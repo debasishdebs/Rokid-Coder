@@ -198,3 +198,22 @@ test("fake phone waitFor times out with a descriptive error", async () => {
     phone.close();
   }
 });
+
+test("rokidCoder.waitLimitSec is optional, absent by default and validated against the hour cap", async () => {
+  await withStateDir(async (dir) => {
+    assert.equal(ensureConfig(dir).rokidCoder.waitLimitSec, undefined);
+    await fsp.writeFile(configPath(dir), JSON.stringify({
+      ...LEGACY,
+      rokidCoder: { stateDir: "/var/rokid", waitLimitSec: 600 },
+    }));
+    assert.equal(ensureConfig(dir).rokidCoder.waitLimitSec, 600);
+
+    for (const bad of [0, -5, 3601, 1.5, "600"]) {
+      await fsp.writeFile(configPath(dir), JSON.stringify({
+        ...LEGACY,
+        rokidCoder: { stateDir: "/var/rokid", waitLimitSec: bad },
+      }));
+      assert.throws(() => ensureConfig(dir), /Invalid nexus-agentd config/, String(bad));
+    }
+  });
+});

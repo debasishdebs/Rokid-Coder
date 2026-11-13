@@ -11,11 +11,12 @@ import { ApprovalPolicy, type ResetNotice } from "./approval-policy";
 import { AttachRegistry, NotAttachedError } from "./attach-registry";
 import { spawnClaudeThread } from "./claude-spawn";
 import { CodexMonitor } from "./codex/monitor";
-import { configPath, defaultStateDir, ensureConfig } from "./config";
+import { DEFAULT_WAIT_LIMIT_SEC, configPath, defaultStateDir, ensureConfig } from "./config";
 import { discoverRecentSessions } from "./discovery";
 import { HookHttpServer } from "./http-server";
 import { FileLogger } from "./logger";
 import { SessionStore } from "./session-store";
+import { DEFAULT_STOP_CONTINUATION_CAP, StopWait } from "./stop-wait";
 import { TerminalTargets, createTerminalInputHandler } from "./terminal-input";
 import { PhoneLink } from "./phone-link";
 import { TranscriptTailManager } from "./transcript";
@@ -32,6 +33,12 @@ export interface RunningDaemon {
   approvalPolicy: ApprovalPolicy;
   /** Drains the reset notices queued since the last call, restart notices first. */
   takeResetNotices(): ResetNotice[];
+  /**
+   * Glasses follow-ups for attached Claude sessions. The phone's followup frame
+   * calls deliver and its settings call setWaitLimitMs (Task 9); onRelease is
+   * where followup_closed comes from.
+   */
+  stopWait: StopWait;
   isTailing(sessionId: string): boolean;
   stop(): Promise<void>;
 }
@@ -63,6 +70,13 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       logger.info("approval_mode_reset", { reason: notice.reason, from: notice.from });
     }
   };
+  const stopWait = new StopWait({
+    waitLimitMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
+    continuationCap: DEFAULT_STOP_CONTINUATION_CAP,
+  });
+  // No phone frame carries a release yet; until followup_closed exists the log
+  // is the only trace of how a wait ended.
+  stopWait.onRelease((_sessionId, reason) => logger.info("stop_wait_released", { reason }));
   const sessions = new SessionStore(config, logger, Date.now, {
     isAttached: (provider, id) => attachRegistry.isAttached(provider, id),
   });
@@ -116,7 +130,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       tailManager.start(sessionId, transcriptPath);
     }
   };
-  const processHook = (payload: HookPayload): HookResponse | Promise<HookResponse> => {
+  const processHook = (payload: HookPayload, closed: AbortSignal): HookResponse | Promise<HookResponse> => {
     const attachReply = handleAttachCommand(payload, {
       registry: attachRegistry,
       logger,
@@ -157,6 +171,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     if (sessionId && eventName === "SessionEnd") {
       tailManager.stop(sessionId);
       approvals?.resolveSession(sessionId);
+      stopWait.endSession(sessionId);
       endApprovalSession("claude", sessionId);
     } else if (sessionId && transcriptPath && sessions.get(sessionId)?.stale === false) {
       tailManager.start(sessionId, transcriptPath);
@@ -167,6 +182,19 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     // as well as the one command that actually needed them.
     if (eventName === "PermissionRequest") {
       return approvals?.request(payload) ?? {};
+    }
+    // Only a Claude session that is attached gets here, so these are the only
+    // sessions that wait for the glasses. The attach commands were answered
+    // above, which is why they never count as the wearer typing at the laptop.
+    if (sessionId) {
+      if (eventName === "Stop") {
+        return stopWait.hold(sessionId, closed);
+      }
+      if (eventName === "PreToolUse") {
+        stopWait.noteToolUse(sessionId);
+      } else if (eventName === "UserPromptSubmit" || eventName === "UserPromptExpansion") {
+        stopWait.releaseByLaptop(sessionId);
+      }
     }
     return {};
   };
@@ -263,6 +291,9 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     }
     tailManager.stop(entry.id);
     approvals?.resolveSession(entry.id);
+    if (entry.provider === "claude") {
+      stopWait.endSession(entry.id);
+    }
     endApprovalSession(entry.provider, entry.id);
     sessions.removeSession(entry.id);
     if (entry.provider === "codex") {
@@ -293,6 +324,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   } catch (error) {
     clearInterval(heartbeatTimer);
     stopListeningForDetach();
+    stopWait.dispose();
     link.stop();
     await codex.stop();
     await httpServer.stop().catch(() => undefined);
@@ -316,6 +348,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     sessions,
     attachRegistry,
     approvalPolicy,
+    stopWait,
     takeResetNotices: () => [
       ...approvalPolicy.takeRestartNotices(),
       ...queuedResetNotices.splice(0),
@@ -330,6 +363,9 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       stopListeningForDetach();
       await codex.stop();
       approvals?.dispose();
+      // Before the HTTP server: close() waits for open requests, and a held
+      // Stop hook is one.
+      stopWait.dispose();
       link.stop();
       tailManager.stopAll();
       await Promise.all([httpServer.stop(), hub.stop()]);

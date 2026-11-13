@@ -6,7 +6,14 @@ import type { HookPayload, Logger } from "./types";
 export interface HookHttpServerOptions {
   port: number;
   sessionCount: () => number;
-  onHook: (payload: HookPayload) => HookResponse | void | Promise<HookResponse | void>;
+  /**
+   * `closed` aborts (reason "cancelled") when the forwarder goes away before it
+   * has its reply, which is how a held hook learns it was killed.
+   */
+  onHook: (
+    payload: HookPayload,
+    closed: AbortSignal,
+  ) => HookResponse | void | Promise<HookResponse | void>;
   logger: Logger;
   extraHealth?: () => Record<string, unknown>;
 }
@@ -38,6 +45,14 @@ export class HookHttpServer {
       }
 
       if (request.method === "POST" && request.url === "/hook") {
+        // Not request "close": that fires after every request ends normally. The
+        // response closing before it was ended means the client socket went away.
+        const closed = new AbortController();
+        response.on("close", () => {
+          if (!response.writableEnded) {
+            closed.abort("cancelled");
+          }
+        });
         let body = "";
         request.setEncoding("utf8");
         request.on("data", (chunk: string) => {
@@ -66,7 +81,7 @@ export class HookHttpServer {
           if (provider === "claude" || provider === "codex") {
             payload.__provider = provider;
           }
-          Promise.resolve(this.options.onHook(payload))
+          Promise.resolve(this.options.onHook(payload, closed.signal))
             .then((result) => this.respond(response, result ?? {}))
             .catch((error) => {
               this.options.logger.error("hook_processing_failed", {
@@ -76,6 +91,7 @@ export class HookHttpServer {
             });
         });
         request.on("error", () => {
+          closed.abort("cancelled");
           if (!response.headersSent) {
             this.respond(response, {});
           }
@@ -116,6 +132,10 @@ export class HookHttpServer {
     }
     return new Promise((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
+      // A hook released by shutdown is answered just after close() looked for
+      // idle connections, so its keep-alive socket would hold the server open
+      // until the keep-alive timeout.
+      setImmediate(() => server.closeIdleConnections());
     });
   }
 

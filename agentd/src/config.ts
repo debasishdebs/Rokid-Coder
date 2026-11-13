@@ -9,6 +9,8 @@ const DEFAULT_HTTP_PORT = 8791;
 const DEFAULT_WS_PORT = 8792;
 export const DEFAULT_CODEX_PORT = 8390;
 export const DEFAULT_PHONE_LINK_PORT = 8792;
+export const DEFAULT_WAIT_LIMIT_SEC = 1800;
+export const MAX_WAIT_LIMIT_SEC = 3600;
 
 export function defaultStateDir(): string {
   return process.env.NEXUS_AGENTD_STATE_DIR || path.join(homedir(), ".nexus-agentd");
@@ -53,6 +55,10 @@ function expandHome(value: string): string {
 
 function isPort(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) > 0 && Number(value) <= 65_535;
+}
+
+function isWaitLimitSec(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) > 0 && Number(value) <= MAX_WAIT_LIMIT_SEC;
 }
 
 export function parsePhoneTarget(value: string): { host: string; port: number } | undefined {
@@ -133,7 +139,10 @@ function parseConfig(raw: string, filePath: string): {
     (hasRokidCoder && !rokidCoderRecord) ||
     (rokidCoderRecord &&
       rokidCoderRecord.stateDir !== undefined &&
-      !isNonEmptyString(rokidCoderRecord.stateDir))
+      !isNonEmptyString(rokidCoderRecord.stateDir)) ||
+    (rokidCoderRecord &&
+      rokidCoderRecord.waitLimitSec !== undefined &&
+      !isWaitLimitSec(rokidCoderRecord.waitLimitSec))
   ) {
     throw new Error(`Invalid nexus-agentd config at ${filePath}`);
   }
@@ -184,6 +193,9 @@ function parseConfig(raw: string, filePath: string): {
           typeof rokidCoderRecord?.stateDir === "string"
             ? expandHome(rokidCoderRecord.stateDir)
             : defaultRokidCoderStateDir(),
+        ...(rokidCoderRecord?.waitLimitSec !== undefined
+          ? { waitLimitSec: rokidCoderRecord.waitLimitSec as number }
+          : {}),
       },
     },
     upgraded,

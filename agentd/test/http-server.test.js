@@ -98,3 +98,73 @@ test("loopback HTTP server reports health and returns the completed hook decisio
     await server.stop();
   }
 });
+
+const silent = { info() {}, warn() {}, error() {} };
+
+test("intact_held_post_is_not_aborted", async () => {
+  const signals = [];
+  const server = new HookHttpServer({
+    port: 0,
+    sessionCount: () => 0,
+    async onHook(_payload, closed) {
+      signals.push(closed);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      return { decision: "block", reason: "held" };
+    },
+    logger: silent,
+  });
+  await server.start();
+  try {
+    const reply = await call(server.port(), "POST", "/hook", JSON.stringify({ session_id: "s" }));
+    assert.equal(reply.status, 200);
+    assert.deepEqual(JSON.parse(reply.body), { decision: "block", reason: "held" });
+    assert.equal(signals[0].aborted, false);
+    // The request-side close that follows a finished exchange must not abort it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(signals[0].aborted, false);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("killed_forwarder_aborts_hold", async () => {
+  let signal;
+  let markHeld;
+  const held = new Promise((resolve) => { markHeld = resolve; });
+  let finish;
+  const server = new HookHttpServer({
+    port: 0,
+    sessionCount: () => 0,
+    onHook(_payload, closed) {
+      signal = closed;
+      markHeld();
+      return new Promise((resolve) => {
+        finish = resolve;
+        closed.addEventListener("abort", () => resolve({}), { once: true });
+      });
+    },
+    logger: silent,
+  });
+  await server.start();
+  try {
+    const body = JSON.stringify({ session_id: "s" });
+    const outgoing = http.request({
+      hostname: "127.0.0.1",
+      port: server.port(),
+      method: "POST",
+      path: "/hook",
+      headers: { "content-length": Buffer.byteLength(body) },
+    });
+    outgoing.on("error", () => undefined);
+    outgoing.end(body);
+    await held;
+    assert.equal(signal.aborted, false);
+    outgoing.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(signal.aborted, true);
+    assert.equal(signal.reason, "cancelled");
+    finish?.({});
+  } finally {
+    await server.stop();
+  }
+});

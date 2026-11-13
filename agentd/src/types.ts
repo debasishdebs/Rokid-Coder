@@ -52,6 +52,12 @@ export interface CodexConfig {
 export interface RokidCoderConfig {
   /** Where Rokid-Coder keeps its own state (attached.json, applied-ids.json, tls/). */
   stateDir: string;
+  /**
+   * How long a Stop hook waits for a glasses follow-up (the wait limit Y), in
+   * seconds. Absent means DEFAULT_WAIT_LIMIT_SEC; the phone's settings
+   * override it while the daemon runs.
+   */
+  waitLimitSec?: number;
 }
 
 export interface AgentConfig {
