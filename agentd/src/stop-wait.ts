@@ -18,6 +18,11 @@ export interface StopWaitOptions {
   /** Claude ignores a Stop block after this many in a row, until it calls a tool. */
   continuationCap: number;
   setTimer?: typeof setTimeout;
+  /**
+   * Whether a phone is connected to answer. Without one a hold only stalls the
+   * laptop, so Stop returns at once. Defaults to always.
+   */
+  canAsk?: () => boolean;
 }
 
 interface Hold {
@@ -38,11 +43,13 @@ export class StopWait {
   private waitLimitMs: number;
   private readonly cap: number;
   private readonly setTimer: typeof setTimeout;
+  private readonly canAsk: () => boolean;
 
   constructor(options: StopWaitOptions) {
     this.waitLimitMs = clampWaitLimit(options.waitLimitMs, MAX_WAIT_LIMIT_MS);
     this.cap = options.continuationCap;
     this.setTimer = options.setTimer ?? setTimeout;
+    this.canAsk = options.canAsk ?? (() => true);
   }
 
   /** Applies to the holds that start after this call, not to one already waiting. */
@@ -59,7 +66,7 @@ export class StopWait {
 
   hold(sessionId: string, closed: AbortSignal): Promise<HookResponse> {
     // Claude would not honour another block, so waiting for one only stalls it.
-    if (closed.aborted || this.continuationsUsed(sessionId) >= this.cap) {
+    if (closed.aborted || !this.canAsk() || this.continuationsUsed(sessionId) >= this.cap) {
       return Promise.resolve({});
     }
     // One hook process per session; a second Stop means the first is gone.

@@ -1430,7 +1430,7 @@ test("followup_busy_queues_and_keeps_pending", async () => {
   });
   try {
     assert.equal(await h.monitor.followUp("t", "do it -x", "m1", { model: "gpt-6-luna" }), "queued");
-    assert.deepEqual(h.queued, [["queue", "--thread", "t", "--message", "do it -x"]]);
+    assert.deepEqual(h.queued, [["queue", "--thread", "t", "--message=do it -x"]]);
     assert.equal(h.turnStarts().length, 0, "a busy thread is never steered");
     assert.deepEqual(h.monitor.settings("t").pending, { model: "gpt-6-luna" });
 
@@ -1447,12 +1447,23 @@ test("followup_busy_queues_and_keeps_pending", async () => {
   }
 });
 
+test("queue_message_text_starting_with_a_dash_stays_one_attached_argument", async () => {
+  const h = await controlsHarness({ thread: { status: { type: "active", activeFlags: [] } } });
+  try {
+    assert.equal(await h.monitor.followUp("t", "-x hello", "m1"), "queued");
+    assert.deepEqual(h.queued, [["queue", "--thread", "t", "--message=-x hello"]]);
+    assert.equal(h.queued[0].includes("-x hello"), false, "the text is never a separate argument");
+  } finally {
+    await h.close();
+  }
+});
+
 test("followup_without_a_socket_or_thread_goes_to_the_queue_and_unattached_is_refused", async () => {
   const h = await controlsHarness();
   try {
     await h.monitor.stop();
     assert.equal(await h.monitor.followUp("t", "offline", "m1"), "queued");
-    assert.deepEqual(h.queued, [["queue", "--thread", "t", "--message", "offline"]]);
+    assert.deepEqual(h.queued, [["queue", "--thread", "t", "--message=offline"]]);
   } finally {
     await h.close();
   }

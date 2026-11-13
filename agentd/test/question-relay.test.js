@@ -164,6 +164,19 @@ test("anything_that_is_not_an_answerable_ask_user_question_is_not_held", async (
   assert.deepEqual(opened, []);
 });
 
+test("no_phone_connected_resolves_empty_at_once_and_a_phone_makes_it_hold", async () => {
+  let phone = false;
+  const { relay, opened } = makeRelay({ canAsk: () => phone });
+  assert.deepEqual(await relay.hold(hookPayload(), open().signal), {});
+  assert.deepEqual(opened, []);
+  assert.equal(relay.isWaiting("toolu_1"), false);
+  phone = true;
+  const held = relay.hold(hookPayload(), open().signal);
+  assert.equal(relay.isWaiting("toolu_1"), true);
+  relay.answer("toolu_1", { Pick: "A" }, "m1");
+  assert.equal((await held).hookSpecificOutput.permissionDecision, "allow");
+});
+
 test("daemon_holds_ask_user_question_for_attached_sessions_only", async () => {
   await withDaemon(
     { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
@@ -186,6 +199,48 @@ test("daemon_holds_ask_user_question_for_attached_sessions_only", async () => {
       await settle();
       await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: "held", prompt: "hi" });
       assert.deepEqual(await second, {});
+    },
+  );
+});
+
+test("daemon_without_a_phone_leaves_question_and_stop_to_the_laptop", async () => {
+  await withDaemon(
+    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    async ({ daemon, phone, httpPort }) => {
+      phone.close();
+      await settle(200);
+      assert.deepEqual(await postHook(httpPort, hookPayload({ session_id: "held", tool_use_id: "tu-np" })), {});
+      assert.deepEqual(await postHook(httpPort, { hook_event_name: "Stop", session_id: "held" }), {});
+      assert.equal(daemon.questionRelay.isWaiting("tu-np"), false);
+      assert.equal(daemon.stopWait.state("held").waiting, false);
+    },
+  );
+});
+
+test("daemon_permission_request_for_ask_user_question_never_reaches_the_phone", async () => {
+  await withDaemon(
+    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    async ({ daemon, phone, httpPort }) => {
+      daemon.approvalPolicy.set("claude:held", "approveAll", true);
+      const permission = (tool) => postHook(httpPort, {
+        hook_event_name: "PermissionRequest",
+        session_id: "held",
+        tool_name: tool,
+        tool_input: {},
+      });
+      assert.deepEqual(await permission("AskUserQuestion"), {});
+      // ExitPlanMode is still the phone's to decide, and approve-all does not answer it.
+      let settled = false;
+      const plan = permission("ExitPlanMode").finally(() => { settled = true; });
+      const request = await phone.waitFor("approval_request");
+      assert.equal(request.tool, "ExitPlanMode");
+      assert.equal(settled, false, "approve-all must not auto-allow ExitPlanMode");
+      phone.send({ type: "approval_decision", v: 1, requestId: request.requestId, decision: "deny" });
+      assert.equal((await plan).hookSpecificOutput.decision.behavior, "deny");
+      assert.equal(
+        phone.frames.some((frame) => frame.type === "approval_request" && frame.tool === "AskUserQuestion"),
+        false,
+      );
     },
   );
 });

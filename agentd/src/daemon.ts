@@ -82,15 +82,21 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       logger.info("approval_mode_reset", { reason: notice.reason, from: notice.from });
     }
   };
+  // Either transport counts, as for approvals: a phone that dialled in is as
+  // good as one the daemon dialled. Read at hook time, after both exist.
+  const phoneConnected = (): boolean =>
+    phoneLink?.connected === true || wsHub?.hasAuthenticatedClient === true;
   const stopWait = new StopWait({
     waitLimitMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
     continuationCap: DEFAULT_STOP_CONTINUATION_CAP,
+    canAsk: phoneConnected,
   });
   // No phone frame carries a release yet; until followup_closed exists the log
   // is the only trace of how a wait ended.
   stopWait.onRelease((_sessionId, reason) => logger.info("stop_wait_released", { reason }));
   const questionRelay = new QuestionRelay({
     waitLimitMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
+    canAsk: phoneConnected,
   });
   questionRelay.onClosed(({ reason }) => logger.info("question_released", { reason }));
   const sessions = new SessionStore(config, logger, Date.now, {
@@ -198,6 +204,12 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     // every tool call, so holding on it asked them to approve reads and greps
     // as well as the one command that actually needed them.
     if (eventName === "PermissionRequest") {
+      // The PreToolUse relay answers (or deliberately leaves to the TUI) every
+      // AskUserQuestion; an allow/deny from the phone would answer nothing.
+      // ExitPlanMode is different: it is a real sign-off, never auto-allowed.
+      if (payload.tool_name === "AskUserQuestion") {
+        return {};
+      }
       return approvals?.request(payload) ?? {};
     }
     // Only a Claude session that is attached gets here, so these are the only

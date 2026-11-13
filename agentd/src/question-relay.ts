@@ -34,6 +34,12 @@ export type QuestionClosedListener = (event: QuestionClosed) => void;
 export interface QuestionRelayOptions {
   waitLimitMs: number;
   setTimer?: typeof setTimeout;
+  /**
+   * Whether a phone is connected to answer. PreToolUse suppresses the TUI's own
+   * dialog while it waits, so without a phone the question must go straight to
+   * the laptop. Defaults to always.
+   */
+  canAsk?: () => boolean;
 }
 
 interface Hold {
@@ -104,10 +110,12 @@ export class QuestionRelay {
   private readonly closed = new Set<QuestionClosedListener>();
   private waitLimitMs: number;
   private readonly setTimer: typeof setTimeout;
+  private readonly canAsk: () => boolean;
 
   constructor(options: QuestionRelayOptions) {
     this.waitLimitMs = clampWaitLimit(options.waitLimitMs, MAX_QUESTION_WAIT_MS);
     this.setTimer = options.setTimer ?? setTimeout;
+    this.canAsk = options.canAsk ?? (() => true);
   }
 
   /** Applies to the holds that start after this call, not to one already waiting. */
@@ -139,7 +147,7 @@ export class QuestionRelay {
     const toolUseId = typeof payload.tool_use_id === "string" ? payload.tool_use_id : "";
     const items = QuestionRelay.handles(payload) ? claudeQuestionItems(payload.tool_input) : [];
     // Nothing to show the wearer, or nothing to answer by: let the TUI ask.
-    if (closed.aborted || !sessionId || !toolUseId || items.length === 0) {
+    if (closed.aborted || !this.canAsk() || !sessionId || !toolUseId || items.length === 0) {
       return Promise.resolve({});
     }
     const toolInput = asRecord(payload.tool_input) ?? {};

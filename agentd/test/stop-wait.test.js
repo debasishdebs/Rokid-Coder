@@ -48,6 +48,19 @@ test("delivers_followup_as_block_reason", async () => {
   assert.deepEqual(releases, [{ sessionId: "s1", reason: "delivered", msgId: "m1" }]);
 });
 
+test("no_phone_connected_resolves_stop_at_once_and_a_phone_makes_it_hold", async () => {
+  let phone = false;
+  const { wait, releases } = makeWait({ canAsk: () => phone });
+  assert.deepEqual(await wait.hold("s1", open().signal), {});
+  assert.deepEqual(wait.state("s1"), { waiting: false, continuationsLeft: 8 });
+  assert.deepEqual(releases, []);
+  phone = true;
+  const held = wait.hold("s1", open().signal);
+  assert.equal(wait.state("s1").waiting, true);
+  assert.equal(wait.deliver("s1", "go", "m1"), "delivered");
+  assert.equal((await held).decision, "block");
+});
+
 test("times_out_to_empty_response", async () => {
   const { wait, clock, releases } = makeWait({ waitLimitMs: 1234 });
   const held = wait.hold("s1", open().signal);

@@ -204,7 +204,9 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 export function codexQueueArgs(threadId: string, text: string): string[] {
-  return ["queue", "--thread", threadId, "--message", text];
+  // `--message=<text>`: as a separate argument, text starting with "-" would be
+  // read as another flag.
+  return ["queue", "--thread", threadId, `--message=${text}`];
 }
 
 function runCodexBinary(args: string[]): Promise<void> {
