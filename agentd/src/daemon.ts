@@ -7,6 +7,7 @@ import {
   type HookResponse,
 } from "./approval-manager";
 import { handleAttachCommand, hookProvider } from "./attach-command";
+import { ApprovalPolicy, type ResetNotice } from "./approval-policy";
 import { AttachRegistry, NotAttachedError } from "./attach-registry";
 import { spawnClaudeThread } from "./claude-spawn";
 import { CodexMonitor } from "./codex/monitor";
@@ -19,13 +20,18 @@ import { TerminalTargets, createTerminalInputHandler } from "./terminal-input";
 import { PhoneLink } from "./phone-link";
 import { TranscriptTailManager } from "./transcript";
 import { readRecentMessages } from "./transcript-messages";
-import type { HookPayload } from "./types";
+import { sessionKeyOf } from "./protocol-v2";
+import type { AgentProvider, HookPayload } from "./types";
 import { WsHub } from "./ws-server";
 
 export interface RunningDaemon {
   config: ReturnType<typeof ensureConfig>;
   sessions: SessionStore;
   attachRegistry: AttachRegistry;
+  /** Temporary approval modes; the phone's mode_set and defaults_set frames drive it (Task 9). */
+  approvalPolicy: ApprovalPolicy;
+  /** Drains the reset notices queued since the last call, restart notices first. */
+  takeResetNotices(): ResetNotice[];
   isTailing(sessionId: string): boolean;
   stop(): Promise<void>;
 }
@@ -43,6 +49,20 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     file: path.join(config.rokidCoder.stateDir, "attached.json"),
     logger,
   });
+  const approvalPolicy = new ApprovalPolicy({
+    file: path.join(config.rokidCoder.stateDir, "approve-all.json"),
+    logger,
+  });
+  // Nothing delivers these to the phone yet; they wait here, in memory, for the
+  // alert pipeline to drain them with takeResetNotices.
+  const queuedResetNotices: ResetNotice[] = [];
+  const endApprovalSession = (provider: AgentProvider, id: string): void => {
+    const notice = approvalPolicy.endSession(sessionKeyOf(provider, id));
+    if (notice) {
+      queuedResetNotices.push(notice);
+      logger.info("approval_mode_reset", { reason: notice.reason, from: notice.from });
+    }
+  };
   const sessions = new SessionStore(config, logger, Date.now, {
     isAttached: (provider, id) => attachRegistry.isAttached(provider, id),
   });
@@ -137,6 +157,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     if (sessionId && eventName === "SessionEnd") {
       tailManager.stop(sessionId);
       approvals?.resolveSession(sessionId);
+      endApprovalSession("claude", sessionId);
     } else if (sessionId && transcriptPath && sessions.get(sessionId)?.stale === false) {
       tailManager.start(sessionId, transcriptPath);
     }
@@ -218,6 +239,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     transport: approvalTransport,
     logger,
     timeoutMs: approvalTimeoutFromEnv(),
+    policy: approvalPolicy,
   });
   const codex = new CodexMonitor({
     config,
@@ -225,6 +247,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     approvals,
     logger,
     isAttached: (threadId) => attachRegistry.isAttached("codex", threadId),
+    onThreadEnded: (threadId) => endApprovalSession("codex", threadId),
   });
   codexMonitor = codex;
   // Attaching a Codex thread subscribes to it; detaching undoes everything
@@ -232,6 +255,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   // relays, alerts) subscribe to onChange themselves when they land.
   const stopListeningForDetach = attachRegistry.onChange(({ kind, entry }) => {
     if (kind === "attached") {
+      approvalPolicy.applyDefault(sessionKeyOf(entry.provider, entry.id));
       if (entry.provider === "codex") {
         void codex.subscribe(entry.id);
       }
@@ -239,6 +263,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     }
     tailManager.stop(entry.id);
     approvals?.resolveSession(entry.id);
+    endApprovalSession(entry.provider, entry.id);
     sessions.removeSession(entry.id);
     if (entry.provider === "codex") {
       codex.unsubscribe(entry.id);
@@ -290,6 +315,11 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     config,
     sessions,
     attachRegistry,
+    approvalPolicy,
+    takeResetNotices: () => [
+      ...approvalPolicy.takeRestartNotices(),
+      ...queuedResetNotices.splice(0),
+    ],
     isTailing: (sessionId) => tailManager.isTailing(sessionId),
     async stop() {
       if (stopped) {

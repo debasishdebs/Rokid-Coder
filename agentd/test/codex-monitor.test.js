@@ -197,6 +197,7 @@ function makeHarness(port, overrides = {}) {
     transport,
     logger: silentLogger,
     timeoutMs: overrides.approvalTimeoutMs ?? 1000,
+    policy: overrides.policy,
   });
   const monitor = new CodexMonitor({
     config: {
@@ -212,6 +213,7 @@ function makeHarness(port, overrides = {}) {
     approvals,
     logger: silentLogger,
     isAttached: overrides.isAttached ?? (() => true),
+    onThreadEnded: overrides.onThreadEnded,
     connectTimeoutMs: 80,
     requestTimeoutMs: 1000,
     startTimeoutMs: 500,
@@ -1302,6 +1304,63 @@ test("detached_thread_pending_approval_left_for_tui", async () => {
       false,
     );
     assert.equal(store.get("t"), undefined);
+  } finally {
+    await monitor.stop();
+    approvals.dispose();
+    store.dispose();
+    await closeUnix(daemon);
+  }
+});
+
+test("codex_policy_answers_approvals_itself_and_thread_end_is_reported", async () => {
+  const { ApprovalPolicy } = require("../dist/approval-policy.js");
+  const daemon = await listenUnix();
+  const threads = new Map([["t", makeThread({ id: "t" })]]);
+  const { requests, sockets } = sharedDaemon(daemon.server, { threads, loaded: () => ["t"] });
+  const policy = new ApprovalPolicy();
+  const ended = [];
+  const { store, transport, approvals, monitor } = sharedHarness(daemon, {
+    policy,
+    onThreadEnded: (id) => ended.push(id),
+  });
+  const replies = [];
+  const approvalParams = {
+    threadId: "t",
+    turnId: "turn-1",
+    itemId: "i",
+    startedAtMs: Date.now(),
+    environmentId: null,
+    reason: "Run it",
+    command: "npm test",
+    cwd: "/work/sample",
+  };
+  try {
+    policy.set("codex:t", "approveAll", true);
+    monitor.start();
+    await waitUntil(() => monitor.availability().available, "monitor did not attach");
+    sockets[0].on("message", (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.method === undefined && String(message.id).startsWith("approval-")) replies.push(message);
+    });
+    sockets[0].send(JSON.stringify({
+      id: "approval-1",
+      method: "item/commandExecution/requestApproval",
+      params: approvalParams,
+    }));
+    await waitUntil(() => replies.length === 1, "agentd did not answer the approval itself");
+    assert.deepEqual(replies[0], { id: "approval-1", result: { decision: "accept" } });
+    assert.equal(transport.frames.some((frame) => frame.type === "approval_request"), false);
+    // Nothing about approve-all ever reaches Codex as native configuration.
+    assert.equal(
+      requests.some((request) => JSON.stringify(request).includes("approvalPolicy")),
+      false,
+    );
+
+    for (const method of ["thread/closed", "thread/archived"]) {
+      sockets[0].send(JSON.stringify({ method, params: { threadId: "t" } }));
+    }
+    await waitUntil(() => ended.length === 2, "thread end was not reported");
+    assert.deepEqual(ended, ["t", "t"]);
   } finally {
     await monitor.stop();
     approvals.dispose();

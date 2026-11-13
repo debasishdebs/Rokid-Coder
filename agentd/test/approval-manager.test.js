@@ -230,3 +230,63 @@ test("provider-native approvals share timeout and link-loss handling without Cla
   assert.equal(await dropped, undefined);
   assert.equal(transport.frames.length, 3, "link loss must not send a provider decision");
 });
+
+test("policy_allow_skips_phone", async () => {
+  const { ApprovalPolicy } = require("../dist/approval-policy.js");
+  const policy = new ApprovalPolicy();
+  const { manager, transport } = harness({ policy });
+  const request = (approvalKind) => ({
+    type: "approval_request",
+    v: 1,
+    requestId: `policy-${approvalKind}`,
+    sessionId: "session-policy",
+    provider: "claude",
+    sessionKey: "claude:session-policy",
+    approvalKind,
+    tool: "Bash",
+    summary: "s",
+    detail: "d",
+    createdAt: 1,
+  });
+
+  policy.set("claude:session-policy", "approveAll", true);
+  assert.equal(await manager.requestDecision(request("command")), "allow");
+  assert.equal(transport.frames.length, 0);
+  assert.equal(manager.size, 0);
+
+  // Allowed even with no phone: the wearer already chose to stop being asked.
+  transport.connected = false;
+  assert.equal(await manager.requestDecision(request("tool")), "allow");
+
+  // A mode that does not cover the request still goes to the phone.
+  transport.connected = true;
+  policy.set("claude:session-policy", "acceptEdits", false);
+  const pending = manager.requestDecision(request("command"));
+  assert.equal(transport.frames.length, 1);
+  manager.handleDecision("policy-command", "deny");
+  assert.equal(await pending, "deny");
+});
+
+test("claude_hook_requests_carry_provider_session_key_and_kind_but_not_on_the_wire", async () => {
+  const { manager, transport } = harness();
+  const edit = manager.request(bashHook({ tool_name: "Edit", tool_input: { file_path: "/repo/a.ts" } }));
+  assert.equal("approvalKind" in transport.frames[0], false);
+  assert.equal("sessionKey" in transport.frames[0], false);
+  assert.equal("provider" in transport.frames[0], false);
+  manager.handleDecision("request-1", "allow");
+  await edit;
+});
+
+test("claude_hook_edit_is_auto_allowed_under_accept_edits_but_bash_is_not", async () => {
+  const { ApprovalPolicy } = require("../dist/approval-policy.js");
+  const policy = new ApprovalPolicy();
+  const { manager, transport } = harness({ policy });
+  policy.set("claude:session-approval", "acceptEdits", false);
+  const edit = await manager.request(bashHook({ tool_name: "Write", tool_input: { file_path: "/repo/a.ts", content: "x" } }));
+  assert.equal(edit.hookSpecificOutput.decision.behavior, "allow");
+  assert.equal(transport.frames.length, 0);
+  const bash = manager.request(bashHook());
+  assert.equal(transport.frames.length, 1);
+  manager.handleDecision("request-2", "deny");
+  await bash;
+});

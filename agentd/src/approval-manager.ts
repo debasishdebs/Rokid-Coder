@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import type { ApprovalPolicy } from "./approval-policy";
+import { sessionKeyOf, type SessionKey } from "./protocol-v2";
 import { truncateText } from "./session-store";
-import type { HookPayload, Logger } from "./types";
+import type { AgentProvider, HookPayload, Logger } from "./types";
 
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
 export const MAX_PENDING_APPROVALS = 32;
@@ -9,15 +11,41 @@ const MAX_TIMER_MS = 2_147_000_000;
 export type ApprovalDecision = "allow" | "deny";
 export type ApprovalOutcome = ApprovalDecision | "timeout" | "local";
 
+/**
+ * What a request is asking to do, as the provider's own protocol says, never as
+ * a display label. The temporary approval modes decide on this alone.
+ */
+export type ApprovalKind = "command" | "fileChange" | "tool";
+
 export interface ApprovalRequest {
   type: "approval_request";
   v: 1;
   requestId: string;
   sessionId: string;
+  provider: AgentProvider;
+  sessionKey: SessionKey;
+  approvalKind: ApprovalKind;
   tool: string;
   summary: string;
   detail: string;
   createdAt: number;
+}
+
+const CLAUDE_FILE_CHANGE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
+export function claudeApprovalKind(tool: string): ApprovalKind {
+  return CLAUDE_FILE_CHANGE_TOOLS.has(tool) ? "fileChange" : "tool";
+}
+
+/** The phone-facing v1 frame: policy-only fields stay inside agentd. */
+function toWireFrame(request: ApprovalRequest): ApprovalRequest {
+  const {
+    provider: _provider,
+    sessionKey: _sessionKey,
+    approvalKind: _approvalKind,
+    ...wire
+  } = request;
+  return wire as ApprovalRequest;
 }
 
 export interface ApprovalTransport {
@@ -41,6 +69,7 @@ export interface ApprovalManagerOptions {
   now?: () => number;
   requestId?: () => string;
   maxPending?: number;
+  policy?: ApprovalPolicy;
 }
 
 const DETAIL_FIELDS = [
@@ -222,6 +251,9 @@ export class ApprovalManager {
       v: 1,
       requestId: this.makeRequestId(),
       sessionId,
+      provider: "claude",
+      sessionKey: sessionKeyOf("claude", sessionId),
+      approvalKind: claudeApprovalKind(description.tool),
       tool: description.tool,
       summary: description.summary,
       detail: description.detail,
@@ -238,6 +270,16 @@ export class ApprovalManager {
    * contract is not Claude's PreToolUse hook contract.
    */
   requestDecision(request: ApprovalRequest): Promise<ApprovalDecision | undefined> {
+    // Ahead of every phone check: a session on approve-all or accept-edits is
+    // answered here, whether or not a phone is connected to ask.
+    if (this.options.policy?.decide(request.sessionKey, request) === "allow") {
+      this.options.logger.info("approval_policy_allowed", {
+        requestId: request.requestId,
+        sessionKey: request.sessionKey.slice(0, 24),
+        approvalKind: request.approvalKind,
+      });
+      return Promise.resolve("allow");
+    }
     if (!this.options.transport.connected) {
       this.options.logger.info("approval_local", { reason: "phone_not_connected" });
       return Promise.resolve(undefined);
@@ -258,7 +300,7 @@ export class ApprovalManager {
       const timer = setTimeout(() => this.onTimeout(request.requestId), this.timeoutMs);
       timer.unref();
       this.pending.set(request.requestId, { request, timer, resolve });
-      if (!this.options.transport.sendApprovalRequest(request)) {
+      if (!this.options.transport.sendApprovalRequest(toWireFrame(request))) {
         this.resolveLocal(request.requestId, "send_failed", false);
         return;
       }
@@ -284,7 +326,7 @@ export class ApprovalManager {
 
   onLinkConnected(): void {
     for (const [requestId, pending] of this.pending) {
-      if (!this.options.transport.sendApprovalRequest(pending.request)) {
+      if (!this.options.transport.sendApprovalRequest(toWireFrame(pending.request))) {
         this.resolveLocal(requestId, "resend_failed", false);
       }
     }

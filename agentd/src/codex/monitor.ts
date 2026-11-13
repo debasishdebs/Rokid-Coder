@@ -2,9 +2,11 @@ import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 import WebSocket from "ws";
 import {
   type ApprovalDecision,
+  type ApprovalKind,
   type ApprovalManager,
   type ApprovalRequest,
 } from "../approval-manager";
+import { sessionKeyOf } from "../protocol-v2";
 import {
   normalizeCwd,
   projectName,
@@ -140,6 +142,11 @@ export interface CodexMonitorOptions {
    * published or asked about.
    */
   isAttached: (threadId: string) => boolean;
+  /**
+   * The provider says the thread is over (closed, archived or deleted). Not
+   * called when agentd itself stops watching it; that is a detach.
+   */
+  onThreadEnded?: (threadId: string) => void;
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
   startTimeoutMs?: number;
@@ -237,6 +244,38 @@ export function describeCodexApproval(request: ApprovalServerRequest): {
       };
     }
   }
+}
+
+/** From the server-request method, never from describeCodexApproval's display label. */
+function codexApprovalKind(method: ApprovalServerRequest["method"]): ApprovalKind {
+  switch (method) {
+    case "item/commandExecution/requestApproval":
+      return "command";
+    case "item/fileChange/requestApproval":
+      return "fileChange";
+    case "item/permissions/requestApproval":
+      return "tool";
+  }
+}
+
+export function buildCodexApprovalRequest(
+  request: ApprovalServerRequest,
+  threadId: string,
+): ApprovalRequest {
+  const described = describeCodexApproval(request);
+  return {
+    type: "approval_request",
+    v: 1,
+    requestId: codexApprovalRequestId(request.id),
+    sessionId: threadId,
+    provider: "codex",
+    sessionKey: sessionKeyOf("codex", threadId),
+    approvalKind: codexApprovalKind(request.method),
+    tool: described.tool,
+    summary: described.summary,
+    detail: described.detail,
+    createdAt: described.createdAt,
+  };
 }
 
 export function codexApprovalResponse(
@@ -1113,27 +1152,16 @@ export class CodexMonitor {
     if (this.approvalsByRpcId.has(key)) {
       return;
     }
-    const described = describeCodexApproval(request);
-    const phoneRequestId = codexApprovalRequestId(request.id);
+    const phoneRequest = buildCodexApprovalRequest(request, threadId);
     this.approvalsByRpcId.set(key, {
-      phoneRequestId,
+      phoneRequestId: phoneRequest.requestId,
       rpcId: request.id,
       threadId,
-      summary: described.summary,
-      createdAt: described.createdAt,
+      summary: phoneRequest.summary,
+      createdAt: phoneRequest.createdAt,
     });
     this.publishThread(threadId);
 
-    const phoneRequest: ApprovalRequest = {
-      type: "approval_request",
-      v: 1,
-      requestId: phoneRequestId,
-      sessionId: threadId,
-      tool: described.tool,
-      summary: described.summary,
-      detail: described.detail,
-      createdAt: described.createdAt,
-    };
     const decision = await this.options.approvals.requestDecision(phoneRequest);
     if (
       decision === undefined ||
@@ -1232,6 +1260,7 @@ export class CodexMonitor {
       case "thread/deleted": {
         if (typeof params.threadId === "string") {
           this.removeThread(params.threadId, method);
+          this.options.onThreadEnded?.(params.threadId);
         }
         break;
       }
@@ -1242,6 +1271,9 @@ export class CodexMonitor {
         if (thread) {
           thread.status = { type: "idle" };
           this.publishThread(thread.id);
+        }
+        if (typeof params.threadId === "string") {
+          this.options.onThreadEnded?.(params.threadId);
         }
         break;
       }
