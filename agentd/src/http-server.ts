@@ -59,6 +59,13 @@ export class HookHttpServer {
             this.respond(response, {});
             return;
           }
+          // Only the forwarder's header names the provider. Whatever the body
+          // claims for itself is dropped, so a payload cannot pick its own.
+          delete payload.__provider;
+          const provider = request.headers["x-rokid-provider"];
+          if (provider === "claude" || provider === "codex") {
+            payload.__provider = provider;
+          }
           Promise.resolve(this.options.onHook(payload))
             .then((result) => this.respond(response, result ?? {}))
             .catch((error) => {

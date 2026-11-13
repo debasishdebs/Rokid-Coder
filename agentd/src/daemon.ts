@@ -6,7 +6,7 @@ import {
   type ApprovalTransport,
   type HookResponse,
 } from "./approval-manager";
-import { handleAttachCommand } from "./attach-command";
+import { handleAttachCommand, hookProvider } from "./attach-command";
 import { AttachRegistry, NotAttachedError } from "./attach-registry";
 import { spawnClaudeThread } from "./claude-spawn";
 import { CodexMonitor } from "./codex/monitor";
@@ -113,10 +113,15 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     if (attachReply) {
       return attachReply;
     }
+    // Codex hooks exist only to carry the attach phrase. Everything else about
+    // a Codex thread, approvals included, comes over the app-server connection.
+    if (hookProvider(payload) === "codex") {
+      return {};
+    }
     const sessionId = typeof payload.session_id === "string" ? payload.session_id : undefined;
     // The opt-in gate for hooks: an unattached session leaves no trace, is never
-    // tailed and is never held for an approval. Every /hook payload is Claude's
-    // today. The attach command is handled above this check, since it is how a
+    // tailed and is never held for an approval. What reaches here is Claude's.
+    // The attach command is handled above this check, since it is how a
     // session gets through it.
     if (sessionId !== undefined && !attachRegistry.isAttached("claude", sessionId)) {
       return {};

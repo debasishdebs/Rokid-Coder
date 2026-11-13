@@ -84,6 +84,8 @@ export interface HookPayload {
   prompt?: unknown;
   message?: unknown;
   reason?: unknown;
+  /** Set by the HTTP server from the forwarder's x-rokid-provider header, never by the sender. */
+  __provider?: "claude" | "codex";
   [key: string]: unknown;
 }
 

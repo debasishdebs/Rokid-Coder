@@ -1,0 +1,16 @@
+{
+  "name": "rokid",
+  "version": "0.1.0",
+  "description": "Opt this Codex session into Rokid-Coder so Rokid glasses can follow it, answer its approvals and steer it. Type rokid:on, rokid:off or rokid:status.",
+  "author": {
+    "name": "Rokid-Coder"
+  },
+  "license": "MIT",
+  "interface": {
+    "displayName": "Rokid-Coder",
+    "shortDescription": "Follow and steer this Codex session from Rokid glasses",
+    "developerName": "Rokid-Coder",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive"]
+  }
+}

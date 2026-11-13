@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=codex node \"${PLUGIN_ROOT}/bin/hook-forward.js\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

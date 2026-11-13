@@ -27,7 +27,7 @@ function freePort() {
   });
 }
 
-function postHook(port, payload) {
+function postHook(port, payload, headers = {}) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
     const request = http.request(
@@ -36,7 +36,7 @@ function postHook(port, payload) {
         port,
         path: "/hook",
         method: "POST",
-        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body), ...headers },
       },
       (response) => {
         let text = "";
