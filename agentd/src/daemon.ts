@@ -6,6 +6,7 @@ import {
   type ApprovalTransport,
   type HookResponse,
 } from "./approval-manager";
+import { handleAttachCommand } from "./attach-command";
 import { AttachRegistry, NotAttachedError } from "./attach-registry";
 import { spawnClaudeThread } from "./claude-spawn";
 import { CodexMonitor } from "./codex/monitor";
@@ -96,11 +97,27 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     }
   };
   const processHook = (payload: HookPayload): HookResponse | Promise<HookResponse> => {
+    const attachReply = handleAttachCommand(payload, {
+      registry: attachRegistry,
+      logger,
+      // The block ends the turn, so no further hook would show the session
+      // to the phone until the user's next prompt.
+      onAttached: (hook, id) =>
+        sessions.handleHook({
+          session_id: id,
+          cwd: hook.cwd,
+          transcript_path: hook.transcript_path,
+          hook_event_name: "SessionStart",
+        }),
+    });
+    if (attachReply) {
+      return attachReply;
+    }
     const sessionId = typeof payload.session_id === "string" ? payload.session_id : undefined;
     // The opt-in gate for hooks: an unattached session leaves no trace, is never
     // tailed and is never held for an approval. Every /hook payload is Claude's
-    // today. Anything that must act on a session before it is attached (the
-    // attach command itself) is handled above this check.
+    // today. The attach command is handled above this check, since it is how a
+    // session gets through it.
     if (sessionId !== undefined && !attachRegistry.isAttached("claude", sessionId)) {
       return {};
     }

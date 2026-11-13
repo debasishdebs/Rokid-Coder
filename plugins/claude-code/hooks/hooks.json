@@ -1,0 +1,98 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "matcher": "rokid-coder:rokid",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\"",
+            "timeout": 3600
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\"",
+            "timeout": 3600
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\"",
+            "timeout": 3600
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "rokid-coder",
+  "displayName": "Rokid-Coder",
+  "version": "0.1.0",
+  "description": "Opt this Claude Code session into Rokid-Coder so Rokid glasses can follow it, answer its approvals and steer it. Type /rokid to attach.",
+  "author": { "name": "Rokid-Coder" },
+  "license": "MIT"
+}

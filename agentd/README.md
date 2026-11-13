@@ -20,9 +20,32 @@ provide TLS, or install itself as a Windows service.
 cd agentd
 npm install
 npm run build
-node dist/cli.js install-hooks
 node dist/cli.js run
 ```
+
+### Claude Code plugin (replaces `install-hooks`)
+
+Sessions are opt-in. The Rokid-Coder plugin forwards a session's hooks to the daemon, and
+the daemon ignores a session until it asks to be attached. From the repository root:
+
+```bash
+claude plugin marketplace add .
+claude plugin install rokid-coder@rokid-coder
+```
+
+(`claude --plugin-dir plugins/claude-code` loads it for one session without installing.)
+Then, inside a session, type `/rokid` to attach it. Claude Code namespaces plugin
+commands, so the full names are `/rokid-coder:rokid`, `/rokid-coder:rokid status` and
+`/rokid-coder:rokid off`; typing `/rokid` and pressing Enter selects the first, but a
+command with arguments needs the full name. While attached, the plugin supports progress,
+approvals, questions, context and voice follow-ups while waiting; compact and model change
+need `rk claude`.
+
+The plugin's `bin/hook-forward.js` is a build output: `npm run build` copies
+`dist/hook-forward.js` into `plugins/claude-code/bin` and `plugins/codex/bin` (the
+`bundle:plugins` script), and the copies are committed so a plugin installed from git has
+them. Rebuild and commit them whenever `src/hook-forward.ts` changes; a test fails when
+the committed copy is stale.
 
 On macOS the same four commands run from any shell:
 
@@ -179,7 +202,11 @@ interpreter under System Settings > Privacy & Security > Local Network. macOS
 usually lists it only after a first attempt has been refused, so install the
 agent, let it fail once, then look.
 
-## Hook management
+## Hook management (legacy)
+
+`install-hooks` predates the plugin. It writes the forwarder into `~/.claude/settings.json`
+for every session on the machine, which the opt-in model no longer wants; prefer the plugin
+above. The commands remain for existing setups.
 
 ```powershell
 node dist/cli.js install-hooks

@@ -1,8 +1,26 @@
 #!/usr/bin/env node
 import { request } from "node:http";
-import { approvalTimeoutFromEnv } from "./approval-manager";
 
-const EXIT_AFTER_MS = approvalTimeoutFromEnv() + 5000;
+// The plugins ship a copy of this file with no node_modules and no sibling
+// modules next to it, so it may import only node:* built-ins. The defaults
+// below mirror approval-manager; a test pins the "no relative require" rule.
+const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
+const MAX_TIMER_MS = 2_147_000_000;
+
+function positiveTimerMs(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= MAX_TIMER_MS ? parsed : undefined;
+}
+
+// An explicit deadline wins (plugins set it past the longest hook timeout);
+// otherwise wait one approval timeout plus slack for the daemon to answer.
+const EXIT_AFTER_MS =
+  positiveTimerMs(process.env.ROKID_CODER_HOOK_DEADLINE_MS) ??
+  (positiveTimerMs(process.env.NEXUS_AGENTD_APPROVAL_TIMEOUT_MS) ?? DEFAULT_APPROVAL_TIMEOUT_MS) + 5000;
+const PROVIDER = process.env.ROKID_CODER_PROVIDER?.trim();
 const HTTP_PORT = (() => {
   const parsed = Number(process.env.NEXUS_AGENTD_HTTP_PORT);
   return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 65_535 ? parsed : 8791;
@@ -44,6 +62,7 @@ process.stdin.on("end", () => {
         headers: {
           "content-type": "application/json",
           "content-length": body.length,
+          ...(PROVIDER ? { "x-rokid-provider": PROVIDER } : {}),
         },
       },
       (response) => {

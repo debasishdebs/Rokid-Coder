@@ -1,0 +1,12 @@
+{
+  "name": "rokid-coder",
+  "owner": { "name": "Rokid-Coder" },
+  "description": "Rokid-Coder lets Rokid glasses follow and steer Claude Code and Codex sessions.",
+  "plugins": [
+    {
+      "name": "rokid-coder",
+      "source": "./plugins/claude-code",
+      "description": "Opt a Claude Code session into Rokid-Coder with /rokid."
+    }
+  ]
+}
