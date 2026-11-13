@@ -97,6 +97,9 @@ export interface UserInput {
 export interface TurnStartParams {
   threadId: string;
   input: UserInput[];
+  /** Apply to this turn and the ones after it. approvalPolicy is deliberately absent. */
+  model?: string;
+  effort?: string;
 }
 
 export interface TurnStartResponse {

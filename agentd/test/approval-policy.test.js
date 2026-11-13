@@ -179,6 +179,39 @@ test("claude_edit_tools_are_file_changes", () => {
   }
 });
 
+test("never_auto_allows_ask_user_question_or_exit_plan_mode_even_on_approve_all", async () => {
+  const { ApprovalManager } = require("../dist/approval-manager.js");
+  for (const tool of ["AskUserQuestion", "ExitPlanMode"]) {
+    assert.equal(claudeApprovalKind(tool), "interactive");
+  }
+  const { dir, file } = tempFile();
+  const policy = policyAt(file);
+  policy.set("claude:s1", "approveAll", true);
+  policy.set("claude:s2", "acceptEdits", false);
+  for (const key of ["claude:s1", "claude:s2"]) {
+    assert.equal(policy.decide(key, request("interactive")), undefined);
+  }
+  // Through the manager, with no phone to ask: still no automatic allow.
+  const manager = new ApprovalManager({
+    transport: { connected: false, sendApprovalRequest: () => false, sendApprovalResolved: () => false },
+    logger: silentLogger,
+    policy,
+  });
+  for (const tool of ["AskUserQuestion", "ExitPlanMode"]) {
+    assert.deepEqual(
+      await manager.request({ session_id: "s1", hook_event_name: "PermissionRequest", tool_name: tool, tool_input: {} }),
+      {},
+    );
+  }
+  assert.equal(
+    (await manager.request({ session_id: "s1", hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "ls" } }))
+      .hookSpecificOutput?.decision?.behavior,
+    "allow",
+    "approve-all still answers ordinary tools",
+  );
+  rmSync(dir, { recursive: true });
+});
+
 test("codex_normalized_file_change_request_counts_as_file_change", () => {
   const { dir, file } = tempFile();
   const fileChange = {

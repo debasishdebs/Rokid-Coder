@@ -133,6 +133,10 @@ export class ApprovalPolicy {
     sessionKey: string,
     request: Pick<ApprovalRequest, "approvalKind">,
   ): "allow" | undefined {
+    // Even approve-all: these ask the person a question or for a plan sign-off.
+    if (request.approvalKind === "interactive") {
+      return undefined;
+    }
     switch (this.modes.get(sessionKey)) {
       case "approveAll":
         return "allow";

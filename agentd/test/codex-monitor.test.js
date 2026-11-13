@@ -224,6 +224,7 @@ function makeHarness(port, overrides = {}) {
       throw new Error("codex executable not found");
     }),
     terminate: overrides.terminate,
+    runCodex: overrides.runCodex,
   });
   return { store, transport, approvals, monitor };
 }
@@ -1020,7 +1021,7 @@ async function closeUnix({ server, http, dir }) {
 
 // A stand-in for the shared daemon: loaded threads, per-thread resume failures,
 // and a log of every request so tests can assert what was (not) asked.
-function sharedDaemon(server, { threads, loaded, resumeError = () => undefined }) {
+function sharedDaemon(server, { threads, loaded, resumeError = () => undefined, handle = () => undefined }) {
   const requests = [];
   const sockets = [];
   server.on("connection", (socket) => {
@@ -1059,7 +1060,8 @@ function sharedDaemon(server, { threads, loaded, resumeError = () => undefined }
           result = { thread: threads.get(message.params.threadId) };
           break;
         default:
-          return;
+          result = handle(message);
+          if (result === undefined) return;
       }
       socket.send(JSON.stringify({ id: message.id, result }));
     });
@@ -1366,5 +1368,358 @@ test("codex_policy_answers_approvals_itself_and_thread_end_is_reported", async (
     approvals.dispose();
     store.dispose();
     await closeUnix(daemon);
+  }
+});
+
+// ---- Task 7: follow-ups, compaction, context, models, questions ----
+
+async function controlsHarness(options = {}) {
+  const daemon = await listenUnix();
+  const threads = new Map([["t", makeThread({ id: "t", ...options.thread })]]);
+  const { requests, sockets } = sharedDaemon(daemon.server, {
+    threads,
+    loaded: () => ["t"],
+    handle: options.handle,
+  });
+  const queued = [];
+  const harness = sharedHarness(daemon, {
+    isAttached: (id) => id === "t",
+    runCodex: async (args) => { queued.push(args); },
+  });
+  harness.monitor.start();
+  await waitUntil(() => harness.monitor.availability().available, "monitor did not attach");
+  await waitUntil(() => harness.store.get("t"), "thread was not subscribed");
+  const send = (method, params) => sockets[0].send(JSON.stringify({ method, params }));
+  const turnStarts = () => requests.filter((request) => request.method === "turn/start");
+  const close = async () => {
+    await harness.monitor.stop();
+    harness.approvals.dispose();
+    harness.store.dispose();
+    await closeUnix(daemon);
+  };
+  return { ...harness, daemon, requests, sockets, queued, send, turnStarts, close };
+}
+
+test("followup_idle_uses_turn_start_with_pending_model", async () => {
+  const h = await controlsHarness({ handle: (m) => (m.method === "turn/start" ? { turn: turn("inProgress") } : undefined) });
+  try {
+    assert.equal(await h.monitor.followUp("t", "next step", "m1", { model: "gpt-6-luna", effort: "low" }), "started");
+    assert.deepEqual(h.turnStarts().map((request) => request.params), [{
+      threadId: "t",
+      input: [{ type: "text", text: "next step", text_elements: [] }],
+      model: "gpt-6-luna",
+      effort: "low",
+    }]);
+    assert.deepEqual(h.queued, []);
+    assert.equal(
+      h.requests.some((request) => JSON.stringify(request).includes("approvalPolicy")),
+      false,
+      "only model and effort ever ride on a turn",
+    );
+    // Sent is not applied: the daemon has not said so yet.
+    assert.deepEqual(h.monitor.settings("t"), { applied: {}, pending: { model: "gpt-6-luna", effort: "low" } });
+  } finally {
+    await h.close();
+  }
+});
+
+test("followup_busy_queues_and_keeps_pending", async () => {
+  const h = await controlsHarness({
+    thread: { status: { type: "active", activeFlags: [] } },
+    handle: (m) => (m.method === "turn/start" ? { turn: turn("inProgress") } : undefined),
+  });
+  try {
+    assert.equal(await h.monitor.followUp("t", "do it -x", "m1", { model: "gpt-6-luna" }), "queued");
+    assert.deepEqual(h.queued, [["queue", "--thread", "t", "--message", "do it -x"]]);
+    assert.equal(h.turnStarts().length, 0, "a busy thread is never steered");
+    assert.deepEqual(h.monitor.settings("t").pending, { model: "gpt-6-luna" });
+
+    // The thread goes idle; the next follow-up carries what was kept, plus its own.
+    h.send("thread/status/changed", { threadId: "t", status: { type: "idle" } });
+    await waitUntil(() => h.store.get("t")?.status === "idle", "thread did not go idle");
+    assert.equal(await h.monitor.followUp("t", "again", "m2", { effort: "high" }), "started");
+    assert.deepEqual(
+      { model: h.turnStarts()[0].params.model, effort: h.turnStarts()[0].params.effort },
+      { model: "gpt-6-luna", effort: "high" },
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("followup_without_a_socket_or_thread_goes_to_the_queue_and_unattached_is_refused", async () => {
+  const h = await controlsHarness();
+  try {
+    await h.monitor.stop();
+    assert.equal(await h.monitor.followUp("t", "offline", "m1"), "queued");
+    assert.deepEqual(h.queued, [["queue", "--thread", "t", "--message", "offline"]]);
+  } finally {
+    await h.close();
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rc7-"));
+  const unattached = sharedHarness({ socketPath: path.join(dir, "none.sock") }, { isAttached: () => false });
+  try {
+    await assert.rejects(unattached.monitor.followUp("t", "x", "m"), /not attached/);
+    await assert.rejects(unattached.monitor.compact("t"), /not attached/);
+  } finally {
+    unattached.approvals.dispose();
+    unattached.store.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("settings_applied_only_on_settings_updated", async () => {
+  const h = await controlsHarness({ handle: (m) => (m.method === "turn/start" ? { turn: turn("inProgress") } : undefined) });
+  try {
+    await h.monitor.followUp("t", "go", "m1", { model: "gpt-6-luna", effort: "low" });
+    assert.deepEqual(h.monitor.settings("t").applied, {});
+    // Another thread's settings and an unrelated change confirm nothing.
+    h.send("thread/settings/updated", { threadId: "other", threadSettings: { model: "gpt-6-luna", effort: "low" } });
+    h.send("thread/settings/updated", { threadId: "t", threadSettings: { model: "gpt-6-luna", effort: "medium" } });
+    await waitUntil(() => h.monitor.settings("t").applied.model, "settings update was not recorded");
+    assert.deepEqual(h.monitor.settings("t"), {
+      applied: { model: "gpt-6-luna", effort: "medium" },
+      pending: { effort: "low" },
+    });
+    h.send("thread/settings/updated", { threadId: "t", threadSettings: { model: "gpt-6-luna", effort: "low" } });
+    await waitUntil(() => h.monitor.settings("t").applied.effort === "low", "effort was not confirmed");
+    assert.deepEqual(h.monitor.settings("t").pending, {});
+  } finally {
+    await h.close();
+  }
+});
+
+test("compact_calls_thread_compact_start", async () => {
+  const h = await controlsHarness({ handle: (m) => (m.method === "thread/compact/start" ? {} : undefined) });
+  try {
+    await h.monitor.compact("t");
+    assert.deepEqual(
+      h.requests.filter((request) => request.method === "thread/compact/start").map((request) => request.params),
+      [{ threadId: "t" }],
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("context_fill_from_token_usage_event", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rc7-"));
+  const rollout = path.join(dir, "rollout.jsonl");
+  fs.writeFileSync(rollout, `${JSON.stringify({
+    type: "event_msg",
+    payload: { type: "token_count", info: { last_token_usage: { total_tokens: 1000 }, model_context_window: 258400 } },
+  })}\n`);
+  const h = await controlsHarness({ thread: { path: rollout } });
+  try {
+    await waitUntil(() => h.monitor.contextFill("t"), "rollout seed was not read");
+    assert.deepEqual(h.monitor.contextFill("t"), { used: 1000, window: 258400 });
+    const usage = (total, window = 258400) => ({
+      threadId: "t",
+      turnId: "u",
+      tokenUsage: { total: { totalTokens: 99999 }, last: { totalTokens: total }, modelContextWindow: window },
+    });
+    h.send("thread/tokenUsage/updated", usage(18578));
+    await waitUntil(() => h.monitor.contextFill("t").used === 18578, "live usage was not cached");
+    assert.deepEqual(h.monitor.contextFill("t"), { used: 18578, window: 258400 });
+    // Unusable events and other threads change nothing.
+    h.send("thread/tokenUsage/updated", usage(5, null));
+    h.send("thread/tokenUsage/updated", { ...usage(7), threadId: "stranger" });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.deepEqual(h.monitor.contextFill("t"), { used: 18578, window: 258400 });
+    assert.equal(h.monitor.contextFill("stranger"), undefined);
+  } finally {
+    await h.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("list_models_returns_model_names_across_pages", async () => {
+  const pages = [
+    { data: [{ id: "a", model: "gpt-6.1-sol" }, { id: "b", model: "gpt-6-luna" }], nextCursor: "p2" },
+    { data: [{ id: "c" }, { id: "b", model: "gpt-6-luna" }], nextCursor: null },
+  ];
+  const h = await controlsHarness({
+    handle: (m) => (m.method === "model/list" ? pages[m.params.cursor ? 1 : 0] : undefined),
+  });
+  try {
+    assert.deepEqual(await h.monitor.listModels(), ["gpt-6.1-sol", "gpt-6-luna", "c"]);
+    assert.deepEqual(
+      h.requests.filter((request) => request.method === "model/list").map((request) => request.params),
+      [{}, { cursor: "p2" }],
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+const asyncQuestionMessage = {
+  id: "item-q1",
+  type: "agentMessage",
+  delivery: "async",
+  text: "Which database?\n1. SQLite\n2. Postgres",
+  questions: [
+    { title: "Which database?", options: ["SQLite", "Postgres"] },
+    { title: "Which ORM?", options: ["None"] },
+  ],
+};
+
+test("async_questions_message_maps_to_question_alert", async () => {
+  const h = await controlsHarness();
+  try {
+    const opened = [];
+    const closed = [];
+    h.monitor.onQuestionOpened((event) => opened.push(event));
+    h.monitor.onQuestionClosed((event) => closed.push(event));
+    h.send("item/completed", { threadId: "t", turnId: "u", item: { id: "plain", type: "agentMessage", text: "done" } });
+    h.send("item/completed", { threadId: "stranger", turnId: "u", item: asyncQuestionMessage });
+    h.send("item/completed", { threadId: "t", turnId: "u", item: asyncQuestionMessage });
+    await waitUntil(() => opened.length > 0, "question was not detected");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(opened, [{
+      sessionKey: "codex:t",
+      sessionId: "t",
+      question: {
+        requestRef: "item-q1",
+        source: "codex_async",
+        items: [
+          { text: "Which database?", options: [{ label: "SQLite" }, { label: "Postgres" }], multiSelect: false, allowFreeText: true },
+          { text: "Which ORM?", options: [{ label: "None" }], multiSelect: false, allowFreeText: true },
+        ],
+      },
+    }]);
+    // A redelivered item is the same question.
+    h.send("item/completed", { threadId: "t", turnId: "u", item: asyncQuestionMessage });
+    // The next turn starts without it having been answered here.
+    h.send("turn/started", { threadId: "t", turn: turn("inProgress", { id: "turn-2" }) });
+    await waitUntil(() => closed.length > 0, "an abandoned question stayed open");
+    assert.deepEqual(closed, [{ sessionKey: "codex:t", requestRef: "item-q1", reason: "cancelled" }]);
+    assert.equal(opened.length, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test("codex_async_question_answer_becomes_followup", async () => {
+  const h = await controlsHarness({ handle: (m) => (m.method === "turn/start" ? { turn: turn("inProgress") } : undefined) });
+  try {
+    const opened = [];
+    const closed = [];
+    h.monitor.onQuestionOpened((event) => opened.push(event));
+    h.monitor.onQuestionClosed((event) => closed.push(event));
+    h.send("item/completed", { threadId: "t", turnId: "u", item: asyncQuestionMessage });
+    await waitUntil(() => opened.length > 0, "question was not detected");
+    const { requestRef } = opened[0].question;
+
+    assert.equal(await h.monitor.answerQuestion("missing", { "Which database?": "x" }, "m0"), "unknown");
+    assert.equal(await h.monitor.answerQuestion(requestRef, { "Not asked": "x" }, "m0"), "unknown");
+    assert.equal(
+      await h.monitor.answerQuestion(requestRef, { "Which database?": "SQLite", "Which ORM?": ["None", "Raw SQL"] }, "m1"),
+      "started",
+    );
+    assert.equal(
+      h.turnStarts()[0].params.input[0].text,
+      "Q: Which database? / A: SQLite\nQ: Which ORM? / A: None, Raw SQL",
+    );
+    assert.deepEqual(closed, [{ sessionKey: "codex:t", requestRef, reason: "answered", msgId: "m1" }]);
+    assert.equal(await h.monitor.answerQuestion(requestRef, { "Which database?": "SQLite" }, "m2"), "unknown");
+  } finally {
+    await h.close();
+  }
+});
+
+const rpcQuestionParams = {
+  threadId: "t",
+  turnId: "u",
+  itemId: "i",
+  isBlocking: true,
+  questions: [
+    {
+      id: "q-db",
+      header: "DB",
+      question: "Which database?",
+      isOther: true,
+      isSecret: false,
+      options: [{ label: "SQLite", description: "file" }, { label: "Postgres", description: "server" }],
+    },
+    { id: "q-name", header: "Name", question: "What name?", isOther: false, isSecret: false, options: null },
+  ],
+};
+
+test("codex_rpc_question_answer_replies_to_request_id", async () => {
+  const h = await controlsHarness();
+  try {
+    const opened = [];
+    const closed = [];
+    const replies = [];
+    h.sockets[0].on("message", (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.method === undefined && message.id === 41) replies.push(message);
+    });
+    h.monitor.onQuestionOpened((event) => opened.push(event));
+    h.monitor.onQuestionClosed((event) => closed.push(event));
+    h.sockets[0].send(JSON.stringify({
+      id: 41,
+      method: "item/tool/requestUserInput",
+      params: { ...rpcQuestionParams, threadId: "stranger" },
+    }));
+    h.sockets[0].send(JSON.stringify({ id: 41, method: "item/tool/requestUserInput", params: rpcQuestionParams }));
+    await waitUntil(() => opened.length > 0, "blocking question was not detected");
+    assert.deepEqual(opened, [{
+      sessionKey: "codex:t",
+      sessionId: "t",
+      question: {
+        requestRef: "41",
+        source: "codex_rpc",
+        items: [
+          {
+            text: "Which database?",
+            options: [{ label: "SQLite", description: "file" }, { label: "Postgres", description: "server" }],
+            multiSelect: false,
+            allowFreeText: true,
+          },
+          { text: "What name?", options: [], multiSelect: false, allowFreeText: true },
+        ],
+      },
+    }]);
+    assert.equal(
+      await h.monitor.answerQuestion("41", { "Which database?": ["Postgres"], "What name?": "orders" }, "m1"),
+      "replied",
+    );
+    await waitUntil(() => replies.length === 1, "no reply reached the app-server");
+    assert.deepEqual(replies[0], {
+      id: 41,
+      result: { answers: { "q-db": { answers: ["Postgres"] }, "q-name": { answers: ["orders"] } } },
+    });
+    assert.deepEqual(closed, [{ sessionKey: "codex:t", requestRef: "41", reason: "answered", msgId: "m1" }]);
+    assert.equal(await h.monitor.answerQuestion("41", { "What name?": "again" }, "m2"), "unknown");
+  } finally {
+    await h.close();
+  }
+});
+
+test("codex_rpc_question_is_closed_when_resolved_elsewhere_or_detached_and_secrets_stay_local", async () => {
+  const h = await controlsHarness();
+  try {
+    const opened = [];
+    const closed = [];
+    h.monitor.onQuestionOpened((event) => opened.push(event));
+    h.monitor.onQuestionClosed((event) => closed.push(event));
+    const ask = (id, params = rpcQuestionParams) =>
+      h.sockets[0].send(JSON.stringify({ id, method: "item/tool/requestUserInput", params }));
+    ask(1, { ...rpcQuestionParams, questions: [{ ...rpcQuestionParams.questions[0], isSecret: true }] });
+    ask(2);
+    await waitUntil(() => opened.length > 0, "question was not detected");
+    assert.deepEqual(opened.map((event) => event.question.requestRef), ["2"], "a secret is never offered");
+    h.send("serverRequest/resolved", { threadId: "t", requestId: 2 });
+    await waitUntil(() => closed.length > 0, "TUI answer did not close the question");
+    assert.deepEqual(closed, [{ sessionKey: "codex:t", requestRef: "2", reason: "laptop" }]);
+
+    ask(3);
+    await waitUntil(() => opened.length === 2, "second question was not detected");
+    h.monitor.unsubscribe("t");
+    assert.deepEqual(closed.at(-1), { sessionKey: "codex:t", requestRef: "3", reason: "cancelled" });
+    assert.equal(await h.monitor.answerQuestion("3", { "What name?": "x" }, "m1"), "unknown");
+  } finally {
+    await h.close();
   }
 });

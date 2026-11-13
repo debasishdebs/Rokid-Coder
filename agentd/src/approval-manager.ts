@@ -15,7 +15,7 @@ export type ApprovalOutcome = ApprovalDecision | "timeout" | "local";
  * What a request is asking to do, as the provider's own protocol says, never as
  * a display label. The temporary approval modes decide on this alone.
  */
-export type ApprovalKind = "command" | "fileChange" | "tool";
+export type ApprovalKind = "command" | "fileChange" | "tool" | "interactive";
 
 export interface ApprovalRequest {
   type: "approval_request";
@@ -32,8 +32,15 @@ export interface ApprovalRequest {
 }
 
 const CLAUDE_FILE_CHANGE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+// Tools whose permission prompt is the user answering something, not granting
+// something: an allow with no `updatedInput` answers nothing and approves the
+// plan unread. No temporary mode may stand in for the person.
+const CLAUDE_INTERACTIVE_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
 
 export function claudeApprovalKind(tool: string): ApprovalKind {
+  if (CLAUDE_INTERACTIVE_TOOLS.has(tool)) {
+    return "interactive";
+  }
   return CLAUDE_FILE_CHANGE_TOOLS.has(tool) ? "fileChange" : "tool";
 }
 

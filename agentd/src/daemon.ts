@@ -19,6 +19,7 @@ import { SessionStore } from "./session-store";
 import { DEFAULT_STOP_CONTINUATION_CAP, StopWait } from "./stop-wait";
 import { TerminalTargets, createTerminalInputHandler } from "./terminal-input";
 import { PhoneLink } from "./phone-link";
+import { QuestionRelay } from "./question-relay";
 import { TranscriptTailManager } from "./transcript";
 import { readRecentMessages } from "./transcript-messages";
 import { sessionKeyOf } from "./protocol-v2";
@@ -39,6 +40,17 @@ export interface RunningDaemon {
    * where followup_closed comes from.
    */
   stopWait: StopWait;
+  /**
+   * AskUserQuestion holds for attached Claude sessions. The phone's
+   * question_answer frame calls answer for source claude_tool; onOpened and
+   * onClosed are where the question alerts come from (Task 9).
+   */
+  questionRelay: QuestionRelay;
+  /**
+   * Codex follow-ups, compact, context fill, models and questions. Its
+   * answerQuestion serves question_answer for codex_async and codex_rpc.
+   */
+  codex: CodexMonitor;
   isTailing(sessionId: string): boolean;
   stop(): Promise<void>;
 }
@@ -77,6 +89,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   // No phone frame carries a release yet; until followup_closed exists the log
   // is the only trace of how a wait ended.
   stopWait.onRelease((_sessionId, reason) => logger.info("stop_wait_released", { reason }));
+  const questionRelay = new QuestionRelay({
+    waitLimitMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
+  });
+  questionRelay.onClosed(({ reason }) => logger.info("question_released", { reason }));
   const sessions = new SessionStore(config, logger, Date.now, {
     isAttached: (provider, id) => attachRegistry.isAttached(provider, id),
   });
@@ -172,6 +188,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       tailManager.stop(sessionId);
       approvals?.resolveSession(sessionId);
       stopWait.endSession(sessionId);
+      questionRelay.endSession(sessionId);
       endApprovalSession("claude", sessionId);
     } else if (sessionId && transcriptPath && sessions.get(sessionId)?.stale === false) {
       tailManager.start(sessionId, transcriptPath);
@@ -192,8 +209,12 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       }
       if (eventName === "PreToolUse") {
         stopWait.noteToolUse(sessionId);
+        if (QuestionRelay.handles(payload)) {
+          return questionRelay.hold(payload, closed);
+        }
       } else if (eventName === "UserPromptSubmit" || eventName === "UserPromptExpansion") {
         stopWait.releaseByLaptop(sessionId);
+        questionRelay.releaseByLaptop(sessionId);
       }
     }
     return {};
@@ -293,6 +314,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     approvals?.resolveSession(entry.id);
     if (entry.provider === "claude") {
       stopWait.endSession(entry.id);
+      questionRelay.endSession(entry.id);
     }
     endApprovalSession(entry.provider, entry.id);
     sessions.removeSession(entry.id);
@@ -325,6 +347,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     clearInterval(heartbeatTimer);
     stopListeningForDetach();
     stopWait.dispose();
+    questionRelay.dispose();
     link.stop();
     await codex.stop();
     await httpServer.stop().catch(() => undefined);
@@ -349,6 +372,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     attachRegistry,
     approvalPolicy,
     stopWait,
+    questionRelay,
+    codex,
     takeResetNotices: () => [
       ...approvalPolicy.takeRestartNotices(),
       ...queuedResetNotices.splice(0),
@@ -366,6 +391,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       // Before the HTTP server: close() waits for open requests, and a held
       // Stop hook is one.
       stopWait.dispose();
+      questionRelay.dispose();
       link.stop();
       tailManager.stopAll();
       await Promise.all([httpServer.stop(), hub.stop()]);

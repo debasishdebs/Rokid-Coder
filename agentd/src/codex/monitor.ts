@@ -6,7 +6,15 @@ import {
   type ApprovalManager,
   type ApprovalRequest,
 } from "../approval-manager";
-import { sessionKeyOf } from "../protocol-v2";
+import { sessionKeyOf, type QuestionPayload } from "../protocol-v2";
+import type {
+  QuestionAnswers,
+  QuestionClosed,
+  QuestionClosedListener,
+  QuestionClosedReason,
+  QuestionOpened,
+  QuestionOpenedListener,
+} from "../question-relay";
 import {
   normalizeCwd,
   projectName,
@@ -65,6 +73,8 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_ROLLOUT_RETRY_MS = 5_000;
 const MAX_ROLLOUT_RETRIES = 12;
 const CLIENT_VERSION = "0.1.0";
+const RUN_CODEX_TIMEOUT_MS = 15_000;
+const MAX_MODEL_PAGES = 10;
 
 export interface CodexAvailability {
   enabled: boolean;
@@ -77,6 +87,16 @@ export interface CodexSpawnSpec {
   args: string[];
   options: SpawnOptions;
 }
+
+/** The model and effort a turn/start can carry; never an approval policy. */
+export interface FollowUpSettings {
+  model?: string;
+  effort?: string;
+}
+
+export type FollowUpResult = "started" | "queued";
+/** `unknown`: nothing is waiting on that requestRef, or no answer matched a question. */
+export type QuestionAnswerResult = FollowUpResult | "replied" | "unknown";
 
 export interface CodexTerminateSpec {
   command: string;
@@ -123,6 +143,15 @@ interface PendingRpc {
   reject: (error: Error) => void;
 }
 
+interface PendingCodexQuestion {
+  threadId: string;
+  source: "codex_async" | "codex_rpc";
+  items: QuestionPayload["items"];
+  /** codex_rpc only: the server request to reply to, and the question id behind each item's text. */
+  rpcId?: RequestId;
+  idByText?: Map<string, string>;
+}
+
 interface PendingCodexApproval {
   phoneRequestId: string;
   rpcId: RequestId;
@@ -156,6 +185,11 @@ export interface CodexMonitorOptions {
   now?: () => number;
   launch?: (port: number) => ChildProcess;
   terminate?: (child: ChildProcess) => Promise<void>;
+  /**
+   * Runs the `codex` binary with these arguments and resolves when it exits 0.
+   * The follow-up queue goes through it; tests inject it so no real binary runs.
+   */
+  runCodex?: (args: string[]) => Promise<void>;
 }
 
 type ApprovalParams =
@@ -167,6 +201,61 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+export function codexQueueArgs(threadId: string, text: string): string[] {
+  return ["queue", "--thread", threadId, "--message", text];
+}
+
+function runCodexBinary(args: string[]): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    // No shell: the text is the wearer's and goes through as one argument.
+    const child = spawn("codex", args, { shell: false, windowsHide: true, stdio: "ignore" });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("codex timed out"));
+    }, RUN_CODEX_TIMEOUT_MS);
+    timer.unref();
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`codex exited with code ${String(code)}`));
+      }
+    });
+  });
+}
+
+/** One `Q: … / A: …` line per answered question, in the order they were asked. */
+export function formatQuestionAnswers(
+  items: QuestionPayload["items"],
+  answers: QuestionAnswers,
+): string {
+  const lines: string[] = [];
+  for (const item of items) {
+    const answer = answers[item.text];
+    if (answer !== undefined) {
+      lines.push(`Q: ${item.text} / A: ${Array.isArray(answer) ? answer.join(", ") : answer}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function settingsOf(value: unknown): FollowUpSettings {
+  const record = asRecord(value);
+  const settings: FollowUpSettings = {};
+  if (typeof record?.model === "string" && record.model) {
+    settings.model = record.model;
+  }
+  if (typeof record?.effort === "string" && record.effort) {
+    settings.effort = record.effort;
+  }
+  return settings;
 }
 
 function errorMessage(value: unknown): string {
@@ -305,6 +394,10 @@ function latestTurn(thread: Thread): Turn | undefined {
   return thread.turns.at(-1);
 }
 
+function threadIsBusy(thread: Thread): boolean {
+  return thread.status.type === "active" || latestTurn(thread)?.status === "inProgress";
+}
+
 function threadActivityAt(thread: Thread): number {
   const turn = latestTurn(thread);
   const seconds = Math.max(
@@ -413,6 +506,14 @@ export class CodexMonitor {
   private readonly rolloutAttempts = new Map<string, number>();
   private readonly subscribing = new Map<string, Promise<void>>();
   private readonly contextByThread = new Map<string, ContextUsage>();
+  // Threads whose context fill has come from a live event, which the (older)
+  // rollout seed must never overwrite.
+  private readonly liveContext = new Set<string>();
+  private readonly pendingSettings = new Map<string, FollowUpSettings>();
+  private readonly appliedSettings = new Map<string, FollowUpSettings>();
+  private readonly questions = new Map<string, PendingCodexQuestion>();
+  private readonly questionOpened = new Set<QuestionOpenedListener>();
+  private readonly questionClosed = new Set<QuestionClosedListener>();
   private rolloutRetryTimer?: NodeJS.Timeout;
 
   constructor(private readonly options: CodexMonitorOptions) {
@@ -430,6 +531,160 @@ export class CodexMonitor {
   contextUsage(threadId: string): ContextUsage | undefined {
     const usage = this.contextByThread.get(threadId);
     return usage ? { ...usage } : undefined;
+  }
+
+  /** The latest of the live thread/tokenUsage/updated event and the rollout seed. */
+  contextFill(threadId: string): ContextUsage | undefined {
+    return this.contextUsage(threadId);
+  }
+
+  /** What Codex confirmed for the thread (thread/settings/updated) and what is still waiting for a turn. */
+  settings(threadId: string): { applied: FollowUpSettings; pending: FollowUpSettings } {
+    return {
+      applied: { ...this.appliedSettings.get(threadId) },
+      pending: { ...this.pendingSettings.get(threadId) },
+    };
+  }
+
+  /**
+   * Sends the wearer's text to an attached thread. An idle thread gets a
+   * turn/start carrying any pending model and effort; a busy one (or one that
+   * cannot be reached over the socket) gets `codex queue`, and the pending
+   * settings wait for the next turn/start. A setting counts as applied only
+   * once the daemon reports it in thread/settings/updated.
+   */
+  async followUp(
+    threadId: string,
+    text: string,
+    msgId: string,
+    pending?: FollowUpSettings,
+  ): Promise<FollowUpResult> {
+    if (!this.options.isAttached(threadId)) {
+      throw new Error("Codex thread is not attached");
+    }
+    const merged = { ...this.pendingSettings.get(threadId), ...settingsOf(pending) };
+    if (merged.model || merged.effort) {
+      this.pendingSettings.set(threadId, merged);
+    }
+    const thread = this.threads.get(threadId);
+    if (this.state.available && this.socket && thread && !threadIsBusy(thread)) {
+      const params: TurnStartParams = {
+        threadId,
+        input: [{ type: "text", text, text_elements: [] }],
+        ...(merged.model ? { model: merged.model } : {}),
+        ...(merged.effort ? { effort: merged.effort } : {}),
+      };
+      await this.request<TurnStartResponse>("turn/start", params as unknown as Record<string, unknown>);
+      this.dropAppliedPending(threadId);
+      this.options.logger.info("codex_followup", { msgId, route: "turn_start" });
+      return "started";
+    }
+    await (this.options.runCodex ?? runCodexBinary)(codexQueueArgs(threadId, text));
+    this.options.logger.info("codex_followup", { msgId, route: "queue" });
+    return "queued";
+  }
+
+  async compact(threadId: string): Promise<void> {
+    if (!this.options.isAttached(threadId)) {
+      throw new Error("Codex thread is not attached");
+    }
+    await this.request("thread/compact/start", { threadId });
+  }
+
+  /** The model names a turn/start accepts, in the daemon's order. */
+  async listModels(): Promise<string[]> {
+    const names: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_MODEL_PAGES; page += 1) {
+      const response: { data?: unknown; nextCursor?: unknown } = await this.request(
+        "model/list",
+        cursor ? { cursor } : {},
+      );
+      for (const entry of Array.isArray(response.data) ? response.data : []) {
+        const record = asRecord(entry);
+        const name = typeof record?.model === "string" ? record.model : record?.id;
+        if (typeof name === "string" && name && !names.includes(name)) {
+          names.push(name);
+        }
+      }
+      if (typeof response.nextCursor !== "string" || !response.nextCursor) {
+        break;
+      }
+      cursor = response.nextCursor;
+    }
+    return names;
+  }
+
+  /** Questions the wearer can answer. The alert pipeline turns each into an alert. */
+  onQuestionOpened(listener: QuestionOpenedListener): () => void {
+    this.questionOpened.add(listener);
+    return () => {
+      this.questionOpened.delete(listener);
+    };
+  }
+
+  onQuestionClosed(listener: QuestionClosedListener): () => void {
+    this.questionClosed.add(listener);
+    return () => {
+      this.questionClosed.delete(listener);
+    };
+  }
+
+  /**
+   * Answers a codex_async or codex_rpc question by its requestRef. An async
+   * question was an ordinary message, so the answer is an ordinary follow-up;
+   * a blocking one is a server request, replied to with the schema's shape.
+   */
+  async answerQuestion(
+    requestRef: string,
+    answers: QuestionAnswers,
+    msgId: string,
+  ): Promise<QuestionAnswerResult> {
+    const pending = this.questions.get(requestRef);
+    if (!pending || !this.options.isAttached(pending.threadId)) {
+      return "unknown";
+    }
+    const closed = (reason: QuestionClosedReason): void =>
+      this.emitQuestionClosed({
+        sessionKey: sessionKeyOf("codex", pending.threadId),
+        requestRef,
+        reason,
+        msgId,
+      });
+    if (pending.source === "codex_async") {
+      const text = formatQuestionAnswers(pending.items, answers);
+      if (!text) {
+        return "unknown";
+      }
+      // Out of the table first: the turn/started this follow-up causes would
+      // otherwise report the question as cancelled.
+      this.questions.delete(requestRef);
+      try {
+        const result = await this.followUp(pending.threadId, text, msgId);
+        closed("answered");
+        return result;
+      } catch (error) {
+        this.questions.set(requestRef, pending);
+        throw error;
+      }
+    }
+    const byId: Record<string, { answers: string[] }> = {};
+    for (const item of pending.items) {
+      const answer = answers[item.text];
+      const id = pending.idByText?.get(item.text);
+      if (answer !== undefined && id !== undefined) {
+        byId[id] = { answers: Array.isArray(answer) ? [...answer] : [answer] };
+      }
+    }
+    if (Object.keys(byId).length === 0 || pending.rpcId === undefined) {
+      return "unknown";
+    }
+    if (!this.write({ id: pending.rpcId, result: { answers: byId } })) {
+      throw new Error("Codex app-server is not connected");
+    }
+    this.questions.delete(requestRef);
+    closed("answered");
+    return "replied";
   }
 
   /**
@@ -457,6 +712,9 @@ export class CodexMonitor {
     this.wanted.delete(threadId);
     this.rolloutAttempts.delete(threadId);
     this.contextByThread.delete(threadId);
+    this.liveContext.delete(threadId);
+    this.pendingSettings.delete(threadId);
+    this.appliedSettings.delete(threadId);
     this.removeThread(threadId, "unsubscribed");
   }
 
@@ -519,6 +777,10 @@ export class CodexMonitor {
     this.wanted.clear();
     this.rolloutAttempts.clear();
     this.contextByThread.clear();
+    this.liveContext.clear();
+    this.pendingSettings.clear();
+    this.appliedSettings.clear();
+    this.closeQuestions("cancelled");
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
@@ -810,6 +1072,7 @@ export class CodexMonitor {
     this.subscribing.clear();
     this.rejectPendingRpc(new Error("Codex app-server connection closed"));
     this.resolveAllApprovals("codex_connection_closed");
+    this.closeQuestions("cancelled");
     if (!this.stopped) {
       this.reportUnavailable("Codex app-server connection closed; reconnecting.");
       this.scheduleConnect(this.options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS);
@@ -973,7 +1236,7 @@ export class CodexMonitor {
     this.publishThread(threadId);
     if (thread.path) {
       const usage = await readLastTokenUsage(thread.path);
-      if (usage && this.threads.has(threadId)) {
+      if (usage && this.threads.has(threadId) && !this.liveContext.has(threadId)) {
         this.contextByThread.set(threadId, usage);
       }
     }
@@ -1102,6 +1365,8 @@ export class CodexMonitor {
     if (message.method && message.id !== undefined) {
       if (this.isApprovalMethod(message.method)) {
         void this.handleApproval(socket, message as ApprovalServerRequest);
+      } else if (message.method === "item/tool/requestUserInput") {
+        this.handleUserInputRequest(message.id, message.params);
       } else {
         this.options.logger.info("codex_server_request_ignored", {
           method: message.method,
@@ -1215,6 +1480,40 @@ export class CodexMonitor {
         }
         break;
       }
+      case "thread/tokenUsage/updated": {
+        const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+        const usage = asRecord(asRecord(params.tokenUsage)?.last);
+        const used = usage?.totalTokens;
+        const window = asRecord(params.tokenUsage)?.modelContextWindow;
+        if (
+          threadId &&
+          this.options.isAttached(threadId) &&
+          typeof used === "number" && Number.isFinite(used) &&
+          typeof window === "number" && Number.isFinite(window) && window > 0
+        ) {
+          this.contextByThread.set(threadId, { used, window });
+          this.liveContext.add(threadId);
+        }
+        break;
+      }
+      case "thread/settings/updated": {
+        const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+        if (threadId && this.options.isAttached(threadId)) {
+          this.appliedSettings.set(threadId, {
+            ...this.appliedSettings.get(threadId),
+            ...settingsOf(params.threadSettings),
+          });
+          this.dropAppliedPending(threadId);
+        }
+        break;
+      }
+      case "item/completed": {
+        const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+        if (threadId) {
+          this.handleCompletedItem(threadId, asRecord(params.item));
+        }
+        break;
+      }
       case "turn/started":
       case "turn/completed": {
         const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
@@ -1230,6 +1529,8 @@ export class CodexMonitor {
           thread.updatedAt = Math.max(thread.updatedAt, this.now() / 1000);
           if (method === "turn/started") {
             this.terminalErrors.delete(thread.id);
+            // A new turn means the asked question was answered or moved past.
+            this.closeQuestions("cancelled", thread.id, "codex_async");
           }
           this.publishThread(thread.id);
         }
@@ -1253,6 +1554,7 @@ export class CodexMonitor {
             : undefined;
         if (requestId !== undefined) {
           this.resolveApproval(requestId, "codex_request_resolved");
+          this.resolveQuestionRequest(requestId);
         }
         break;
       }
@@ -1285,6 +1587,180 @@ export class CodexMonitor {
       }
       default:
         break;
+    }
+  }
+
+  /** Confirmed settings clear the pending ones they match; the rest keep waiting. */
+  private dropAppliedPending(threadId: string): void {
+    const pending = this.pendingSettings.get(threadId);
+    if (!pending) {
+      return;
+    }
+    const applied = this.appliedSettings.get(threadId);
+    if (pending.model !== undefined && pending.model === applied?.model) {
+      delete pending.model;
+    }
+    if (pending.effort !== undefined && pending.effort === applied?.effort) {
+      delete pending.effort;
+    }
+    if (pending.model === undefined && pending.effort === undefined) {
+      this.pendingSettings.delete(threadId);
+    }
+  }
+
+  // 0.169 delivers request_user_input as a finished agentMessage whose
+  // questions[] the TUI renders as text; the answer is an ordinary follow-up.
+  private handleCompletedItem(threadId: string, item: Record<string, unknown> | undefined): void {
+    if (
+      !item ||
+      item.type !== "agentMessage" ||
+      typeof item.id !== "string" ||
+      !this.options.isAttached(threadId) ||
+      this.questions.has(item.id)
+    ) {
+      return;
+    }
+    const items: QuestionPayload["items"] = [];
+    for (const entry of Array.isArray(item.questions) ? item.questions : []) {
+      const question = asRecord(entry);
+      const text = typeof question?.title === "string" ? question.title : undefined;
+      if (!text) {
+        continue;
+      }
+      const options: QuestionPayload["items"][number]["options"] = [];
+      for (const option of Array.isArray(question?.options) ? question.options : []) {
+        const label = typeof option === "string" ? option : asRecord(option)?.label;
+        if (typeof label === "string" && label) {
+          const description = asRecord(option)?.description;
+          options.push(
+            typeof description === "string" && description
+              ? { label, description }
+              : { label },
+          );
+        }
+      }
+      items.push({ text, options, multiSelect: false, allowFreeText: true });
+    }
+    if (items.length === 0) {
+      return;
+    }
+    this.openQuestion(threadId, item.id, { threadId, source: "codex_async", items });
+  }
+
+  // The blocking form: a server request that stays open until it is answered.
+  private handleUserInputRequest(id: RequestId, rawParams: unknown): void {
+    const params = asRecord(rawParams);
+    const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
+    if (!threadId || !this.options.isAttached(threadId)) {
+      // Left unanswered on purpose: whoever owns the thread decides it locally.
+      this.options.logger.info("codex_question_not_attached", {});
+      return;
+    }
+    const requestRef = String(id);
+    if (this.questions.has(requestRef)) {
+      return;
+    }
+    const items: QuestionPayload["items"] = [];
+    const idByText = new Map<string, string>();
+    for (const entry of Array.isArray(params?.questions) ? params.questions : []) {
+      const question = asRecord(entry);
+      if (question?.isSecret === true) {
+        // A secret has no business on the glasses; the TUI asks for it.
+        this.options.logger.info("codex_question_secret_left_local", {});
+        return;
+      }
+      const text = typeof question?.question === "string" ? question.question : undefined;
+      const questionId = typeof question?.id === "string" ? question.id : undefined;
+      if (!text || !questionId || idByText.has(text)) {
+        continue;
+      }
+      const options: QuestionPayload["items"][number]["options"] = [];
+      for (const option of Array.isArray(question?.options) ? question.options : []) {
+        const record = asRecord(option);
+        if (typeof record?.label === "string") {
+          options.push(
+            typeof record.description === "string" && record.description
+              ? { label: record.label, description: record.description }
+              : { label: record.label },
+          );
+        }
+      }
+      idByText.set(text, questionId);
+      items.push({
+        text,
+        options,
+        multiSelect: false,
+        allowFreeText: question?.isOther === true || options.length === 0,
+      });
+    }
+    if (items.length === 0) {
+      return;
+    }
+    this.openQuestion(threadId, requestRef, {
+      threadId,
+      source: "codex_rpc",
+      items,
+      rpcId: id,
+      idByText,
+    });
+  }
+
+  private openQuestion(threadId: string, requestRef: string, pending: PendingCodexQuestion): void {
+    this.questions.set(requestRef, pending);
+    const event: QuestionOpened = {
+      sessionKey: sessionKeyOf("codex", threadId),
+      sessionId: threadId,
+      question: { requestRef, source: pending.source, items: pending.items },
+    };
+    for (const listener of [...this.questionOpened]) {
+      try {
+        listener(event);
+      } catch {
+        // One subscriber's bug must not stop the monitor.
+      }
+    }
+  }
+
+  private emitQuestionClosed(event: QuestionClosed): void {
+    for (const listener of [...this.questionClosed]) {
+      try {
+        listener(event);
+      } catch {
+        // As above.
+      }
+    }
+  }
+
+  /** Forgets questions without answering them: the TUI still owns whatever is pending. */
+  private closeQuestions(
+    reason: QuestionClosedReason,
+    threadId?: string,
+    source?: PendingCodexQuestion["source"],
+  ): void {
+    for (const [requestRef, pending] of [...this.questions]) {
+      if ((threadId && pending.threadId !== threadId) || (source && pending.source !== source)) {
+        continue;
+      }
+      this.questions.delete(requestRef);
+      this.emitQuestionClosed({
+        sessionKey: sessionKeyOf("codex", pending.threadId),
+        requestRef,
+        reason,
+      });
+    }
+  }
+
+  private resolveQuestionRequest(id: RequestId): void {
+    const requestRef = String(id);
+    const pending = this.questions.get(requestRef);
+    if (pending?.source === "codex_rpc") {
+      this.questions.delete(requestRef);
+      // Answered elsewhere, which for a thread the user also has open is the TUI.
+      this.emitQuestionClosed({
+        sessionKey: sessionKeyOf("codex", pending.threadId),
+        requestRef,
+        reason: "laptop",
+      });
     }
   }
 
@@ -1358,6 +1834,7 @@ export class CodexMonitor {
   private removeThread(threadId: string, reason: string): void {
     this.threads.delete(threadId);
     this.terminalErrors.delete(threadId);
+    this.closeQuestions("cancelled", threadId);
     for (const approval of [...this.approvalsByRpcId.values()]) {
       if (approval.threadId === threadId) {
         this.resolveApproval(approval.rpcId, reason);
