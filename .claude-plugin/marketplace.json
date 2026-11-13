@@ -4,9 +4,9 @@
   "description": "Rokid-Coder lets Rokid glasses follow and steer Claude Code and Codex sessions.",
   "plugins": [
     {
-      "name": "rokid-coder",
+      "name": "rokid",
       "source": "./plugins/claude-code",
-      "description": "Opt a Claude Code session into Rokid-Coder with /rokid."
+      "description": "Opt a Claude Code session into Rokid-Coder with /rokid:on."
     }
   ]
 }

@@ -26,30 +26,32 @@ export const ATTACH_TEXT =
   'Attached to Rokid-Coder (plugin mode). Works: progress, approvals, questions, context, voice follow-ups while waiting. Not available: compact, model change — use "rk claude" for those.';
 const DETACH_TEXT = "Detached from Rokid-Coder. This session no longer sends anything to the phone.";
 const STATUS_ATTACHED_TEXT = "Attached to Rokid-Coder (plugin mode).";
-const STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder. Type /rokid to attach.";
-const USAGE_TEXT = "Usage: /rokid-coder:rokid [off|status]";
+const STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder. Type /rokid:on to attach.";
 const NO_SESSION_TEXT = "Rokid-Coder could not tell which session this is, so nothing was changed.";
 const ATTACH_FAILED_TEXT = "Rokid-Coder could not save the attach list, so this session was not attached.";
 
 /**
  * Claude Code never hands a slash command to UserPromptSubmit. The plugin's
- * command arrives as UserPromptExpansion, namespaced by the plugin and with its
- * arguments split out. The prompt string the parser sees is rebuilt from that.
+ * commands arrive as UserPromptExpansion, namespaced by the plugin name
+ * (observed command_name values: "rokid:on", "rokid:off", "rokid:status").
  */
-const PLUGIN_COMMAND_NAME = "rokid-coder:rokid";
+const PLUGIN_COMMANDS: Record<string, AttachAction> = {
+  "rokid:on": "attach",
+  "rokid:off": "detach",
+  "rokid:status": "status",
+};
 
-function commandPrompt(payload: HookPayload): { prompt: string; ours: boolean } {
+function requestedAction(payload: HookPayload): AttachAction | undefined {
   if (payload.hook_event_name === "UserPromptExpansion") {
-    if (payload.command_name !== PLUGIN_COMMAND_NAME) {
-      return { prompt: "", ours: false };
-    }
-    const args = typeof payload.command_args === "string" ? payload.command_args.trim() : "";
-    return { prompt: args ? `/rokid ${args}` : "/rokid", ours: true };
+    const name = payload.command_name;
+    return typeof name === "string" && Object.hasOwn(PLUGIN_COMMANDS, name)
+      ? PLUGIN_COMMANDS[name]
+      : undefined;
   }
   if (payload.hook_event_name === "UserPromptSubmit") {
-    return { prompt: typeof payload.prompt === "string" ? payload.prompt : "", ours: false };
+    return parseAttachCommand(payload.prompt)?.action;
   }
-  return { prompt: "", ours: false };
+  return undefined;
 }
 
 function block(reason: string): HookResponse {
@@ -73,10 +75,9 @@ export function handleAttachCommand(
   payload: HookPayload,
   context: AttachCommandContext,
 ): HookResponse | undefined {
-  const { prompt, ours } = commandPrompt(payload);
-  const command = parseAttachCommand(prompt);
-  if (!command) {
-    return ours ? block(USAGE_TEXT) : undefined;
+  const action = requestedAction(payload);
+  if (!action) {
+    return undefined;
   }
   const sessionId = typeof payload.session_id === "string" && payload.session_id.length > 0
     ? payload.session_id
@@ -85,7 +86,7 @@ export function handleAttachCommand(
     return block(NO_SESSION_TEXT);
   }
   const { registry } = context;
-  switch (command.action) {
+  switch (action) {
     case "attach":
       try {
         registry.attach("claude", sessionId, "plugin");

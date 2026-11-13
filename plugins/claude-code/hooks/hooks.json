@@ -22,7 +22,7 @@
     ],
     "UserPromptExpansion": [
       {
-        "matcher": "rokid-coder:rokid",
+        "matcher": "rokid:on|rokid:off|rokid:status",
         "hooks": [
           {
             "type": "command",

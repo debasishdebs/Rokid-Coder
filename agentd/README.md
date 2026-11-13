@@ -30,16 +30,14 @@ the daemon ignores a session until it asks to be attached. From the repository r
 
 ```bash
 claude plugin marketplace add .
-claude plugin install rokid-coder@rokid-coder
+claude plugin install rokid@rokid-coder
 ```
 
 (`claude --plugin-dir plugins/claude-code` loads it for one session without installing.)
-Then, inside a session, type `/rokid` to attach it. Claude Code namespaces plugin
-commands, so the full names are `/rokid-coder:rokid`, `/rokid-coder:rokid status` and
-`/rokid-coder:rokid off`; typing `/rokid` and pressing Enter selects the first, but a
-command with arguments needs the full name. While attached, the plugin supports progress,
-approvals, questions, context and voice follow-ups while waiting; compact and model change
-need `rk claude`.
+Then, inside a session, type `/rokid:on` to attach it, `/rokid:status` to check and
+`/rokid:off` to detach (typing `/rokid` autocompletes to all three). While attached, the
+plugin supports progress, approvals, questions, context and voice follow-ups while waiting;
+compact and model change need `rk claude`.
 
 The plugin's `bin/hook-forward.js` is a build output: `npm run build` copies
 `dist/hook-forward.js` into `plugins/claude-code/bin` and `plugins/codex/bin` (the

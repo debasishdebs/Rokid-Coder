@@ -73,14 +73,14 @@ for (const transport of ["phonelink", "wshub"]) {
   test(`plugin_command_expansion_attaches_status_and_detaches (${transport})`, async () => {
     await withDaemon({ transport }, async ({ daemon, phone, httpPort }) => {
       // Claude Code never sends a slash command to UserPromptSubmit; the plugin's
-      // command arrives as UserPromptExpansion with its arguments split out.
-      const expansion = (commandArgs) => ({
+      // commands arrive as UserPromptExpansion named after the plugin.
+      const expansion = (name) => ({
         hook_event_name: "UserPromptExpansion",
         expansion_type: "slash_command",
-        command_name: "rokid-coder:rokid",
-        command_args: commandArgs,
+        command_name: `rokid:${name}`,
+        command_args: "",
         command_source: "plugin",
-        prompt: `/rokid-coder:rokid${commandArgs ? ` ${commandArgs}` : ""}`,
+        prompt: `/rokid:${name}`,
         session_id: "s2",
         cwd: "/work/demo",
       });
@@ -90,7 +90,7 @@ for (const transport of ["phonelink", "wshub"]) {
       assert.match(before.reason, /Not attached/);
       assert.equal(daemon.attachRegistry.isAttached("claude", "s2"), false);
 
-      const attached = await postHook(httpPort, expansion(""));
+      const attached = await postHook(httpPort, expansion("on"));
       assert.deepEqual(attached, { decision: "block", reason: ATTACH_TEXT });
       assert.equal(daemon.attachRegistry.isAttached("claude", "s2"), true);
       await phone.waitFor("session_upsert", (f) => f.session.id === "s2");
@@ -113,28 +113,23 @@ for (const transport of ["phonelink", "wshub"]) {
   test(`attach_command_edge_cases (${transport})`, async () => {
     await withDaemon({ transport }, async ({ daemon, phone, httpPort }) => {
       // Other commands expanding in the session are none of our business.
-      assert.deepEqual(
-        await postHook(httpPort, {
-          hook_event_name: "UserPromptExpansion",
-          command_name: "other-plugin:rokid",
-          command_args: "",
-          session_id: "s3",
-        }),
-        {},
-      );
-      // A mistyped argument is told so rather than falling through to the model.
-      const usage = await postHook(httpPort, {
-        hook_event_name: "UserPromptExpansion",
-        command_name: "rokid-coder:rokid",
-        command_args: "bogus",
-        session_id: "s3",
-      });
-      assert.equal(usage.decision, "block");
-      assert.match(usage.reason, /Usage: \/rokid-coder:rokid \[off\|status\]/);
+      for (const name of ["other-plugin:on", "rokid-coder:rokid", "rokid:other", "rokid", "toString"]) {
+        assert.deepEqual(
+          await postHook(httpPort, {
+            hook_event_name: "UserPromptExpansion",
+            command_name: name,
+            command_args: "",
+            session_id: "s3",
+          }),
+          {},
+          name,
+        );
+      }
+      assert.equal(daemon.attachRegistry.isAttached("claude", "s3"), false);
       // No session id means there is nothing to attach.
       const anonymous = await postHook(httpPort, {
-        hook_event_name: "UserPromptSubmit",
-        prompt: "/rokid",
+        hook_event_name: "UserPromptExpansion",
+        command_name: "rokid:on",
       });
       assert.equal(anonymous.decision, "block");
       assert.equal(daemon.attachRegistry.list().length, 0);
