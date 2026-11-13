@@ -6,21 +6,29 @@
  *                PhoneLink dials it, as a real phone does.
  *   "wshub"      the fake CONNECTS to agentd's WsHub over WebSocket.
  *
- * `tls` is a test-only marker: real TLS does not exist yet, so `tls: true`
- * only sets `phone.trusted` for later authorization tests. Nothing in agentd
- * reads it; no production path marks a link trusted.
+ * `tls: true` makes the link real TLS, the way a phone does it:
+ *   phonelink  the fake is the TLS server, with its own self-signed cert
+ *              (`phone.fingerprint`, or pass `cert: { key, cert }`). agentd pins
+ *              that cert on the first authenticated hello.
+ *   wshub      the fake connects over wss and checks agentd's cert against `pin`
+ *              (agentd's sha256 fingerprint, as in the pairing payload) before
+ *              it sends a token; a mismatch rejects `start()`.
+ * Without it the link is plaintext, which agentd treats as monitor-only.
  *
  * Also runnable as a CLI that pairs, prints every received frame as a JSON line
  * and sends the frame named after the flags:
  *   node test/fake-phone.js --transport phonelink [--port 8792] [--token T] followup claude:ID "text"
  *   node test/fake-phone.js --transport wshub --port 8792 --token T mode_set claude:ID acceptEdits
  * `--wait MS` exits after MS; otherwise it stays up until SIGINT. A real agentd
- * accepts steering frames only over a trusted link, which until TLS (Task 11) it
- * never has, so over the CLI they come back `ack rejected monitor_only`; `--tls`
- * only marks this end for the tests, where the daemon is started with trustLinks.
+ * accepts steering frames only over TLS: add `--tls true` (wshub also needs
+ * `--pin <agentd fingerprint>`); over plaintext they come back
+ * `ack rejected monitor_only`.
  */
 const net = require("node:net");
+const tlsModule = require("node:tls");
 const WebSocket = require("ws");
+const { normalizeFingerprint } = require("../dist/tls.js");
+const { phoneCert } = require("./helpers/tls.js");
 
 const DEFAULT_TIMEOUT_MS = 2000;
 
@@ -71,7 +79,7 @@ function buildFrame(type, args = [], { msgId } = {}) {
   return frame;
 }
 
-function createFakePhone({ transport, tls = false, pin, onFrame } = {}) {
+function createFakePhone({ transport, tls = false, pin, cert, onFrame } = {}) {
   if (transport !== "phonelink" && transport !== "wshub") {
     throw new Error(`unknown fake phone transport: ${transport}`);
   }
@@ -104,9 +112,9 @@ function createFakePhone({ transport, tls = false, pin, onFrame } = {}) {
   const phone = {
     transport,
     tls,
-    /** Test-only: true when the harness was created with `tls: true`. */
-    trusted: tls === true,
     pin,
+    /** phonelink over TLS: the sha256 fingerprint of this phone's cert, once started. */
+    fingerprint: undefined,
     frames,
 
     /**
@@ -162,9 +170,11 @@ function createFakePhone({ transport, tls = false, pin, onFrame } = {}) {
     },
   };
 
-  function startPhoneLink({ port, host, token }) {
+  async function startPhoneLink({ port, host, token }) {
     const sockets = new Set();
-    const server = net.createServer((socket) => {
+    const identity = tls ? (cert ?? await phoneCert("phone")) : undefined;
+    if (identity) phone.fingerprint = identity.fingerprint256 ?? tlsFingerprint(identity.cert);
+    const onConnection = (socket) => {
       sockets.add(socket);
       socket.on("close", () => sockets.delete(socket));
       socket.on("error", () => {});
@@ -189,7 +199,12 @@ function createFakePhone({ transport, tls = false, pin, onFrame } = {}) {
           newline = buffer.indexOf("\n");
         }
       });
-    });
+    };
+    const server = identity
+      ? tlsModule.createServer({ key: identity.key, cert: identity.cert }, onConnection)
+      : net.createServer(onConnection);
+    // A refused handshake (agentd pinned another cert) is the test's business, not noise.
+    server.on("tlsClientError", () => {});
     closeTransport = () => {
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -201,7 +216,13 @@ function createFakePhone({ transport, tls = false, pin, onFrame } = {}) {
   }
 
   function startWsHub({ port, host, token }) {
-    const socket = new WebSocket(`ws://${host}:${port}`);
+    const expected = tls ? normalizeFingerprint(pin ?? "") : undefined;
+    if (tls && !expected) {
+      return Promise.reject(new Error("a TLS wshub fake phone needs `pin`: agentd's sha256 fingerprint"));
+    }
+    const socket = tls
+      ? new WebSocket(`wss://${host}:${port}`, { rejectUnauthorized: false })
+      : new WebSocket(`ws://${host}:${port}`);
     writeFrame = (frame) => socket.send(JSON.stringify(frame));
     closeTransport = () => socket.terminate();
     socket.on("message", (data) => {
@@ -210,6 +231,16 @@ function createFakePhone({ transport, tls = false, pin, onFrame } = {}) {
     });
     return new Promise((resolve, reject) => {
       socket.once("error", reject);
+      // The pin is the only identity check there is, so it runs before the
+      // token can leave: a socket that fails it is dropped before "open".
+      socket.once("upgrade", (response) => {
+        if (!expected) return;
+        const actual = response.socket.getPeerCertificate().fingerprint256;
+        if (actual !== expected) {
+          socket.terminate();
+          reject(new Error(`pin mismatch: agentd presented ${actual}, expected ${expected}`));
+        }
+      });
       socket.once("open", () => {
         socket.off("error", reject);
         socket.on("error", () => {});
@@ -225,6 +256,10 @@ function createFakePhone({ transport, tls = false, pin, onFrame } = {}) {
   }
 
   return phone;
+}
+
+function tlsFingerprint(certPem) {
+  return new (require("node:crypto").X509Certificate)(certPem).fingerprint256;
 }
 
 /** `--flag value` pairs first; the first token that is not a flag starts the frame to send. */

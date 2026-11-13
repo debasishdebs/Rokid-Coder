@@ -11,6 +11,7 @@ const { CodexMonitor } = require("../dist/codex/monitor.js");
 const { silentLogger } = require("../dist/logger.js");
 const { SessionStore } = require("../dist/session-store.js");
 const { createFakePhone } = require("./fake-phone.js");
+const { agentCert } = require("./helpers/tls.js");
 const { withDaemon, postHook, settle } = require("./helpers/daemon.js");
 
 const CODEX = { "x-rokid-provider": "codex" };
@@ -24,7 +25,7 @@ const permission = (sessionId, command = "ls") => ({
 
 /** A phone that connects to the daemon's WsHub after the first one went away. */
 async function reconnectPhone(wsPort, token, tls = true) {
-  const phone = createFakePhone({ transport: "wshub", tls });
+  const phone = createFakePhone({ transport: "wshub", tls, pin: (await agentCert()).fingerprint256 });
   await phone.start({ port: wsPort, host: "127.0.0.1", token });
   await phone.waitFor("snapshot");
   return phone;

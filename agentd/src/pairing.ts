@@ -21,7 +21,8 @@ export function bestHostGuess(interfaces = os.networkInterfaces()): string {
   );
 }
 
-export function pairingPayload(config: AgentConfig): string {
+/** `fp` is agentd's certificate fingerprint; the phone pins it before it trusts wss. */
+export function pairingPayload(config: AgentConfig, fp: string): string {
   return JSON.stringify({
     v: 1,
     kind: "nexus-agentd",
@@ -29,5 +30,6 @@ export function pairingPayload(config: AgentConfig): string {
     host: bestHostGuess(),
     port: config.wsPort,
     token: config.token,
+    fp,
   });
 }

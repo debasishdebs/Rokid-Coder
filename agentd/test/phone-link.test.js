@@ -4,8 +4,10 @@ const fsp = require("node:fs/promises");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const tls = require("node:tls");
 const { configPath, ensureConfig, saveConfig } = require("../dist/config.js");
 const { SessionStore } = require("../dist/session-store.js");
+const { phoneCert } = require("./helpers/tls.js");
 const {
   buildPhoneDialTargets,
   MAX_PHONE_SESSIONS_PER_PROVIDER,
@@ -112,9 +114,6 @@ function createLink(overrides = {}) {
     // Never the real discovery port: announcing on 8793 makes any actual
     // phone on the LAN answer mid-test and dial into the assertions.
     discoveryPort: 48793,
-    // These tests exercise the v1 frames themselves; the gate that refuses
-    // them on an untrusted link is covered in protocol-v2.test.js.
-    trusted: true,
     ...overrides,
   });
   return { link, store, logs };
@@ -279,7 +278,7 @@ test("TCP stays dialling until hello_ack, then sends data and accepts decisions"
   const sockets = [];
   let acceptConnection;
   const accepted = new Promise((resolve) => { acceptConnection = resolve; });
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     const lines = collectLines(socket);
     acceptConnection({ socket, lines });
@@ -295,7 +294,7 @@ test("TCP stays dialling until hello_ack, then sends data and accepts decisions"
   });
 
   try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone" });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone", tls: true });
     const { socket, lines } = await accepted;
     const hello = await lines.waitFor((frame) => frame.type === "hello");
     assert.equal(hello.token, config.token);
@@ -417,7 +416,7 @@ test("authenticated thread_start frames validate and round-trip with ids echoed"
   const sockets = [];
   let acceptConnection;
   const accepted = new Promise((resolve) => { acceptConnection = resolve; });
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     acceptConnection({ socket, lines: collectLines(socket) });
   });
@@ -433,7 +432,7 @@ test("authenticated thread_start frames validate and round-trip with ids echoed"
   });
 
   try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone" });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone", tls: true });
     const { socket, lines } = await accepted;
     await lines.waitFor((frame) => frame.type === "hello");
     socket.write('{"type":"hello_ack","v":1}\n');
@@ -578,7 +577,7 @@ test("thread_start replies Timed out when the daemon callback hangs", async () =
   const sockets = [];
   let acceptConnection;
   const accepted = new Promise((resolve) => { acceptConnection = resolve; });
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     acceptConnection({ socket, lines: collectLines(socket) });
   });
@@ -593,7 +592,7 @@ test("thread_start replies Timed out when the daemon callback hangs", async () =
   });
 
   try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone" });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone", tls: true });
     const { socket, lines } = await accepted;
     await lines.waitFor((frame) => frame.type === "hello");
     socket.write('{"type":"hello_ack","v":1}\n');

@@ -6,6 +6,7 @@ const path = require("node:path");
 const { ensureConfig, saveConfig } = require("../../dist/config.js");
 const { startDaemon } = require("../../dist/daemon.js");
 const { createFakePhone } = require("../fake-phone.js");
+const { agentCert, seedAgentCert } = require("./tls.js");
 
 async function withTempDir(body) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "rokid-coder-test-"));
@@ -63,8 +64,10 @@ function transcriptLine(sessionId) {
 /**
  * Boots the real daemon against temp state with a fake phone on `transport`.
  * `discovered` Claude sessions are written under a temp ~/.claude/projects.
- * `tls: true` marks the phone and the daemon's links trusted (test-only until Task 11),
- * which is what lets steering frames through. `coderFiles` pre-seeds files in
+ * `tls: true` makes the phone link real TLS: agentd pins the fake phone's cert
+ * on its first hello (phonelink), or the fake pins agentd's cert (wshub). That
+ * is what lets steering frames through; without it the link is monitor-only.
+ * The daemon's agentd cert is the one shared test cert, copied into its tls dir. `coderFiles` pre-seeds files in
  * the Rokid-Coder state dir (name -> JSON value), such as settings.json.
  */
 async function withDaemon({ transport, tls = false, attached = [], discovered = [], coderFiles = {} }, body) {
@@ -90,7 +93,9 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
       await fsp.writeFile(path.join(coderDir, name), JSON.stringify(content));
     }
 
-    const phone = createFakePhone({ transport, tls });
+    await seedAgentCert(path.join(coderDir, "tls"));
+    const agent = await agentCert();
+    const phone = createFakePhone({ transport, tls, pin: agent.fingerprint256 });
     const httpPort = await freePort();
     const wsPort = await freePort();
     const base = ensureConfig(stateDir);
@@ -102,7 +107,7 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
       ...base,
       httpPort,
       wsPort,
-      phoneHosts: transport === "phonelink" ? [`127.0.0.1:${phonePort}`] : [],
+      phoneHosts: transport === "phonelink" ? [`${tls ? "tls://" : ""}127.0.0.1:${phonePort}`] : [],
       tailnetDiscovery: false,
       rokidCoder: { stateDir: coderDir },
     }, stateDir);
@@ -112,12 +117,12 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
     process.env.NEXUS_AGENTD_CLAUDE_DIR = claudeDir;
     let daemon;
     try {
-      daemon = await startDaemon({ discoveryPort: await freePort(), trustLinks: tls });
+      daemon = await startDaemon({ discoveryPort: await freePort() });
       if (transport === "wshub") {
         await phone.start({ port: wsPort, host: "127.0.0.1", token: base.token });
       }
       await phone.waitFor("snapshot");
-      await body({ daemon, phone, httpPort, wsPort, token: base.token, coderDir, claudeDir });
+      await body({ daemon, phone, httpPort, wsPort, token: base.token, coderDir, claudeDir, agentFingerprint: agent.fingerprint256 });
     } finally {
       phone.close();
       await daemon?.stop();

@@ -256,7 +256,9 @@ test("a_plaintext_dismiss_only_parks_an_approval_which_a_trusted_action_still_an
 
 test("a_plaintext_dismiss_leaves_an_approval_and_a_question_in_the_queue_but_closes_a_done", async () => {
   await withDaemon(
-    { transport: "phonelink", tls: false, attached: [{ provider: "claude", id: "s1" }] },
+    // The approval needs a phone that can answer it, so the link is TLS; the
+    // dismiss frames are monitor-class and are accepted on either.
+    { transport: "phonelink", tls: true, attached: [{ provider: "claude", id: "s1" }] },
     async ({ daemon, phone, httpPort }) => {
       postHook(httpPort, {
         hook_event_name: "PermissionRequest",
@@ -609,6 +611,7 @@ test("persisted_defaults_reach_sessions_attached_before_the_start", async () => 
   await withDaemon(
     {
       transport: "wshub",
+      tls: true,
       attached: [{ provider: "claude", id: "old" }],
       coderFiles: { "settings.json": { version: 1, defaultModes: { claude: "acceptEdits", codex: "ask" } } },
     },
@@ -662,8 +665,8 @@ test("every_steering_frame_rejected_over_plaintext_on_both_transports", async ()
       },
       async ({ daemon, phone, httpPort, coderDir }) => {
         await postHook(httpPort, sessionStart("s1"));
-        const held = postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" });
-        await settle();
+        // A monitor-only phone cannot answer a Stop, so nothing is held for it.
+        assert.deepEqual(await postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" }), {});
         for (const frame of STEERING_FRAMES) {
           assert.equal(classifyFrame(frame.type), "steering", frame.type);
           assert.deepEqual(authorize(frame, { trusted: false }), { ok: false, error: "monitor_only" });
@@ -678,11 +681,9 @@ test("every_steering_frame_rejected_over_plaintext_on_both_transports", async ()
 
         // Nothing ran: no mode, no delivery, no recorded id.
         assert.equal(daemon.approvalPolicy.get("claude:s1"), "ask");
-        assert.equal(daemon.stopWait.state("s1").waiting, true);
+        assert.deepEqual(daemon.stopWait.state("s1"), { waiting: false, continuationsLeft: 8 });
         assert.equal(await exists(path.join(coderDir, "applied-ids.json")), false);
         assert.equal(await exists(path.join(coderDir, "settings.json")), false);
-        daemon.stopWait.releaseByLaptop("s1");
-        await held;
       },
     );
   }
@@ -781,11 +782,12 @@ test("heading_is_read_from_a_transcript_attached_mid_conversation", async () => 
 test("fake_phone_cli_pairs_prints_frames_and_sends_a_frame_from_argv", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
-    async ({ daemon, httpPort, wsPort, token }) => {
+    async ({ daemon, httpPort, wsPort, token, agentFingerprint }) => {
       await postHook(httpPort, sessionStart("s1"));
       const child = spawn(process.execPath, [
         path.join(__dirname, "fake-phone.js"),
-        "--transport", "wshub", "--port", String(wsPort), "--token", token, "--tls", "true", "--wait", "1500",
+        "--transport", "wshub", "--port", String(wsPort), "--token", token, "--tls", "true",
+        "--pin", agentFingerprint, "--wait", "1500",
         "mode_set", "claude:s1", "acceptEdits",
       ]);
       let out = "";
@@ -803,6 +805,7 @@ test("approve_all_left_by_a_previous_run_is_reported_when_the_phone_connects", a
   await withDaemon(
     {
       transport: "wshub",
+      tls: true,
       attached: [{ provider: "claude", id: "old" }],
       coderFiles: { "approve-all.json": { version: 1, sessions: [{ sessionKey: "claude:old", since: 1 }] } },
     },

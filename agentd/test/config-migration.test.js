@@ -10,6 +10,7 @@ const { WsHub } = require("../dist/ws-server.js");
 const { silentLogger } = require("../dist/logger.js");
 const { classifyFrame, sessionKeyOf } = require("../dist/protocol-v2.js");
 const { createFakePhone } = require("./fake-phone.js");
+const { agentCert } = require("./helpers/tls.js");
 
 const LEGACY = {
   token: "legacy-token",
@@ -156,7 +157,7 @@ test("fake_phone_receives_snapshot_on_both_transports", async () => {
       assert.equal(hello.token, config.token);
       const snapshot = await phone.waitFor("snapshot");
       assert.deepEqual(snapshot.sessions, []);
-      assert.equal(phone.trusted, false);
+      assert.equal(phone.tls, false);
       // Frames flow phone -> agentd as well: ping is answered with pong.
       phone.send({ type: "ping", t: 1 });
       assert.equal((await phone.waitFor("pong", (frame) => frame.t === 1)).t, 1);
@@ -169,16 +170,16 @@ test("fake_phone_receives_snapshot_on_both_transports", async () => {
 
   async function t_wshub() {
     const store = new SessionStore(config, silentLogger);
-    const hub = new WsHub(config, store, silentLogger, { host: "127.0.0.1" });
+    const agent = await agentCert();
+    const hub = new WsHub(config, store, silentLogger, { host: "127.0.0.1", tls: agent });
     await hub.start();
-    const phone = createFakePhone({ transport: "wshub", tls: true, pin: "pin-1" });
+    const phone = createFakePhone({ transport: "wshub", tls: true, pin: agent.fingerprint256 });
     try {
       await phone.start({ port: hub.port(), token: config.token });
       assert.equal((await phone.waitFor("hello_ack")).server.name, "nexus-agentd");
       const snapshot = await phone.waitFor("snapshot");
       assert.deepEqual(snapshot.sessions, []);
-      assert.equal(phone.trusted, true);
-      assert.equal(phone.pin, "pin-1");
+      assert.equal(phone.tls, true);
       phone.send({ type: "refresh" });
       await phone.waitFor("snapshot", () => phone.frames.filter((f) => f.type === "snapshot").length === 2);
     } finally {

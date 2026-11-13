@@ -25,6 +25,7 @@ import { QuestionRelay } from "./question-relay";
 import { TranscriptTailManager, readTranscriptHeading } from "./transcript";
 import { DETAIL_MESSAGE_LIMIT, readRecentMessages } from "./transcript-messages";
 import { sessionKeyOf } from "./protocol-v2";
+import { ensureAgentCert, PinStore } from "./tls";
 import type { AgentProvider, HookPayload } from "./types";
 import { WsHub } from "./ws-server";
 
@@ -64,12 +65,6 @@ export interface RunningDaemon {
 export interface DaemonOptions {
   /** Test seam: keeps the UDP announce broadcast off the well-known port. */
   discoveryPort?: number;
-  /**
-   * Test seam: treat every phone link as trusted, so steering frames are
-   * accepted without TLS. Nothing in production sets it (cli.ts passes no
-   * options); real trust arrives with TLS in Task 11.
-   */
-  trustLinks?: boolean;
 }
 
 const APPLIED_ID_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -108,20 +103,22 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     phoneV2?.onSessionEnded(provider, id);
   };
   // Either transport counts, as for approvals: a phone that dialled in is as
-  // good as one the daemon dialled. Read at hook time, after both exist.
-  const phoneConnected = (): boolean =>
-    phoneLink?.connected === true || wsHub?.hasAuthenticatedClient === true;
+  // good as one the daemon dialled. Read at hook time, after both exist. Only a
+  // TRUSTED phone (pinned TLS) can answer, so only one may hold an approval, a
+  // question or a Stop; a monitor-only phone is shown the board and nothing more.
+  const trustedPhoneConnected = (): boolean =>
+    phoneLink?.trustedConnected === true || wsHub?.hasTrustedClient === true;
   const stopWait = new StopWait({
     waitLimitMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
     continuationCap: DEFAULT_STOP_CONTINUATION_CAP,
-    canAsk: phoneConnected,
+    canAsk: trustedPhoneConnected,
   });
   // No phone frame carries a release yet; until followup_closed exists the log
   // is the only trace of how a wait ended.
   stopWait.onRelease((_sessionId, reason) => logger.info("stop_wait_released", { reason }));
   const questionRelay = new QuestionRelay({
     waitLimitMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
-    canAsk: phoneConnected,
+    canAsk: trustedPhoneConnected,
   });
   questionRelay.onClosed(({ reason }) => logger.info("question_released", { reason }));
   const sessions = new SessionStore(config, logger, Date.now, {
@@ -321,7 +318,9 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       ? typeIntoTerminal(sessionId, text)
       : { ok: false, error: "not_attached" };
 
-  const trusted = daemonOptions.trustLinks === true;
+  const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
+  const agentCert = await ensureAgentCert(tlsDir);
+  const pins = new PinStore(path.join(tlsDir, "phone-pins.json"));
   // Both transports share one v2 layer, built once the pieces it needs exist.
   const v2Hooks = {
     handle: (frame: Record<string, unknown>, channel: Parameters<PhoneV2["handle"]>[1]) =>
@@ -329,12 +328,15 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     decorate: (session: Parameters<PhoneV2["decorate"]>[0]) => phoneV2?.decorate(session) ?? { ...session },
   };
 
-  // A phone came up on either transport: it gets what was waiting for one (open
-  // approvals, queued alerts, resets nobody has been told about) and Claude
-  // sessions are rebuilt from their transcripts, since the tail only sees new lines.
+  // A phone came up on either transport: Claude sessions are rebuilt from their
+  // transcripts, since the tail only sees new lines, and a trusted phone also
+  // gets what was waiting for one (open approvals, queued alerts, resets nobody
+  // has been told about). A monitor-only phone cannot answer any of those.
   const onPhoneConnected = (): void => {
-    approvals?.onLinkConnected();
-    phoneV2?.onChannelConnected();
+    if (trustedPhoneConnected()) {
+      approvals?.onLinkConnected();
+      phoneV2?.onChannelConnected();
+    }
     rebuildAttachedClaudeSessions();
   };
   // A phone went away on either transport. Pending approvals fall back to the
@@ -342,10 +344,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   // a phone: expiring something that can still be answered would only cost the
   // wearer the answer. Frames go to the dialled link when it is up, so only its
   // loss strands anything; then the other phone is sent what the link held.
-  const onPhoneDisconnected = (lostDialledLink: boolean): void => {
-    if (!phoneConnected()) {
+  const onPhoneDisconnected = (lostTrustedDialledLink: boolean): void => {
+    if (!trustedPhoneConnected()) {
       approvals?.onLinkDisconnected();
-    } else if (lostDialledLink) {
+    } else if (lostTrustedDialledLink) {
       approvals?.onLinkConnected();
       phoneV2?.onChannelConnected();
     }
@@ -356,7 +358,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onDetailOpen,
     onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
-    trusted,
+    tls: { key: agentCert.key, cert: agentCert.cert },
     v2: v2Hooks,
     onClientConnected: onPhoneConnected,
     onClientDisconnected: () => onPhoneDisconnected(false),
@@ -381,10 +383,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     },
     onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
-    trusted,
+    pins,
     v2: v2Hooks,
     onConnected: onPhoneConnected,
-    onDisconnected: () => onPhoneDisconnected(true),
+    onDisconnected: (wasTrusted) => onPhoneDisconnected(wasTrusted),
   });
   phoneLink = link;
   // Either direction can carry an approval. The daemon dials the phone on the
@@ -395,14 +397,14 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   // since that is the one the phone's own reconnect logic keeps warm.
   const approvalTransport: ApprovalTransport = {
     get connected(): boolean {
-      return link.connected || hub.hasAuthenticatedClient;
+      return trustedPhoneConnected();
     },
     sendApprovalRequest: (request) =>
-      link.connected
+      link.trustedConnected
         ? link.sendApprovalRequest(request)
         : hub.sendApprovalRequest(request),
     sendApprovalResolved: (requestId, outcome) =>
-      link.connected
+      link.trustedConnected
         ? link.sendApprovalResolved(requestId, outcome)
         : hub.sendApprovalResolved(requestId, outcome),
   };
@@ -428,9 +430,9 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   codexMonitor = codex;
   const outlet: PhoneOutlet = {
     get connected(): boolean {
-      return phoneConnected();
+      return trustedPhoneConnected();
     },
-    send: (frame) => (link.connected ? link.sendFrame(frame) : hub.broadcastFrame(frame)),
+    send: (frame) => (link.trustedConnected ? link.sendFrame(frame) : hub.broadcastFrame(frame)),
   };
   const phone = new PhoneV2({
     sessions,

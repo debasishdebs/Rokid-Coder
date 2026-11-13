@@ -61,7 +61,23 @@ function isWaitLimitSec(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) > 0 && Number(value) <= MAX_WAIT_LIMIT_SEC;
 }
 
-export function parsePhoneTarget(value: string): { host: string; port: number } | undefined {
+const TLS_TARGET_PREFIX = "tls://";
+
+/**
+ * A phone to dial: `host`, `host:port`, or `tls://host[:port]` for a phone that
+ * serves TLS. Without the prefix a target is dialled in plaintext (monitor-only)
+ * unless agentd already holds a pin for the host.
+ */
+export function parsePhoneTarget(
+  value: string,
+): { host: string; port: number; tls?: true } | undefined {
+  const tls = value.startsWith(TLS_TARGET_PREFIX);
+  const target = tls ? value.slice(TLS_TARGET_PREFIX.length) : value;
+  const parsed = parsePlainTarget(target);
+  return parsed ? { ...parsed, ...(tls ? { tls: true as const } : {}) } : undefined;
+}
+
+function parsePlainTarget(value: string): { host: string; port: number } | undefined {
   if (!value || value.trim() !== value) {
     return undefined;
   }

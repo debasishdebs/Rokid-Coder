@@ -1,7 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
+import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import https from "node:https";
+import net, { type AddressInfo } from "node:net";
 import path from "node:path";
+import type { TLSSocket } from "node:tls";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { NotAttachedError } from "./attach-registry";
 import { gateFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
@@ -26,8 +29,18 @@ const SERVER_VERSION = (() => {
   return packageJson.version;
 })();
 
+/** The first byte of a TLS record carrying a handshake. */
+const TLS_HANDSHAKE_BYTE = 0x16;
+
+function refuseHttp(_request: IncomingMessage, response: ServerResponse): void {
+  response.writeHead(426, { "content-type": "text/plain" });
+  response.end("WebSocket only\n");
+}
+
 interface ClientState {
   authenticated: boolean;
+  /** Arrived over TLS, so the phone has the pinned cert's word that this is agentd. */
+  trusted: boolean;
   channel: PhoneChannel;
   lastPongAt: number;
   helloTimer: NodeJS.Timeout;
@@ -50,11 +63,12 @@ export interface WsHubOptions {
   /** Types the wearer's text into the session's terminal; see terminal-input. */
   onTerminalInput?: (sessionId: string, text: string) => Promise<TerminalInputOutcome>;
   /**
-   * Whether clients of this hub have proved who they are, which is what lets
-   * steering frames through. Production leaves it unset (untrusted, monitor-only)
-   * until real TLS exists; only tests and the TLS path may say otherwise.
+   * agentd's TLS identity. With it the one port serves both wss and plain ws:
+   * the first byte of a connection says which. A wss client is trusted (it
+   * pinned this cert from the pairing payload, and the token is checked inside
+   * the tunnel); a plain ws client is monitor-only.
    */
-  trusted?: boolean;
+  tls?: { key: string; cert: string };
   v2?: PhoneV2Hooks;
   /** A client finished its handshake, after it has its snapshot. */
   onClientConnected?: () => void;
@@ -73,7 +87,10 @@ function tokenMatches(received: unknown, expected: string): boolean {
 }
 
 export class WsHub {
-  private server?: WebSocketServer;
+  private server?: net.Server;
+  private plainServer?: http.Server;
+  private secureServer?: https.Server;
+  private sockets?: WebSocketServer;
   private keepaliveTimer?: NodeJS.Timeout;
   private readonly clients = new Map<WebSocket, ClientState>();
   private sequence = 0;
@@ -98,12 +115,26 @@ export class WsHub {
     if (this.server) {
       return Promise.resolve();
     }
-    const server = new WebSocketServer({
-      host: this.options.host ?? "0.0.0.0",
-      port: this.config.wsPort,
+    // The HTTP servers never listen: the front server below hands each
+    // connection to one of them, which only exists to run the upgrade.
+    const sockets = new WebSocketServer({ noServer: true });
+    const onUpgrade = (request: IncomingMessage, socket: net.Socket, head: Buffer): void => {
+      sockets.handleUpgrade(request, socket, head, (client) => this.accept(client, request));
+    };
+    const plain = http.createServer(refuseHttp);
+    plain.on("upgrade", onUpgrade);
+    const secure = this.options.tls
+      ? https.createServer({ ...this.options.tls, minVersion: "TLSv1.2" }, refuseHttp)
+      : undefined;
+    secure?.on("upgrade", onUpgrade);
+    secure?.on("tlsClientError", (error) => {
+      this.logger.warn("ws_tls_client_error", { reason: error.name });
     });
+    const server = net.createServer((socket) => this.route(socket, plain, secure));
     this.server = server;
-    server.on("connection", (socket) => this.accept(socket));
+    this.plainServer = plain;
+    this.secureServer = secure;
+    this.sockets = sockets;
     server.on("error", (error) => {
       this.logger.error("ws_server_error", { reason: error.name });
     });
@@ -123,6 +154,26 @@ export class WsHub {
       };
       server.once("error", onError);
       server.once("listening", onListening);
+      server.listen({ host: this.options.host ?? "0.0.0.0", port: this.config.wsPort });
+    });
+  }
+
+  /** Peeks at the first byte to tell a TLS handshake from an HTTP request. */
+  private route(socket: net.Socket, plain: http.Server, secure: https.Server | undefined): void {
+    socket.on("error", () => undefined);
+    const timer = setTimeout(() => socket.destroy(), this.options.helloTimeoutMs ?? 5000);
+    timer.unref();
+    socket.once("close", () => clearTimeout(timer));
+    socket.once("readable", () => {
+      clearTimeout(timer);
+      const first: Buffer | null = socket.read(1);
+      const target = first && first[0] === TLS_HANDSHAKE_BYTE ? secure : plain;
+      if (!first || !target) {
+        socket.destroy();
+        return;
+      }
+      socket.unshift(first);
+      target.emit("connection", socket);
     });
   }
 
@@ -146,28 +197,35 @@ export class WsHub {
     this.clients.clear();
     const server = this.server;
     this.server = undefined;
+    this.sockets?.close();
+    this.sockets = undefined;
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+    for (const inner of [this.plainServer, this.secureServer]) {
+      inner?.close();
+      inner?.closeAllConnections();
+    }
+    this.plainServer = undefined;
+    this.secureServer = undefined;
     this.unsubscribeUpsert();
     this.unsubscribeRemoved();
   }
 
-  private accept(socket: WebSocket): void {
+  private accept(socket: WebSocket, request: IncomingMessage): void {
+    const trusted = (request.socket as Partial<TLSSocket>).encrypted === true;
     const helloTimer = setTimeout(() => {
       if (!this.clients.get(socket)?.authenticated) {
         socket.close(4408, "hello timeout");
       }
     }, this.options.helloTimeoutMs ?? 5000);
     helloTimer.unref();
-    const options = this.options;
     this.clients.set(socket, {
       authenticated: false,
+      trusted,
       channel: {
         transport: "wshub",
-        get trusted() {
-          return options.trusted === true;
-        },
+        trusted,
         send: (frame) => this.send(socket, frame),
       },
       lastPongAt: Date.now(),
@@ -357,6 +415,19 @@ export class WsHub {
     return false;
   }
 
+  /**
+   * True while a pinned-TLS phone is authenticated. Only such a phone can
+   * answer, so only its presence may hold a tool call, a question or a Stop.
+   */
+  get hasTrustedClient(): boolean {
+    for (const state of this.clients.values()) {
+      if (state.authenticated && state.trusted) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /** The WebSocket half of typed input; both transports share the judgement. */
   private async answerTerminalInput(
     socket: WebSocket,
@@ -387,17 +458,18 @@ export class WsHub {
     });
   }
 
+  /** Approvals, alerts and their resolutions go to trusted phones only: a monitor-only phone cannot answer them. */
   sendApprovalRequest(request: ApprovalRequest): boolean {
-    return this.broadcastToAuthenticated({ ...request });
+    return this.broadcastToTrusted({ ...request });
   }
 
-  /** Any other frame for the phones, such as the v2 alert; false when none is connected. */
+  /** Any other frame for the phones, such as the v2 alert; false when no trusted phone is connected. */
   broadcastFrame(frame: Record<string, unknown>): boolean {
-    return this.broadcastToAuthenticated(frame);
+    return this.broadcastToTrusted(frame);
   }
 
   sendApprovalResolved(requestId: string, outcome: ApprovalOutcome): boolean {
-    return this.broadcastToAuthenticated({
+    return this.broadcastToTrusted({
       type: "approval_resolved",
       v: 1,
       requestId,
@@ -406,10 +478,10 @@ export class WsHub {
   }
 
   /** Delivered is "at least one phone got it", matching the dialled link's contract. */
-  private broadcastToAuthenticated(message: Record<string, unknown>): boolean {
+  private broadcastToTrusted(message: Record<string, unknown>): boolean {
     let delivered = false;
     for (const [socket, state] of this.clients) {
-      if (state.authenticated) {
+      if (state.authenticated && state.trusted) {
         this.send(socket, message);
         delivered = true;
       }

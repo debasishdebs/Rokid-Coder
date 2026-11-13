@@ -179,7 +179,7 @@ test("no_phone_connected_resolves_empty_at_once_and_a_phone_makes_it_hold", asyn
 
 test("daemon_holds_ask_user_question_for_attached_sessions_only", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, httpPort }) => {
       const opened = [];
       daemon.questionRelay.onOpened((event) => opened.push(event));
@@ -247,7 +247,7 @@ test("daemon_permission_request_for_ask_user_question_never_reaches_the_phone", 
 
 test("daemon_detach_releases_a_held_question", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, httpPort }) => {
       const reply = postHook(httpPort, hookPayload({ session_id: "held", tool_use_id: "tu-d" }));
       await settle();

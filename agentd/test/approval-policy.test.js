@@ -254,6 +254,7 @@ test("daemon_resets_approve_all_on_session_end_and_detach_and_reports_restart", 
   await withDaemon(
     {
       transport: "wshub",
+      tls: true,
       attached: [
         { provider: "claude", id: "ending" },
         { provider: "claude", id: "detached" },

@@ -4,6 +4,7 @@ const WebSocket = require("ws");
 const { SessionStore } = require("../dist/session-store.js");
 const { WsHub } = require("../dist/ws-server.js");
 const { silentLogger } = require("../dist/logger.js");
+const { agentCert } = require("./helpers/tls.js");
 
 function waitFor(messages, predicate, timeoutMs = 2000) {
   const existing = messages.find(predicate);
@@ -170,13 +171,14 @@ test("a phone that dialled in can be held for approval and answer over the same 
   const decisions = [];
   const hub = new WsHub(config, store, silentLogger, {
     host: "127.0.0.1",
-    // The v1 decision itself is under test here; the gate that refuses it on an
-    // untrusted link is covered in protocol-v2.test.js.
-    trusted: true,
+    // The v1 decision itself is under test here, so the phone connects over
+    // wss: the gate that refuses it on a plaintext link is covered in
+    // protocol-v2.test.js and tls.test.js.
+    tls: await agentCert(),
     onApprovalDecision: (requestId, decision) => decisions.push({ requestId, decision }),
   });
   await hub.start();
-  const socket = new WebSocket(`ws://127.0.0.1:${hub.port()}`);
+  const socket = new WebSocket(`wss://127.0.0.1:${hub.port()}`, { rejectUnauthorized: false });
   const messages = collect(socket);
   try {
     await opened(socket);
@@ -225,13 +227,14 @@ test("a malformed approval decision is ignored rather than forwarded", async () 
   const decisions = [];
   const hub = new WsHub(config, store, silentLogger, {
     host: "127.0.0.1",
-    // The v1 decision itself is under test here; the gate that refuses it on an
-    // untrusted link is covered in protocol-v2.test.js.
-    trusted: true,
+    // The v1 decision itself is under test here, so the phone connects over
+    // wss: the gate that refuses it on a plaintext link is covered in
+    // protocol-v2.test.js and tls.test.js.
+    tls: await agentCert(),
     onApprovalDecision: (requestId, decision) => decisions.push({ requestId, decision }),
   });
   await hub.start();
-  const socket = new WebSocket(`ws://127.0.0.1:${hub.port()}`);
+  const socket = new WebSocket(`wss://127.0.0.1:${hub.port()}`, { rejectUnauthorized: false });
   const messages = collect(socket);
   try {
     await opened(socket);

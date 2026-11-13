@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir, networkInterfaces, platform } from "node:os";
 import { connect, type Socket as TcpSocket } from "node:net";
+import { connect as tlsConnect, type TLSSocket } from "node:tls";
 import type {
   ApprovalDecision,
   ApprovalOutcome,
@@ -20,6 +21,7 @@ import {
 import type { SessionStore } from "./session-store";
 import type { TerminalInputOutcome } from "./terminal-input";
 import { TailscalePeerDiscovery } from "./tailnet-discovery";
+import { PinStore, shortFingerprint } from "./tls";
 import { DETAIL_MESSAGE_LIMIT } from "./transcript-messages";
 import type {
   AgentConfig,
@@ -68,13 +70,15 @@ export interface PhoneLinkOptions {
     prompt: string,
   ) => Promise<ThreadStartResult>;
   onConnected?: () => void;
-  onDisconnected?: () => void;
+  /** `wasTrusted` is whether the link that went away was a pinned-TLS one. */
+  onDisconnected?: (wasTrusted: boolean) => void;
   /**
-   * Whether this link has proved who it is, which is what lets steering frames
-   * through. Production leaves it unset (untrusted, monitor-only) until real TLS
-   * exists; only tests and the TLS path may say otherwise.
+   * The phones' pinned certificate fingerprints. A link is trusted, and so may
+   * steer, only when it is TLS and its peer cert matches the pin for its host
+   * (pinned on the first authenticated hello). Without a store the pins last
+   * only as long as the process.
    */
-  trusted?: boolean;
+  pins?: PinStore;
   v2?: PhoneV2Hooks;
   operatorMessage?: (message: string) => void;
   discoveryPort?: number;
@@ -96,6 +100,12 @@ interface PhoneAnnouncement {
   host: string;
   port: number;
   name: string;
+  /**
+   * Whether the phone serves TLS. A UDP announcement always says (`tls: true`,
+   * or false when the field is absent); a configured or tailnet target says
+   * only when it is written `tls://`, and otherwise leaves it undefined.
+   */
+  tls?: boolean;
 }
 
 interface RejectedPhone {
@@ -121,6 +131,7 @@ function parseAnnouncement(raw: Buffer, host: string): PhoneAnnouncement | undef
       host,
       port,
       name: typeof record.name === "string" ? record.name.slice(0, 64) : "phone",
+      tls: record.tls === true,
     };
   } catch {
     return undefined;
@@ -194,6 +205,11 @@ export class PhoneLink {
   private connectedTo?: string;
   private phoneName?: string;
   private authenticated = false;
+  /** This connection's peer cert, set once a TLS handshake has passed the pin check. */
+  private peerFingerprint?: string;
+  /** This connection proved itself: TLS, pin matched or first-used, hello accepted. */
+  private linkTrusted = false;
+  private readonly pins: PinStore;
   private stopped = false;
   private unsubscribe?: () => void;
   private readonly rejectedPhones = new Map<string, RejectedPhone>();
@@ -210,13 +226,15 @@ export class PhoneLink {
 
   constructor(private readonly options: PhoneLinkOptions) {
     const send = (frame: Record<string, unknown>): void => void this.send(frame);
+    const isTrusted = (): boolean => this.linkTrusted;
     this.channel = {
       transport: "phonelink",
       get trusted() {
-        return options.trusted === true;
+        return isTrusted();
       },
       send,
     };
+    this.pins = options.pins ?? new PinStore();
     this.now = options.now ?? Date.now;
     this.phoneHosts = [...options.config.phoneHosts];
     this.tailnetDiscoveryEnabled = options.config.tailnetDiscovery !== false;
@@ -278,6 +296,8 @@ export class PhoneLink {
     this.socket?.destroy();
     this.socket = undefined;
     this.authenticated = false;
+    this.linkTrusted = false;
+    this.peerFingerprint = undefined;
     this.publishedSessions.clear();
     this.discovery?.close();
     this.discovery = undefined;
@@ -287,17 +307,23 @@ export class PhoneLink {
     return this.authenticated && this.socket !== undefined && !this.socket.destroyed;
   }
 
-  sendApprovalRequest(request: ApprovalRequest): boolean {
-    return this.send({ ...request });
+  /** True while the link is up and has proved who it is, which is what may hold a tool call. */
+  get trustedConnected(): boolean {
+    return this.connected && this.linkTrusted;
   }
 
-  /** Any other frame for the phone, such as the v2 alert; false when the link is not up. */
+  /** Approvals, alerts and their resolutions go to a trusted phone only: a monitor-only one cannot answer them. */
+  sendApprovalRequest(request: ApprovalRequest): boolean {
+    return this.linkTrusted && this.send({ ...request });
+  }
+
+  /** Any other frame for the phone, such as the v2 alert; false when the link is not up and trusted. */
   sendFrame(frame: Record<string, unknown>): boolean {
-    return this.send(frame);
+    return this.linkTrusted && this.send(frame);
   }
 
   sendApprovalResolved(requestId: string, outcome: ApprovalOutcome): boolean {
-    return this.send({ type: "approval_resolved", v: 1, requestId, outcome });
+    return this.linkTrusted && this.send({ type: "approval_resolved", v: 1, requestId, outcome });
   }
 
   /** Streams an appended conversation message if the phone is reading that session. */
@@ -426,14 +452,34 @@ export class PhoneLink {
     if ((this.retryAt.get(target) ?? 0) > now) {
       return;
     }
-    const socket = connect({ host: announcement.host, port: announcement.port });
+    // A host that has a pin is a TLS phone and is never dialled in plaintext,
+    // or whoever strips the encryption would be taken for it. A phone that
+    // announces plaintext after pinning is refused until the pin is cleared;
+    // there is no downgrade, and a failed TLS dial is never retried as plaintext.
+    const pinned = this.pins.pinFor(normalizedHost(announcement.host)) !== undefined;
+    if (pinned && announcement.tls === false) {
+      this.refuseDowngrade(target);
+      return;
+    }
+    const useTls = announcement.tls === true || pinned;
+    const socket: TcpSocket = useTls
+      // The phone's cert is self-signed, so chain validation cannot pass; the
+      // pin (checked below) is the identity check. Node skips
+      // checkServerIdentity when validation failed, which is why it is not used.
+      ? tlsConnect({ host: announcement.host, port: announcement.port, rejectUnauthorized: false })
+      : connect({ host: announcement.host, port: announcement.port });
     this.socket = socket;
     this.connectedTo = target;
     this.phoneName = announcement.name;
     this.authenticated = false;
+    this.linkTrusted = false;
+    this.peerFingerprint = undefined;
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 30_000);
-    socket.on("connect", () => {
+    socket.on(useTls ? "secureConnect" : "connect", () => {
+      if (useTls && !this.verifyPeer(socket as TLSSocket, announcement.host, target)) {
+        return;
+      }
       this.helloTimer = setTimeout(
         () => this.onHelloTimeout(socket),
         this.options.helloTimeoutMs ?? PHONE_HELLO_TIMEOUT_MS,
@@ -460,6 +506,46 @@ export class PhoneLink {
     socket.on("close", () => this.onClose());
   }
 
+  private refuseDowngrade(target: string): void {
+    const previous = this.rejectedPhones.get(target);
+    this.rejectedPhones.set(target, {
+      retryAt: this.now() + REFUSAL_RECONNECT_DELAY_MS,
+      reportedReason: "plaintext_after_pin",
+    });
+    if (previous?.reportedReason === "plaintext_after_pin") {
+      return;
+    }
+    this.options.logger.warn("phone_link_downgrade_refused", { target });
+    this.tellOperator(
+      "A phone that was pinned announced a plaintext link, so agentd refused it. If the phone was reset or replaced, remove its entry from the phone pins file and link it again.",
+    );
+  }
+
+  /** Holds the dialled phone to its pin; false means the link was refused and destroyed. */
+  private verifyPeer(socket: TLSSocket, host: string, target: string): boolean {
+    const actual = socket.getPeerCertificate().fingerprint256;
+    const expected = this.pins.pinFor(normalizedHost(host));
+    if (!actual || (expected !== undefined && expected !== actual)) {
+      // Fingerprints only, shortened; the token is never part of a log line.
+      this.options.logger.warn("phone_link_pin_mismatch", {
+        target,
+        expected: expected ? shortFingerprint(expected) : "none",
+        actual: actual ? shortFingerprint(actual) : "none",
+      });
+      this.rejectedPhones.set(target, {
+        retryAt: this.now() + REFUSAL_RECONNECT_DELAY_MS,
+        reportedReason: "pin_mismatch",
+      });
+      this.tellOperator(
+        "The phone's TLS certificate does not match the one pinned for it, so agentd refused the link. If the phone was reset or replaced, remove its entry from the phone pins file and link it again.",
+      );
+      socket.destroy();
+      return false;
+    }
+    this.peerFingerprint = actual;
+    return true;
+  }
+
   private subscribe(): () => void {
     const upsert = this.options.store.onUpsert((session) => this.reconcileSessions(session.id));
     const removed = this.options.store.onRemoved((sessionId) => this.reconcileSessions(sessionId));
@@ -471,6 +557,7 @@ export class PhoneLink {
 
   private onClose(): void {
     const wasAuthenticated = this.authenticated;
+    const wasTrusted = this.linkTrusted;
     const target = this.connectedTo;
     this.clearHelloTimer();
     this.clearPingTimer();
@@ -478,6 +565,8 @@ export class PhoneLink {
     this.unsubscribe = undefined;
     this.socket = undefined;
     this.authenticated = false;
+    this.linkTrusted = false;
+    this.peerFingerprint = undefined;
     this.publishedSessions.clear();
     this.buffer = "";
     this.clearDetailRefreshTimer();
@@ -490,7 +579,7 @@ export class PhoneLink {
     }
     if (wasAuthenticated && target) {
       this.options.logger.info("phone_link_closed", { target });
-      this.options.onDisconnected?.();
+      this.options.onDisconnected?.(wasTrusted);
     }
     if (!this.stopped) {
       // Discovery keeps running; give the phone a moment before dialling again.
@@ -651,9 +740,11 @@ export class PhoneLink {
       this.rejectedPhones.delete(this.connectedTo);
       this.retryAt.delete(this.connectedTo);
     }
+    this.trustPeer();
     this.options.logger.info("phone_link_connected", {
       phone: this.phoneName ?? "phone",
       target: this.connectedTo ?? "unknown",
+      trusted: this.linkTrusted,
     });
     this.sendSnapshot();
     this.unsubscribe = this.subscribe();
@@ -665,6 +756,33 @@ export class PhoneLink {
     }, LINK_PING_INTERVAL_MS);
     this.pingTimer.unref();
     this.options.onConnected?.();
+  }
+
+  /**
+   * Trust on first use: the first authenticated hello over TLS pins the peer's
+   * cert for its host. Later links must present that cert (verifyPeer), so by
+   * the time a link is trusted its peer matches the pin.
+   */
+  private trustPeer(): void {
+    const fingerprint = this.peerFingerprint;
+    const target = this.connectedTo ? parsePhoneTarget(this.connectedTo) : undefined;
+    if (!fingerprint || !target) {
+      return;
+    }
+    const host = normalizedHost(target.host);
+    if (this.pins.pinFor(host) === undefined) {
+      try {
+        this.pins.pin(host, fingerprint);
+      } catch (error) {
+        // Unpinned means untrusted: better a monitor-only link than one nothing remembers.
+        this.options.logger.error("phone_link_pin_failed", {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+      this.options.logger.info("phone_link_pinned", { host, fingerprint: shortFingerprint(fingerprint) });
+    }
+    this.linkTrusted = true;
   }
 
   private clearPingTimer(): void {

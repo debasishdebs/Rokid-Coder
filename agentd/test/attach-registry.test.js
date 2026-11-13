@@ -226,7 +226,7 @@ for (const transport of TRANSPORTS) {
 
   test(`detach_stops_tailing_and_removes_session (${transport})`, async () => {
     await withDaemon(
-      { transport, attached: [{ provider: "claude", id: "disc-attached" }], discovered: ["disc-attached"] },
+      { transport, tls: true, attached: [{ provider: "claude", id: "disc-attached" }], discovered: ["disc-attached"] },
       async ({ daemon, phone, httpPort }) => {
         // A permission request is pending for the session when it is detached.
         const held = postHook(httpPort, {

@@ -3,6 +3,7 @@
  * (PhoneLink's newline-delimited TCP and WsHub's WebSocket). Types and the
  * frame classification only; handlers live with the tasks that own them.
  */
+import { isSteeringAllowed } from "./tls";
 import type { AgentProvider, Session } from "./types";
 
 export type SessionKey = `${AgentProvider}:${string}`;
@@ -301,8 +302,9 @@ export function parseSessionKey(value: unknown): { provider: AgentProvider; id: 
 
 /**
  * One phone connection as the frame handlers see it, whichever transport it
- * came in on. `trusted` is true only for a link that has proved who it is
- * (TLS, Task 11); every production link is untrusted until then.
+ * came in on. `trusted` is true only for a link that has proved who it is: a
+ * TLS connection whose peer was checked against a pin. It is read per
+ * connection, so one phone's trust never covers another's.
  */
 export interface PhoneChannel {
   readonly transport: "phonelink" | "wshub";
@@ -315,7 +317,7 @@ export type AuthorizeResult = { ok: true } | { ok: false; error: "monitor_only" 
 /** The one authorization decision, made before any handler sees a frame. */
 export function authorize(frame: { type?: unknown }, link: Pick<PhoneChannel, "trusted">): AuthorizeResult {
   const type = typeof frame.type === "string" ? frame.type : "";
-  if (classifyFrame(type) === "steering" && link.trusted !== true) {
+  if (classifyFrame(type) === "steering" && !isSteeringAllowed({ tls: link.trusted === true })) {
     return { ok: false, error: "monitor_only" };
   }
   return { ok: true };

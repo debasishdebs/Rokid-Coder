@@ -10,6 +10,7 @@ import {
 } from "./config";
 import { startDaemon } from "./daemon";
 import { pairingPayload } from "./pairing";
+import { ensureAgentCert } from "./tls";
 import { installHooks, uninstallHooks } from "./settings";
 
 interface Health {
@@ -112,7 +113,8 @@ async function main(): Promise<void> {
     }
     case "pair": {
       const config = ensureConfig(defaultStateDir());
-      const payload = pairingPayload(config);
+      const cert = await ensureAgentCert(path.join(config.rokidCoder.stateDir, "tls"));
+      const payload = pairingPayload(config, cert.fingerprint256);
       process.stdout.write(`${payload}\n`);
       qrcode.generate(payload, { small: true }, (code) => process.stdout.write(`${code}\n`));
       break;

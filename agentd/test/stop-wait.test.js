@@ -215,7 +215,7 @@ function startStop(httpPort, sessionId, headers) {
 
 test("daemon_holds_stop_for_attached_claude_and_a_laptop_prompt_releases_it", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, httpPort }) => {
       const releases = [];
       daemon.stopWait.onRelease((sessionId, reason) => releases.push(`${sessionId}:${reason}`));
@@ -236,7 +236,7 @@ test("daemon_holds_stop_for_attached_claude_and_a_laptop_prompt_releases_it", as
 
 test("daemon_delivery_reaches_the_held_stop_request", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, httpPort }) => {
       const stop = startStop(httpPort, "held");
       await settle();
@@ -251,7 +251,7 @@ test("daemon_delivery_reaches_the_held_stop_request", async () => {
 
 test("daemon_attach_commands_are_not_laptop_prompts", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, httpPort }) => {
       const stop = startStop(httpPort, "held");
       await settle();
@@ -278,7 +278,7 @@ test("daemon_attach_commands_are_not_laptop_prompts", async () => {
 
 test("daemon_does_not_hold_unattached_or_codex_stops", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, httpPort }) => {
       assert.deepEqual(await postHook(httpPort, { hook_event_name: "Stop", session_id: "stranger" }), {});
       assert.deepEqual(
@@ -292,7 +292,7 @@ test("daemon_does_not_hold_unattached_or_codex_stops", async () => {
 
 test("daemon_pre_tool_use_resets_the_continuation_cap", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, httpPort }) => {
       const stop = startStop(httpPort, "held");
       await settle();
@@ -307,7 +307,7 @@ test("daemon_pre_tool_use_resets_the_continuation_cap", async () => {
 
 test("daemon_detach_releases_the_hold_as_cancelled", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, httpPort }) => {
       const releases = [];
       daemon.stopWait.onRelease((sessionId, reason) => releases.push(`${sessionId}:${reason}`));
@@ -322,7 +322,7 @@ test("daemon_detach_releases_the_hold_as_cancelled", async () => {
 
 test("daemon_stop_does_not_hang_on_a_held_request", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ httpPort }) => {
       // The harness stops the daemon after this body returns; the held request
       // must not keep the HTTP server from closing.
@@ -334,7 +334,7 @@ test("daemon_stop_does_not_hang_on_a_held_request", async () => {
 
 test("daemon_forwarder_that_dies_releases_the_hold_as_cancelled", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, httpPort }) => {
       const releases = [];
       daemon.stopWait.onRelease((sessionId, reason) => releases.push(`${sessionId}:${reason}`));
