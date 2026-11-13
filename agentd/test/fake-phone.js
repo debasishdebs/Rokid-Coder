@@ -10,16 +10,68 @@
  * only sets `phone.trusted` for later authorization tests. Nothing in agentd
  * reads it; no production path marks a link trusted.
  *
- * Also runnable as a CLI that prints every received frame as a JSON line:
- *   node test/fake-phone.js --transport phonelink [--port 8792] [--token T]
- *   node test/fake-phone.js --transport wshub --port 8792 --token T
+ * Also runnable as a CLI that pairs, prints every received frame as a JSON line
+ * and sends the frame named after the flags:
+ *   node test/fake-phone.js --transport phonelink [--port 8792] [--token T] followup claude:ID "text"
+ *   node test/fake-phone.js --transport wshub --port 8792 --token T mode_set claude:ID acceptEdits
+ * `--wait MS` exits after MS; otherwise it stays up until SIGINT. A real agentd
+ * accepts steering frames only over a trusted link, which until TLS (Task 11) it
+ * never has, so over the CLI they come back `ack rejected monitor_only`; `--tls`
+ * only marks this end for the tests, where the daemon is started with trustLinks.
  */
 const net = require("node:net");
 const WebSocket = require("ws");
 
 const DEFAULT_TIMEOUT_MS = 2000;
 
-function createFakePhone({ transport, tls = false, pin } = {}) {
+let nextMsgId = 0;
+const newMsgId = () => `fake-${process.pid}-${Date.now().toString(36)}-${nextMsgId++}`;
+
+const DEFAULT_TIMINGS = {
+  ageBoostMs: 30000,
+  dwellMs: 8000,
+  ackTimeoutMs: 5000,
+  retryBackoffMs: [5000, 10000, 20000],
+  reminderMs: 300000,
+  expireMs: 1800000,
+};
+
+/**
+ * The v2 phone -> agent frames, built from positional arguments the way the CLI
+ * takes them. Steering frames get a fresh msgId; pass `{ msgId }` to reuse one.
+ */
+const FRAME_BUILDERS = {
+  followup: ([sessionKey, text]) => ({ sessionKey, text }),
+  question_answer: ([sessionKey, alertId, requestRef, answers]) =>
+    ({ sessionKey, alertId, requestRef, answers: JSON.parse(answers) }),
+  mode_set: ([sessionKey, mode, confirmed]) => ({ sessionKey, mode, confirmed: confirmed === "true" }),
+  mode_revoke_all: () => ({}),
+  codex_settings: ([sessionKey, model, effort]) =>
+    ({ sessionKey, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }),
+  codex_compact: ([sessionKey]) => ({ sessionKey }),
+  alert_action: ([id, action]) => ({ id, action }),
+  alert_shown: ([id]) => ({ id }),
+  alert_dismissed: ([id]) => ({ id }),
+  defaults_set: ([claude, codex]) => ({ defaultModes: { claude, codex } }),
+  settings_sync: ([waitLimitMs]) => ({ timings: DEFAULT_TIMINGS, waitLimitMs: Number(waitLimitMs) }),
+  models_request: ([sessionKey]) => ({ sessionKey }),
+  // Any frame at all, steering or not, for the cases the builders do not cover.
+  raw: ([json]) => JSON.parse(json),
+};
+const MONITOR_ONLY_BUILDERS = new Set(["alert_shown", "alert_dismissed", "models_request", "raw"]);
+
+function buildFrame(type, args = [], { msgId } = {}) {
+  const build = FRAME_BUILDERS[type];
+  if (!build) throw new Error(`unknown frame "${type}" (known: ${Object.keys(FRAME_BUILDERS).join(", ")})`);
+  const fields = build(args);
+  const frame = type === "raw" ? fields : { type, v: 2, ...fields };
+  if (!MONITOR_ONLY_BUILDERS.has(type) && frame.msgId === undefined) {
+    frame.msgId = msgId ?? newMsgId();
+  }
+  return frame;
+}
+
+function createFakePhone({ transport, tls = false, pin, onFrame } = {}) {
   if (transport !== "phonelink" && transport !== "wshub") {
     throw new Error(`unknown fake phone transport: ${transport}`);
   }
@@ -32,6 +84,7 @@ function createFakePhone({ transport, tls = false, pin } = {}) {
 
   function record(frame) {
     frames.push(frame);
+    if (onFrame) onFrame(frame);
     waiters = waiters.filter((waiter) => !waiter(frame));
     // An app-level ping must be answered or agentd drops the link as dead.
     if (frame && frame.type === "ping") {
@@ -72,6 +125,13 @@ function createFakePhone({ transport, tls = false, pin } = {}) {
     send(frame) {
       if (!writeFrame) throw new Error("fake phone is not connected");
       writeFrame(frame);
+    },
+
+    /** Builds a v2 frame from CLI-style arguments, sends it and returns it. */
+    sendFrame(type, args = [], options) {
+      const frame = buildFrame(type, args, options);
+      phone.send(frame);
+      return frame;
     },
 
     waitFor(type, predicate, timeoutMs = DEFAULT_TIMEOUT_MS) {
@@ -167,39 +227,55 @@ function createFakePhone({ transport, tls = false, pin } = {}) {
   return phone;
 }
 
+/** `--flag value` pairs first; the first token that is not a flag starts the frame to send. */
 function parseArgs(argv) {
-  const args = {};
-  for (let index = 0; index < argv.length; index += 2) {
-    args[argv[index].replace(/^--/, "")] = argv[index + 1];
+  const flags = {};
+  let index = 0;
+  while (index < argv.length && argv[index].startsWith("--")) {
+    flags[argv[index].slice(2)] = argv[index + 1];
+    index += 2;
   }
-  return args;
+  return { flags, frame: argv.slice(index) };
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const { flags: args, frame } = parseArgs(process.argv.slice(2));
   const phone = createFakePhone({
     transport: args.transport,
     tls: args.tls === "true",
     pin: args.pin,
+    onFrame: (received) => process.stdout.write(`${JSON.stringify(received)}\n`),
   });
-  const originalPush = phone.frames.push.bind(phone.frames);
-  phone.frames.push = (...items) => {
-    for (const item of items) process.stdout.write(`${JSON.stringify(item)}\n`);
-    return originalPush(...items);
-  };
   const { port } = await phone.start({
     port: args.port === undefined ? 0 : Number(args.port),
     host: args.host,
     token: args.token,
   });
   process.stderr.write(`fake phone (${args.transport}) on port ${port}\n`);
-  process.on("SIGINT", () => {
+  if (frame.length > 0) {
+    // The link needs a moment to finish its handshake before agentd listens.
+    const sent = await new Promise((resolve) => {
+      const attempt = () => {
+        try {
+          resolve(phone.sendFrame(frame[0], frame.slice(1)));
+        } catch (error) {
+          if (error.message === "fake phone is not connected") setTimeout(attempt, 200);
+          else throw error;
+        }
+      };
+      phone.waitFor("snapshot", undefined, 30000).then(attempt, attempt);
+    });
+    process.stderr.write(`sent ${JSON.stringify(sent)}\n`);
+  }
+  const finish = () => {
     phone.close();
     process.exit(0);
-  });
+  };
+  process.on("SIGINT", finish);
+  if (args.wait !== undefined) setTimeout(finish, Number(args.wait));
 }
 
-module.exports = { createFakePhone };
+module.exports = { createFakePhone, buildFrame };
 
 if (require.main === module) {
   main().catch((error) => {

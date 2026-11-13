@@ -69,8 +69,21 @@ interface PendingApproval {
   resolve: (decision: ApprovalDecision | undefined) => void;
 }
 
+/**
+ * What the phone-facing alert pipeline hears. `onPending` fires once a request
+ * is on the wire (never for one the policy or a missing phone settled first).
+ * `onSettled` fires when it ends: `allow`/`deny` is the phone's answer, `timeout`
+ * is nobody answering, `local` is anything else, with `reason` saying what
+ * (`phone_disconnected`, `session_end`, ...).
+ */
+export interface ApprovalObserver {
+  onPending(request: ApprovalRequest): void;
+  onSettled(request: ApprovalRequest, outcome: ApprovalOutcome, reason?: string): void;
+}
+
 export interface ApprovalManagerOptions {
   transport: ApprovalTransport;
+  observer?: ApprovalObserver;
   logger: Logger;
   timeoutMs?: number;
   now?: () => number;
@@ -316,19 +329,23 @@ export class ApprovalManager {
         sessionId: request.sessionId.slice(0, 16),
         tool: request.tool,
       });
+      this.observe(() => this.options.observer?.onPending(request));
     });
   }
 
-  handleDecision(requestId: string, decision: ApprovalDecision): void {
+  /** False when nothing is waiting on that request any more (answered, expired or gone). */
+  handleDecision(requestId: string, decision: ApprovalDecision): boolean {
     const pending = this.take(requestId);
     if (!pending) {
-      return;
+      return false;
     }
     pending.resolve(decision);
     this.options.logger.info("approval_decided", {
       requestId,
       decision,
     });
+    this.observe(() => this.options.observer?.onSettled(pending.request, decision));
+    return true;
   }
 
   onLinkConnected(): void {
@@ -373,6 +390,7 @@ export class ApprovalManager {
     }
     pending.resolve(undefined);
     this.options.logger.info("approval_timeout", { requestId });
+    this.observe(() => this.options.observer?.onSettled(pending.request, "timeout"));
   }
 
   private resolveLocal(requestId: string, reason: string, notifyPhone: boolean): void {
@@ -385,6 +403,18 @@ export class ApprovalManager {
     }
     pending.resolve(undefined);
     this.options.logger.info("approval_local", { requestId, reason });
+    this.observe(() => this.options.observer?.onSettled(pending.request, "local", reason));
+  }
+
+  /** An observer's bug must never strand the hook that is waiting on the phone. */
+  private observe(notify: () => void): void {
+    try {
+      notify();
+    } catch (error) {
+      this.options.logger.warn("approval_observer_failed", {
+        reason: error instanceof Error ? error.name : "unknown",
+      });
+    }
   }
 
   private take(requestId: string): PendingApproval | undefined {

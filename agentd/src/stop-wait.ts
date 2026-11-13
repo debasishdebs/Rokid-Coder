@@ -13,6 +13,8 @@ export type StopWaitReleaseListener = (
   msgId?: string,
 ) => void;
 
+export type StopWaitOpenedListener = (sessionId: string) => void;
+
 export interface StopWaitOptions {
   waitLimitMs: number;
   /** Claude ignores a Stop block after this many in a row, until it calls a tool. */
@@ -40,6 +42,7 @@ export class StopWait {
   /** Follow-ups delivered since the session last called a tool. */
   private readonly used = new Map<string, number>();
   private readonly listeners = new Set<StopWaitReleaseListener>();
+  private readonly openedListeners = new Set<StopWaitOpenedListener>();
   private waitLimitMs: number;
   private readonly cap: number;
   private readonly setTimer: typeof setTimeout;
@@ -55,6 +58,18 @@ export class StopWait {
   /** Applies to the holds that start after this call, not to one already waiting. */
   setWaitLimitMs(ms: number): void {
     this.waitLimitMs = clampWaitLimit(ms, this.waitLimitMs);
+  }
+
+  get currentWaitLimitMs(): number {
+    return this.waitLimitMs;
+  }
+
+  /** A Stop is now held: the glasses can send a follow-up. The release side is onRelease. */
+  onOpened(listener: StopWaitOpenedListener): () => void {
+    this.openedListeners.add(listener);
+    return () => {
+      this.openedListeners.delete(listener);
+    };
   }
 
   onRelease(listener: StopWaitReleaseListener): () => void {
@@ -96,6 +111,13 @@ export class StopWait {
       };
       this.holds.set(sessionId, hold);
       closed.addEventListener("abort", onAbort, { once: true });
+      for (const listener of [...this.openedListeners]) {
+        try {
+          listener(sessionId);
+        } catch {
+          // One subscriber's bug must not strand the hook.
+        }
+      }
     });
   }
 

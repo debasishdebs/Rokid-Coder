@@ -219,7 +219,7 @@ test("daemon_without_a_phone_leaves_question_and_stop_to_the_laptop", async () =
 
 test("daemon_permission_request_for_ask_user_question_never_reaches_the_phone", async () => {
   await withDaemon(
-    { transport: "wshub", attached: [{ provider: "claude", id: "held" }] },
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
     async ({ daemon, phone, httpPort }) => {
       daemon.approvalPolicy.set("claude:held", "approveAll", true);
       const permission = (tool) => postHook(httpPort, {

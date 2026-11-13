@@ -63,8 +63,11 @@ function transcriptLine(sessionId) {
 /**
  * Boots the real daemon against temp state with a fake phone on `transport`.
  * `discovered` Claude sessions are written under a temp ~/.claude/projects.
+ * `tls: true` marks the phone and the daemon's links trusted (test-only until Task 11),
+ * which is what lets steering frames through. `coderFiles` pre-seeds files in
+ * the Rokid-Coder state dir (name -> JSON value), such as settings.json.
  */
-async function withDaemon({ transport, attached = [], discovered = [] }, body) {
+async function withDaemon({ transport, tls = false, attached = [], discovered = [], coderFiles = {} }, body) {
   await withTempDir(async (dir) => {
     const stateDir = path.join(dir, "nexus-agentd");
     const coderDir = path.join(dir, "rokid-coder");
@@ -83,7 +86,11 @@ async function withDaemon({ transport, attached = [], discovered = [] }, body) {
       }),
     );
 
-    const phone = createFakePhone({ transport, tls: false });
+    for (const [name, content] of Object.entries(coderFiles)) {
+      await fsp.writeFile(path.join(coderDir, name), JSON.stringify(content));
+    }
+
+    const phone = createFakePhone({ transport, tls });
     const httpPort = await freePort();
     const wsPort = await freePort();
     const base = ensureConfig(stateDir);
@@ -105,12 +112,12 @@ async function withDaemon({ transport, attached = [], discovered = [] }, body) {
     process.env.NEXUS_AGENTD_CLAUDE_DIR = claudeDir;
     let daemon;
     try {
-      daemon = await startDaemon({ discoveryPort: await freePort() });
+      daemon = await startDaemon({ discoveryPort: await freePort(), trustLinks: tls });
       if (transport === "wshub") {
         await phone.start({ port: wsPort, host: "127.0.0.1", token: base.token });
       }
       await phone.waitFor("snapshot");
-      await body({ daemon, phone, httpPort, coderDir, claudeDir });
+      await body({ daemon, phone, httpPort, wsPort, token: base.token, coderDir, claudeDir });
     } finally {
       phone.close();
       await daemon?.stop();

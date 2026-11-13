@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import path from "node:path";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { NotAttachedError } from "./attach-registry";
+import { gateFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
 import { SessionStore } from "./session-store";
 import type {
   ApprovalDecision,
@@ -26,6 +27,7 @@ const SERVER_VERSION = (() => {
 
 interface ClientState {
   authenticated: boolean;
+  channel: PhoneChannel;
   lastPongAt: number;
   helloTimer: NodeJS.Timeout;
   pongTimer?: NodeJS.Timeout;
@@ -46,6 +48,17 @@ export interface WsHubOptions {
   onApprovalDecision?: (requestId: string, decision: ApprovalDecision) => void;
   /** Types the wearer's text into the session's terminal; see terminal-input. */
   onTerminalInput?: (sessionId: string, text: string) => Promise<TerminalInputOutcome>;
+  /**
+   * Whether clients of this hub have proved who they are, which is what lets
+   * steering frames through. Production leaves it unset (untrusted, monitor-only)
+   * until real TLS exists; only tests and the TLS path may say otherwise.
+   */
+  trusted?: boolean;
+  v2?: PhoneV2Hooks;
+  /** A client finished its handshake, after it has its snapshot. */
+  onClientConnected?: () => void;
+  /** An authenticated client went away. */
+  onClientDisconnected?: () => void;
 }
 
 const DETAIL_MESSAGE_LIMIT = 40;
@@ -147,8 +160,16 @@ export class WsHub {
       }
     }, this.options.helloTimeoutMs ?? 5000);
     helloTimer.unref();
+    const options = this.options;
     this.clients.set(socket, {
       authenticated: false,
+      channel: {
+        transport: "wshub",
+        get trusted() {
+          return options.trusted === true;
+        },
+        send: (frame) => this.send(socket, frame),
+      },
       lastPongAt: Date.now(),
       helloTimer,
     });
@@ -166,6 +187,9 @@ export class WsHub {
         }
       }
       this.clients.delete(socket);
+      if (state?.authenticated) {
+        this.options.onClientDisconnected?.();
+      }
     });
   }
 
@@ -234,9 +258,14 @@ export class WsHub {
         },
       });
       this.sendSnapshot(socket);
+      this.options.onClientConnected?.();
       return;
     }
 
+    // One gate for every frame, before any handler, v1 or v2.
+    if (!gateFrame(message, state.channel) || this.options.v2?.handle(message, state.channel)) {
+      return;
+    }
     switch (message.type) {
       case "refresh":
         this.sendSnapshot(socket);
@@ -362,6 +391,11 @@ export class WsHub {
     return this.broadcastToAuthenticated({ ...request });
   }
 
+  /** Any other frame for the phones, such as the v2 alert; false when none is connected. */
+  broadcastFrame(frame: Record<string, unknown>): boolean {
+    return this.broadcastToAuthenticated(frame);
+  }
+
   sendApprovalResolved(requestId: string, outcome: ApprovalOutcome): boolean {
     return this.broadcastToAuthenticated({
       type: "approval_resolved",
@@ -393,19 +427,24 @@ export class WsHub {
   }
 
   private sendSnapshot(socket: WebSocket): void {
+    const v2 = this.options.v2;
+    const sessions = this.store.list();
     this.send(socket, {
       type: "snapshot",
+      ...(v2 ? { v: 2 } : {}),
       seq: this.sequence,
-      sessions: this.store.list(),
+      sessions: v2 ? sessions.map((session) => v2.decorate(session)) : sessions,
     });
   }
 
   private broadcastUpsert(session: Session): void {
     this.sequence += 1;
+    const v2 = this.options.v2;
     this.broadcast({
       type: "session_upsert",
+      ...(v2 ? { v: 2 } : {}),
       seq: this.sequence,
-      session,
+      session: v2 ? v2.decorate(session) : session,
     });
   }
 

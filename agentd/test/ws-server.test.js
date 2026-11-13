@@ -170,6 +170,9 @@ test("a phone that dialled in can be held for approval and answer over the same 
   const decisions = [];
   const hub = new WsHub(config, store, silentLogger, {
     host: "127.0.0.1",
+    // The v1 decision itself is under test here; the gate that refuses it on an
+    // untrusted link is covered in protocol-v2.test.js.
+    trusted: true,
     onApprovalDecision: (requestId, decision) => decisions.push({ requestId, decision }),
   });
   await hub.start();
@@ -222,6 +225,9 @@ test("a malformed approval decision is ignored rather than forwarded", async () 
   const decisions = [];
   const hub = new WsHub(config, store, silentLogger, {
     host: "127.0.0.1",
+    // The v1 decision itself is under test here; the gate that refuses it on an
+    // untrusted link is covered in protocol-v2.test.js.
+    trusted: true,
     onApprovalDecision: (requestId, decision) => decisions.push({ requestId, decision }),
   });
   await hub.start();

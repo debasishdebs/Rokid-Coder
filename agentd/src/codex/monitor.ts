@@ -6,7 +6,7 @@ import {
   type ApprovalManager,
   type ApprovalRequest,
 } from "../approval-manager";
-import { sessionKeyOf, type QuestionPayload } from "../protocol-v2";
+import { sessionKeyOf, type QuestionPayload, type SessionKey } from "../protocol-v2";
 import type {
   QuestionAnswers,
   QuestionClosed,
@@ -48,6 +48,7 @@ import type {
   ThreadStartResponse,
   Turn,
   TurnStartParams,
+  TurnStatus,
   TurnStartResponse,
 } from "./protocol";
 import { readLastTokenUsage, type ContextUsage } from "./rollout-usage";
@@ -93,6 +94,17 @@ export interface FollowUpSettings {
   model?: string;
   effort?: string;
 }
+
+/** A turn the monitor saw end on an attached thread. */
+export interface CodexTurnCompleted {
+  sessionKey: SessionKey;
+  threadId: string;
+  status: TurnStatus;
+  /** The failure message, for a failed turn. */
+  error?: string;
+}
+
+export type CodexTurnCompletedListener = (event: CodexTurnCompleted) => void;
 
 export type FollowUpResult = "started" | "queued";
 /** `unknown`: nothing is waiting on that requestRef, or no answer matched a question. */
@@ -513,6 +525,10 @@ export class CodexMonitor {
   private readonly liveContext = new Set<string>();
   private readonly pendingSettings = new Map<string, FollowUpSettings>();
   private readonly appliedSettings = new Map<string, FollowUpSettings>();
+  private readonly nativeModes = new Map<string, string>();
+  private readonly sandboxes = new Map<string, string>();
+  private readonly steps = new Map<string, { currentFile?: string; step?: string }>();
+  private readonly turnCompleted = new Set<CodexTurnCompletedListener>();
   private readonly questions = new Map<string, PendingCodexQuestion>();
   private readonly questionOpened = new Set<QuestionOpenedListener>();
   private readonly questionClosed = new Set<QuestionClosedListener>();
@@ -591,6 +607,29 @@ export class CodexMonitor {
       throw new Error("Codex thread is not attached");
     }
     await this.request("thread/compact/start", { threadId });
+  }
+
+  /**
+   * Remembers a model and effort for the thread's next turn/start. Nothing is
+   * sent now: the thread's settings change only when a turn carries them, and
+   * they count as applied only once thread/settings/updated confirms it.
+   */
+  setPendingSettings(threadId: string, settings: FollowUpSettings): void {
+    if (!this.options.isAttached(threadId)) {
+      throw new Error("Codex thread is not attached");
+    }
+    const merged = { ...this.pendingSettings.get(threadId), ...settingsOf(settings) };
+    if (merged.model || merged.effort) {
+      this.pendingSettings.set(threadId, merged);
+      this.publishThread(threadId);
+    }
+  }
+
+  onTurnCompleted(listener: CodexTurnCompletedListener): () => void {
+    this.turnCompleted.add(listener);
+    return () => {
+      this.turnCompleted.delete(listener);
+    };
   }
 
   /** The model names a turn/start accepts, in the daemon's order. */
@@ -717,6 +756,9 @@ export class CodexMonitor {
     this.liveContext.delete(threadId);
     this.pendingSettings.delete(threadId);
     this.appliedSettings.delete(threadId);
+    this.nativeModes.delete(threadId);
+    this.sandboxes.delete(threadId);
+    this.steps.delete(threadId);
     this.removeThread(threadId, "unsubscribed");
   }
 
@@ -1204,6 +1246,7 @@ export class CodexMonitor {
         excludeTurns: true,
       });
       resumed = response.thread;
+      this.rememberThreadModes(threadId, response);
     } catch (error) {
       if (/no rollout found/i.test(errorMessage(error))) {
         this.awaitFirstTurn(threadId);
@@ -1244,6 +1287,28 @@ export class CodexMonitor {
     }
     this.options.logger.info("codex_thread_subscribed", { threadId });
     return true;
+  }
+
+  /**
+   * The thread's own approval policy and sandbox, as thread/resume reports
+   * them. Read-only context for the phone; agentd never sets either.
+   */
+  private rememberThreadModes(threadId: string, response: unknown): void {
+    const record = asRecord(response);
+    const policy = record?.approvalPolicy;
+    const sandbox = record?.sandbox;
+    const label = (value: unknown): string | undefined =>
+      typeof value === "string" && value
+        ? value
+        : typeof asRecord(value)?.type === "string" ? String(asRecord(value)?.type) : undefined;
+    const nativeMode = label(policy);
+    const sandboxLabel = label(sandbox);
+    if (nativeMode) {
+      this.nativeModes.set(threadId, nativeMode);
+    }
+    if (sandboxLabel) {
+      this.sandboxes.set(threadId, sandboxLabel);
+    }
   }
 
   private awaitFirstTurn(threadId: string): void {
@@ -1495,6 +1560,7 @@ export class CodexMonitor {
         ) {
           this.contextByThread.set(threadId, { used, window });
           this.liveContext.add(threadId);
+          this.publishThread(threadId);
         }
         break;
       }
@@ -1506,6 +1572,14 @@ export class CodexMonitor {
             ...settingsOf(params.threadSettings),
           });
           this.dropAppliedPending(threadId);
+          this.publishThread(threadId);
+        }
+        break;
+      }
+      case "item/started": {
+        const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+        if (threadId && this.options.isAttached(threadId)) {
+          this.noteStep(threadId, asRecord(params.item));
         }
         break;
       }
@@ -1534,7 +1608,13 @@ export class CodexMonitor {
             // A new turn means the asked question was answered or moved past.
             this.closeQuestions("cancelled", thread.id, "codex_async");
           }
+          if (method === "turn/completed") {
+            this.steps.delete(thread.id);
+          }
           this.publishThread(thread.id);
+          if (method === "turn/completed" && this.options.isAttached(thread.id)) {
+            this.emitTurnCompleted(thread.id, turn);
+          }
         }
         break;
       }
@@ -1590,6 +1670,43 @@ export class CodexMonitor {
       default:
         break;
     }
+  }
+
+  private emitTurnCompleted(threadId: string, turn: Turn): void {
+    const event: CodexTurnCompleted = {
+      sessionKey: sessionKeyOf("codex", threadId),
+      threadId,
+      status: turn.status,
+      ...(turn.status === "failed" ? { error: turn.error?.message || "Codex turn failed." } : {}),
+    };
+    for (const listener of [...this.turnCompleted]) {
+      try {
+        listener(event);
+      } catch {
+        // One subscriber's bug must not stop the monitor.
+      }
+    }
+  }
+
+  /** What the thread is doing now: the file being changed or the command being run. */
+  private noteStep(threadId: string, item: Record<string, unknown> | undefined): void {
+    if (item?.type === "fileChange") {
+      const change = asRecord(Array.isArray(item.changes) ? item.changes[0] : undefined);
+      const file = typeof change?.path === "string" ? change.path : undefined;
+      this.steps.set(threadId, {
+        ...this.steps.get(threadId),
+        currentFile: file ? truncateText(normalizeCwd(file), 200) : undefined,
+      });
+    } else if (item?.type === "commandExecution") {
+      const command = typeof item.command === "string" ? item.command : undefined;
+      this.steps.set(threadId, {
+        ...this.steps.get(threadId),
+        step: command ? truncateText(command, 120) : undefined,
+      });
+    } else {
+      return;
+    }
+    this.publishThread(threadId);
   }
 
   /** Confirmed settings clear the pending ones they match; the rest keep waiting. */
@@ -1823,14 +1940,24 @@ export class CodexMonitor {
     const pending = [...this.approvalsByRpcId.values()]
       .filter((approval) => approval.threadId === threadId)
       .sort((left, right) => left.createdAt - right.createdAt)[0];
-    this.options.store.upsertProviderSession(
-      normalizeCodexThread(
-        thread,
-        this.options.config,
-        pending,
-        this.terminalErrors.get(threadId),
-      ),
+    const base = normalizeCodexThread(
+      thread,
+      this.options.config,
+      pending,
+      this.terminalErrors.get(threadId),
     );
+    const heading = truncateText(thread.name?.trim() || thread.preview.trim(), 120);
+    const pendingSettings = this.pendingSettings.get(threadId);
+    const context = this.contextByThread.get(threadId);
+    this.options.store.upsertProviderSession({
+      ...base,
+      ...(heading ? { heading } : {}),
+      ...this.steps.get(threadId),
+      ...(context ? { context: { ...context } } : {}),
+      ...(this.nativeModes.has(threadId) ? { nativeMode: this.nativeModes.get(threadId) } : {}),
+      ...(this.sandboxes.has(threadId) ? { sandbox: this.sandboxes.get(threadId) } : {}),
+      ...(pendingSettings ? { pendingSettings: { ...pendingSettings } } : {}),
+    });
   }
 
   private removeThread(threadId: string, reason: string): void {

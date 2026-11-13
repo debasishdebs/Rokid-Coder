@@ -14,7 +14,18 @@ const STALLED_AFTER_MS = 30 * 60 * 1000;
 interface SessionRecord {
   session: Session;
   lastUserPrompt?: string;
+  firstUserPrompt?: string;
+  aiTitle?: string;
   transcriptPath?: string;
+}
+
+const HEADING_PROMPT_CHARS = 48;
+
+/** The task heading: Claude's own title, else the first prompt cut short. */
+function headingOf(record: SessionRecord): string | undefined {
+  return record.aiTitle || (record.firstUserPrompt
+    ? truncateText(record.firstUserPrompt, HEADING_PROMPT_CHARS)
+    : undefined);
 }
 
 export interface DiscoveredSession {
@@ -179,6 +190,10 @@ export class SessionStore {
     if (transcriptPath) {
       record.transcriptPath = transcriptPath;
     }
+    const permissionMode = asString(payload.permission_mode);
+    if (permissionMode) {
+      record.session.nativeMode = permissionMode;
+    }
 
     let refreshTitle = true;
     switch (eventName) {
@@ -191,6 +206,7 @@ export class SessionStore {
         const prompt = asString(payload.prompt);
         if (prompt && !prompt.trim().startsWith("<")) {
           record.lastUserPrompt = truncateText(prompt, 120);
+          record.firstUserPrompt ??= record.lastUserPrompt;
           record.session.title = record.lastUserPrompt || record.session.title;
         } else if (prompt) {
           refreshTitle = false;
@@ -199,9 +215,13 @@ export class SessionStore {
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
         record.session.turn = { activeSince: now };
+        record.session.currentFile = undefined;
+        record.session.step = undefined;
         break;
       }
       case "Stop":
+        record.session.currentFile = undefined;
+        record.session.step = undefined;
         if (record.session.pendingRequest) {
           record.session.status = "needs_you";
         } else {
@@ -211,8 +231,18 @@ export class SessionStore {
         break;
       case "SubagentStop":
         break;
+      case "PreToolUse": {
+        const input = payload.tool_input;
+        const fields = input && typeof input === "object" && !Array.isArray(input)
+          ? input as Record<string, unknown>
+          : {};
+        const file = asString(fields.file_path);
+        const step = asString(fields.description);
+        record.session.currentFile = file ? truncateText(file, 200) : undefined;
+        record.session.step = step ? truncateText(step, 120) : undefined;
+        break;
+      }
       case "PreCompact":
-      case "PreToolUse":
       case "PostToolUse":
         break;
       case "Notification":
@@ -232,6 +262,7 @@ export class SessionStore {
     if (refreshTitle) {
       this.refreshDerivedTitle(record);
     }
+    this.refreshHeading(record);
     this.emitUpsert(record.session);
   }
 
@@ -256,7 +287,34 @@ export class SessionStore {
       record.session.status = "error";
       record.session.statusDetail = truncateText(update.error, 140);
     }
+    if (update.context) {
+      record.session.context = { ...update.context };
+    }
+    if (update.heading) {
+      record.aiTitle = update.heading;
+      this.refreshHeading(record);
+    }
     this.emitUpsert(record.session);
+  }
+
+  /** Titles read from the transcript at attach time, for a session that was already under way. */
+  seedHeading(sessionId: string, seed: { aiTitle?: string; firstPrompt?: string }): void {
+    const record = this.records.get(sessionId);
+    if (!record) {
+      return;
+    }
+    record.aiTitle ??= seed.aiTitle;
+    record.firstUserPrompt ??= seed.firstPrompt;
+    this.refreshHeading(record);
+    this.emitUpsert(record.session);
+  }
+
+  /** Publishes the session again, for state that lives outside the store (modes, waits). */
+  refresh(sessionId: string): void {
+    const record = this.records.get(sessionId);
+    if (record) {
+      this.emitUpsert(record.session);
+    }
   }
 
   /**
@@ -350,6 +408,10 @@ export class SessionStore {
       summary: message,
       createdAt: now,
     };
+  }
+
+  private refreshHeading(record: SessionRecord): void {
+    record.session.heading = headingOf(record);
   }
 
   private refreshDerivedTitle(record: SessionRecord): void {

@@ -98,6 +98,30 @@ function errorText(entry: Record<string, unknown>, message: Record<string, unkno
   );
 }
 
+const CLAUDE_CONTEXT_WINDOW = 200_000;
+const CLAUDE_LONG_CONTEXT_WINDOW = 1_000_000;
+
+function tokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** Context fill of the turn the assistant record reports: every input token it read or wrote. */
+function contextFrom(message: Record<string, unknown> | undefined) {
+  const usage = recordValue(message?.usage);
+  if (!usage) {
+    return undefined;
+  }
+  const used =
+    tokenCount(usage.input_tokens) +
+    tokenCount(usage.cache_read_input_tokens) +
+    tokenCount(usage.cache_creation_input_tokens);
+  if (used === 0) {
+    return undefined;
+  }
+  const model = typeof message?.model === "string" ? message.model : "";
+  return { used, window: model.endsWith("[1m]") ? CLAUDE_LONG_CONTEXT_WINDOW : CLAUDE_CONTEXT_WINDOW };
+}
+
 export function extractTranscriptUpdate(
   value: unknown,
   now: number = Date.now(),
@@ -114,11 +138,23 @@ export function extractTranscriptUpdate(
     activityAt: timestampFrom(entry.timestamp, now),
   };
 
+  if (type === "ai-title") {
+    const title = typeof entry.aiTitle === "string" ? truncateText(entry.aiTitle, 120) : "";
+    if (title) {
+      update.heading = title;
+    }
+    return update;
+  }
+
   const content = message?.content ?? entry.content;
   if (type === "assistant" || role === "assistant") {
     const text = contentText(content);
     if (text) {
       update.lastAssistantText = truncateText(text, 140);
+    }
+    const context = contextFrom(message);
+    if (context) {
+      update.context = context;
     }
   }
   const toolName = toolNameFrom(content);
@@ -366,5 +402,62 @@ export class TranscriptTailManager {
       tailer.stop();
     }
     this.tailers.clear();
+  }
+}
+
+const HEADING_SCAN_BYTES = 1024 * 1024;
+
+/**
+ * The session's title as the transcript already holds it: Claude's own
+ * `ai-title` (the last one wins) and the first user prompt, for a session that
+ * was attached mid-conversation, where the live tail starts at the end and
+ * would never see either. Reads at most HEADING_SCAN_BYTES from each end.
+ */
+export async function readTranscriptHeading(
+  filePath: string,
+): Promise<{ aiTitle?: string; firstPrompt?: string }> {
+  let handle;
+  try {
+    handle = await open(filePath, "r");
+    const { size } = await handle.stat();
+    const read = async (position: number, length: number): Promise<string> => {
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle!.read(buffer, 0, length, position);
+      return buffer.subarray(0, bytesRead).toString("utf8");
+    };
+    const head = await read(0, Math.min(size, HEADING_SCAN_BYTES));
+    const tailStart = Math.max(0, size - HEADING_SCAN_BYTES);
+    const tail = tailStart === 0 ? head : await read(tailStart, size - tailStart);
+    const result: { aiTitle?: string; firstPrompt?: string } = {};
+    for (const line of head.split("\n")) {
+      const message = parseLine(line);
+      if (message?.role === "user" && message.text && !message.text.trim().startsWith("<")) {
+        result.firstPrompt = message.text;
+        break;
+      }
+    }
+    for (const line of tail.split("\n")) {
+      try {
+        const entry = recordValue(JSON.parse(line));
+        if (entry?.type === "ai-title" && typeof entry.aiTitle === "string" && entry.aiTitle) {
+          result.aiTitle = truncateText(entry.aiTitle, 120);
+        }
+      } catch {
+        // A partial first line of the tail window, or noise: skip it.
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  } finally {
+    await handle?.close();
+  }
+}
+
+function parseLine(line: string): SessionMessage | undefined {
+  try {
+    return extractMessage(JSON.parse(line), 0);
+  } catch {
+    return undefined;
   }
 }

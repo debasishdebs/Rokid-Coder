@@ -3,7 +3,7 @@
  * (PhoneLink's newline-delimited TCP and WsHub's WebSocket). Types and the
  * frame classification only; handlers live with the tasks that own them.
  */
-import type { AgentProvider } from "./types";
+import type { AgentProvider, Session } from "./types";
 
 export type SessionKey = `${AgentProvider}:${string}`;
 
@@ -112,9 +112,28 @@ export interface ModelsFrame {
   current: { model?: string; effort?: string };
 }
 
+export type AlertClosedReason = "acted" | "dismissed" | "expired" | "withdrawn";
+
+/** An alert left the queue for a reason the glasses did not cause (a dismiss is theirs, so it is never sent). */
+export interface AlertClosedFrame {
+  type: "alert_closed";
+  v: 2;
+  id: string;
+  reason: AlertClosedReason;
+}
+
+/** The v1 reply to a detail_open for a session that is not attached. */
+export interface DetailRejectedFrame {
+  type: "detail_rejected";
+  sessionId: string;
+  error: "not_attached";
+}
+
 export type AgentToPhoneFrameV2 =
   | SessionUpsertFrameV2
   | AlertFrame
+  | AlertClosedFrame
+  | DetailRejectedFrame
   | AckFrame
   | FollowupClosedFrame
   | ModeResetFrame
@@ -265,4 +284,88 @@ export function classifyFrame(type: string): FrameClass {
   return Object.prototype.hasOwnProperty.call(FRAME_CLASS, type)
     ? FRAME_CLASS[type]
     : "steering";
+}
+
+/** `provider:id`, taken apart; undefined for anything that is not an exact session key. */
+export function parseSessionKey(value: unknown): { provider: AgentProvider; id: string } | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const separator = value.indexOf(":");
+  const provider = value.slice(0, separator);
+  const id = value.slice(separator + 1);
+  return separator > 0 && id.length > 0 && (provider === "claude" || provider === "codex")
+    ? { provider, id }
+    : undefined;
+}
+
+/**
+ * One phone connection as the frame handlers see it, whichever transport it
+ * came in on. `trusted` is true only for a link that has proved who it is
+ * (TLS, Task 11); every production link is untrusted until then.
+ */
+export interface PhoneChannel {
+  readonly transport: "phonelink" | "wshub";
+  readonly trusted: boolean;
+  send(frame: Record<string, unknown>): void;
+}
+
+export type AuthorizeResult = { ok: true } | { ok: false; error: "monitor_only" };
+
+/** The one authorization decision, made before any handler sees a frame. */
+export function authorize(frame: { type?: unknown }, link: Pick<PhoneChannel, "trusted">): AuthorizeResult {
+  const type = typeof frame.type === "string" ? frame.type : "";
+  if (classifyFrame(type) === "steering" && link.trusted !== true) {
+    return { ok: false, error: "monitor_only" };
+  }
+  return { ok: true };
+}
+
+function correlationId(frame: Record<string, unknown>): string {
+  for (const key of ["msgId", "id", "requestId"]) {
+    const value = frame[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value.slice(0, 128);
+    }
+  }
+  return "";
+}
+
+/**
+ * The gate both transports run first on every frame after hello. True means
+ * the frame may go to a handler; false means it was refused here and answered,
+ * so nothing downstream ran. A v1 frame that expects its own reply also gets it,
+ * or the existing phone plugin would wait on an answer that never comes.
+ */
+export function gateFrame(frame: Record<string, unknown>, link: PhoneChannel): boolean {
+  const verdict = authorize(frame, link);
+  if (verdict.ok) {
+    return true;
+  }
+  const ack: AckFrame = {
+    type: "ack",
+    v: 2,
+    msgId: correlationId(frame),
+    result: "rejected",
+    error: verdict.error,
+  };
+  link.send({ ...ack });
+  const id = typeof frame.id === "string" ? frame.id : undefined;
+  if (id && frame.type === "session_input") {
+    link.send({ type: "session_input_result", id, ok: false, error: verdict.error });
+  } else if (id && frame.type === "thread_start") {
+    link.send({ type: "thread_started", id, ok: false, provider: null, error: verdict.error });
+  }
+  return false;
+}
+
+/**
+ * What a transport needs from the v2 layer. Absent, a transport speaks exactly
+ * the v1 frames it always did.
+ */
+export interface PhoneV2Hooks {
+  /** True when the frame was a v2 (or unknown) one and is dealt with; false leaves v1 frames to the transport. */
+  handle(frame: Record<string, unknown>, channel: PhoneChannel): boolean;
+  /** The session as published to the phone, with the v2 fields. */
+  decorate(session: Session): Record<string, unknown>;
 }

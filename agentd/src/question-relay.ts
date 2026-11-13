@@ -123,6 +123,10 @@ export class QuestionRelay {
     this.waitLimitMs = clampWaitLimit(ms, this.waitLimitMs);
   }
 
+  get currentWaitLimitMs(): number {
+    return this.waitLimitMs;
+  }
+
   onOpened(listener: QuestionOpenedListener): () => void {
     this.opened.add(listener);
     return () => {

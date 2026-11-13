@@ -38,6 +38,20 @@ export interface Session {
   answerable?: boolean;
   turn?: SessionTurn;
   pendingRequest?: PendingRequest;
+  /** Phone protocol v2 data; the phone-facing mode, capabilities and tempMode are added at publish time. */
+  heading?: string;
+  currentFile?: string;
+  step?: string;
+  context?: ContextFill;
+  /** The provider's own approval mode (Claude permission_mode, Codex approvalPolicy); read-only. */
+  nativeMode?: string;
+  pendingSettings?: { model?: string; effort?: string };
+  sandbox?: string;
+}
+
+export interface ContextFill {
+  used: number;
+  window: number;
 }
 
 export interface CodexConfig {
@@ -110,6 +124,10 @@ export interface TranscriptUpdate {
   lastAssistantText?: string;
   lastTool?: string;
   error?: string;
+  /** Claude's own session title (`ai-title` record). */
+  heading?: string;
+  /** From the last assistant `usage`. */
+  context?: ContextFill;
 }
 
 export type MessageRole = "user" | "assistant" | "tool";

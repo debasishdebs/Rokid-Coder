@@ -259,7 +259,7 @@ test("daemon_resets_approve_all_on_session_end_and_detach_and_reports_restart", 
         { provider: "claude", id: "detached" },
       ],
     },
-    async ({ daemon, httpPort, coderDir }) => {
+    async ({ daemon, phone, httpPort, coderDir }) => {
       const policy = daemon.approvalPolicy;
       policy.set("claude:ending", "approveAll", true);
       policy.set("claude:detached", "approveAll", true);
@@ -273,11 +273,13 @@ test("daemon_resets_approve_all_on_session_end_and_detach_and_reports_restart", 
       assert.equal(policy.get("claude:ending"), "ask");
       assert.equal(policy.get("claude:detached"), "ask");
       assert.equal(policy.get("claude:other"), "approveAll");
-      const notices = daemon.takeResetNotices();
+      // PhoneV2 drains the notices into mode_reset frames and notice alerts.
+      const resets = phone.frames.filter((frame) => frame.type === "mode_reset");
       assert.deepEqual(
-        notices.map((n) => `${n.sessionKey}:${n.reason}`).sort(),
-        ["claude:detached:session_ended", "claude:ending:session_ended"],
+        resets.map((n) => `${n.sessionKey}:${n.from}:${n.reason}`).sort(),
+        ["claude:detached:approveAll:session_ended", "claude:ending:approveAll:session_ended"],
       );
+      assert.ok(phone.frames.some((frame) => frame.type === "alert" && frame.kind === "notice"));
       assert.deepEqual(daemon.takeResetNotices(), []);
     },
   );

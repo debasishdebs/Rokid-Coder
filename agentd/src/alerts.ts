@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type { AlertFrame, AlertKind, AlertTimings, QuestionPayload, SessionKey } from "./protocol-v2";
+import type {
+  AlertClosedReason,
+  AlertFrame,
+  AlertKind,
+  AlertTimings,
+  QuestionPayload,
+  SessionKey,
+} from "./protocol-v2";
 
 export type { AlertKind } from "./protocol-v2";
 
@@ -18,6 +25,8 @@ export interface Alert {
   attempts: number;
   promoted: boolean;
 }
+
+export type AlertCloseListener = (alert: Alert, reason: AlertClosedReason) => void;
 
 export type NewAlert = Omit<Alert, "id" | "state" | "attempts" | "promoted">;
 
@@ -54,11 +63,49 @@ export class AlertQueue {
   private slot: Entry | undefined;
   private seq = 0;
 
+  /**
+   * `sink` returns false when no phone link can take the frame. That is not an
+   * attempt: the alert stays unsent-for-free, so a link that is down for a while
+   * does not push the retry gap to its 20 s step, and linkUp() sends it the
+   * moment a link returns. A throwing sink is treated like a refusing one.
+   * `onClose` hears every way an alert leaves the queue; a dismiss is the
+   * glasses' own doing, so the daemon reports every other reason to the phone.
+   */
   constructor(
-    private readonly timings: AlertTimings,
+    private timings: AlertTimings,
     private readonly sink: (frame: AlertFrame) => boolean,
     private readonly now: () => number = Date.now,
+    private readonly onClose?: AlertCloseListener,
   ) {}
+
+  /** New thresholds apply to the alerts already queued as well as the ones to come. */
+  setTimings(timings: AlertTimings): void {
+    this.timings = timings;
+    this.service();
+  }
+
+  get(id: string): Alert | undefined {
+    const entry = this.entries.get(id);
+    return entry ? { ...entry.alert } : undefined;
+  }
+
+  /** Removes an alert whose subject went away (answered at the laptop, session ended). */
+  withdraw(id: string, reason: "expired" | "withdrawn" = "withdrawn"): void {
+    const entry = this.entries.get(id);
+    if (entry) {
+      this.close(entry, "expired", reason);
+      this.service();
+    }
+  }
+
+  /** A phone link just came up: whatever held the glasses may never have arrived, so send it again. */
+  linkUp(): void {
+    const occupant = this.slot;
+    if (occupant && (occupant.alert.state === "sent" || occupant.alert.state === "shown")) {
+      this.requeue(occupant, occupant.preempted);
+    }
+    this.service();
+  }
 
   push(input: NewAlert): string {
     const id = randomUUID();
@@ -105,7 +152,7 @@ export class AlertQueue {
   expireSession(sessionKey: string, _reason: string): void {
     for (const entry of [...this.entries.values()]) {
       if (entry.alert.sessionKey === sessionKey) {
-        this.close(entry, "expired");
+        this.close(entry, "expired", "withdrawn");
       }
     }
     this.service();
@@ -116,15 +163,20 @@ export class AlertQueue {
     if (!entry) {
       return;
     }
-    this.close(entry, state);
+    this.close(entry, state, state);
     this.service();
   }
 
-  private close(entry: Entry, state: AlertState): void {
+  private close(entry: Entry, state: AlertState, reason: AlertClosedReason): void {
     entry.alert.state = state;
     this.entries.delete(entry.alert.id);
     if (this.slot === entry) {
       this.slot = undefined;
+    }
+    try {
+      this.onClose?.({ ...entry.alert }, reason);
+    } catch {
+      // A listener's bug must not leave the queue half-updated.
     }
   }
 
@@ -140,7 +192,7 @@ export class AlertQueue {
     for (const entry of [...this.entries.values()]) {
       const origin = entry.firstShownAt ?? entry.alert.createdAt;
       if (t - origin >= this.timings.expireMs) {
-        this.close(entry, "expired");
+        this.close(entry, "expired", "expired");
       }
     }
   }
@@ -274,11 +326,16 @@ export class AlertQueue {
       ...(alert.question ? { question: alert.question } : {}),
       waiting: this.waitingCount(),
     };
+    let delivered = false;
     try {
-      // A refused frame counts as an attempt: only a shown ack ends the retries.
-      this.sink(frame);
+      delivered = this.sink(frame);
     } catch {
-      // A throwing sink is handled like a refusing one; the retry schedule covers it.
+      // Handled like a refusal.
+    }
+    // Only a shown ack ends the retries, and only a frame that reached a link
+    // counts toward the backoff.
+    if (!delivered) {
+      alert.attempts = Math.max(0, alert.attempts - 1);
     }
   }
 }

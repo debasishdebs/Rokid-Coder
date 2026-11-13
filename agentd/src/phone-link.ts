@@ -10,6 +10,7 @@ import type {
 } from "./approval-manager";
 import { NotAttachedError } from "./attach-registry";
 import { parsePhoneTarget, readPhoneLinkConfig } from "./config";
+import { gateFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
 import {
   listDirectory,
   listRoots,
@@ -68,6 +69,13 @@ export interface PhoneLinkOptions {
   ) => Promise<ThreadStartResult>;
   onConnected?: () => void;
   onDisconnected?: () => void;
+  /**
+   * Whether this link has proved who it is, which is what lets steering frames
+   * through. Production leaves it unset (untrusted, monitor-only) until real TLS
+   * exists; only tests and the TLS path may say otherwise.
+   */
+  trusted?: boolean;
+  v2?: PhoneV2Hooks;
   operatorMessage?: (message: string) => void;
   discoveryPort?: number;
   helloTimeoutMs?: number;
@@ -198,8 +206,17 @@ export class PhoneLink {
   private targetRefreshPromise?: Promise<void>;
   private targetRefreshGeneration = 0;
   private publishedSessions = new Map<string, Session>();
+  private readonly channel: PhoneChannel;
 
   constructor(private readonly options: PhoneLinkOptions) {
+    const send = (frame: Record<string, unknown>): void => void this.send(frame);
+    this.channel = {
+      transport: "phonelink",
+      get trusted() {
+        return options.trusted === true;
+      },
+      send,
+    };
     this.now = options.now ?? Date.now;
     this.phoneHosts = [...options.config.phoneHosts];
     this.tailnetDiscoveryEnabled = options.config.tailnetDiscovery !== false;
@@ -272,6 +289,11 @@ export class PhoneLink {
 
   sendApprovalRequest(request: ApprovalRequest): boolean {
     return this.send({ ...request });
+  }
+
+  /** Any other frame for the phone, such as the v2 alert; false when the link is not up. */
+  sendFrame(frame: Record<string, unknown>): boolean {
+    return this.send(frame);
   }
 
   sendApprovalResolved(requestId: string, outcome: ApprovalOutcome): boolean {
@@ -529,6 +551,10 @@ export class PhoneLink {
   }
 
   private handleAuthenticatedMessage(message: Record<string, unknown>): void {
+    // One gate for every frame, before any handler, v1 or v2.
+    if (!gateFrame(message, this.channel) || this.options.v2?.handle(message, this.channel)) {
+      return;
+    }
     switch (message.type) {
       case "refresh":
         this.sendSnapshot();
@@ -952,10 +978,12 @@ export class PhoneLink {
   private sendSnapshot(): void {
     const sessions = sessionsForPhone(this.options.store.list());
     this.publishedSessions = new Map(sessions.map((session) => [session.id, session]));
+    const v2 = this.options.v2;
     this.send({
       type: "snapshot",
+      ...(v2 ? { v: 2 } : {}),
       seq: this.sequence,
-      sessions,
+      sessions: v2 ? sessions.map((session) => v2.decorate(session)) : sessions,
     });
   }
 
@@ -980,7 +1008,13 @@ export class PhoneLink {
 
   private sendUpsert(session: Session): void {
     this.sequence += 1;
-    this.send({ type: "session_upsert", seq: this.sequence, session });
+    const v2 = this.options.v2;
+    this.send({
+      type: "session_upsert",
+      ...(v2 ? { v: 2 } : {}),
+      seq: this.sequence,
+      session: v2 ? v2.decorate(session) : session,
+    });
     this.scheduleCodexDetailRefresh(session);
   }
 

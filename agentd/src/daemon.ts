@@ -7,6 +7,7 @@ import {
   type HookResponse,
 } from "./approval-manager";
 import { handleAttachCommand, hookProvider } from "./attach-command";
+import { AppliedIds } from "./applied-ids";
 import { ApprovalPolicy, type ResetNotice } from "./approval-policy";
 import { AttachRegistry, NotAttachedError } from "./attach-registry";
 import { spawnClaudeThread } from "./claude-spawn";
@@ -19,8 +20,10 @@ import { SessionStore } from "./session-store";
 import { DEFAULT_STOP_CONTINUATION_CAP, StopWait } from "./stop-wait";
 import { TerminalTargets, createTerminalInputHandler } from "./terminal-input";
 import { PhoneLink } from "./phone-link";
+import { PhoneV2, type PhoneOutlet } from "./phone-v2";
+import { PhoneSettingsStore } from "./phone-settings";
 import { QuestionRelay } from "./question-relay";
-import { TranscriptTailManager } from "./transcript";
+import { TranscriptTailManager, readTranscriptHeading } from "./transcript";
 import { readRecentMessages } from "./transcript-messages";
 import { sessionKeyOf } from "./protocol-v2";
 import type { AgentProvider, HookPayload } from "./types";
@@ -51,6 +54,8 @@ export interface RunningDaemon {
    * answerQuestion serves question_answer for codex_async and codex_rpc.
    */
   codex: CodexMonitor;
+  /** Phone protocol v2: inbound frames, alerts and session enrichment for both transports. */
+  phoneV2: PhoneV2;
   isTailing(sessionId: string): boolean;
   stop(): Promise<void>;
 }
@@ -58,7 +63,15 @@ export interface RunningDaemon {
 export interface DaemonOptions {
   /** Test seam: keeps the UDP announce broadcast off the well-known port. */
   discoveryPort?: number;
+  /**
+   * Test seam: treat every phone link as trusted, so steering frames are
+   * accepted without TLS. Nothing in production sets it (cli.ts passes no
+   * options); real trust arrives with TLS in Task 11.
+   */
+  trustLinks?: boolean;
 }
+
+const APPLIED_ID_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<RunningDaemon> {
   const stateDir = defaultStateDir();
@@ -72,15 +85,20 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     file: path.join(config.rokidCoder.stateDir, "approve-all.json"),
     logger,
   });
-  // Nothing delivers these to the phone yet; they wait here, in memory, for the
-  // alert pipeline to drain them with takeResetNotices.
+  // Reset notices wait here, in memory, until PhoneV2 drains them with
+  // takeResetNotices into mode_reset frames and notice alerts.
   const queuedResetNotices: ResetNotice[] = [];
+  const takeResetNotices = (): ResetNotice[] => [
+    ...approvalPolicy.takeRestartNotices(),
+    ...queuedResetNotices.splice(0),
+  ];
   const endApprovalSession = (provider: AgentProvider, id: string): void => {
     const notice = approvalPolicy.endSession(sessionKeyOf(provider, id));
     if (notice) {
       queuedResetNotices.push(notice);
       logger.info("approval_mode_reset", { reason: notice.reason, from: notice.from });
     }
+    phoneV2?.onSessionEnded(provider, id);
   };
   // Either transport counts, as for approvals: a phone that dialled in is as
   // good as one the daemon dialled. Read at hook time, after both exist.
@@ -112,8 +130,14 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   let phoneLink: PhoneLink | undefined;
   let approvals: ApprovalManager | undefined;
   let codexMonitor: CodexMonitor | undefined;
+  let phoneV2: PhoneV2 | undefined;
   const tailManager = new TranscriptTailManager(
-    (sessionId, update) => sessions.applyTranscriptUpdate(sessionId, update),
+    (sessionId, update) => {
+      sessions.applyTranscriptUpdate(sessionId, update);
+      if (update.error) {
+        phoneV2?.onClaudeError(sessionId, update.error);
+      }
+    },
     logger,
     (sessionId, message) => {
       wsHub?.broadcastDetailMessage(sessionId, message);
@@ -143,13 +167,26 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   };
   // Reading a conversation also starts tailing it, so the view stays live
   // even for a session that had been quiet since the daemon started.
+  // The live tail starts at the end of the file, so a session attached mid-
+  // conversation would never see its own title; read it from the transcript once.
+  const startTailing = (sessionId: string, transcriptPath: string): void => {
+    const fresh = !tailManager.isTailing(sessionId);
+    tailManager.start(sessionId, transcriptPath);
+    if (fresh) {
+      void readTranscriptHeading(transcriptPath).then((heading) => {
+        if (heading.aiTitle || heading.firstPrompt) {
+          sessions.seedHeading(sessionId, heading);
+        }
+      });
+    }
+  };
   const onDetailOpen = (sessionId: string) => {
     if (!isSessionAttached(sessionId) || sessions.get(sessionId)?.provider === "codex") {
       return;
     }
     const transcriptPath = sessions.transcriptPath(sessionId);
     if (transcriptPath && !tailManager.isTailing(sessionId)) {
-      tailManager.start(sessionId, transcriptPath);
+      startTailing(sessionId, transcriptPath);
     }
   };
   const processHook = (payload: HookPayload, closed: AbortSignal): HookResponse | Promise<HookResponse> => {
@@ -197,7 +234,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       questionRelay.endSession(sessionId);
       endApprovalSession("claude", sessionId);
     } else if (sessionId && transcriptPath && sessions.get(sessionId)?.stale === false) {
-      tailManager.start(sessionId, transcriptPath);
+      startTailing(sessionId, transcriptPath);
     }
     // PreToolUse still arrives, and is still what keeps the session's activity
     // current, but it is no longer what the wearer is asked about: it fires for
@@ -247,11 +284,30 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       ? typeIntoTerminal(sessionId, text)
       : { ok: false, error: "not_attached" };
 
+  const trusted = daemonOptions.trustLinks === true;
+  // Both transports share one v2 layer, built once the pieces it needs exist.
+  const v2Hooks = {
+    handle: (frame: Record<string, unknown>, channel: Parameters<PhoneV2["handle"]>[1]) =>
+      phoneV2?.handle(frame, channel) ?? false,
+    decorate: (session: Parameters<PhoneV2["decorate"]>[0]) => phoneV2?.decorate(session) ?? { ...session },
+  };
+
   const hub = new WsHub(config, sessions, logger, {
     detailProvider,
     onDetailOpen,
-    onApprovalDecision: (requestId, decision) => approvals?.handleDecision(requestId, decision),
+    onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
+    trusted,
+    v2: v2Hooks,
+    onClientConnected: () => {
+      approvals?.onLinkConnected();
+      phoneV2?.onChannelConnected();
+    },
+    onClientDisconnected: () => {
+      if (!phoneConnected()) {
+        approvals?.onLinkDisconnected();
+      }
+    },
   });
   wsHub = hub;
   const link = new PhoneLink({
@@ -271,9 +327,14 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
         error: "Codex is not available on this computer",
       });
     },
-    onApprovalDecision: (requestId, decision) => approvals?.handleDecision(requestId, decision),
+    onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
-    onConnected: () => approvals?.onLinkConnected(),
+    trusted,
+    v2: v2Hooks,
+    onConnected: () => {
+      approvals?.onLinkConnected();
+      phoneV2?.onChannelConnected();
+    },
     onDisconnected: () => approvals?.onLinkDisconnected(),
   });
   phoneLink = link;
@@ -301,6 +362,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     logger,
     timeoutMs: approvalTimeoutFromEnv(),
     policy: approvalPolicy,
+    observer: {
+      onPending: (request) => phoneV2?.approvalObserver.onPending(request),
+      onSettled: (request, outcome, reason) => phoneV2?.approvalObserver.onSettled(request, outcome, reason),
+    },
   });
   const codex = new CodexMonitor({
     config,
@@ -311,6 +376,36 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onThreadEnded: (threadId) => endApprovalSession("codex", threadId),
   });
   codexMonitor = codex;
+  const outlet: PhoneOutlet = {
+    get connected(): boolean {
+      return phoneConnected();
+    },
+    send: (frame) => (link.connected ? link.sendFrame(frame) : hub.broadcastFrame(frame)),
+  };
+  const phone = new PhoneV2({
+    sessions,
+    attachRegistry,
+    approvalPolicy,
+    approvals,
+    stopWait,
+    questionRelay,
+    codex,
+    settings: new PhoneSettingsStore(
+      path.join(config.rokidCoder.stateDir, "settings.json"),
+      config.rokidCoder.waitLimitSec,
+      logger,
+    ),
+    appliedIds: new AppliedIds(
+      path.join(config.rokidCoder.stateDir, "applied-ids.json"),
+      APPLIED_ID_RETENTION_MS,
+      Date.now,
+      logger,
+    ),
+    outlet,
+    takeResetNotices,
+    logger,
+  });
+  phoneV2 = phone;
   // Attaching a Codex thread subscribes to it; detaching undoes everything
   // attaching allowed. Pieces that do not exist yet (stop-waits, question
   // relays, alerts) subscribe to onChange themselves when they land.
@@ -355,8 +450,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     await hub.start();
     link.start();
     codex.start();
+    phone.start();
   } catch (error) {
     clearInterval(heartbeatTimer);
+    phone.stop();
     stopListeningForDetach();
     stopWait.dispose();
     questionRelay.dispose();
@@ -386,10 +483,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     stopWait,
     questionRelay,
     codex,
-    takeResetNotices: () => [
-      ...approvalPolicy.takeRestartNotices(),
-      ...queuedResetNotices.splice(0),
-    ],
+    phoneV2: phone,
+    takeResetNotices,
     isTailing: (sessionId) => tailManager.isTailing(sessionId),
     async stop() {
       if (stopped) {
@@ -398,6 +493,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       stopped = true;
       clearInterval(heartbeatTimer);
       stopListeningForDetach();
+      phone.stop();
       await codex.stop();
       approvals?.dispose();
       // Before the HTTP server: close() waits for open requests, and a held

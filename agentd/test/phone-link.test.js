@@ -112,6 +112,9 @@ function createLink(overrides = {}) {
     // Never the real discovery port: announcing on 8793 makes any actual
     // phone on the LAN answer mid-test and dial into the assertions.
     discoveryPort: 48793,
+    // These tests exercise the v1 frames themselves; the gate that refuses
+    // them on an untrusted link is covered in protocol-v2.test.js.
+    trusted: true,
     ...overrides,
   });
   return { link, store, logs };

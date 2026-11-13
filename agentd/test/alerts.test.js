@@ -344,3 +344,63 @@ test("dismissed_alert_is_dropped_and_the_next_is_sent", () => {
   assert.equal(env.queue.current().title, "second");
   assert.equal(env.queue.waitingCount(), 0);
 });
+
+test("a_link_that_is_down_does_not_escalate_the_backoff_and_linkUp_sends_at_once", () => {
+  let t = 0;
+  let up = false;
+  const sent = [];
+  const queue = new AlertQueue(TIMINGS, (frame) => {
+    sent.push({ at: t, id: frame.id });
+    return up;
+  }, () => t);
+  const id = queue.push({ ...alert("approval"), createdAt: 0 });
+  // Five refusals at the ack timeout: none counted, so the gap never reaches 20 s.
+  for (let n = 0; n < 5; n += 1) {
+    t += 5_000;
+    queue.tick();
+  }
+  assert.equal(sent.length, 6);
+  assert.equal(queue.current().attempts, 0);
+
+  up = true;
+  t += 1_000;
+  queue.linkUp();
+  assert.equal(sent.length, 7);
+  assert.equal(sent.at(-1).id, id);
+  assert.equal(queue.current().attempts, 1);
+});
+
+test("onClose_reports_every_way_out_with_its_reason", () => {
+  let t = 0;
+  const closed = [];
+  const queue = new AlertQueue(TIMINGS, () => true, () => t, (a, reason) => closed.push([a.id, reason]));
+  const acted = queue.push({ ...alert("approval"), createdAt: 0 });
+  const dismissed = queue.push({ ...alert("done"), createdAt: 1 });
+  const withdrawn = queue.push({ ...alert("error"), createdAt: 2 });
+  const expiring = queue.push({ ...alert("notice"), createdAt: 3 });
+  const ended = queue.push({ ...alert("done", { sessionKey: "claude:other" }), createdAt: 4 });
+
+  queue.onShown(acted);
+  queue.onActed(acted);
+  queue.onDismissed(dismissed);
+  queue.withdraw(withdrawn);
+  queue.expireSession("claude:other", "session_ended");
+  t += TIMINGS.expireMs + 10;
+  queue.tick();
+  assert.deepEqual(closed, [
+    [acted, "acted"],
+    [dismissed, "dismissed"],
+    [withdrawn, "withdrawn"],
+    [ended, "withdrawn"],
+    [expiring, "expired"],
+  ]);
+  assert.equal(queue.get(expiring), undefined);
+});
+
+test("setTimings_applies_to_alerts_already_queued", () => {
+  const env = setup();
+  const id = hold(env);
+  env.queue.setTimings({ ...TIMINGS, expireMs: 10_000 });
+  env.advance(10_000);
+  assert.equal(env.queue.get(id), undefined);
+});
