@@ -21,8 +21,12 @@ export function bestHostGuess(interfaces = os.networkInterfaces()): string {
   );
 }
 
-/** `fp` is agentd's certificate fingerprint; the phone pins it before it trusts wss. */
-export function pairingPayload(config: AgentConfig, fp: string): string {
+/**
+ * `fp` is agentd's certificate fingerprint; the phone pins it before it trusts
+ * wss. `steer` is the secret that makes a wss hello a steering one. It travels
+ * only in this payload (line, QR): agentd never sends it on a socket.
+ */
+export function pairingPayload(config: AgentConfig, fp: string, steer: string): string {
   return JSON.stringify({
     v: 1,
     kind: "nexus-agentd",
@@ -31,5 +35,6 @@ export function pairingPayload(config: AgentConfig, fp: string): string {
     port: config.wsPort,
     token: config.token,
     fp,
+    steer,
   });
 }

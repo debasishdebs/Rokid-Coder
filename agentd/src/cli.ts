@@ -10,7 +10,13 @@ import {
 } from "./config";
 import { startDaemon } from "./daemon";
 import { pairingPayload } from "./pairing";
-import { ensureAgentCert } from "./tls";
+import {
+  ALLOW_NEXT_WINDOW_MS,
+  PinStore,
+  ensureAgentCert,
+  ensureSteerSecret,
+  rotateSteerSecret,
+} from "./tls";
 import { installHooks, uninstallHooks } from "./settings";
 
 interface Health {
@@ -113,8 +119,16 @@ async function main(): Promise<void> {
     }
     case "pair": {
       const config = ensureConfig(defaultStateDir());
-      const cert = await ensureAgentCert(path.join(config.rokidCoder.stateDir, "tls"));
-      const payload = pairingPayload(config, cert.fingerprint256);
+      const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
+      const cert = await ensureAgentCert(tlsDir);
+      const rotate = process.argv.slice(3).includes("--rotate-steer");
+      const steer = rotate ? rotateSteerSecret(tlsDir) : ensureSteerSecret(tlsDir);
+      if (rotate) {
+        process.stderr.write(
+          "Steering secret rotated: phones paired before now can still monitor but cannot steer until they pair again.\n",
+        );
+      }
+      const payload = pairingPayload(config, cert.fingerprint256, steer);
       process.stdout.write(`${payload}\n`);
       qrcode.generate(payload, { small: true }, (code) => process.stdout.write(`${code}\n`));
       break;
@@ -139,6 +153,37 @@ async function main(): Promise<void> {
       printPhoneHosts(config.phoneHosts);
       break;
     }
+    case "phones": {
+      const config = ensureConfig(defaultStateDir());
+      const pins = new PinStore(path.join(config.rokidCoder.stateDir, "tls", "phone-pins.json"));
+      const action = process.argv[3];
+      if (action === "list") {
+        const phones = pins.list();
+        process.stdout.write(phones.length > 0 ? `${phones.join("\n")}\n` : "No trusted phones.\n");
+        if (pins.allowNextOpen(Date.now())) {
+          process.stdout.write("The next new phone will be trusted (allow-next is open).\n");
+        }
+      } else if (action === "forget") {
+        const which = process.argv[4];
+        if (which === "--all") {
+          pins.forgetAll();
+          process.stdout.write("Forgot all phones; the next phone to connect is trusted on first use.\n");
+        } else if (which) {
+          const removed = pins.forget(which);
+          process.stdout.write(removed.length > 0 ? `Forgot ${removed.join(", ")}\n` : "No such phone.\n");
+        } else {
+          throw new Error("Usage: agentd phones forget <fingerprint|--all>");
+        }
+      } else if (action === "allow-next") {
+        pins.armAllowNext(Date.now());
+        process.stdout.write(
+          `The next new phone to connect in the next ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes will be trusted.\n`,
+        );
+      } else {
+        throw new Error("Usage: agentd phones list | forget <fingerprint|--all> | allow-next");
+      }
+      break;
+    }
     case "status": {
       const config = ensureConfig(defaultStateDir());
       const health = await getHealth(config.httpPort);
@@ -157,7 +202,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        `Unknown command '${command}'. Use run, install-hooks, uninstall-hooks, pair, link-phone, unlink-phone, or status.`,
+        `Unknown command '${command}'. Use run, install-hooks, uninstall-hooks, pair, phones, link-phone, unlink-phone, or status.`,
       );
   }
 }

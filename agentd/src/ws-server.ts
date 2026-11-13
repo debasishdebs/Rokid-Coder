@@ -8,6 +8,7 @@ import type { TLSSocket } from "node:tls";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { NotAttachedError } from "./attach-registry";
 import { gateFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
+import { secretMatches } from "./tls";
 import { SessionStore } from "./session-store";
 import type {
   ApprovalDecision,
@@ -39,8 +40,10 @@ function refuseHttp(_request: IncomingMessage, response: ServerResponse): void {
 
 interface ClientState {
   authenticated: boolean;
-  /** Arrived over TLS, so the phone has the pinned cert's word that this is agentd. */
+  /** Arrived over TLS and proved the steering secret in its hello. */
   trusted: boolean;
+  /** The connection is TLS; trust needs this and the secret. */
+  encrypted: boolean;
   channel: PhoneChannel;
   lastPongAt: number;
   helloTimer: NodeJS.Timeout;
@@ -64,11 +67,15 @@ export interface WsHubOptions {
   onTerminalInput?: (sessionId: string, text: string) => Promise<TerminalInputOutcome>;
   /**
    * agentd's TLS identity. With it the one port serves both wss and plain ws:
-   * the first byte of a connection says which. A wss client is trusted (it
-   * pinned this cert from the pairing payload, and the token is checked inside
-   * the tunnel); a plain ws client is monitor-only.
+   * the first byte of a connection says which. Plain ws is monitor-only.
    */
   tls?: { key: string; cert: string };
+  /**
+   * The steering secret, read at each hello so a rotation takes effect at once.
+   * A wss client is trusted only if its hello carries it. It is never sent: the
+   * token alone, which any plaintext link can see, lets a client in as a monitor.
+   */
+  steer?: () => string | undefined;
   v2?: PhoneV2Hooks;
   /** A client finished its handshake, after it has its snapshot. */
   onClientConnected?: () => void;
@@ -213,24 +220,28 @@ export class WsHub {
   }
 
   private accept(socket: WebSocket, request: IncomingMessage): void {
-    const trusted = (request.socket as Partial<TLSSocket>).encrypted === true;
+    const encrypted = (request.socket as Partial<TLSSocket>).encrypted === true;
     const helloTimer = setTimeout(() => {
       if (!this.clients.get(socket)?.authenticated) {
         socket.close(4408, "hello timeout");
       }
     }, this.options.helloTimeoutMs ?? 5000);
     helloTimer.unref();
-    this.clients.set(socket, {
+    const state: ClientState = {
       authenticated: false,
-      trusted,
+      trusted: false,
+      encrypted,
       channel: {
         transport: "wshub",
-        trusted,
+        get trusted() {
+          return state.trusted;
+        },
         send: (frame) => this.send(socket, frame),
       },
       lastPongAt: Date.now(),
       helloTimer,
-    });
+    };
+    this.clients.set(socket, state);
 
     socket.on("message", (data, isBinary) => this.onMessage(socket, data, isBinary));
     socket.on("error", (error) => {
@@ -302,6 +313,7 @@ export class WsHub {
         return;
       }
       state.authenticated = true;
+      state.trusted = this.grantsSteering(state, message.steer);
       state.lastPongAt = Date.now();
       clearTimeout(state.helloTimer);
       this.armPongDeadline(socket, state);
@@ -369,6 +381,23 @@ export class WsHub {
         });
         break;
     }
+  }
+
+  /**
+   * Steering needs TLS and the steering secret together. The secret is checked
+   * in constant time and a length mismatch is just a mismatch. A plaintext
+   * client that sends one has put it on the wire, so that is logged.
+   */
+  private grantsSteering(state: ClientState, presented: unknown): boolean {
+    if (typeof presented !== "string") {
+      return false;
+    }
+    if (!state.encrypted) {
+      this.logger.warn("ws_steer_over_plaintext");
+      return false;
+    }
+    const expected = this.options.steer?.();
+    return expected !== undefined && secretMatches(presented, expected);
   }
 
   private async sendDetail(socket: WebSocket, sessionId: string): Promise<void> {

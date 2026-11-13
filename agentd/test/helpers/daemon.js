@@ -118,11 +118,14 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
     let daemon;
     try {
       daemon = await startDaemon({ discoveryPort: await freePort() });
+      // The steering secret the daemon made; a wss phone sends it to steer.
+      const steer = (await fsp.readFile(path.join(coderDir, "tls", "steer.secret"), "utf8")).trim();
+      if (tls) phone.steer = steer;
       if (transport === "wshub") {
         await phone.start({ port: wsPort, host: "127.0.0.1", token: base.token });
       }
       await phone.waitFor("snapshot");
-      await body({ daemon, phone, httpPort, wsPort, token: base.token, coderDir, claudeDir, agentFingerprint: agent.fingerprint256 });
+      await body({ daemon, phone, httpPort, wsPort, token: base.token, coderDir, claudeDir, steer, agentFingerprint: agent.fingerprint256 });
     } finally {
       phone.close();
       await daemon?.stop();

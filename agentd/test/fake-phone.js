@@ -12,7 +12,8 @@
  *              that cert on the first authenticated hello.
  *   wshub      the fake connects over wss and checks agentd's cert against `pin`
  *              (agentd's sha256 fingerprint, as in the pairing payload) before
- *              it sends a token; a mismatch rejects `start()`.
+ *              it sends a token; a mismatch rejects `start()`. To steer it must
+ *              also send `steer` (the pairing payload's secret) in its hello.
  * Without it the link is plaintext, which agentd treats as monitor-only.
  *
  * Also runnable as a CLI that pairs, prints every received frame as a JSON line
@@ -21,7 +22,7 @@
  *   node test/fake-phone.js --transport wshub --port 8792 --token T mode_set claude:ID acceptEdits
  * `--wait MS` exits after MS; otherwise it stays up until SIGINT. A real agentd
  * accepts steering frames only over TLS: add `--tls true` (wshub also needs
- * `--pin <agentd fingerprint>`); over plaintext they come back
+ * `--pin <agentd fingerprint> --steer <secret>`); over plaintext they come back
  * `ack rejected monitor_only`.
  */
 const net = require("node:net");
@@ -79,7 +80,7 @@ function buildFrame(type, args = [], { msgId } = {}) {
   return frame;
 }
 
-function createFakePhone({ transport, tls = false, pin, cert, onFrame } = {}) {
+function createFakePhone({ transport, tls = false, pin, cert, steer, onFrame } = {}) {
   if (transport !== "phonelink" && transport !== "wshub") {
     throw new Error(`unknown fake phone transport: ${transport}`);
   }
@@ -113,6 +114,8 @@ function createFakePhone({ transport, tls = false, pin, cert, onFrame } = {}) {
     transport,
     tls,
     pin,
+    /** wshub: the steering secret from the pairing payload; sent in hello, only a wss hello that carries it steers. */
+    steer,
     /** phonelink over TLS: the sha256 fingerprint of this phone's cert, once started. */
     fingerprint: undefined,
     frames,
@@ -248,6 +251,7 @@ function createFakePhone({ transport, tls = false, pin, cert, onFrame } = {}) {
           type: "hello",
           v: 1,
           token,
+          ...(phone.steer === undefined ? {} : { steer: phone.steer }),
           client: { name: "fake-phone", version: "test" },
         }));
         resolve({ port });
@@ -279,6 +283,7 @@ async function main() {
     transport: args.transport,
     tls: args.tls === "true",
     pin: args.pin,
+    steer: args.steer,
     onFrame: (received) => process.stdout.write(`${JSON.stringify(received)}\n`),
   });
   const { port } = await phone.start({

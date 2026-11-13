@@ -6,6 +6,8 @@ const { WsHub } = require("../dist/ws-server.js");
 const { silentLogger } = require("../dist/logger.js");
 const { agentCert } = require("./helpers/tls.js");
 
+const STEER = "ws-server-test-steering-secret";
+
 function waitFor(messages, predicate, timeoutMs = 2000) {
   const existing = messages.find(predicate);
   if (existing) return Promise.resolve(existing);
@@ -72,6 +74,7 @@ test("authenticated fake client receives ordered snapshot, delta, refresh, and r
       type: "hello",
       v: 1,
       token: config.token,
+      steer: STEER,
       client: { name: "plugin-agents", version: "test" },
     }));
     const ack = await waitFor(messages, (message) => message.type === "hello_ack");
@@ -175,6 +178,7 @@ test("a phone that dialled in can be held for approval and answer over the same 
     // wss: the gate that refuses it on a plaintext link is covered in
     // protocol-v2.test.js and tls.test.js.
     tls: await agentCert(),
+    steer: () => STEER,
     onApprovalDecision: (requestId, decision) => decisions.push({ requestId, decision }),
   });
   await hub.start();
@@ -190,6 +194,7 @@ test("a phone that dialled in can be held for approval and answer over the same 
       type: "hello",
       v: 1,
       token: config.token,
+      steer: STEER,
       client: { name: "plugin-agents", version: "test" },
     }));
     await waitFor(messages, (message) => message.type === "hello_ack");
@@ -231,6 +236,7 @@ test("a malformed approval decision is ignored rather than forwarded", async () 
     // wss: the gate that refuses it on a plaintext link is covered in
     // protocol-v2.test.js and tls.test.js.
     tls: await agentCert(),
+    steer: () => STEER,
     onApprovalDecision: (requestId, decision) => decisions.push({ requestId, decision }),
   });
   await hub.start();
@@ -242,6 +248,7 @@ test("a malformed approval decision is ignored rather than forwarded", async () 
       type: "hello",
       v: 1,
       token: config.token,
+      steer: STEER,
       client: { name: "plugin-agents", version: "test" },
     }));
     await waitFor(messages, (message) => message.type === "hello_ack");

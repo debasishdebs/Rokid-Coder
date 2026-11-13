@@ -25,7 +25,7 @@ import { QuestionRelay } from "./question-relay";
 import { TranscriptTailManager, readTranscriptHeading } from "./transcript";
 import { DETAIL_MESSAGE_LIMIT, readRecentMessages } from "./transcript-messages";
 import { sessionKeyOf } from "./protocol-v2";
-import { ensureAgentCert, PinStore } from "./tls";
+import { ensureAgentCert, ensureSteerSecret, PinStore, readSteerSecret } from "./tls";
 import type { AgentProvider, HookPayload } from "./types";
 import { WsHub } from "./ws-server";
 
@@ -320,6 +320,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
 
   const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
   const agentCert = await ensureAgentCert(tlsDir);
+  ensureSteerSecret(tlsDir);
   const pins = new PinStore(path.join(tlsDir, "phone-pins.json"));
   // Both transports share one v2 layer, built once the pieces it needs exist.
   const v2Hooks = {
@@ -359,6 +360,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
     tls: { key: agentCert.key, cert: agentCert.cert },
+    // Read at each hello, so `pair --rotate-steer` takes effect without a restart.
+    steer: () => readSteerSecret(tlsDir),
     v2: v2Hooks,
     onClientConnected: onPhoneConnected,
     onClientDisconnected: () => onPhoneDisconnected(false),

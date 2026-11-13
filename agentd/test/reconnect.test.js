@@ -24,8 +24,8 @@ const permission = (sessionId, command = "ls") => ({
 });
 
 /** A phone that connects to the daemon's WsHub after the first one went away. */
-async function reconnectPhone(wsPort, token, tls = true) {
-  const phone = createFakePhone({ transport: "wshub", tls, pin: (await agentCert()).fingerprint256 });
+async function reconnectPhone(wsPort, token, steer, tls = true) {
+  const phone = createFakePhone({ transport: "wshub", tls, steer, pin: (await agentCert()).fingerprint256 });
   await phone.start({ port: wsPort, host: "127.0.0.1", token });
   await phone.waitFor("snapshot");
   return phone;
@@ -60,7 +60,7 @@ function abortableHook(port, payload) {
 test("late_decision_after_disconnect_is_ignored", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
-    async ({ daemon, phone, httpPort, wsPort, token }) => {
+    async ({ daemon, phone, httpPort, wsPort, token, steer }) => {
       const reply = postHook(httpPort, permission("s1"));
       const alert = await phone.waitFor("alert", (f) => f.kind === "approval");
       phone.close();
@@ -68,7 +68,7 @@ test("late_decision_after_disconnect_is_ignored", async () => {
       await settle();
       assert.equal(daemon.approvals.size, 0);
 
-      const second = await reconnectPhone(wsPort, token);
+      const second = await reconnectPhone(wsPort, token, steer);
       try {
         second.sendFrame("alert_action", [alert.id, "allow"], { msgId: "late-1" });
         const ack = await second.waitFor("ack", (f) => f.msgId === "late-1");
@@ -84,7 +84,7 @@ test("late_decision_after_disconnect_is_ignored", async () => {
 test("wshub_disconnect_expires_pending_approval", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
-    async ({ daemon, phone, httpPort, wsPort, token }) => {
+    async ({ daemon, phone, httpPort, wsPort, token, steer }) => {
       const reply = postHook(httpPort, permission("s1"));
       const alert = await phone.waitFor("alert", (f) => f.kind === "approval");
       phone.close();
@@ -97,7 +97,7 @@ test("wshub_disconnect_expires_pending_approval", async () => {
       assert.equal(waiting.body, "Answer on laptop");
       assert.equal(daemon.phoneV2.alerts.get(alert.id), undefined);
 
-      const second = await reconnectPhone(wsPort, token);
+      const second = await reconnectPhone(wsPort, token, steer);
       try {
         const notice = await second.waitFor("alert", (f) => f.kind === "notice");
         assert.equal(notice.sessionKey, "claude:s1");
@@ -129,8 +129,8 @@ test("phonelink_disconnect_expires_pending_approval", async () => {
 test("a_disconnect_keeps_the_approval_while_the_other_transport_still_has_a_phone", async () => {
   await withDaemon(
     { transport: "phonelink", tls: true, attached: [{ provider: "claude", id: "s1" }] },
-    async ({ daemon, phone, httpPort, wsPort, token }) => {
-      const hubPhone = await reconnectPhone(wsPort, token);
+    async ({ daemon, phone, httpPort, wsPort, token, steer }) => {
+      const hubPhone = await reconnectPhone(wsPort, token, steer);
       try {
         const reply = postHook(httpPort, permission("s1"));
         await phone.waitFor("alert", (f) => f.kind === "approval");
@@ -207,7 +207,7 @@ test("reconnect_replays_snapshot_and_alerts", async () => {
       tls: true,
       attached: [{ provider: "claude", id: "s1" }, { provider: "claude", id: "s2" }],
     },
-    async ({ daemon, phone, wsPort, token }) => {
+    async ({ daemon, phone, wsPort, token, steer }) => {
       const set = phone.sendFrame("mode_set", ["claude:s2", "approveAll", "true"], { msgId: "ma-1" });
       assert.equal((await phone.waitFor("ack", (f) => f.msgId === set.msgId)).result, "applied");
       phone.close();
@@ -218,7 +218,7 @@ test("reconnect_replays_snapshot_and_alerts", async () => {
       daemon.attachRegistry.detach("claude", "s2");
       await settle();
 
-      const second = await reconnectPhone(wsPort, token);
+      const second = await reconnectPhone(wsPort, token, steer);
       try {
         const reset = await second.waitFor("mode_reset");
         const alert = await second.waitFor("alert", (f) => f.kind === "error");
@@ -241,7 +241,7 @@ test("reconnect_replays_snapshot_and_alerts", async () => {
 test("reset_notices_wait_for_a_phone_instead_of_being_drained", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s2" }] },
-    async ({ daemon, phone, wsPort, token }) => {
+    async ({ daemon, phone, wsPort, token, steer }) => {
       const set = phone.sendFrame("mode_set", ["claude:s2", "approveAll", "true"], { msgId: "ma-2" });
       await phone.waitFor("ack", (f) => f.msgId === set.msgId);
       phone.close();
@@ -254,7 +254,7 @@ test("reset_notices_wait_for_a_phone_instead_of_being_drained", async () => {
         [["claude:s2", "session_ended"]],
       );
       assert.equal(daemon.takeResetNotices().length, 0);
-      const second = await reconnectPhone(wsPort, token);
+      const second = await reconnectPhone(wsPort, token, steer);
       second.close();
     },
   );

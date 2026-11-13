@@ -8,7 +8,7 @@ const { SessionStore } = require("../dist/session-store.js");
 const { silentLogger } = require("../dist/logger.js");
 const { PhoneSettingsStore, DEFAULT_ALERT_TIMINGS } = require("../dist/phone-settings.js");
 const { authorize, classifyFrame, gateFrame } = require("../dist/protocol-v2.js");
-const { buildFrame } = require("./fake-phone.js");
+const { buildFrame, createFakePhone } = require("./fake-phone.js");
 const { withDaemon, postHook, settle } = require("./helpers/daemon.js");
 
 const TRANSPORTS = ["phonelink", "wshub"];
@@ -663,10 +663,18 @@ test("every_steering_frame_rejected_over_plaintext_on_both_transports", async ()
         tls: false,
         attached: [{ provider: "claude", id: "s1" }, { provider: "codex", id: "t1" }],
       },
-      async ({ daemon, phone, httpPort, coderDir }) => {
+      async ({ daemon, phone, httpPort, wsPort, token, steer, agentFingerprint, coderDir }) => {
         await postHook(httpPort, sessionStart("s1"));
         // A monitor-only phone cannot answer a Stop, so nothing is held for it.
         assert.deepEqual(await postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" }), {});
+        // A second, trusted phone (wss with the steering secret) can, so the Stop
+        // is held for it: a steerable state the plaintext phone must not be able to touch.
+        const trusted = createFakePhone({ transport: "wshub", tls: true, pin: agentFingerprint, steer });
+        await trusted.start({ port: wsPort, host: "127.0.0.1", token });
+        await trusted.waitFor("snapshot");
+        const held = postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" });
+        await settle();
+        assert.equal(daemon.stopWait.state("s1").waiting, true, "held for the trusted phone");
         for (const frame of STEERING_FRAMES) {
           assert.equal(classifyFrame(frame.type), "steering", frame.type);
           assert.deepEqual(authorize(frame, { trusted: false }), { ok: false, error: "monitor_only" });
@@ -681,9 +689,16 @@ test("every_steering_frame_rejected_over_plaintext_on_both_transports", async ()
 
         // Nothing ran: no mode, no delivery, no recorded id.
         assert.equal(daemon.approvalPolicy.get("claude:s1"), "ask");
-        assert.deepEqual(daemon.stopWait.state("s1"), { waiting: false, continuationsLeft: 8 });
+        assert.deepEqual(
+          daemon.stopWait.state("s1"),
+          { waiting: true, continuationsLeft: 8 },
+          "still held: no follow-up from the plaintext phone was delivered into it",
+        );
         assert.equal(await exists(path.join(coderDir, "applied-ids.json")), false);
         assert.equal(await exists(path.join(coderDir, "settings.json")), false);
+        daemon.stopWait.releaseByLaptop("s1");
+        assert.deepEqual(await held, {});
+        trusted.close();
       },
     );
   }
@@ -782,12 +797,12 @@ test("heading_is_read_from_a_transcript_attached_mid_conversation", async () => 
 test("fake_phone_cli_pairs_prints_frames_and_sends_a_frame_from_argv", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
-    async ({ daemon, httpPort, wsPort, token, agentFingerprint }) => {
+    async ({ daemon, httpPort, wsPort, token, steer, agentFingerprint }) => {
       await postHook(httpPort, sessionStart("s1"));
       const child = spawn(process.execPath, [
         path.join(__dirname, "fake-phone.js"),
         "--transport", "wshub", "--port", String(wsPort), "--token", token, "--tls", "true",
-        "--pin", agentFingerprint, "--wait", "1500",
+        "--pin", agentFingerprint, "--steer", steer, "--wait", "1500",
         "mode_set", "claude:s1", "acceptEdits",
       ]);
       let out = "";
