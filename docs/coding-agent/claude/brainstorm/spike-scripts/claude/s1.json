@@ -1,0 +1,129 @@
+{
+ "hooks": {
+  "Stop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 3600
+     }
+    ]
+   }
+  ],
+  "PreToolUse": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "PostToolUse": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "PermissionRequest": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "Notification": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "UserPromptSubmit": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "PreCompact": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "PostCompact": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "PreModelSwitch": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "PostModelSwitch": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ],
+  "SessionStart": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "/opt/anaconda3/bin/python3 /private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/hook.py",
+      "timeout": 120
+     }
+    ]
+   }
+  ]
+ },
+ "statusLine": {
+  "type": "command",
+  "command": "/private/tmp/claude-501/-Users-debasishkanhar/1fc7a898-3766-43a3-956c-0aefb8f170ab/scratchpad/claude-compat/bin/sl.sh"
+ }
+}
