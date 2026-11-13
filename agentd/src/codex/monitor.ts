@@ -19,6 +19,7 @@ import type {
   SessionMessage,
   ThreadStartResult,
 } from "../types";
+import { daemonEndpoint, resolveDaemonSocketPath } from "./daemon-socket";
 import { codexThreadMessages } from "./messages";
 import type {
   AdditionalFileSystemPermissions,
@@ -39,6 +40,7 @@ import type {
   TurnStartParams,
   TurnStartResponse,
 } from "./protocol";
+import { readLastTokenUsage, type ContextUsage } from "./rollout-usage";
 
 // The HUD board never shows more than 63 rows, and one thread/resume replays a
 // full rollout: a deep backlog at 200 threads kept the first synchronize from
@@ -56,6 +58,11 @@ const REFRESH_CONCURRENCY = 8;
 // born in a terminal (codex exec, the CLI) reach the store only when listed, so
 // the monitor re-lists on a slow clock and adopts what it has never seen.
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
+// thread/resume fails with "no rollout found" until a thread's first turn has
+// been written. Retry briefly; after that the slow sweep picks the thread up.
+const DEFAULT_ROLLOUT_RETRY_MS = 5_000;
+const MAX_ROLLOUT_RETRIES = 12;
+const CLIENT_VERSION = "0.1.0";
 
 export interface CodexAvailability {
   enabled: boolean;
@@ -138,6 +145,7 @@ export interface CodexMonitorOptions {
   startTimeoutMs?: number;
   reconnectDelayMs?: number;
   sweepIntervalMs?: number;
+  rolloutRetryMs?: number;
   now?: () => number;
   launch?: (port: number) => ChildProcess;
   terminate?: (child: ChildProcess) => Promise<void>;
@@ -359,6 +367,14 @@ export class CodexMonitor {
   private readonly now: () => number;
   private state: CodexAvailability;
   private lastChildError = "";
+  // Shared-daemon mode. `wanted` is the set of threads the daemon asked us to
+  // subscribe (the attach registry's codex entries); it is what lets an old
+  // attached thread be resumed without it appearing in any capped listing.
+  private readonly wanted = new Set<string>();
+  private readonly rolloutAttempts = new Map<string, number>();
+  private readonly subscribing = new Map<string, Promise<void>>();
+  private readonly contextByThread = new Map<string, ContextUsage>();
+  private rolloutRetryTimer?: NodeJS.Timeout;
 
   constructor(private readonly options: CodexMonitorOptions) {
     this.now = options.now ?? Date.now;
@@ -369,6 +385,40 @@ export class CodexMonitor {
 
   availability(): CodexAvailability {
     return { ...this.state };
+  }
+
+  /** The last known context fill of an attached thread, seeded from its rollout. */
+  contextUsage(threadId: string): ContextUsage | undefined {
+    const usage = this.contextByThread.get(threadId);
+    return usage ? { ...usage } : undefined;
+  }
+
+  /**
+   * Start watching one attached thread: resume it on the daemon (which is what
+   * subscribes this connection to its live stream) and seed its context fill.
+   * Safe before the monitor is connected: the connect-time sync picks it up.
+   */
+  async subscribe(threadId: string): Promise<void> {
+    if (!this.options.isAttached(threadId)) {
+      return;
+    }
+    this.wanted.add(threadId);
+    if (this.stopped || !this.socket) {
+      return;
+    }
+    await this.resumeAndRefresh(threadId);
+  }
+
+  /**
+   * Stop watching a thread. Anything it still has pending with the app-server
+   * is deliberately left unanswered, so the user's own Codex TUI (which gets
+   * the same request) stays the one that decides it.
+   */
+  unsubscribe(threadId: string): void {
+    this.wanted.delete(threadId);
+    this.rolloutAttempts.delete(threadId);
+    this.contextByThread.delete(threadId);
+    this.removeThread(threadId, "unsubscribed");
   }
 
   async readMessages(threadId: string, limit: number): Promise<SessionMessage[]> {
@@ -426,6 +476,10 @@ export class CodexMonitor {
   async stop(): Promise<void> {
     this.stopped = true;
     this.clearSweep();
+    this.clearRolloutRetry();
+    this.wanted.clear();
+    this.rolloutAttempts.clear();
+    this.contextByThread.clear();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
@@ -481,6 +535,13 @@ export class CodexMonitor {
         });
       } catch (attachError) {
         if (this.stopped) {
+          return;
+        }
+        if (this.options.config.codex.useSharedDaemon) {
+          // The shared daemon belongs to the user: never spawn, stop or replace it.
+          this.reportUnavailable(
+            `Codex shared daemon is not reachable: ${errorMessage(attachError)}`,
+          );
           return;
         }
         if (!this.ownedProcess) {
@@ -590,6 +651,10 @@ export class CodexMonitor {
   }
 
   private endpoint(): string {
+    const codex = this.options.config.codex;
+    if (codex.useSharedDaemon) {
+      return daemonEndpoint(resolveDaemonSocketPath(codex.socketPath));
+    }
     return `ws://127.0.0.1:${this.options.config.codex.port}`;
   }
 
@@ -636,12 +701,12 @@ export class CodexMonitor {
 
     await this.request("initialize", {
       clientInfo: {
-        name: "nexus-agentd",
-        title: "Nexus Agent Daemon",
-        version: "0.1.0",
+        name: "rokid-coder-agentd",
+        title: "Rokid-Coder",
+        version: CLIENT_VERSION,
       },
       capabilities: {
-        experimentalApi: false,
+        experimentalApi: this.options.config.codex.useSharedDaemon,
         requestAttestation: false,
       },
     });
@@ -680,13 +745,14 @@ export class CodexMonitor {
     }
     this.sweeping = true;
     try {
-      const listed = await this.listThreads();
-      const unseen = listed.filter(
-        (thread) => !this.threads.has(thread.id) && this.options.isAttached(thread.id),
-      );
+      const unseen = this.options.config.codex.useSharedDaemon
+        ? await this.unseenSharedThreads()
+        : (await this.listThreads())
+            .map((thread) => thread.id)
+            .filter((id) => !this.threads.has(id) && this.options.isAttached(id));
       if (unseen.length > 0) {
         this.options.logger.info("codex_sweep_adopted", { threads: unseen.length });
-        await inBatches(unseen, (thread) => this.resumeAndRefresh(thread.id));
+        await inBatches(unseen, (id) => this.resumeAndRefresh(id));
       }
     } catch (error) {
       this.options.logger.info("codex_sweep_failed", { reason: errorMessage(error) });
@@ -701,6 +767,8 @@ export class CodexMonitor {
     }
     this.socket = undefined;
     this.clearSweep();
+    this.clearRolloutRetry();
+    this.subscribing.clear();
     this.rejectPendingRpc(new Error("Codex app-server connection closed"));
     this.resolveAllApprovals("codex_connection_closed");
     if (!this.stopped) {
@@ -710,6 +778,10 @@ export class CodexMonitor {
   }
 
   private async synchronize(): Promise<void> {
+    if (this.options.config.codex.useSharedDaemon) {
+      await this.synchronizeShared();
+      return;
+    }
     const resumed = new Map<string, Thread>();
     const previouslyCaredFor = [...this.threads.keys()]
       .filter((threadId) => this.options.isAttached(threadId));
@@ -763,6 +835,142 @@ export class CodexMonitor {
       this.threads.set(thread.id, thread);
       this.publishThread(thread.id);
     }
+  }
+
+  // Live threads come from thread/loaded/list, not the capped thread/list page,
+  // and every attached thread we were told about is resumed explicitly, so an
+  // old attached thread cannot fall off a listing.
+  private async synchronizeShared(): Promise<void> {
+    const candidates = [...new Set([
+      ...await this.listLoadedThreads(),
+      ...this.wanted,
+      ...this.threads.keys(),
+    ])].filter((id) => this.options.isAttached(id));
+
+    const subscribed = new Set<string>();
+    await inBatches(candidates, async (id) => {
+      if (await this.subscribeShared(id)) {
+        subscribed.add(id);
+      }
+    });
+    for (const threadId of [...this.threads.keys()]) {
+      if (!subscribed.has(threadId)) {
+        this.removeThread(threadId, "authoritative_refresh");
+      }
+    }
+  }
+
+  private async unseenSharedThreads(): Promise<string[]> {
+    const live = await this.listLoadedThreads();
+    return [...new Set([...live, ...this.wanted])].filter(
+      (id) =>
+        !this.threads.has(id) &&
+        !this.subscribing.has(id) &&
+        this.options.isAttached(id),
+    );
+  }
+
+  private async listLoadedThreads(): Promise<string[]> {
+    const response = await this.request<{ data?: unknown }>("thread/loaded/list", {});
+    return Array.isArray(response.data)
+      ? response.data.filter((id): id is string => typeof id === "string")
+      : [];
+  }
+
+  private subscribeShared(threadId: string): Promise<boolean> {
+    const running = this.subscribing.get(threadId);
+    if (running) {
+      return running.then(() => this.threads.has(threadId));
+    }
+    const run = this.subscribeSharedOnce(threadId).finally(() => {
+      this.subscribing.delete(threadId);
+    });
+    this.subscribing.set(threadId, run.then(() => undefined));
+    return run;
+  }
+
+  private async subscribeSharedOnce(threadId: string): Promise<boolean> {
+    if (!this.options.isAttached(threadId)) {
+      return false;
+    }
+    let resumed: Thread;
+    try {
+      const response = await this.request<ThreadResumeResponse>("thread/resume", {
+        threadId,
+        excludeTurns: true,
+      });
+      resumed = response.thread;
+    } catch (error) {
+      if (/no rollout found/i.test(errorMessage(error))) {
+        this.awaitFirstTurn(threadId);
+      } else {
+        this.options.logger.info("codex_thread_resume_failed", {
+          threadId,
+          reason: errorMessage(error),
+        });
+      }
+      return false;
+    }
+    this.rolloutAttempts.delete(threadId);
+    if (this.stopped || !this.options.isAttached(threadId)) {
+      return false;
+    }
+    let thread = resumed;
+    try {
+      thread = (await this.request<ThreadReadResponse>("thread/read", {
+        threadId,
+        includeTurns: true,
+      })).thread;
+    } catch (error) {
+      this.options.logger.info("codex_thread_refresh_failed", {
+        threadId,
+        reason: errorMessage(error),
+      });
+    }
+    if (this.stopped || !this.options.isAttached(threadId)) {
+      return false;
+    }
+    this.threads.set(threadId, thread);
+    this.publishThread(threadId);
+    if (thread.path) {
+      const usage = await readLastTokenUsage(thread.path);
+      if (usage && this.threads.has(threadId)) {
+        this.contextByThread.set(threadId, usage);
+      }
+    }
+    this.options.logger.info("codex_thread_subscribed", { threadId });
+    return true;
+  }
+
+  private awaitFirstTurn(threadId: string): void {
+    const attempts = (this.rolloutAttempts.get(threadId) ?? 0) + 1;
+    this.rolloutAttempts.set(threadId, attempts);
+    if (attempts > MAX_ROLLOUT_RETRIES) {
+      // The sweep keeps looking; this just stops the fast loop.
+      this.rolloutAttempts.delete(threadId);
+      return;
+    }
+    if (this.rolloutRetryTimer || this.stopped) {
+      return;
+    }
+    this.rolloutRetryTimer = setTimeout(() => {
+      this.rolloutRetryTimer = undefined;
+      const waiting = [...this.rolloutAttempts.keys()];
+      void Promise.all(waiting.map((id) =>
+        this.options.isAttached(id) && this.socket
+          ? this.subscribeShared(id)
+          : Promise.resolve(false),
+      ));
+    }, this.options.rolloutRetryMs ?? DEFAULT_ROLLOUT_RETRY_MS);
+    this.rolloutRetryTimer.unref();
+  }
+
+  private clearRolloutRetry(): void {
+    if (this.rolloutRetryTimer) {
+      clearTimeout(this.rolloutRetryTimer);
+      this.rolloutRetryTimer = undefined;
+    }
+    this.rolloutAttempts.clear();
   }
 
   private async listThreads(): Promise<Thread[]> {
@@ -1063,6 +1271,10 @@ export class CodexMonitor {
 
   private async resumeAndRefresh(threadId: string): Promise<void> {
     if (!this.options.isAttached(threadId)) {
+      return;
+    }
+    if (this.options.config.codex.useSharedDaemon) {
+      await this.subscribeShared(threadId);
       return;
     }
     const resumed = await this.tryResume(threadId);

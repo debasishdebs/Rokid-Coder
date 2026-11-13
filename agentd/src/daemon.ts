@@ -222,17 +222,29 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     isAttached: (threadId) => attachRegistry.isAttached("codex", threadId),
   });
   codexMonitor = codex;
-  // Detaching undoes everything attaching allowed. Pieces that do not exist yet
-  // (stop-waits, question relays, alerts, Codex unsubscribe) subscribe to
-  // onChange themselves when they land.
+  // Attaching a Codex thread subscribes to it; detaching undoes everything
+  // attaching allowed. Pieces that do not exist yet (stop-waits, question
+  // relays, alerts) subscribe to onChange themselves when they land.
   const stopListeningForDetach = attachRegistry.onChange(({ kind, entry }) => {
-    if (kind !== "detached") {
+    if (kind === "attached") {
+      if (entry.provider === "codex") {
+        void codex.subscribe(entry.id);
+      }
       return;
     }
     tailManager.stop(entry.id);
     approvals?.resolveSession(entry.id);
     sessions.removeSession(entry.id);
+    if (entry.provider === "codex") {
+      codex.unsubscribe(entry.id);
+    }
   });
+  // Threads attached in an earlier run are subscribed once the monitor connects.
+  for (const entry of attachRegistry.list()) {
+    if (entry.provider === "codex") {
+      void codex.subscribe(entry.id);
+    }
+  }
   const httpServer = new HookHttpServer({
     port: config.httpPort,
     sessionCount: () => sessions.size,

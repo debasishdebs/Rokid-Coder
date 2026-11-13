@@ -2,6 +2,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { PassThrough } = require("node:stream");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { WebSocketServer } = require("ws");
 const { ApprovalManager } = require("../dist/approval-manager.js");
 const {
@@ -198,7 +201,12 @@ function makeHarness(port, overrides = {}) {
   const monitor = new CodexMonitor({
     config: {
       ...identity,
-      codex: { enabled: true, port },
+      codex: {
+        enabled: true,
+        port,
+        useSharedDaemon: overrides.useSharedDaemon ?? false,
+        socketPath: overrides.socketPath,
+      },
     },
     store,
     approvals,
@@ -209,6 +217,7 @@ function makeHarness(port, overrides = {}) {
     startTimeoutMs: 500,
     reconnectDelayMs: 20,
     sweepIntervalMs: overrides.sweepIntervalMs,
+    rolloutRetryMs: overrides.rolloutRetryMs,
     launch: overrides.launch ?? (() => {
       throw new Error("codex executable not found");
     }),
@@ -986,5 +995,317 @@ test("codex_broadcast_thread_not_adopted_unless_attached", async () => {
     approvals.dispose();
     store.dispose();
     await closeServer(server);
+  }
+});
+
+// ---- shared Codex daemon (WebSocket over a unix socket) ----
+
+async function listenUnix() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rc3-"));
+  const socketPath = path.join(dir, "s.sock");
+  const http = require("node:http").createServer();
+  const server = new WebSocketServer({ server: http });
+  await new Promise((resolve) => http.listen(socketPath, resolve));
+  return { server, http, socketPath, dir };
+}
+
+async function closeUnix({ server, http, dir }) {
+  for (const client of server.clients) client.terminate();
+  await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => http.close(resolve));
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// A stand-in for the shared daemon: loaded threads, per-thread resume failures,
+// and a log of every request so tests can assert what was (not) asked.
+function sharedDaemon(server, { threads, loaded, resumeError = () => undefined }) {
+  const requests = [];
+  const sockets = [];
+  server.on("connection", (socket) => {
+    sockets.push(socket);
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.id === undefined) {
+        requests.push({ method: message.method });
+        return;
+      }
+      requests.push({ method: message.method, params: message.params });
+      let result;
+      switch (message.method) {
+        case "initialize":
+          result = { userAgent: "fake-codex" };
+          break;
+        case "thread/loaded/list":
+          result = { data: loaded() };
+          break;
+        case "thread/resume": {
+          const failure = resumeError(message.params.threadId);
+          if (failure) {
+            socket.send(JSON.stringify({ id: message.id, error: { code: -32600, message: failure } }));
+            return;
+          }
+          result = {
+            thread: threads.get(message.params.threadId),
+            model: "gpt-5",
+            modelProvider: "openai",
+            serviceTier: null,
+            cwd: "/work/sample",
+          };
+          break;
+        }
+        case "thread/read":
+          result = { thread: threads.get(message.params.threadId) };
+          break;
+        default:
+          return;
+      }
+      socket.send(JSON.stringify({ id: message.id, result }));
+    });
+  });
+  return { requests, sockets };
+}
+
+function sharedHarness(daemon, overrides = {}) {
+  let launches = 0;
+  const harness = makeHarness(0, {
+    useSharedDaemon: true,
+    socketPath: daemon.socketPath,
+    rolloutRetryMs: 15,
+    ...overrides,
+    launch: () => {
+      launches += 1;
+      throw new Error("must never spawn");
+    },
+  });
+  harness.launches = () => launches;
+  return harness;
+}
+
+test("shared_daemon_never_spawns", async () => {
+  const daemon = await listenUnix();
+  const threads = new Map([["a", makeThread({ id: "a" })]]);
+  const { requests } = sharedDaemon(daemon.server, { threads, loaded: () => ["a"] });
+  const { store, approvals, monitor, launches } = sharedHarness(daemon);
+  try {
+    monitor.start();
+    await waitUntil(() => monitor.availability().available, "monitor did not attach to the daemon");
+    assert.equal(launches(), 0);
+    const init = requests.find((request) => request.method === "initialize");
+    assert.equal(init.params.clientInfo.name, "rokid-coder-agentd");
+    assert.equal(init.params.clientInfo.title, "Rokid-Coder");
+    assert.equal(init.params.capabilities.experimentalApi, true);
+    assert.deepEqual(
+      requests.map((request) => request.method).slice(0, 3),
+      ["initialize", "initialized", "thread/loaded/list"],
+    );
+    assert.equal(requests.some((request) => request.method === "thread/list"), false);
+  } finally {
+    await monitor.stop();
+    approvals.dispose();
+    store.dispose();
+    await closeUnix(daemon);
+  }
+});
+
+test("shared daemon that is not running is unavailable, not spawned", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rc3-"));
+  const { store, approvals, monitor, launches } = sharedHarness(
+    { socketPath: path.join(dir, "missing.sock") },
+    { startTimeoutMs: 50 },
+  );
+  try {
+    monitor.start();
+    await waitUntil(() => monitor.availability().reason, "no unavailable reason reported");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(monitor.availability().available, false);
+    assert.match(monitor.availability().reason, /shared daemon/i);
+    assert.equal(launches(), 0);
+  } finally {
+    await monitor.stop();
+    approvals.dispose();
+    store.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("subscribes_only_attached_threads", async () => {
+  const daemon = await listenUnix();
+  const threads = new Map([
+    ["a", makeThread({ id: "a" })],
+    ["b", makeThread({ id: "b" })],
+  ]);
+  const { requests } = sharedDaemon(daemon.server, { threads, loaded: () => ["a", "b"] });
+  const { store, approvals, monitor } = sharedHarness(daemon, {
+    isAttached: (threadId) => threadId === "b",
+  });
+  try {
+    monitor.start();
+    await waitUntil(() => monitor.availability().available, "monitor did not attach");
+    const resumes = requests.filter((request) => request.method === "thread/resume");
+    assert.deepEqual(resumes.map((request) => request.params), [{ threadId: "b", excludeTurns: true }]);
+    assert.ok(store.get("b"));
+    assert.equal(store.get("a"), undefined);
+    assert.equal(
+      requests.some((request) => request.params?.threadId === "a"),
+      false,
+      "an unattached live thread must never be resumed or read",
+    );
+  } finally {
+    await monitor.stop();
+    approvals.dispose();
+    store.dispose();
+    await closeUnix(daemon);
+  }
+});
+
+test("an attached thread outside the live list is resumed explicitly, not found through thread/list", async () => {
+  const daemon = await listenUnix();
+  const threads = new Map([["old", makeThread({ id: "old" })]]);
+  const { requests } = sharedDaemon(daemon.server, { threads, loaded: () => [] });
+  const { store, approvals, monitor } = sharedHarness(daemon, { isAttached: (id) => id === "old" });
+  try {
+    // Attached before the monitor connected (the registry loads from disk).
+    await monitor.subscribe("old");
+    monitor.start();
+    await waitUntil(() => store.get("old"), "attached thread was not resumed on connect");
+    assert.equal(requests.some((request) => request.method === "thread/list"), false);
+    assert.deepEqual(
+      requests.filter((request) => request.method === "thread/resume").map((request) => request.params),
+      [{ threadId: "old", excludeTurns: true }],
+    );
+  } finally {
+    await monitor.stop();
+    approvals.dispose();
+    store.dispose();
+    await closeUnix(daemon);
+  }
+});
+
+test("no rollout found is retried until the thread has its first turn", async () => {
+  const daemon = await listenUnix();
+  const threads = new Map([["fresh", makeThread({ id: "fresh" })]]);
+  let failures = 2;
+  const { requests } = sharedDaemon(daemon.server, {
+    threads,
+    loaded: () => ["fresh"],
+    resumeError: () => (failures-- > 0 ? "no rollout found for thread id fresh" : undefined),
+  });
+  const { store, approvals, monitor } = sharedHarness(daemon);
+  try {
+    monitor.start();
+    await waitUntil(() => monitor.availability().available, "monitor did not attach");
+    await waitUntil(() => store.get("fresh"), "thread was never subscribed after retries");
+    assert.equal(requests.filter((request) => request.method === "thread/resume").length, 3);
+  } finally {
+    await monitor.stop();
+    approvals.dispose();
+    store.dispose();
+    await closeUnix(daemon);
+  }
+});
+
+test("subscribe seeds context from the rollout; unsubscribe forgets the thread", async () => {
+  const daemon = await listenUnix();
+  const rollout = path.join(daemon.dir, "rollout.jsonl");
+  fs.writeFileSync(rollout, `${JSON.stringify({
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: { last_token_usage: { total_tokens: 18578 }, model_context_window: 258400 },
+    },
+  })}\n`);
+  const threads = new Map([["live", makeThread({ id: "live", path: rollout })]]);
+  const { requests, sockets } = sharedDaemon(daemon.server, { threads, loaded: () => [] });
+  const attached = new Set();
+  const { store, approvals, monitor } = sharedHarness(daemon, { isAttached: (id) => attached.has(id) });
+  try {
+    monitor.start();
+    await waitUntil(() => monitor.availability().available, "monitor did not attach");
+
+    await monitor.subscribe("live");
+    assert.equal(store.get("live"), undefined, "subscribing an unattached thread must do nothing");
+    assert.equal(requests.some((request) => request.params?.threadId === "live"), false);
+
+    attached.add("live");
+    await monitor.subscribe("live");
+    assert.ok(store.get("live"));
+    assert.deepEqual(monitor.contextUsage("live"), { used: 18578, window: 258400 });
+
+    attached.delete("live");
+    monitor.unsubscribe("live");
+    assert.equal(store.get("live"), undefined);
+    assert.equal(monitor.contextUsage("live"), undefined);
+    sockets[0].send(JSON.stringify({
+      method: "thread/status/changed",
+      params: { threadId: "live", status: { type: "active", activeFlags: [] } },
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(store.get("live"), undefined, "events for a detached thread must not republish it");
+  } finally {
+    await monitor.stop();
+    approvals.dispose();
+    store.dispose();
+    await closeUnix(daemon);
+  }
+});
+
+test("detached_thread_pending_approval_left_for_tui", async () => {
+  const daemon = await listenUnix();
+  const threads = new Map([["t", makeThread({ id: "t" })]]);
+  const { requests, sockets } = sharedDaemon(daemon.server, { threads, loaded: () => ["t"] });
+  const replies = [];
+  const attached = new Set(["t"]);
+  const { store, transport, approvals, monitor } = sharedHarness(daemon, {
+    isAttached: (id) => attached.has(id),
+  });
+  try {
+    monitor.start();
+    await waitUntil(() => monitor.availability().available, "monitor did not attach");
+    sockets[0].on("message", (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.id === "approval-9" && message.method === undefined) replies.push(message);
+    });
+    sockets[0].send(JSON.stringify({
+      id: "approval-9",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "t",
+        turnId: "turn-1",
+        itemId: "i",
+        startedAtMs: Date.now(),
+        environmentId: null,
+        reason: "Run it",
+        command: "npm test",
+        cwd: "/work/sample",
+      },
+    }));
+    const frame = await waitUntil(
+      () => transport.frames.find((entry) => entry.type === "approval_request"),
+      "approval did not reach the phone",
+    );
+
+    // The daemon's detach path: registry says no first, then the monitor is told.
+    attached.delete("t");
+    monitor.unsubscribe("t");
+    approvals.resolveSession("t");
+
+    assert.ok(
+      transport.frames.some((entry) => entry.type === "approval_resolved" && entry.requestId === frame.requestId),
+      "the phone must be told the request is no longer its to answer",
+    );
+    // A late phone decision has nothing left to answer.
+    approvals.handleDecision(frame.requestId, "allow");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.deepEqual(replies, [], "no response may be sent: the request stays pending for the TUI");
+    assert.equal(
+      requests.some((request) => request.id === "approval-9"),
+      false,
+    );
+    assert.equal(store.get("t"), undefined);
+  } finally {
+    await monitor.stop();
+    approvals.dispose();
+    store.dispose();
+    await closeUnix(daemon);
   }
 });
