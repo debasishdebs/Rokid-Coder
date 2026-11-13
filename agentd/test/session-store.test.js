@@ -141,3 +141,28 @@ test("synthetic user prompts preserve the human title while keeping status trans
   assert.equal(session.turn.activeSince, now);
   store.dispose();
 });
+
+test("a Stop hook's last_assistant_message is the session's latest assistant text, ahead of the transcript tail", () => {
+  let now = 1_753_380_000_000;
+  const store = new SessionStore(identity, silentLogger, () => now);
+  const base = { session_id: "stop-text-session", cwd: "/work/sample" };
+
+  store.handleHook({ ...base, hook_event_name: "UserPromptSubmit", prompt: "first" });
+  store.applyTranscriptUpdate(base.session_id, { activityAt: now, lastAssistantText: "older answer" });
+
+  // Claude fires Stop before the transcript has the final message, so the tail
+  // still holds the previous turn's text; the hook carries the real one.
+  now += 10;
+  store.handleHook({ ...base, hook_event_name: "Stop", last_assistant_message: "BANANA" });
+  assert.equal(store.get(base.session_id).lastAssistantText, "BANANA");
+
+  now += 10;
+  store.handleHook({ ...base, hook_event_name: "Stop", last_assistant_message: "x".repeat(300) });
+  assert.equal(store.get(base.session_id).lastAssistantText.length, 140);
+
+  // A Stop without the field (an older Claude) leaves what the tail found.
+  now += 10;
+  store.handleHook({ ...base, hook_event_name: "Stop" });
+  assert.equal(store.get(base.session_id).lastAssistantText.length, 140);
+  store.dispose();
+});

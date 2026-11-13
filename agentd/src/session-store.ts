@@ -219,9 +219,15 @@ export class SessionStore {
         record.session.step = undefined;
         break;
       }
-      case "Stop":
+      case "Stop": {
         record.session.currentFile = undefined;
         record.session.step = undefined;
+        // Stop fires before the transcript holds the final message, so the tail
+        // still has the previous turn's text; the hook carries the real one.
+        const finalText = asString(payload.last_assistant_message);
+        if (finalText) {
+          record.session.lastAssistantText = truncateText(finalText, 140);
+        }
         if (record.session.pendingRequest) {
           record.session.status = "needs_you";
         } else {
@@ -229,6 +235,7 @@ export class SessionStore {
           record.session.statusDetail = undefined;
         }
         break;
+      }
       case "SubagentStop":
         break;
       case "PreToolUse": {
