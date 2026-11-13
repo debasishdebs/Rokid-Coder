@@ -127,6 +127,12 @@ export interface CodexMonitorOptions {
   store: SessionStore;
   approvals: ApprovalManager;
   logger: Logger;
+  /**
+   * The opt-in check, by exact thread id. Required rather than defaulted so a
+   * caller cannot forget it: a thread that fails it is never adopted, resumed,
+   * published or asked about.
+   */
+  isAttached: (threadId: string) => boolean;
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
   startTimeoutMs?: number;
@@ -675,7 +681,9 @@ export class CodexMonitor {
     this.sweeping = true;
     try {
       const listed = await this.listThreads();
-      const unseen = listed.filter((thread) => !this.threads.has(thread.id));
+      const unseen = listed.filter(
+        (thread) => !this.threads.has(thread.id) && this.options.isAttached(thread.id),
+      );
       if (unseen.length > 0) {
         this.options.logger.info("codex_sweep_adopted", { threads: unseen.length });
         await inBatches(unseen, (thread) => this.resumeAndRefresh(thread.id));
@@ -703,7 +711,8 @@ export class CodexMonitor {
 
   private async synchronize(): Promise<void> {
     const resumed = new Map<string, Thread>();
-    const previouslyCaredFor = [...this.threads.keys()];
+    const previouslyCaredFor = [...this.threads.keys()]
+      .filter((threadId) => this.options.isAttached(threadId));
 
     // Resume first on every connection. thread/read refreshes data but does not
     // subscribe this connection to the live event stream.
@@ -714,7 +723,8 @@ export class CodexMonitor {
       }
     });
 
-    const listed = await this.listThreads();
+    const listed = (await this.listThreads())
+      .filter((thread) => this.options.isAttached(thread.id));
     await inBatches(listed, async (thread) => {
       if (resumed.has(thread.id)) {
         return;
@@ -886,6 +896,11 @@ export class CodexMonitor {
       this.options.logger.warn("codex_approval_invalid", { method: request.method });
       return;
     }
+    if (!this.options.isAttached(threadId)) {
+      // Left unanswered on purpose: whoever owns the thread decides it locally.
+      this.options.logger.info("codex_approval_not_attached", { method: request.method });
+      return;
+    }
     const key = rpcIdKey(request.id);
     if (this.approvalsByRpcId.has(key)) {
       return;
@@ -1034,6 +1049,9 @@ export class CodexMonitor {
   }
 
   private async adoptStartedThread(thread: Thread): Promise<void> {
+    if (!this.options.isAttached(thread.id)) {
+      return;
+    }
     this.threads.set(thread.id, thread);
     this.trimThreads();
     if (!this.threads.has(thread.id)) {
@@ -1044,6 +1062,9 @@ export class CodexMonitor {
   }
 
   private async resumeAndRefresh(threadId: string): Promise<void> {
+    if (!this.options.isAttached(threadId)) {
+      return;
+    }
     const resumed = await this.tryResume(threadId);
     if (!resumed || this.stopped) {
       return;
@@ -1074,7 +1095,7 @@ export class CodexMonitor {
 
   private publishThread(threadId: string): void {
     const thread = this.threads.get(threadId);
-    if (!thread) {
+    if (!thread || !this.options.isAttached(threadId)) {
       return;
     }
     const pending = [...this.approvalsByRpcId.values()]

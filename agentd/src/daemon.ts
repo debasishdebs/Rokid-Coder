@@ -6,6 +6,7 @@ import {
   type ApprovalTransport,
   type HookResponse,
 } from "./approval-manager";
+import { AttachRegistry, NotAttachedError } from "./attach-registry";
 import { spawnClaudeThread } from "./claude-spawn";
 import { CodexMonitor } from "./codex/monitor";
 import { configPath, defaultStateDir, ensureConfig } from "./config";
@@ -23,14 +24,27 @@ import { WsHub } from "./ws-server";
 export interface RunningDaemon {
   config: ReturnType<typeof ensureConfig>;
   sessions: SessionStore;
+  attachRegistry: AttachRegistry;
+  isTailing(sessionId: string): boolean;
   stop(): Promise<void>;
 }
 
-export async function startDaemon(): Promise<RunningDaemon> {
+export interface DaemonOptions {
+  /** Test seam: keeps the UDP announce broadcast off the well-known port. */
+  discoveryPort?: number;
+}
+
+export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<RunningDaemon> {
   const stateDir = defaultStateDir();
   const config = ensureConfig(stateDir);
   const logger = new FileLogger(stateDir);
-  const sessions = new SessionStore(config, logger);
+  const attachRegistry = new AttachRegistry({
+    file: path.join(config.rokidCoder.stateDir, "attached.json"),
+    logger,
+  });
+  const sessions = new SessionStore(config, logger, Date.now, {
+    isAttached: (provider, id) => attachRegistry.isAttached(provider, id),
+  });
   const claudeDir = process.env.NEXUS_AGENTD_CLAUDE_DIR || path.join(homedir(), ".claude");
   const discovered = await discoverRecentSessions(path.join(claudeDir, "projects"), logger);
   for (const session of discovered) {
@@ -50,7 +64,16 @@ export async function startDaemon(): Promise<RunningDaemon> {
     },
   );
 
+  // Session ids reach the gates without a provider. A session the store knows
+  // names its own; one it does not is a Claude id, since only Claude sessions
+  // can be attached before they have produced a record.
+  const isSessionAttached = (sessionId: string): boolean =>
+    attachRegistry.isAttached(sessions.get(sessionId)?.provider ?? "claude", sessionId);
+
   const detailProvider = async (sessionId: string, limit: number) => {
+    if (!isSessionAttached(sessionId)) {
+      throw new NotAttachedError();
+    }
     if (sessions.get(sessionId)?.provider === "codex") {
       try {
         return await codexMonitor?.readMessages(sessionId, limit) ?? [];
@@ -64,7 +87,7 @@ export async function startDaemon(): Promise<RunningDaemon> {
   // Reading a conversation also starts tailing it, so the view stays live
   // even for a session that had been quiet since the daemon started.
   const onDetailOpen = (sessionId: string) => {
-    if (sessions.get(sessionId)?.provider === "codex") {
+    if (!isSessionAttached(sessionId) || sessions.get(sessionId)?.provider === "codex") {
       return;
     }
     const transcriptPath = sessions.transcriptPath(sessionId);
@@ -73,8 +96,15 @@ export async function startDaemon(): Promise<RunningDaemon> {
     }
   };
   const processHook = (payload: HookPayload): HookResponse | Promise<HookResponse> => {
-    sessions.handleHook(payload);
     const sessionId = typeof payload.session_id === "string" ? payload.session_id : undefined;
+    // The opt-in gate for hooks: an unattached session leaves no trace, is never
+    // tailed and is never held for an approval. Every /hook payload is Claude's
+    // today. Anything that must act on a session before it is attached (the
+    // attach command itself) is handled above this check.
+    if (sessionId !== undefined && !attachRegistry.isAttached("claude", sessionId)) {
+      return {};
+    }
+    sessions.handleHook(payload);
     const eventName = typeof payload.hook_event_name === "string" ? payload.hook_event_name : undefined;
     const transcriptPath =
       typeof payload.transcript_path === "string"
@@ -103,11 +133,15 @@ export async function startDaemon(): Promise<RunningDaemon> {
   // is how that record stops being true. A multiplexer can, because it is the
   // terminal. Off unless the owner turned it on.
   const terminalTargets = new TerminalTargets();
-  const typeIntoSession = createTerminalInputHandler({
+  const typeIntoTerminal = createTerminalInputHandler({
     enabled: () => config.allowTerminalInput,
     store: sessions,
     targets: terminalTargets,
   });
+  const typeIntoSession: typeof typeIntoTerminal = async (sessionId, text) =>
+    isSessionAttached(sessionId)
+      ? typeIntoTerminal(sessionId, text)
+      : { ok: false, error: "not_attached" };
 
   const hub = new WsHub(config, sessions, logger, {
     detailProvider,
@@ -123,6 +157,7 @@ export async function startDaemon(): Promise<RunningDaemon> {
     logger,
     detailProvider,
     onDetailOpen,
+    discoveryPort: daemonOptions.discoveryPort,
     onThreadStart: (provider, projectPath, prompt) => {
       if (provider === "claude") {
         return spawnClaudeThread(projectPath, prompt);
@@ -167,8 +202,20 @@ export async function startDaemon(): Promise<RunningDaemon> {
     store: sessions,
     approvals,
     logger,
+    isAttached: (threadId) => attachRegistry.isAttached("codex", threadId),
   });
   codexMonitor = codex;
+  // Detaching undoes everything attaching allowed. Pieces that do not exist yet
+  // (stop-waits, question relays, alerts, Codex unsubscribe) subscribe to
+  // onChange themselves when they land.
+  const stopListeningForDetach = attachRegistry.onChange(({ kind, entry }) => {
+    if (kind !== "detached") {
+      return;
+    }
+    tailManager.stop(entry.id);
+    approvals?.resolveSession(entry.id);
+    sessions.removeSession(entry.id);
+  });
   const httpServer = new HookHttpServer({
     port: config.httpPort,
     sessionCount: () => sessions.size,
@@ -186,6 +233,7 @@ export async function startDaemon(): Promise<RunningDaemon> {
     codex.start();
   } catch (error) {
     clearInterval(heartbeatTimer);
+    stopListeningForDetach();
     link.stop();
     await codex.stop();
     await httpServer.stop().catch(() => undefined);
@@ -207,12 +255,15 @@ export async function startDaemon(): Promise<RunningDaemon> {
   return {
     config,
     sessions,
+    attachRegistry,
+    isTailing: (sessionId) => tailManager.isTailing(sessionId),
     async stop() {
       if (stopped) {
         return;
       }
       stopped = true;
       clearInterval(heartbeatTimer);
+      stopListeningForDetach();
       await codex.stop();
       approvals?.dispose();
       link.stop();

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
+import { NotAttachedError } from "./attach-registry";
 import { SessionStore } from "./session-store";
 import type {
   ApprovalDecision,
@@ -285,7 +286,20 @@ export class WsHub {
 
   private async sendDetail(socket: WebSocket, sessionId: string): Promise<void> {
     const provider = this.options.detailProvider;
-    const messages = provider ? await provider(sessionId, DETAIL_MESSAGE_LIMIT) : [];
+    let messages: SessionMessage[] = [];
+    try {
+      messages = provider ? await provider(sessionId, DETAIL_MESSAGE_LIMIT) : [];
+    } catch (error) {
+      if (!(error instanceof NotAttachedError)) {
+        throw error;
+      }
+      const state = this.clients.get(socket);
+      if (state?.openSessionId === sessionId) {
+        state.openSessionId = undefined;
+      }
+      this.send(socket, { type: "detail_rejected", sessionId, error: "not_attached" });
+      return;
+    }
     const state = this.clients.get(socket);
     // The wearer may have left the conversation while the tail was being read.
     if (!state?.authenticated || state.openSessionId !== sessionId) {

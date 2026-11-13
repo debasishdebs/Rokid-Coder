@@ -1,6 +1,7 @@
 import path from "node:path";
 import type {
   AgentConfig,
+  AgentProvider,
   HookPayload,
   Logger,
   Session,
@@ -23,6 +24,15 @@ export interface DiscoveredSession {
   title?: string;
   lastActivityAt: number;
   transcriptPath?: string;
+}
+
+export interface SessionStoreOptions {
+  /**
+   * The opt-in check. A session that fails it is never stored, never listed and
+   * never published. Absent means everything is allowed, which only unit tests
+   * rely on; the daemon always passes the real registry.
+   */
+  isAttached?: (provider: AgentProvider, id: string) => boolean;
 }
 
 type UpsertListener = (session: Session) => void;
@@ -61,13 +71,16 @@ export class SessionStore {
   private readonly upsertListeners = new Set<UpsertListener>();
   private readonly removedListeners = new Set<RemovedListener>();
   private readonly now: () => number;
+  private readonly attached: (provider: AgentProvider, id: string) => boolean;
 
   constructor(
     private readonly config: Pick<AgentConfig, "machineId" | "machineName">,
     private readonly logger: Logger,
     now: () => number = Date.now,
+    options: SessionStoreOptions = {},
   ) {
     this.now = now;
+    this.attached = options.isAttached ?? (() => true);
   }
 
   get size(): number {
@@ -76,6 +89,7 @@ export class SessionStore {
 
   list(): Session[] {
     return [...this.records.values()]
+      .filter((record) => this.attached(record.session.provider, record.session.id))
       .map((record) => cloneSession(record.session))
       .sort((left, right) => right.lastActivityAt - left.lastActivityAt);
   }
@@ -100,7 +114,7 @@ export class SessionStore {
   }
 
   addDiscovered(discovered: DiscoveredSession): void {
-    if (this.records.has(discovered.id)) {
+    if (this.records.has(discovered.id) || !this.attached("claude", discovered.id)) {
       return;
     }
     const cwd = normalizeCwd(discovered.cwd);
@@ -132,6 +146,9 @@ export class SessionStore {
     }
     if (!sessionId) {
       this.logger.warn("hook_missing_session", { eventName });
+      return;
+    }
+    if (!this.attached("claude", sessionId)) {
       return;
     }
 
@@ -250,6 +267,9 @@ export class SessionStore {
     if (session.provider === "claude") {
       throw new Error("Claude sessions must use the hook and discovery paths");
     }
+    if (!this.attached(session.provider, session.id)) {
+      return;
+    }
     const snapshot = cloneSession(session);
     this.records.set(session.id, { session: snapshot });
     this.emitUpsert(snapshot);
@@ -340,6 +360,9 @@ export class SessionStore {
   }
 
   private emitUpsert(session: Session): void {
+    if (!this.attached(session.provider, session.id)) {
+      return;
+    }
     const snapshot = cloneSession(session);
     for (const listener of this.upsertListeners) {
       listener(snapshot);

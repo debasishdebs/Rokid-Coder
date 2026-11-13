@@ -8,6 +8,7 @@ import type {
   ApprovalOutcome,
   ApprovalRequest,
 } from "./approval-manager";
+import { NotAttachedError } from "./attach-registry";
 import { parsePhoneTarget, readPhoneLinkConfig } from "./config";
 import {
   listDirectory,
@@ -720,7 +721,19 @@ export class PhoneLink {
   }
 
   private async sendDetail(sessionId: string): Promise<void> {
-    const messages = await this.options.detailProvider(sessionId, DETAIL_MESSAGE_LIMIT);
+    let messages: SessionMessage[];
+    try {
+      messages = await this.options.detailProvider(sessionId, DETAIL_MESSAGE_LIMIT);
+    } catch (error) {
+      if (!(error instanceof NotAttachedError)) {
+        throw error;
+      }
+      if (this.openSessionId === sessionId) {
+        this.openSessionId = undefined;
+      }
+      this.send({ type: "detail_rejected", sessionId, error: "not_attached" });
+      return;
+    }
     this.options.logger.info("phone_link_detail_read", {
       sessionId: sessionId.slice(0, 8),
       messages: messages.length,
