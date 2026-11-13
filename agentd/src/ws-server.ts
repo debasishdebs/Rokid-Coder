@@ -12,6 +12,7 @@ import type {
   ApprovalRequest,
 } from "./approval-manager";
 import type { TerminalInputOutcome } from "./terminal-input";
+import { DETAIL_MESSAGE_LIMIT } from "./transcript-messages";
 import type { AgentConfig, Logger, Session, SessionMessage } from "./types";
 
 const PROTOCOL_VERSION = 1;
@@ -61,7 +62,6 @@ export interface WsHubOptions {
   onClientDisconnected?: () => void;
 }
 
-const DETAIL_MESSAGE_LIMIT = 40;
 
 function tokenMatches(received: unknown, expected: string): boolean {
   if (typeof received !== "string") {

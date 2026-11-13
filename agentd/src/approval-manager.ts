@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { ApprovalPolicy } from "./approval-policy";
+import { DEFAULT_WAIT_LIMIT_SEC } from "./config";
 import { sessionKeyOf, type SessionKey } from "./protocol-v2";
 import { truncateText } from "./session-store";
 import type { AgentProvider, HookPayload, Logger } from "./types";
 
-export const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
 export const MAX_PENDING_APPROVALS = 32;
 const MAX_TIMER_MS = 2_147_000_000;
 
@@ -67,6 +67,8 @@ interface PendingApproval {
   request: ApprovalRequest;
   timer: NodeJS.Timeout;
   resolve: (decision: ApprovalDecision | undefined) => void;
+  /** Stops listening for the hook's connection to drop. */
+  release?: () => void;
 }
 
 /**
@@ -85,6 +87,7 @@ export interface ApprovalManagerOptions {
   transport: ApprovalTransport;
   observer?: ApprovalObserver;
   logger: Logger;
+  /** How long a request waits for the phone: the wait limit Y, which the phone's settings can change. */
   timeoutMs?: number;
   now?: () => number;
   requestId?: () => string;
@@ -225,25 +228,19 @@ function decisionResponse(decision: ApprovalDecision): HookResponse {
   };
 }
 
-export function approvalTimeoutFromEnv(value = process.env.NEXUS_AGENTD_APPROVAL_TIMEOUT_MS): number {
-  if (value === undefined || value.trim() === "") {
-    return DEFAULT_APPROVAL_TIMEOUT_MS;
-  }
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= MAX_TIMER_MS
-    ? parsed
-    : DEFAULT_APPROVAL_TIMEOUT_MS;
+function validTimeout(ms: number | undefined): number | undefined {
+  return typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.min(Math.round(ms), MAX_TIMER_MS) : undefined;
 }
 
 export class ApprovalManager {
   private readonly pending = new Map<string, PendingApproval>();
-  private readonly timeoutMs: number;
+  private waitLimitMs: number;
   private readonly now: () => number;
   private readonly makeRequestId: () => string;
   private readonly maxPending: number;
 
   constructor(private readonly options: ApprovalManagerOptions) {
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+    this.waitLimitMs = validTimeout(options.timeoutMs) ?? DEFAULT_WAIT_LIMIT_SEC * 1000;
     this.now = options.now ?? Date.now;
     this.makeRequestId = options.requestId ?? randomUUID;
     this.maxPending = options.maxPending ?? MAX_PENDING_APPROVALS;
@@ -253,7 +250,22 @@ export class ApprovalManager {
     return this.pending.size;
   }
 
-  request(payload: HookPayload): Promise<HookResponse> {
+  /** The lifetime a request made now gets. */
+  get timeoutMs(): number {
+    return this.waitLimitMs;
+  }
+
+  /** Applies to requests made from now on; one already waiting keeps the lifetime it started with. */
+  setTimeoutMs(ms: number): void {
+    this.waitLimitMs = validTimeout(ms) ?? this.waitLimitMs;
+  }
+
+  /**
+   * `closed` is the hook's own connection: it drops when Claude gives up on the
+   * hook, which happens once the person answers at the laptop, so it ends the
+   * request as answered locally.
+   */
+  request(payload: HookPayload, closed?: AbortSignal): Promise<HookResponse> {
     const sessionId =
       typeof payload.session_id === "string" && payload.session_id.length > 0
         ? payload.session_id
@@ -280,7 +292,7 @@ export class ApprovalManager {
       createdAt: this.now(),
     };
 
-    return this.requestDecision(request).then((decision) =>
+    return this.requestDecision(request, closed).then((decision) =>
       decision ? decisionResponse(decision) : {},
     );
   }
@@ -289,7 +301,7 @@ export class ApprovalManager {
    * Shares the phone approval lifecycle with providers whose native response
    * contract is not Claude's PreToolUse hook contract.
    */
-  requestDecision(request: ApprovalRequest): Promise<ApprovalDecision | undefined> {
+  requestDecision(request: ApprovalRequest, closed?: AbortSignal): Promise<ApprovalDecision | undefined> {
     // Ahead of every phone check: a session on approve-all or accept-edits is
     // answered here, whether or not a phone is connected to ask.
     if (this.options.policy?.decide(request.sessionKey, request) === "allow") {
@@ -299,6 +311,10 @@ export class ApprovalManager {
         approvalKind: request.approvalKind,
       });
       return Promise.resolve("allow");
+    }
+    if (closed?.aborted) {
+      this.options.logger.info("approval_local", { reason: "hook_closed" });
+      return Promise.resolve(undefined);
     }
     if (!this.options.transport.connected) {
       this.options.logger.info("approval_local", { reason: "phone_not_connected" });
@@ -317,9 +333,15 @@ export class ApprovalManager {
     }
 
     return new Promise<ApprovalDecision | undefined>((resolve) => {
-      const timer = setTimeout(() => this.onTimeout(request.requestId), this.timeoutMs);
+      const timer = setTimeout(() => this.onTimeout(request.requestId), this.waitLimitMs);
       timer.unref();
-      this.pending.set(request.requestId, { request, timer, resolve });
+      const pending: PendingApproval = { request, timer, resolve };
+      if (closed) {
+        const onAbort = () => this.resolveLocal(request.requestId, "hook_closed", true);
+        closed.addEventListener("abort", onAbort, { once: true });
+        pending.release = () => closed.removeEventListener("abort", onAbort);
+      }
+      this.pending.set(request.requestId, pending);
       if (!this.options.transport.sendApprovalRequest(toWireFrame(request))) {
         this.resolveLocal(request.requestId, "send_failed", false);
         return;
@@ -424,6 +446,7 @@ export class ApprovalManager {
     }
     this.pending.delete(requestId);
     clearTimeout(pending.timer);
+    pending.release?.();
     return pending;
   }
 }

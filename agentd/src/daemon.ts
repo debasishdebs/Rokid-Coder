@@ -2,7 +2,6 @@ import { homedir } from "node:os";
 import path from "node:path";
 import {
   ApprovalManager,
-  approvalTimeoutFromEnv,
   type ApprovalTransport,
   type HookResponse,
 } from "./approval-manager";
@@ -24,7 +23,7 @@ import { PhoneV2, type PhoneOutlet } from "./phone-v2";
 import { PhoneSettingsStore } from "./phone-settings";
 import { QuestionRelay } from "./question-relay";
 import { TranscriptTailManager, readTranscriptHeading } from "./transcript";
-import { readRecentMessages } from "./transcript-messages";
+import { DETAIL_MESSAGE_LIMIT, readRecentMessages } from "./transcript-messages";
 import { sessionKeyOf } from "./protocol-v2";
 import type { AgentProvider, HookPayload } from "./types";
 import { WsHub } from "./ws-server";
@@ -56,6 +55,8 @@ export interface RunningDaemon {
   codex: CodexMonitor;
   /** Phone protocol v2: inbound frames, alerts and session enrichment for both transports. */
   phoneV2: PhoneV2;
+  /** Held tool approvals; each lives for the wait limit Y and ends with its alert. */
+  approvals: ApprovalManager;
   isTailing(sessionId: string): boolean;
   stop(): Promise<void>;
 }
@@ -72,6 +73,7 @@ export interface DaemonOptions {
 }
 
 const APPLIED_ID_RETENTION_MS = 24 * 60 * 60 * 1000;
+const MAX_QUEUED_RESET_NOTICES = 64;
 
 export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<RunningDaemon> {
   const stateDir = defaultStateDir();
@@ -95,6 +97,11 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   const endApprovalSession = (provider: AgentProvider, id: string): void => {
     const notice = approvalPolicy.endSession(sessionKeyOf(provider, id));
     if (notice) {
+      // They wait here while no phone is connected, so a phone that never comes
+      // back must not let them pile up for good.
+      if (queuedResetNotices.length >= MAX_QUEUED_RESET_NOTICES) {
+        queuedResetNotices.shift();
+      }
       queuedResetNotices.push(notice);
       logger.info("approval_mode_reset", { reason: notice.reason, from: notice.from });
     }
@@ -165,6 +172,31 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     const transcriptPath = sessions.transcriptPath(sessionId);
     return transcriptPath ? readRecentMessages(transcriptPath, limit) : [];
   };
+  // The tail only sees what is appended from now on, so a session attached mid-
+  // conversation, or one the phone lost for a while, starts without the last
+  // thing the assistant said. Rebuild that from the transcript's recent messages.
+  // Tailing is already running when this reads, so nothing falls between the two;
+  // a value the tail has already set is newer and is left alone.
+  const seedRecentMessages = async (sessionId: string, transcriptPath: string): Promise<void> => {
+    const recent = await readRecentMessages(transcriptPath, DETAIL_MESSAGE_LIMIT);
+    let last: (typeof recent)[number] | undefined;
+    for (const message of recent) {
+      if (message.role === "assistant") {
+        last = message;
+      }
+    }
+    if (last && !sessions.get(sessionId)?.lastAssistantText) {
+      sessions.applyTranscriptUpdate(sessionId, { activityAt: last.at, lastAssistantText: last.text });
+    }
+  };
+  const rebuildAttachedClaudeSessions = (): void => {
+    for (const entry of attachRegistry.list()) {
+      const transcriptPath = entry.provider === "claude" ? sessions.transcriptPath(entry.id) : undefined;
+      if (transcriptPath) {
+        void seedRecentMessages(entry.id, transcriptPath);
+      }
+    }
+  };
   // Reading a conversation also starts tailing it, so the view stays live
   // even for a session that had been quiet since the daemon started.
   // The live tail starts at the end of the file, so a session attached mid-
@@ -178,6 +210,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
           sessions.seedHeading(sessionId, heading);
         }
       });
+      void seedRecentMessages(sessionId, transcriptPath);
     }
   };
   const onDetailOpen = (sessionId: string) => {
@@ -195,13 +228,17 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       logger,
       // The block ends the turn, so no further hook would show the session
       // to the phone until the user's next prompt.
-      onAttached: (hook, id) =>
+      onAttached: (hook, id) => {
         sessions.handleHook({
           session_id: id,
           cwd: hook.cwd,
           transcript_path: hook.transcript_path,
           hook_event_name: "SessionStart",
-        }),
+        });
+        if (typeof hook.transcript_path === "string") {
+          void seedRecentMessages(id, hook.transcript_path);
+        }
+      },
     });
     if (attachReply) {
       return attachReply;
@@ -247,7 +284,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       if (payload.tool_name === "AskUserQuestion") {
         return {};
       }
-      return approvals?.request(payload) ?? {};
+      return approvals?.request(payload, closed) ?? {};
     }
     // Only a Claude session that is attached gets here, so these are the only
     // sessions that wait for the glasses. The attach commands were answered
@@ -292,6 +329,28 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     decorate: (session: Parameters<PhoneV2["decorate"]>[0]) => phoneV2?.decorate(session) ?? { ...session },
   };
 
+  // A phone came up on either transport: it gets what was waiting for one (open
+  // approvals, queued alerts, resets nobody has been told about) and Claude
+  // sessions are rebuilt from their transcripts, since the tail only sees new lines.
+  const onPhoneConnected = (): void => {
+    approvals?.onLinkConnected();
+    phoneV2?.onChannelConnected();
+    rebuildAttachedClaudeSessions();
+  };
+  // A phone went away on either transport. Pending approvals fall back to the
+  // laptop prompt and their alerts expire, unless the other transport still has
+  // a phone: expiring something that can still be answered would only cost the
+  // wearer the answer. Frames go to the dialled link when it is up, so only its
+  // loss strands anything; then the other phone is sent what the link held.
+  const onPhoneDisconnected = (lostDialledLink: boolean): void => {
+    if (!phoneConnected()) {
+      approvals?.onLinkDisconnected();
+    } else if (lostDialledLink) {
+      approvals?.onLinkConnected();
+      phoneV2?.onChannelConnected();
+    }
+  };
+
   const hub = new WsHub(config, sessions, logger, {
     detailProvider,
     onDetailOpen,
@@ -299,15 +358,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onTerminalInput: typeIntoSession,
     trusted,
     v2: v2Hooks,
-    onClientConnected: () => {
-      approvals?.onLinkConnected();
-      phoneV2?.onChannelConnected();
-    },
-    onClientDisconnected: () => {
-      if (!phoneConnected()) {
-        approvals?.onLinkDisconnected();
-      }
-    },
+    onClientConnected: onPhoneConnected,
+    onClientDisconnected: () => onPhoneDisconnected(false),
   });
   wsHub = hub;
   const link = new PhoneLink({
@@ -331,11 +383,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onTerminalInput: typeIntoSession,
     trusted,
     v2: v2Hooks,
-    onConnected: () => {
-      approvals?.onLinkConnected();
-      phoneV2?.onChannelConnected();
-    },
-    onDisconnected: () => approvals?.onLinkDisconnected(),
+    onConnected: onPhoneConnected,
+    onDisconnected: () => onPhoneDisconnected(true),
   });
   phoneLink = link;
   // Either direction can carry an approval. The daemon dials the phone on the
@@ -360,7 +409,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   approvals = new ApprovalManager({
     transport: approvalTransport,
     logger,
-    timeoutMs: approvalTimeoutFromEnv(),
+    // The phone's synced wait limit replaces this as soon as PhoneV2 starts.
+    timeoutMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
     policy: approvalPolicy,
     observer: {
       onPending: (request) => phoneV2?.approvalObserver.onPending(request),
@@ -484,6 +534,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     questionRelay,
     codex,
     phoneV2: phone,
+    approvals,
     takeResetNotices,
     isTailing: (sessionId) => tailManager.isTailing(sessionId),
     async stop() {

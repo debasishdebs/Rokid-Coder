@@ -2,9 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   ApprovalManager,
-  DEFAULT_APPROVAL_TIMEOUT_MS,
   MAX_PENDING_APPROVALS,
-  approvalTimeoutFromEnv,
   describeTool,
 } = require("../dist/approval-manager.js");
 const { silentLogger } = require("../dist/logger.js");
@@ -193,13 +191,57 @@ test("tool descriptions are concise projections rather than whole hook payloads"
   assert.match(custom.detail, /rollout: \{"percent":25\}/);
 });
 
-test("approval timeout defaults to 120 seconds and accepts a positive environment override", () => {
-  assert.equal(DEFAULT_APPROVAL_TIMEOUT_MS, 120_000);
-  assert.equal(approvalTimeoutFromEnv(undefined), 120_000);
-  assert.equal(approvalTimeoutFromEnv("45000"), 45_000);
-  assert.equal(approvalTimeoutFromEnv("invalid"), 120_000);
-  assert.equal(approvalTimeoutFromEnv("-1"), 120_000);
-  assert.equal(approvalTimeoutFromEnv("999999999999"), 120_000);
+test("approval timeout is the wait limit: 30 minutes by default, and the next request follows a change", async () => {
+  const { manager } = harness();
+  assert.equal(manager.timeoutMs, 1_800_000);
+  manager.setTimeoutMs(45_000);
+  assert.equal(manager.timeoutMs, 45_000);
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    manager.setTimeoutMs(bad);
+    assert.equal(manager.timeoutMs, 45_000, `${bad} is not a limit`);
+  }
+  manager.setTimeoutMs(999_999_999_999);
+  assert.equal(manager.timeoutMs, 2_147_000_000, "never past what a timer can hold");
+
+  // A request already waiting keeps the lifetime it started with.
+  const first = harness({ timeoutMs: 20 });
+  const waiting = first.manager.request(bashHook());
+  first.manager.setTimeoutMs(60_000);
+  assert.deepEqual(await Promise.race([
+    waiting,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("kept the old lifetime too long")), 250)),
+  ]), {});
+});
+
+test("a hook that hangs up ends its request locally and tells the phone", async () => {
+  const { manager, transport } = harness();
+  const closed = new AbortController();
+  const result = manager.request(bashHook(), closed.signal);
+  assert.equal(manager.size, 1);
+  closed.abort("cancelled");
+  assert.deepEqual(await result, {});
+  assert.equal(manager.size, 0);
+  assert.deepEqual(transport.frames.at(-1), {
+    type: "approval_resolved",
+    v: 1,
+    requestId: "request-1",
+    outcome: "local",
+  });
+
+  const already = new AbortController();
+  already.abort("cancelled");
+  const fresh = harness();
+  assert.deepEqual(await fresh.manager.request(bashHook(), already.signal), {});
+  assert.deepEqual(fresh.transport.frames, [], "nothing is asked of the phone for a hook that is gone");
+
+  // An answered request no longer reacts to its hook closing.
+  const answered = harness();
+  const signal = new AbortController();
+  const decided = answered.manager.request(bashHook(), signal.signal);
+  answered.manager.handleDecision("request-1", "allow");
+  await decided;
+  signal.abort("cancelled");
+  assert.equal(answered.transport.frames.filter((f) => f.type === "approval_resolved").length, 0);
 });
 
 test("provider-native approvals share timeout and link-loss handling without Claude responses", async () => {

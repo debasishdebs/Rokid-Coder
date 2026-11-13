@@ -226,6 +226,9 @@ export function extractMessage(value: unknown, now: number = Date.now()): Sessio
   return undefined;
 }
 
+/** How many recent messages a phone's detail view (and a rebuild after a gap) holds. */
+export const DETAIL_MESSAGE_LIMIT = 40;
+
 /** Reads the tail of a transcript and returns its last [limit] messages. */
 export async function readRecentMessages(
   filePath: string,

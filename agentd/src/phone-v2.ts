@@ -39,6 +39,8 @@ const MAX_ANSWER_ENTRIES = 32;
 const MAX_ANSWER_CHARS = 4000;
 const FORBIDDEN_ANSWER_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
 const MAX_SETTING_CHARS = 100;
+/** Alerts remembered as expired, so a late answer can be told apart from an id nobody ever sent. */
+const MAX_EXPIRED_ALERTS = 256;
 const HEADING_FALLBACK_CHARS = 48;
 /**
  * Codex reasoning efforts a turn/start takes. Static until the live check
@@ -110,6 +112,7 @@ export class PhoneV2 {
   private readonly questionAlerts = new Map<string, string>();
   private readonly doneAlerts = new Map<SessionKey, string>();
   private readonly lastError = new Map<string, string>();
+  private readonly expiredApprovalAlerts = new Set<string>();
   private readonly now: () => number;
   private tickTimer?: NodeJS.Timeout;
   private readonly unsubscribe: Array<() => void> = [];
@@ -127,6 +130,7 @@ export class PhoneV2 {
     // default approval modes reach sessions that were attached before this start.
     deps.stopWait.setWaitLimitMs(settings.waitLimitMs);
     deps.questionRelay.setWaitLimitMs(settings.waitLimitMs);
+    deps.approvals.setTimeoutMs(settings.waitLimitMs);
     deps.approvalPolicy.setDefaults(settings.defaultModes);
     for (const entry of deps.attachRegistry.list()) {
       deps.approvalPolicy.applyDefault(sessionKeyOf(entry.provider, entry.id));
@@ -212,8 +216,15 @@ export class PhoneV2 {
     this.flushResets();
   }
 
-  /** Drains queued resets into `mode_reset` frames and `notice` alerts. */
+  /**
+   * Drains queued resets into `mode_reset` frames and `notice` alerts. With no
+   * phone connected they stay queued: draining them then would spend the
+   * notices on frames nobody receives, and the user would never be told.
+   */
   flushResets(): void {
+    if (!this.deps.outlet.connected) {
+      return;
+    }
     for (const notice of this.deps.takeResetNotices()) {
       this.announceReset(notice);
     }
@@ -345,13 +356,17 @@ export class PhoneV2 {
       if (outcome === "allow" || outcome === "deny") {
         this.alerts.onActed(id);
       } else {
-        this.alerts.withdraw(id, outcome === "timeout" ? "expired" : "withdrawn");
+        // A request nobody answered in time, or one a dropped link left behind, is
+        // "expired"; one the laptop or the session itself ended is "withdrawn".
+        this.alerts.withdraw(id, outcome === "timeout" || reason === "phone_disconnected" ? "expired" : "withdrawn");
       }
     }
     if (reason === "phone_disconnected") {
+      // Waits in the queue for the phone to come back; the approval itself is
+      // already back at the laptop's own prompt.
       this.pushAlert(request.sessionKey, "notice", {
         title: "Approval expired",
-        body: `${request.tool} was not answered before the phone disconnected. Answer it at the laptop.`,
+        body: "Answer on laptop",
       });
     }
   }
@@ -372,6 +387,9 @@ export class PhoneV2 {
     this.bindings.delete(alert.id);
     if (binding?.kind === "approval") {
       this.approvalAlerts.delete(binding.requestId);
+      if (reason !== "acted") {
+        this.rememberExpired(alert.id);
+      }
     } else if (binding?.kind === "question") {
       this.questionAlerts.delete(`${alert.sessionKey}|${binding.requestRef}`);
     } else if (binding?.kind === "done" && this.doneAlerts.get(alert.sessionKey) === alert.id) {
@@ -380,6 +398,13 @@ export class PhoneV2 {
     // A dismiss is the glasses' own doing; every other end is news to the phone.
     if (reason !== "dismissed") {
       this.deps.outlet.send({ type: "alert_closed", v: 2, id: alert.id, reason });
+    }
+  }
+
+  private rememberExpired(alertId: string): void {
+    this.expiredApprovalAlerts.add(alertId);
+    if (this.expiredApprovalAlerts.size > MAX_EXPIRED_ALERTS) {
+      this.expiredApprovalAlerts.delete(this.expiredApprovalAlerts.values().next().value as string);
     }
   }
 
@@ -520,6 +545,11 @@ export class PhoneV2 {
     const alertId = nonEmptyString(frame.id, MAX_MSG_ID_CHARS);
     const alert = alertId ? this.alerts.get(alertId) : undefined;
     const binding = alertId ? this.bindings.get(alertId) : undefined;
+    if (alertId && !alert && this.expiredApprovalAlerts.has(alertId)) {
+      // The request ended without this answer (laptop, timeout, a dropped link):
+      // the glasses may still be showing the alert, and a late allow must not land anywhere.
+      return fail("expired");
+    }
     if (!alertId || !alert || !binding) {
       return fail("unknown_alert");
     }
@@ -730,6 +760,7 @@ export class PhoneV2 {
     this.alerts.setTimings(parsedTimings);
     this.deps.stopWait.setWaitLimitMs(waitLimitMs);
     this.deps.questionRelay.setWaitLimitMs(waitLimitMs);
+    this.deps.approvals.setTimeoutMs(waitLimitMs);
     this.ack(channel, msgId, "applied");
   }
 

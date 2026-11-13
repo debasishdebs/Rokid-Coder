@@ -1,6 +1,6 @@
 import { condense, toolSummary } from "../transcript-messages";
 import type { SessionMessage } from "../types";
-import type { Thread } from "./protocol";
+import type { Thread, Turn } from "./protocol";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -193,20 +193,32 @@ export function extractCodexMessage(
   return undefined;
 }
 
-export function codexThreadMessages(thread: Thread, limit: number): SessionMessage[] {
+/** The displayable messages of one turn, in order; `threadAt` (ms) stands in for a turn with no time. */
+export function codexTurnMessages(turn: Turn, threadAt: number): SessionMessage[] {
+  const turnAt = timestampFrom(turn.startedAt ?? turn.completedAt, threadAt);
+  const messages: SessionMessage[] = [];
+  for (const item of turn.items) {
+    const message = extractCodexMessage(item, turnAt);
+    if (message) {
+      messages.push(message);
+    }
+  }
+  return messages;
+}
+
+/**
+ * The last `limit` messages of `turns`, which must be oldest first. `threadUpdatedAt`
+ * (the thread's own `updatedAt`, seconds) stands in for a turn that has no time.
+ */
+export function codexTurnsMessages(turns: Turn[], limit: number, threadUpdatedAt: number): SessionMessage[] {
   if (!Number.isFinite(limit) || limit <= 0) {
     return [];
   }
-  const threadAt = timestampFrom(thread.updatedAt, Date.now());
-  const messages: SessionMessage[] = [];
-  for (const turn of thread.turns) {
-    const turnAt = timestampFrom(turn.startedAt ?? turn.completedAt, threadAt);
-    for (const item of turn.items) {
-      const message = extractCodexMessage(item, turnAt);
-      if (message) {
-        messages.push(message);
-      }
-    }
-  }
+  const threadAt = timestampFrom(threadUpdatedAt, Date.now());
+  const messages = turns.flatMap((turn) => codexTurnMessages(turn, threadAt));
   return messages.slice(-Math.floor(limit));
+}
+
+export function codexThreadMessages(thread: Thread, limit: number): SessionMessage[] {
+  return codexTurnsMessages(thread.turns, limit, thread.updatedAt);
 }

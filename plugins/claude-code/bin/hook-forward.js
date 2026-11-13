@@ -4,7 +4,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const node_http_1 = require("node:http");
 // The plugins ship a copy of this file with no node_modules and no sibling
 // modules next to it, so it may import only node:* built-ins. The defaults
-// below mirror approval-manager; a test pins the "no relative require" rule.
+// below are only the fallback for a forwarder run by hand: the plugins always set
+// ROKID_CODER_HOOK_DEADLINE_MS past the wait limit Y (up to an hour). A test pins
+// the "no relative require" rule.
 const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
 const MAX_TIMER_MS = 2_147_000_000;
 function positiveTimerMs(value) {

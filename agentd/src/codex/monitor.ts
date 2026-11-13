@@ -30,7 +30,8 @@ import type {
   ThreadStartResult,
 } from "../types";
 import { daemonEndpoint, resolveDaemonSocketPath } from "./daemon-socket";
-import { codexThreadMessages } from "./messages";
+import { DETAIL_MESSAGE_LIMIT } from "../transcript-messages";
+import { codexThreadMessages, codexTurnMessages, codexTurnsMessages } from "./messages";
 import type {
   AdditionalFileSystemPermissions,
   AdditionalNetworkPermissions,
@@ -46,6 +47,7 @@ import type {
   ThreadResumeResponse,
   ThreadStartParams,
   ThreadStartResponse,
+  ThreadTurnsListResponse,
   Turn,
   TurnStartParams,
   TurnStatus,
@@ -76,6 +78,11 @@ const MAX_ROLLOUT_RETRIES = 12;
 const CLIENT_VERSION = "0.1.0";
 const RUN_CODEX_TIMEOUT_MS = 15_000;
 const MAX_MODEL_PAGES = 10;
+// thread/resume replays nothing, so what happened while we were away is read back
+// with thread/turns/list: newest turns first, a few at a time, until enough
+// messages are held to fill the detail view (or the thread starts).
+const HISTORY_PAGE_TURNS = 20;
+const MAX_HISTORY_PAGES = 10;
 
 export interface CodexAvailability {
   enabled: boolean;
@@ -523,6 +530,9 @@ export class CodexMonitor {
   // Threads whose context fill has come from a live event, which the (older)
   // rollout seed must never overwrite.
   private readonly liveContext = new Set<string>();
+  // What the assistant said last, read back from history and kept current by
+  // item/completed, so the phone's Done alert has something to say.
+  private readonly lastAssistant = new Map<string, string>();
   private readonly pendingSettings = new Map<string, FollowUpSettings>();
   private readonly appliedSettings = new Map<string, FollowUpSettings>();
   private readonly nativeModes = new Map<string, string>();
@@ -754,6 +764,7 @@ export class CodexMonitor {
     this.rolloutAttempts.delete(threadId);
     this.contextByThread.delete(threadId);
     this.liveContext.delete(threadId);
+    this.lastAssistant.delete(threadId);
     this.pendingSettings.delete(threadId);
     this.appliedSettings.delete(threadId);
     this.nativeModes.delete(threadId);
@@ -765,6 +776,14 @@ export class CodexMonitor {
   async readMessages(threadId: string, limit: number): Promise<SessionMessage[]> {
     if (!this.state.available || this.stopped || !this.socket || limit <= 0) {
       return [];
+    }
+    // The shared daemon resumes without turns, so its history is only reachable
+    // by paging; an embedded server hydrates the thread itself.
+    if (this.options.config.codex.useSharedDaemon) {
+      const turns = await this.recentTurns(threadId, limit);
+      if (turns) {
+        return codexTurnsMessages(turns, limit, this.threads.get(threadId)?.updatedAt ?? this.now() / 1000);
+      }
     }
     const response = await this.request<ThreadReadResponse>("thread/read", {
       threadId,
@@ -822,6 +841,7 @@ export class CodexMonitor {
     this.rolloutAttempts.clear();
     this.contextByThread.clear();
     this.liveContext.clear();
+    this.lastAssistant.clear();
     this.pendingSettings.clear();
     this.appliedSettings.clear();
     this.closeQuestions("cancelled");
@@ -1114,6 +1134,9 @@ export class CodexMonitor {
     this.clearSweep();
     this.clearRolloutRetry();
     this.subscribing.clear();
+    // The live fill is only as fresh as the connection that carried it: whatever
+    // happened while we were away is in the rollout, which the resubscribe re-reads.
+    this.liveContext.clear();
     this.rejectPendingRpc(new Error("Codex app-server connection closed"));
     this.resolveAllApprovals("codex_connection_closed");
     this.closeQuestions("cancelled");
@@ -1274,6 +1297,11 @@ export class CodexMonitor {
         reason: errorMessage(error),
       });
     }
+    const recent = await this.recentTurns(threadId, DETAIL_MESSAGE_LIMIT);
+    if (recent && recent.length > 0) {
+      thread = { ...thread, turns: recent };
+      this.rememberLastAssistant(threadId, recent, thread.updatedAt);
+    }
     if (this.stopped || !this.options.isAttached(threadId)) {
       return false;
     }
@@ -1287,6 +1315,56 @@ export class CodexMonitor {
     }
     this.options.logger.info("codex_thread_subscribed", { threadId });
     return true;
+  }
+
+  /**
+   * The thread's recent history, oldest turn first: pages of thread/turns/list
+   * are read newest first until `messageLimit` displayable messages are held or
+   * the thread starts. Undefined when the server cannot list turns, so callers
+   * keep what thread/read gave them.
+   */
+  private async recentTurns(threadId: string, messageLimit: number): Promise<Turn[] | undefined> {
+    const newestFirst: Turn[] = [];
+    let messages = 0;
+    let cursor: string | null = null;
+    try {
+      for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+        const response: ThreadTurnsListResponse = await this.request<ThreadTurnsListResponse>(
+          "thread/turns/list",
+          {
+            threadId,
+            cursor,
+            limit: HISTORY_PAGE_TURNS,
+            sortDirection: "desc",
+            itemsView: "full",
+          },
+        );
+        for (const turn of response.data) {
+          newestFirst.push(turn);
+          messages += codexTurnMessages(turn, 0).length;
+        }
+        cursor = response.nextCursor;
+        if (messages >= messageLimit || !cursor || response.data.length === 0) {
+          break;
+        }
+      }
+    } catch (error) {
+      this.options.logger.info("codex_turns_list_failed", { threadId, reason: errorMessage(error) });
+      return undefined;
+    }
+    return newestFirst.reverse();
+  }
+
+  private rememberLastAssistant(threadId: string, turns: Turn[], threadAt: number): void {
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const messages = codexTurnMessages(turns[index], threadAt * 1000);
+      for (let at = messages.length - 1; at >= 0; at -= 1) {
+        if (messages[at].role === "assistant") {
+          this.lastAssistant.set(threadId, messages[at].text);
+          return;
+        }
+      }
+    }
   }
 
   /**
@@ -1586,6 +1664,7 @@ export class CodexMonitor {
       case "item/completed": {
         const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
         if (threadId) {
+          this.noteAssistantText(threadId, asRecord(params.item));
           this.handleCompletedItem(threadId, asRecord(params.item));
         }
         break;
@@ -1729,6 +1808,16 @@ export class CodexMonitor {
 
   // 0.169 delivers request_user_input as a finished agentMessage whose
   // questions[] the TUI renders as text; the answer is an ordinary follow-up.
+  private noteAssistantText(threadId: string, item: Record<string, unknown> | undefined): void {
+    if (item?.type !== "agentMessage" || typeof item.text !== "string" || !item.text.trim()) {
+      return;
+    }
+    if (this.options.isAttached(threadId) && this.threads.has(threadId)) {
+      this.lastAssistant.set(threadId, item.text);
+      this.publishThread(threadId);
+    }
+  }
+
   private handleCompletedItem(threadId: string, item: Record<string, unknown> | undefined): void {
     if (
       !item ||
@@ -1949,8 +2038,10 @@ export class CodexMonitor {
     const heading = truncateText(thread.name?.trim() || thread.preview.trim(), 120);
     const pendingSettings = this.pendingSettings.get(threadId);
     const context = this.contextByThread.get(threadId);
+    const lastAssistantText = this.lastAssistant.get(threadId);
     this.options.store.upsertProviderSession({
       ...base,
+      ...(lastAssistantText ? { lastAssistantText: truncateText(lastAssistantText, 140) } : {}),
       ...(heading ? { heading } : {}),
       ...this.steps.get(threadId),
       ...(context ? { context: { ...context } } : {}),

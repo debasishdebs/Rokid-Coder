@@ -20,6 +20,7 @@ import {
 import type { SessionStore } from "./session-store";
 import type { TerminalInputOutcome } from "./terminal-input";
 import { TailscalePeerDiscovery } from "./tailnet-discovery";
+import { DETAIL_MESSAGE_LIMIT } from "./transcript-messages";
 import type {
   AgentConfig,
   AgentProvider,
@@ -44,7 +45,6 @@ export const TAILNET_REFRESH_INTERVAL_MS = 60_000;
 const RECONNECT_DELAY_MS = 3000;
 export const PHONE_HELLO_TIMEOUT_MS = 15_000;
 export const REFUSAL_RECONNECT_DELAY_MS = 60_000;
-const DETAIL_MESSAGE_LIMIT = 40;
 const MAX_LINE_BYTES = 512 * 1024;
 export const MAX_PHONE_SESSIONS_PER_PROVIDER = 200;
 export const THREAD_START_TIMEOUT_MS = 30_000;

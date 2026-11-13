@@ -72,6 +72,12 @@ export interface ThreadReadResponse {
   thread: Thread;
 }
 
+export interface ThreadTurnsListResponse {
+  data: Turn[];
+  nextCursor: string | null;
+  backwardsCursor: string | null;
+}
+
 export interface ThreadResumeResponse {
   thread: Thread;
   model: string;
