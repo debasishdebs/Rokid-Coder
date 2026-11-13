@@ -43,6 +43,15 @@ export interface Session {
 export interface CodexConfig {
   enabled: boolean;
   port: number;
+  /** Attach to the user's running Codex daemon instead of spawning our own. */
+  useSharedDaemon: boolean;
+  /** Overrides the shared daemon's control socket; absent means Codex's default. */
+  socketPath?: string;
+}
+
+export interface RokidCoderConfig {
+  /** Where Rokid-Coder keeps its own state (attached.json, applied-ids.json, tls/). */
+  stateDir: string;
 }
 
 export interface AgentConfig {
@@ -60,6 +69,7 @@ export interface AgentConfig {
    */
   allowTerminalInput: boolean;
   codex: CodexConfig;
+  rokidCoder: RokidCoderConfig;
 }
 
 export interface HookPayload {

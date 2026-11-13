@@ -14,7 +14,7 @@ test("new and upgraded configs apply optional integration defaults", async () =>
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "nexus-agentd-config-"));
   try {
     const fresh = ensureConfig(tempDir);
-    assert.deepEqual(fresh.codex, { enabled: false, port: DEFAULT_CODEX_PORT });
+    assert.deepEqual(fresh.codex, { enabled: false, port: DEFAULT_CODEX_PORT, useSharedDaemon: true });
     assert.deepEqual(fresh.phoneHosts, []);
     assert.equal(fresh.tailnetDiscovery, true);
 
@@ -27,11 +27,11 @@ test("new and upgraded configs apply optional integration defaults", async () =>
     };
     await fsp.writeFile(configPath(tempDir), `${JSON.stringify(legacy)}\n`);
     const upgraded = ensureConfig(tempDir);
-    assert.deepEqual(upgraded.codex, { enabled: false, port: DEFAULT_CODEX_PORT });
+    assert.deepEqual(upgraded.codex, { enabled: false, port: DEFAULT_CODEX_PORT, useSharedDaemon: true });
     assert.deepEqual(upgraded.phoneHosts, []);
     assert.equal(upgraded.tailnetDiscovery, true);
     const persisted = JSON.parse(await fsp.readFile(configPath(tempDir), "utf8"));
-    assert.deepEqual(persisted.codex, { enabled: false, port: DEFAULT_CODEX_PORT });
+    assert.deepEqual(persisted.codex, { enabled: false, port: DEFAULT_CODEX_PORT, useSharedDaemon: true });
     assert.deepEqual(persisted.phoneHosts, []);
     assert.equal(persisted.tailnetDiscovery, true);
   } finally {
@@ -88,9 +88,9 @@ test("Codex configuration uses the existing config file and validates its loopba
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "nexus-agentd-config-"));
   try {
     const config = ensureConfig(tempDir);
-    config.codex = { enabled: true, port: 18490 };
+    config.codex = { enabled: true, port: 18490, useSharedDaemon: true };
     await fsp.writeFile(configPath(tempDir), `${JSON.stringify(config)}\n`);
-    assert.deepEqual(ensureConfig(tempDir).codex, { enabled: true, port: 18490 });
+    assert.deepEqual(ensureConfig(tempDir).codex, { enabled: true, port: 18490, useSharedDaemon: true });
 
     config.codex.port = 0;
     await fsp.writeFile(configPath(tempDir), `${JSON.stringify(config)}\n`);

@@ -14,6 +14,10 @@ export function defaultStateDir(): string {
   return process.env.NEXUS_AGENTD_STATE_DIR || path.join(homedir(), ".nexus-agentd");
 }
 
+export function defaultRokidCoderStateDir(): string {
+  return path.join(homedir(), ".rokid-coder");
+}
+
 export function configPath(stateDir = defaultStateDir()): string {
   return path.join(stateDir, "config.json");
 }
@@ -31,8 +35,20 @@ function newConfig(): AgentConfig {
     codex: {
       enabled: false,
       port: DEFAULT_CODEX_PORT,
+      useSharedDaemon: true,
     },
+    rokidCoder: { stateDir: defaultRokidCoderStateDir() },
   };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function expandHome(value: string): string {
+  return value === "~" || value.startsWith("~/")
+    ? path.join(homedir(), value.slice(1))
+    : value;
 }
 
 function isPort(value: unknown): value is number {
@@ -100,7 +116,24 @@ function parseConfig(raw: string, filePath: string): {
   if (
     (hasCodex && !codexRecord) ||
     (codexRecord &&
-      (typeof codexRecord.enabled !== "boolean" || !isPort(codexRecord.port)))
+      (typeof codexRecord.enabled !== "boolean" ||
+        !isPort(codexRecord.port) ||
+        (codexRecord.useSharedDaemon !== undefined &&
+          typeof codexRecord.useSharedDaemon !== "boolean") ||
+        (codexRecord.socketPath !== undefined && !isNonEmptyString(codexRecord.socketPath))))
+  ) {
+    throw new Error(`Invalid nexus-agentd config at ${filePath}`);
+  }
+  const hasRokidCoder = Object.prototype.hasOwnProperty.call(record, "rokidCoder");
+  const rokidCoderRecord =
+    record.rokidCoder && typeof record.rokidCoder === "object" && !Array.isArray(record.rokidCoder)
+      ? record.rokidCoder as Record<string, unknown>
+      : undefined;
+  if (
+    (hasRokidCoder && !rokidCoderRecord) ||
+    (rokidCoderRecord &&
+      rokidCoderRecord.stateDir !== undefined &&
+      !isNonEmptyString(rokidCoderRecord.stateDir))
   ) {
     throw new Error(`Invalid nexus-agentd config at ${filePath}`);
   }
@@ -112,6 +145,9 @@ function parseConfig(raw: string, filePath: string): {
   if (hasTerminalInput && typeof record.allowTerminalInput !== "boolean") {
     throw new Error(`Invalid nexus-agentd config at ${filePath}`);
   }
+  // The Rokid-Coder fields (codex.useSharedDaemon/socketPath, rokidCoder) are
+  // deliberately not upgrade triggers: an old file keeps its bytes until
+  // something else rewrites it, and the defaults apply on every read.
   const upgraded =
     missingMachineId || !hasPhoneHosts || !hasCodex || !hasTailnetDiscovery || !hasTerminalInput;
   return {
@@ -133,11 +169,22 @@ function parseConfig(raw: string, filePath: string): {
         ? {
             enabled: codexRecord.enabled as boolean,
             port: codexRecord.port as number,
+            useSharedDaemon: codexRecord.useSharedDaemon !== false,
+            ...(codexRecord.socketPath !== undefined
+              ? { socketPath: codexRecord.socketPath as string }
+              : {}),
           }
         : {
             enabled: false,
             port: DEFAULT_CODEX_PORT,
+            useSharedDaemon: true,
           },
+      rokidCoder: {
+        stateDir:
+          typeof rokidCoderRecord?.stateDir === "string"
+            ? expandHome(rokidCoderRecord.stateDir)
+            : defaultRokidCoderStateDir(),
+      },
     },
     upgraded,
   };
