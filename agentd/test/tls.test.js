@@ -23,6 +23,32 @@ const { createFakePhone } = require("./fake-phone.js");
 const { withDaemon, withTempDir, postHook, settle } = require("./helpers/daemon.js");
 const { agentCert, phoneCert } = require("./helpers/tls.js");
 
+
+// Whatever a test opens is closed after it, pass or fail, so a failing
+// assertion cannot leave a listening server or live socket holding the run open.
+const cleanups = [];
+const track = (close) => { cleanups.push(close); return close; };
+test.afterEach(async () => {
+  await Promise.allSettled(cleanups.splice(0).reverse().map(async (close) => close()));
+});
+
+function trackedServer(create, ...args) {
+  const server = create(...args);
+  const sockets = new Set();
+  server.on("connection", (socket) => sockets.add(socket));
+  server.on("secureConnection", (socket) => sockets.add(socket));
+  track(() => { for (const socket of sockets) socket.destroy(); server.close(); });
+  return server;
+}
+const netServer = (...args) => trackedServer(net.createServer, ...args);
+const tlsServer = (...args) => trackedServer(tls.createServer, ...args);
+
+function fakePhone(options) {
+  const phone = createFakePhone(options);
+  track(() => phone.close());
+  return phone;
+}
+
 const TRANSPORTS = ["phonelink", "wshub"];
 const TOKEN = "tls-test-token-do-not-log";
 const STEER = "tls-test-steering-secret-do-not-send";
@@ -56,7 +82,7 @@ async function waitUntil(predicate, message, timeoutMs = 2000) {
 async function listenAsPhone(identity) {
   const seen = { connections: 0, closes: 0, lines: [] };
   const sockets = new Set();
-  const server = tls.createServer({ key: identity.key, cert: identity.cert }, (socket) => {
+  const server = tlsServer({ key: identity.key, cert: identity.cert }, (socket) => {
     seen.connections += 1;
     sockets.add(socket);
     socket.on("error", () => {});
@@ -101,7 +127,9 @@ function newLink(pins, extra = {}) {
     operatorMessage: (message) => operator.push(message),
     ...extra,
   });
-  return { link, store, logs, operator, stop: () => { link.stop(); store.dispose(); } };
+  const stop = () => { link.stop(); store.dispose(); };
+  track(stop);
+  return { link, store, logs, operator, stop };
 }
 
 // ---- the agentd certificate ----
@@ -202,6 +230,27 @@ test("pin_store_is_a_set_that_persists_normalises_and_refuses_a_damaged_file", a
   });
 });
 
+test("ever_pinned_survives_forgetting_and_a_version_2_file_with_phones_counts_as_pinned", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "phone-pins.json");
+    const fp = (await phoneCert("a")).fingerprint256;
+    const store = new PinStore(file);
+    assert.equal(store.everPinned(), false, "no store yet: a fresh install");
+    store.add(fp);
+    store.forgetAll();
+    assert.equal(store.isEmpty(), true);
+    assert.equal(store.everPinned(), true, "an empty set after forgetting is not a fresh install");
+    assert.equal(new PinStore(file).everPinned(), true);
+
+    await fsp.writeFile(file, JSON.stringify({ version: 2, phones: [fp] })); // written before the flag existed
+    assert.equal(new PinStore(file).everPinned(), true);
+    await fsp.writeFile(file, JSON.stringify({ version: 2, phones: [] }));
+    assert.equal(new PinStore(file).everPinned(), false);
+    await fsp.writeFile(file, JSON.stringify({ version: 2, phones: [], everPinned: true }));
+    assert.equal(new PinStore(file).everPinned(), true);
+  });
+});
+
 test("a_version_1_host_keyed_pin_file_is_migrated_into_the_set", async () => {
   await withTempDir(async (dir) => {
     const file = path.join(dir, "phone-pins.json");
@@ -295,7 +344,7 @@ test("a_trusted_phone_is_asked_while_a_plaintext_one_beside_it_only_watches", as
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
     async ({ phone, httpPort, wsPort, token }) => {
-      const watcher = createFakePhone({ transport: "wshub", tls: false });
+      const watcher = fakePhone({ transport: "wshub", tls: false });
       try {
         await watcher.start({ port: wsPort, host: "127.0.0.1", token });
         await watcher.waitFor("snapshot");
@@ -413,7 +462,7 @@ test("pinned_cert_at_new_ip_trusted", async () => {
 test("plaintext_from_new_ip_after_pinning_refused_no_token_sent", async () => {
   const wire = [];
   let dials = 0;
-  const plain = net.createServer((socket) => {
+  const plain = netServer((socket) => {
     dials += 1;
     socket.on("data", (chunk) => wire.push(chunk.toString()));
     socket.on("error", () => {});
@@ -513,39 +562,118 @@ test("an_expired_allow_next_window_admits_nobody", async () => {
   }
 });
 
-test("forget_all_reopens_tofu", async () => {
+test("fresh_install_tofu_still_works", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "tls", "phone-pins.json");
+    const phoneId = await phoneCert("phone");
+    const server = await listenAsPhone(phoneId);
+    const pins = new PinStore(file);
+    const { link, stop } = newLink(pins);
+    assert.equal(pins.everPinned(), false);
+    dialTls(link, server);
+    await waitUntil(() => link.trustedConnected, "the first-ever phone was not trusted on first use");
+    assert.equal(pins.everPinned(), true);
+    assert.equal(new PinStore(file).everPinned(), true, "and that is remembered");
+    stop();
+  });
+});
+
+test("forget_only_phone_does_not_retofu_on_redial", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "tls", "phone-pins.json");
+    const phoneId = await phoneCert("phone");
+    const server = await listenAsPhone(phoneId);
+    const pins = new PinStore(file);
+    let clock = 1_000_000;
+    const { link, logs, stop } = newLink(pins, { now: () => clock });
+    dialTls(link, server);
+    await waitUntil(() => link.trustedConnected, "link never became trusted");
+    const hellos = () => server.seen.lines.filter((f) => f.type === "hello").length;
+    assert.equal(hellos(), 1);
+
+    new PinStore(file).forget(phoneId.fingerprint256); // the only phone, from the CLI
+    await waitUntil(() => !link.connected, "the forgotten phone was not dropped");
+    assert.equal(new PinStore(file).isEmpty(), true);
+
+    // The same phone dials again. The set is empty but this is not a fresh install.
+    clock += 100_000;
+    dialTls(link, server);
+    await waitUntil(
+      () => logs.entries.some((e) => e.event === "phone_link_untrusted_peer"),
+      "the redial was not refused",
+    );
+    await settle(40);
+    assert.equal(link.connected, false);
+    assert.equal(hellos(), 1, "refused before hello: no token went to it");
+    assert.equal(new PinStore(file).isEmpty(), true, "nothing was re-pinned");
+    stop();
+  });
+});
+
+test("forget_all_then_allow_next_admits_one", async () => {
   await withTempDir(async (dir) => {
     const file = path.join(dir, "tls", "phone-pins.json");
     const first = await phoneCert("first");
     const second = await phoneCert("second");
+    const firstServer = await listenAsPhone(first);
     const secondServer = await listenAsPhone(second);
     const pins = new PinStore(file);
     pins.add(first.fingerprint256);
-    const { link, logs, stop } = newLink(pins);
-    try {
-      dialTls(link, secondServer);
-      await waitUntil(() => logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "not refused");
-      // `phones forget --all`, from another process.
-      new PinStore(file).forgetAll();
-      assert.equal(pins.isEmpty(), true);
-      const fresh = newLink(pins);
-      try {
-        dialTls(fresh.link, secondServer);
-        await waitUntil(() => fresh.link.trustedConnected, "the next phone was not trusted on first use");
-        assert.deepEqual(pins.list(), [second.fingerprint256]);
-      } finally {
-        fresh.stop();
-      }
-    } finally {
-      stop();
-      secondServer.close();
-    }
+    new PinStore(file).forgetAll();
+    let clock = 2_000_000;
+    const one = newLink(pins, { now: () => clock });
+    dialTls(one.link, firstServer);
+    await waitUntil(() => one.logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "not refused");
+    assert.deepEqual(firstServer.seen.lines, [], "no hello without allow-next");
+
+    // `phones allow-next`: one phone, and the window closes behind it.
+    clock += 100_000;
+    new PinStore(file).armAllowNext(clock);
+    dialTls(one.link, firstServer);
+    await waitUntil(() => one.link.trustedConnected, "allow-next did not admit the phone");
+    assert.deepEqual(pins.list(), [first.fingerprint256]);
+    assert.equal(pins.allowNextOpen(clock), false);
+    one.link.stop();
+
+    const two = newLink(pins, { now: () => clock });
+    dialTls(two.link, secondServer);
+    await waitUntil(() => two.logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "second not refused");
+    assert.deepEqual(secondServer.seen.lines, []);
+  });
+});
+
+test("plaintext_refused_after_forget_all", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "tls", "phone-pins.json");
+    const wire = [];
+    let dials = 0;
+    const plain = netServer((socket) => {
+      dials += 1;
+      socket.on("data", (chunk) => wire.push(chunk.toString("latin1")));
+      socket.on("error", () => {});
+    });
+    const port = await new Promise((resolve) => plain.listen(0, "127.0.0.1", () => resolve(plain.address().port)));
+    const pins = new PinStore(file);
+    pins.add((await phoneCert("was-trusted")).fingerprint256);
+    new PinStore(file).forgetAll();
+    assert.equal(pins.isEmpty(), true);
+    const { link, logs, operator } = newLink(pins);
+    link.connectToPhone({ host: "127.0.0.1", port, name: "phone", tls: false });
+    await settle(60);
+    assert.equal(dials, 0, "a plaintext announcement opens no socket, though the set is empty");
+    assert.ok(logs.entries.some((e) => e.event === "phone_link_plaintext_refused"));
+    assert.equal(operator.length, 1);
+    // A static target carries no claim, and is dialled with TLS: still no plaintext hello.
+    link.connectToPhone({ host: "127.0.0.1", port, name: "phone" });
+    await settle(80);
+    assert.equal(wire.join("").includes(TOKEN), false, "the token never went out in the clear");
+    assert.equal(wire.join("").includes('"hello"'), false);
   });
 });
 
 test("stalled_tls_handshake_times_out_and_redial_resumes", async () => {
   const sockets = [];
-  const silent = net.createServer((socket) => { sockets.push(socket); socket.on("error", () => {}); });
+  const silent = netServer((socket) => { sockets.push(socket); socket.on("error", () => {}); });
   const silentPort = await new Promise((resolve) => silent.listen(0, "127.0.0.1", () => resolve(silent.address().port)));
   const phoneId = await phoneCert("phone");
   const real = await listenAsPhone(phoneId);
@@ -571,7 +699,7 @@ test("stalled_tls_handshake_times_out_and_redial_resumes", async () => {
 
 test("a_hello_that_is_never_acknowledged_pins_nothing", async () => {
   const phoneId = await phoneCert("phone");
-  const server = tls.createServer({ key: phoneId.key, cert: phoneId.cert }, (socket) => {
+  const server = tlsServer({ key: phoneId.key, cert: phoneId.cert }, (socket) => {
     socket.on("error", () => {});
     socket.on("data", () => {}); // reads the hello, never answers
   });
@@ -629,7 +757,7 @@ test("an_unreadable_pins_file_refuses_every_dial", async () => {
 });
 
 test("a_plaintext_phone_connects_while_the_set_is_empty_but_is_never_trusted_or_pinned", async () => {
-  const plain = net.createServer((socket) => {
+  const plain = netServer((socket) => {
     socket.on("data", (chunk) => {
       for (const line of chunk.toString().split("\n").filter(Boolean)) {
         if (JSON.parse(line).type === "hello") socket.write('{"type":"hello_ack","v":1}\n');
@@ -764,7 +892,7 @@ test("allow_next_is_consumed_by_a_first_admission_through_the_empty_set", async 
 
 test("a_stalling_tls_peer_is_backed_off_not_retried_in_seconds_while_a_phone_is_trusted", async () => {
   const sockets = [];
-  const silent = net.createServer((socket) => { sockets.push(socket); socket.on("error", () => {}); });
+  const silent = netServer((socket) => { sockets.push(socket); socket.on("error", () => {}); });
   const port = await new Promise((resolve) => silent.listen(0, "127.0.0.1", () => resolve(silent.address().port)));
   const pins = new PinStore();
   pins.add((await phoneCert("trusted")).fingerprint256);
@@ -791,11 +919,13 @@ async function newHub(options = {}) {
   const store = new SessionStore(config, logs.logger);
   const hub = new WsHub(config, store, logs.logger, { host: "127.0.0.1", tls: agent, steer: () => STEER, ...options });
   await hub.start();
-  return { hub, logs, agent, stop: async () => { await hub.stop(); store.dispose(); } };
+  const stop = async () => { await hub.stop(); store.dispose(); };
+  track(stop);
+  return { hub, logs, agent, stop };
 }
 
 async function connectPhone(hub, agent, options) {
-  const phone = createFakePhone({ transport: "wshub", pin: agent.fingerprint256, ...options });
+  const phone = fakePhone({ transport: "wshub", pin: agent.fingerprint256, ...options });
   await phone.start({ port: hub.port(), token: TOKEN });
   await phone.waitFor("hello_ack");
   return phone;
@@ -869,7 +999,7 @@ test("plaintext_ws_with_steer_is_still_monitor_only", async () => {
 test("a_token_taken_over_plaintext_does_not_steer_over_wss", async () => {
   // The attack: answer agentd's plaintext dial to learn the token, then use it on wss.
   const stolen = [];
-  const trap = net.createServer((socket) => {
+  const trap = netServer((socket) => {
     socket.on("data", (chunk) => stolen.push(...chunk.toString().split("\n").filter(Boolean).map((l) => JSON.parse(l))));
     socket.on("error", () => {});
   });
@@ -883,7 +1013,7 @@ test("a_token_taken_over_plaintext_does_not_steer_over_wss", async () => {
     assert.equal(token, TOKEN, "monitor-only is what a plaintext dial costs");
     assert.equal(JSON.stringify(stolen).includes(STEER), false);
 
-    const attacker = createFakePhone({ transport: "wshub", tls: true, pin: agent.fingerprint256 });
+    const attacker = fakePhone({ transport: "wshub", tls: true, pin: agent.fingerprint256 });
     await attacker.start({ port: hub.port(), token });
     await attacker.waitFor("hello_ack");
     assert.equal(hub.hasTrustedClient, false);
@@ -986,7 +1116,7 @@ test("wshub_serves_wss_and_plain_ws_on_one_port_and_only_a_steering_wss_phone_is
 
 test("a_wss_phone_with_the_wrong_pin_never_sends_its_token", async () => {
   const { hub, logs, agent, stop } = await newHub();
-  const phone = createFakePhone({
+  const phone = fakePhone({
     transport: "wshub",
     tls: true,
     pin: (await phoneCert("not-agentd")).fingerprint256,
@@ -1015,7 +1145,7 @@ test("wshub_without_a_cert_drops_a_tls_client_and_serves_plain_ws", async () => 
       secure.once("open", () => resolve());
     });
     assert.notEqual(secure.readyState, WebSocket.OPEN);
-    const phone = createFakePhone({ transport: "wshub", tls: false });
+    const phone = fakePhone({ transport: "wshub", tls: false });
     await phone.start({ port: hub.port(), token: TOKEN });
     await phone.waitFor("hello_ack");
     phone.close();
@@ -1050,7 +1180,7 @@ for (const transport of TRANSPORTS) {
         phone.send({ type: "approval_decision", v: 1, requestId: approval.requestId, decision: "allow" });
         await reply;
         // And a second, plaintext watcher on the same hub sees nothing of it either.
-        const watcher = createFakePhone({ transport: "wshub", tls: false });
+        const watcher = fakePhone({ transport: "wshub", tls: false });
         await watcher.start({ port: wsPort, host: "127.0.0.1", token });
         await watcher.waitFor("snapshot");
         await settle(100);

@@ -264,8 +264,11 @@ export function watchFiles(files: string[], intervalMs: number, onChange: () => 
  * The set of phone certificates agentd trusts, by `fingerprint256`. A phone is
  * its cert, wherever it is dialled from, so an IP change needs nothing.
  *
- * Trust on first use applies only while the set is empty, or inside the window
- * `phones allow-next` opens for one more phone. Anything else is refused.
+ * Trust on first use applies only at first-ever setup, while no phone has ever
+ * been pinned, or inside the window `phones allow-next` opens for one more
+ * phone. Anything else is refused, including after every phone was forgotten:
+ * an empty set is not a fresh install, or the phone just forgotten (or whoever
+ * answered in its place) would be trusted again on its own.
  *
  * The CLI edits the same file the daemon uses, so every read looks at the file
  * again; a file that cannot be read throws rather than reading as empty.
@@ -273,6 +276,7 @@ export function watchFiles(files: string[], intervalMs: number, onChange: () => 
 export class PinStore {
   private phones = new Set<string>();
   private allowNextUntil = 0;
+  private pinnedBefore = false;
   private signature: string | undefined;
 
   /** Without a file the set lives only as long as the process. */
@@ -301,6 +305,12 @@ export class PinStore {
     return this.phones.size === 0;
   }
 
+  /** True once any phone has ever been pinned, even if all were forgotten since. */
+  everPinned(): boolean {
+    this.reload();
+    return this.pinnedBefore;
+  }
+
   add(fp: string): void {
     const normalized = normalizeFingerprint(fp);
     if (!normalized) {
@@ -308,6 +318,7 @@ export class PinStore {
     }
     this.reload();
     this.phones.add(normalized);
+    this.pinnedBefore = true;
     // A phone admitted through the empty set used up an open window too.
     this.allowNextUntil = 0;
     this.persist();
@@ -383,7 +394,13 @@ export class PinStore {
         `Cannot read phone pins at ${file}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    const record = value as { version?: unknown; phones?: unknown; pins?: unknown; allowNextUntil?: unknown } | null;
+    const record = value as {
+      version?: unknown;
+      phones?: unknown;
+      pins?: unknown;
+      allowNextUntil?: unknown;
+      everPinned?: unknown;
+    } | null;
     if (!record || typeof record !== "object") {
       throw new Error(`Invalid phone pins file at ${file}`);
     }
@@ -407,6 +424,8 @@ export class PinStore {
     }
     this.signature = signature;
     this.phones = phones;
+    // Phones on file mean a phone was pinned, whatever an older file said.
+    this.pinnedBefore = phones.size > 0 || (record.version === PINS_VERSION && record.everPinned === true);
     this.allowNextUntil =
       typeof record.allowNextUntil === "number" && Number.isFinite(record.allowNextUntil)
         ? record.allowNextUntil
@@ -420,7 +439,16 @@ export class PinStore {
     privateDir(path.dirname(this.file));
     writePrivate(
       this.file,
-      `${JSON.stringify({ version: PINS_VERSION, phones: [...this.phones], allowNextUntil: this.allowNextUntil }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          version: PINS_VERSION,
+          everPinned: this.pinnedBefore,
+          phones: [...this.phones],
+          allowNextUntil: this.allowNextUntil,
+        },
+        null,
+        2,
+      )}\n`,
     );
     this.signature = fileSignature(this.file);
   }

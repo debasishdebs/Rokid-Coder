@@ -161,20 +161,19 @@ async function main(): Promise<void> {
         const phones = pins.list();
         process.stdout.write(phones.length > 0 ? `${phones.join("\n")}\n` : "No trusted phones.\n");
         if (pins.allowNextOpen(Date.now())) {
-          process.stdout.write("The next new phone will be trusted (allow-next is open).\n");
+          process.stdout.write("allow-next is open: the next new phone to authenticate will be trusted.\n");
         }
       } else if (action === "forget") {
         const which = process.argv[4];
+        const none = 'No phones are trusted now. Run "phones allow-next" to add one.\n';
         if (which === "--all") {
           pins.forgetAll();
-          process.stdout.write(
-            "Forgot all phones. A running agentd disconnects the phone it has linked; the next phone to connect is trusted on first use.\n",
-          );
+          process.stdout.write(`Forgot all phones. A running agentd disconnects the phone it has linked.\n${none}`);
         } else if (which) {
           const removed = pins.forget(which);
           process.stdout.write(
             removed.length > 0
-              ? `Forgot ${removed.join(", ")}. A running agentd disconnects it.\n`
+              ? `Forgot ${removed.join(", ")}. A running agentd disconnects it.\n${pins.isEmpty() ? none : ""}`
               : "No such phone.\n",
           );
         } else {
@@ -183,7 +182,7 @@ async function main(): Promise<void> {
       } else if (action === "allow-next") {
         pins.armAllowNext(Date.now());
         process.stdout.write(
-          `The next new phone to connect in the next ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes will be trusted.\n`,
+          `Open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes: the first new phone to connect and authenticate in that time is trusted, then the window closes. Any other phone is still refused. Connect the phone you mean to add now.\n`,
         );
       } else {
         throw new Error("Usage: agentd phones list | forget <fingerprint|--all> | allow-next");

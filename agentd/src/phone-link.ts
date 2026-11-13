@@ -486,14 +486,15 @@ export class PhoneLink {
     if ((this.retryAt.get(target) ?? 0) > now) {
       return;
     }
-    // Once any phone is trusted, agentd speaks TLS only: a plaintext dial would
+    // Once any phone has ever been trusted (even if all were forgotten since),
+    // agentd speaks TLS only: a plaintext dial would
     // put the token on the wire for whoever answered, and a plaintext announcer
     // is not a phone we know. Announcements without `tls` are ignored for
     // dialling; static and tailnet targets, which carry no such claim, are
     // dialled with TLS. A failed TLS dial is never retried as plaintext.
     let trustedPhones: boolean;
     try {
-      trustedPhones = !this.pins.isEmpty();
+      trustedPhones = this.pins.everPinned();
     } catch (error) {
       this.pinsUnreadable(error);
       return;
@@ -575,7 +576,7 @@ export class PhoneLink {
 
   private hasTrustedPhones(): boolean {
     try {
-      return !this.pins.isEmpty();
+      return this.pins.everPinned();
     } catch {
       return true;
     }
@@ -625,7 +626,7 @@ export class PhoneLink {
   /** In the set, or eligible for trust on first use. */
   private mayTrust(fingerprint: string): boolean {
     return (
-      this.pins.has(fingerprint) || this.pins.isEmpty() || this.pins.allowNextOpen(this.now())
+      this.pins.has(fingerprint) || !this.pins.everPinned() || this.pins.allowNextOpen(this.now())
     );
   }
 
