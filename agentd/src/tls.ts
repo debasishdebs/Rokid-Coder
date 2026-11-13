@@ -3,6 +3,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -154,43 +155,44 @@ function steerFile(dir: string): string {
   return path.join(dir, "steer.secret");
 }
 
-/** Identifies a file's current content cheaply: replaced files (rename) get a new inode. */
-function fileSignature(file: string): string | undefined {
+/**
+ * The file's bytes and a signature of exactly those bytes, from one open file:
+ * stat before read, so the bytes are at least as new as the stat, and the hash
+ * catches a same-size rewrite that keeps the inode and the mtime tick.
+ * Undefined when there is no file.
+ */
+function readSnapshot(file: string): { bytes: Buffer; signature: string } | undefined {
+  let fd: number;
   try {
-    const stat = statSync(file);
-    return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
-  } catch {
-    return undefined;
+    fd = openSync(file, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    const bytes = readFileSync(fd);
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    return { bytes, signature: `${stat.ino}:${bytes.length}:${stat.mtimeMs}:${hash}` };
+  } finally {
+    closeSync(fd);
   }
 }
 
-const steerCache = new Map<string, { signature: string; value: string | undefined }>();
-
 /**
  * The secret a wss phone must present, with the token, to steer. Undefined
- * until one is made. Read on every steering check, so the file is re-read only
- * when its signature changes.
+ * until one is made. Read from the file on every steering check: it is 44
+ * bytes, and a cache is how a rotation gets missed.
  */
 export function readSteerSecret(dir: string = defaultTlsDir()): string | undefined {
-  const file = steerFile(dir);
-  const signature = fileSignature(file);
-  if (signature === undefined) {
-    steerCache.delete(file);
+  try {
+    const text = readFileSync(steerFile(dir), "utf8").trim();
+    return text.length >= 32 ? text : undefined;
+  } catch {
     return undefined;
   }
-  const cached = steerCache.get(file);
-  if (cached && cached.signature === signature) {
-    return cached.value;
-  }
-  let value: string | undefined;
-  try {
-    const text = readFileSync(file, "utf8").trim();
-    value = text.length >= 32 ? text : undefined;
-  } catch {
-    value = undefined;
-  }
-  steerCache.set(file, { signature, value });
-  return value;
 }
 
 export function steerSecretFile(dir: string = defaultTlsDir()): string {
@@ -264,23 +266,30 @@ export function watchFiles(files: string[], intervalMs: number, onChange: () => 
  * The set of phone certificates agentd trusts, by `fingerprint256`. A phone is
  * its cert, wherever it is dialled from, so an IP change needs nothing.
  *
- * Trust on first use applies only at first-ever setup, while no phone has ever
- * been pinned, or inside the window `phones allow-next` opens for one more
+ * Trust on first use applies only at first-ever setup, while there is no pin
+ * file at all, or inside the window `phones allow-next` opens for one more
  * phone. Anything else is refused, including after every phone was forgotten:
  * an empty set is not a fresh install, or the phone just forgotten (or whoever
- * answered in its place) would be trusted again on its own.
+ * answered in its place) would be trusted again on its own. Deleting the tls
+ * dir is the factory reset.
  *
  * The CLI edits the same file the daemon uses, so every read looks at the file
- * again; a file that cannot be read throws rather than reading as empty.
+ * again; a file that cannot be read throws rather than reading as empty. A
+ * change is kept only once it is on disk.
  */
 export class PinStore {
   private phones = new Set<string>();
   private allowNextUntil = 0;
   private pinnedBefore = false;
   private signature: string | undefined;
+  private readonly writeFile: (file: string, content: string) => void;
 
-  /** Without a file the set lives only as long as the process. */
-  constructor(private readonly file?: string) {
+  /** Without a file the set lives only as long as the process. `writeFile` is for tests. */
+  constructor(
+    private readonly file?: string,
+    options: { writeFile?: (file: string, content: string) => void } = {},
+  ) {
+    this.writeFile = options.writeFile ?? writePrivate;
     this.reload();
   }
 
@@ -305,7 +314,7 @@ export class PinStore {
     return this.phones.size === 0;
   }
 
-  /** True once any phone has ever been pinned, even if all were forgotten since. */
+  /** True once setup has begun (a pin file exists), even if every phone was forgotten since. */
   everPinned(): boolean {
     this.reload();
     return this.pinnedBefore;
@@ -317,11 +326,8 @@ export class PinStore {
       throw new Error("not a SHA-256 certificate fingerprint");
     }
     this.reload();
-    this.phones.add(normalized);
-    this.pinnedBefore = true;
     // A phone admitted through the empty set used up an open window too.
-    this.allowNextUntil = 0;
-    this.persist();
+    this.commit(new Set([...this.phones, normalized]), 0, true);
   }
 
   /** Removes the phone whose fingerprint is `fp` or starts with it; returns what was removed. */
@@ -335,28 +341,26 @@ export class PinStore {
     if (hits.length > 1) {
       throw new Error("that matches more than one phone; give more of the fingerprint");
     }
-    for (const hit of hits) {
-      this.phones.delete(hit);
-    }
     if (hits.length > 0) {
-      this.persist();
+      const remaining = new Set(this.phones);
+      for (const hit of hits) {
+        remaining.delete(hit);
+      }
+      this.commit(remaining, this.allowNextUntil, this.pinnedBefore);
     }
     return hits;
   }
 
-  /** Back to an empty set: the next phone to authenticate is trusted on first use again. */
+  /** Empties the set. Not a fresh install: a new phone then needs `phones allow-next`. */
   forgetAll(): void {
     this.reload();
-    this.phones.clear();
-    this.allowNextUntil = 0;
-    this.persist();
+    this.commit(new Set(), 0, this.pinnedBefore);
   }
 
   /** Lets one more unknown phone be trusted on first use until `now` + the window. */
   armAllowNext(now: number, windowMs: number = ALLOW_NEXT_WINDOW_MS): number {
     this.reload();
-    this.allowNextUntil = now + windowMs;
-    this.persist();
+    this.commit(this.phones, now + windowMs, this.pinnedBefore);
     return this.allowNextUntil;
   }
 
@@ -369,8 +373,7 @@ export class PinStore {
   closeAllowNext(): void {
     this.reload();
     if (this.allowNextUntil !== 0) {
-      this.allowNextUntil = 0;
-      this.persist();
+      this.commit(this.phones, 0, this.pinnedBefore);
     }
   }
 
@@ -381,14 +384,17 @@ export class PinStore {
     if (!file) {
       return;
     }
-    // The set is consulted on every steering frame, so an unchanged file is not re-read.
-    const signature = fileSignature(file);
-    if (signature === undefined || signature === this.signature) {
-      return;
-    }
+    // The set is consulted on every steering frame: the file is read each time,
+    // but an unchanged one is not parsed again.
     let value: unknown;
+    let signature: string;
     try {
-      value = JSON.parse(readFileSync(file, "utf8"));
+      const snapshot = readSnapshot(file);
+      if (snapshot === undefined || snapshot.signature === this.signature) {
+        return;
+      }
+      signature = snapshot.signature;
+      value = JSON.parse(snapshot.bytes.toString("utf8"));
     } catch (error) {
       throw new Error(
         `Cannot read phone pins at ${file}: ${error instanceof Error ? error.message : String(error)}`,
@@ -399,7 +405,6 @@ export class PinStore {
       phones?: unknown;
       pins?: unknown;
       allowNextUntil?: unknown;
-      everPinned?: unknown;
     } | null;
     if (!record || typeof record !== "object") {
       throw new Error(`Invalid phone pins file at ${file}`);
@@ -424,33 +429,40 @@ export class PinStore {
     }
     this.signature = signature;
     this.phones = phones;
-    // Phones on file mean a phone was pinned, whatever an older file said.
-    this.pinnedBefore = phones.size > 0 || (record.version === PINS_VERSION && record.everPinned === true);
+    // Any pin file, of any version and even with no phones, was written after
+    // setup began; older builds left `forget --all` files without the flag.
+    this.pinnedBefore = true;
     this.allowNextUntil =
       typeof record.allowNextUntil === "number" && Number.isFinite(record.allowNextUntil)
         ? record.allowNextUntil
         : 0;
   }
 
-  private persist(): void {
-    if (!this.file) {
-      return;
+  /** Writes the new state and keeps it only once the write succeeded: a pin the disk lacks is no pin. */
+  private commit(phones: Set<string>, allowNextUntil: number, pinnedBefore: boolean): void {
+    if (this.file) {
+      privateDir(path.dirname(this.file));
+      this.writeFile(
+        this.file,
+        `${JSON.stringify(
+          {
+            version: PINS_VERSION,
+            // Still written, so an older binary reading this file stays closed too.
+            everPinned: true,
+            phones: [...phones],
+            allowNextUntil,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      // Read again next time, not stat now: another process may already have
+      // replaced the file, and its content is what counts.
+      this.signature = undefined;
     }
-    privateDir(path.dirname(this.file));
-    writePrivate(
-      this.file,
-      `${JSON.stringify(
-        {
-          version: PINS_VERSION,
-          everPinned: this.pinnedBefore,
-          phones: [...this.phones],
-          allowNextUntil: this.allowNextUntil,
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    this.signature = fileSignature(this.file);
+    this.phones = phones;
+    this.allowNextUntil = allowNextUntil;
+    this.pinnedBefore = pinnedBefore || this.file !== undefined;
   }
 }
 

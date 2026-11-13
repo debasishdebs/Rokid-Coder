@@ -155,7 +155,8 @@ async function main(): Promise<void> {
     }
     case "phones": {
       const config = ensureConfig(defaultStateDir());
-      const pins = new PinStore(path.join(config.rokidCoder.stateDir, "tls", "phone-pins.json"));
+      const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
+      const pins = new PinStore(path.join(tlsDir, "phone-pins.json"));
       const action = process.argv[3];
       if (action === "list") {
         const phones = pins.list();
@@ -167,13 +168,18 @@ async function main(): Promise<void> {
         const which = process.argv[4];
         const none = 'No phones are trusted now. Run "phones allow-next" to add one.\n';
         if (which === "--all") {
+          // Forgetting everything revokes both transports: a phone that dials in
+          // over wss is trusted by the steering secret, not by a pin.
           pins.forgetAll();
-          process.stdout.write(`Forgot all phones. A running agentd disconnects the phone it has linked.\n${none}`);
+          rotateSteerSecret(tlsDir);
+          process.stdout.write(
+            `Forgot all phones. A running agentd drops its dialled link.\nThe steering secret was rotated too, so a running agentd also cuts off every phone steering over the paired WebSocket link; to steer again, a phone must pair again with "pair".\n${none}`,
+          );
         } else if (which) {
           const removed = pins.forget(which);
           process.stdout.write(
             removed.length > 0
-              ? `Forgot ${removed.join(", ")}. A running agentd disconnects it.\n${pins.isEmpty() ? none : ""}`
+              ? `Forgot ${removed.join(", ")}. A running agentd drops its dialled link to this phone.\nThis phone can still steer over the paired WebSocket link until you run "pair --rotate-steer".\n${pins.isEmpty() ? none : ""}`
               : "No such phone.\n",
           );
         } else {
@@ -185,7 +191,9 @@ async function main(): Promise<void> {
           `Open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes: the first new phone to connect and authenticate in that time is trusted, then the window closes. Any other phone is still refused. Connect the phone you mean to add now.\n`,
         );
       } else {
-        throw new Error("Usage: agentd phones list | forget <fingerprint|--all> | allow-next");
+        throw new Error(
+          `Usage: agentd phones list | forget <fingerprint|--all> | allow-next\nTo factory-reset instead, stop agentd and delete ${tlsDir}: agentd gets a new certificate, every phone must pair again, and the next phone to connect is trusted on first use.`,
+        );
       }
       break;
     }

@@ -73,10 +73,13 @@ export interface PhoneLinkOptions {
   onConnected?: () => void;
   /** `wasTrusted` is whether the link that went away was a pinned-TLS one. */
   onDisconnected?: (wasTrusted: boolean) => void;
+  /** The linked phone was forgotten; its link is being dropped. */
+  onTrustRevoked?: () => void;
   /**
    * The trusted phone certificates. A link is trusted, and so may steer, only
    * when it is TLS and its peer cert is in the set (added on the first
-   * authenticated hello while the set is empty, or through `phones allow-next`).
+   * authenticated hello of a fresh install, which has no pin file yet, or
+   * through `phones allow-next`).
    * Without a store the set lasts only as long as the process.
    */
   pins?: PinStore;
@@ -338,6 +341,7 @@ export class PhoneLink {
         fingerprint: this.peerFingerprint ? shortFingerprint(this.peerFingerprint) : "none",
       });
       this.socket.destroy();
+      this.options.onTrustRevoked?.();
     }
   }
 
@@ -486,8 +490,8 @@ export class PhoneLink {
     if ((this.retryAt.get(target) ?? 0) > now) {
       return;
     }
-    // Once any phone has ever been trusted (even if all were forgotten since),
-    // agentd speaks TLS only: a plaintext dial would
+    // Once setup has begun (a pin file exists, even if every phone was forgotten
+    // since), agentd speaks TLS only: a plaintext dial would
     // put the token on the wire for whoever answered, and a plaintext announcer
     // is not a phone we know. Announcements without `tls` are ignored for
     // dialling; static and tailnet targets, which carry no such claim, are
@@ -570,7 +574,7 @@ export class PhoneLink {
     }
     this.options.logger.warn("phone_link_plaintext_refused", { target });
     this.tellOperator(
-      "A phone announced a plaintext link, but agentd already trusts a phone and only dials TLS, so it was ignored and no token was sent. If this is your phone, update it; list trusted phones with `agentd phones list`.",
+      "A phone announced a plaintext link, but agentd has trusted a phone before and now only dials TLS, so it was ignored and no token was sent. If this is your phone, update it; list trusted phones with `agentd phones list`.",
     );
   }
 
@@ -592,7 +596,7 @@ export class PhoneLink {
   /**
    * Holds the dialled phone to the trusted set before anything is sent: a cert
    * in the set is fine at any address; an unknown one is fine only for trust on
-   * first use (empty set, or the `phones allow-next` window). False means the
+   * first use (a fresh install, or the `phones allow-next` window). False means the
    * link was refused and destroyed, with no hello and so no token written.
    */
   private verifyPeer(socket: TLSSocket, target: string): boolean {
@@ -614,7 +618,7 @@ export class PhoneLink {
         reportedReason: "untrusted_peer",
       });
       this.tellOperator(
-        "A phone presented a TLS certificate agentd does not trust, so the link was refused before any token was sent. To add another phone, run `agentd phones allow-next` and connect it within two minutes; to start over, `agentd phones forget --all`. List trusted phones with `agentd phones list`.",
+        "A phone presented a TLS certificate agentd does not trust, so the link was refused before any token was sent. To add another phone, run `agentd phones allow-next` and connect it within two minutes. List trusted phones with `agentd phones list`.",
       );
       socket.destroy();
       return false;
@@ -862,7 +866,7 @@ export class PhoneLink {
 
   /**
    * Trust on first use: the first authenticated hello over TLS adds the peer's
-   * cert to the trusted set, but only while the set is empty or inside the
+   * cert to the trusted set, but only on a fresh install or inside the
    * `phones allow-next` window, which admits exactly one phone. A cert already
    * in the set is trusted as it stands.
    */

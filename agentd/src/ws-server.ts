@@ -42,7 +42,7 @@ interface ClientState {
   authenticated: boolean;
   /**
    * Digest of the steering secret this TLS client presented at hello and that
-   * matched then; undefined for a monitor. Trust is this digest still matching
+   * matched then; undefined for a monitor and once revoked. Trust is this digest still matching
    * the current secret (`isTrusted`), so a rotation cuts the client off.
    */
   steerDigest?: Buffer;
@@ -89,6 +89,8 @@ export interface WsHubOptions {
   onClientConnected?: () => void;
   /** An authenticated client went away. */
   onClientDisconnected?: () => void;
+  /** A client lost its trust (the secret was rotated); it is being dropped. */
+  onTrustRevoked?: () => void;
 }
 
 
@@ -427,13 +429,25 @@ export class WsHub {
     );
   }
 
-  /** Closes clients that proved a secret which has since been rotated away. */
+  /**
+   * Drops clients that proved a secret which has since been rotated away. The
+   * socket is destroyed at once: a client that never answers the close frame
+   * would otherwise stay listed for ws's 30 s close timeout, and with it what
+   * was held for it. Its digest is dropped, so it is revoked, and logged, once.
+   */
   private recheckTrust(): void {
+    let revoked = false;
     for (const [socket, state] of this.clients) {
       if (state.authenticated && state.steerDigest !== undefined && !this.isTrusted(state)) {
+        state.steerDigest = undefined;
+        revoked = true;
         this.logger.warn("ws_trust_revoked", { reason: "steer_rotated" });
         socket.close(4403, "steering secret rotated");
+        socket.terminate();
       }
+    }
+    if (revoked) {
+      this.options.onTrustRevoked?.();
     }
   }
 

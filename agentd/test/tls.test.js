@@ -1,6 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { execFile } = require("node:child_process");
 const { X509Certificate } = require("node:crypto");
+const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
@@ -230,7 +232,7 @@ test("pin_store_is_a_set_that_persists_normalises_and_refuses_a_damaged_file", a
   });
 });
 
-test("ever_pinned_survives_forgetting_and_a_version_2_file_with_phones_counts_as_pinned", async () => {
+test("ever_pinned_survives_forgetting_and_any_existing_pin_file_counts_as_pinned", async () => {
   await withTempDir(async (dir) => {
     const file = path.join(dir, "phone-pins.json");
     const fp = (await phoneCert("a")).fingerprint256;
@@ -244,10 +246,69 @@ test("ever_pinned_survives_forgetting_and_a_version_2_file_with_phones_counts_as
 
     await fsp.writeFile(file, JSON.stringify({ version: 2, phones: [fp] })); // written before the flag existed
     assert.equal(new PinStore(file).everPinned(), true);
+    // Older builds wrote these after `forget --all`; only no file at all is a fresh install.
     await fsp.writeFile(file, JSON.stringify({ version: 2, phones: [] }));
-    assert.equal(new PinStore(file).everPinned(), false);
-    await fsp.writeFile(file, JSON.stringify({ version: 2, phones: [], everPinned: true }));
     assert.equal(new PinStore(file).everPinned(), true);
+    await fsp.writeFile(file, JSON.stringify({ version: 2, phones: [], everPinned: false }));
+    assert.equal(new PinStore(file).everPinned(), true);
+    await fsp.writeFile(file, JSON.stringify({ version: 1, pins: {} }));
+    assert.equal(new PinStore(file).everPinned(), true);
+  });
+});
+
+test("rewrite_with_same_mtime_and_size_is_detected", async () => {
+  await withTempDir(async (dir) => {
+    const fpA = (await phoneCert("a")).fingerprint256;
+    const fpB = (await phoneCert("b")).fingerprint256;
+    const when = Math.floor(Date.now() / 1000) - 60;
+    // In place keeps the inode, the same length keeps the size, and the mtime is
+    // put back: only the bytes say the file changed.
+    const rewrite = (file, content) => {
+      const before = fs.statSync(file);
+      fs.writeFileSync(file, content);
+      fs.utimesSync(file, when, when);
+      const after = fs.statSync(file);
+      assert.deepEqual([after.ino, after.size, after.mtimeMs], [before.ino, before.size, before.mtimeMs]);
+    };
+
+    const file = path.join(dir, "phone-pins.json");
+    const pinned = (fp) => `${JSON.stringify({ version: 2, everPinned: true, phones: [fp], allowNextUntil: 0 })}\n`;
+    fs.writeFileSync(file, pinned(fpA));
+    fs.utimesSync(file, when, when);
+    const store = new PinStore(file);
+    assert.equal(store.has(fpA), true);
+    rewrite(file, pinned(fpB));
+    assert.equal(store.has(fpA), false, "the forgotten phone is not trusted from a stale read");
+    assert.equal(store.has(fpB), true);
+
+    const tlsDir = path.join(dir, "tls");
+    const first = ensureSteerSecret(tlsDir);
+    const steerFile = path.join(tlsDir, "steer.secret");
+    fs.utimesSync(steerFile, when, when);
+    assert.equal(readSteerSecret(tlsDir), first);
+    const next = "B".repeat(first.length);
+    rewrite(steerFile, `${next}\n`);
+    assert.equal(readSteerSecret(tlsDir), next);
+  });
+});
+
+test("a_cli_write_landing_just_after_a_daemon_write_is_seen", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "phone-pins.json");
+    const fpA = (await phoneCert("a")).fingerprint256;
+    const fpB = (await phoneCert("b")).fingerprint256;
+    new PinStore(file).add(fpA);
+    // The daemon pins B, and `phones forget A` from the CLI replaces the file
+    // right after the daemon's own write, before the daemon reads it again.
+    const daemon = new PinStore(file, {
+      writeFile: (target, content) => {
+        fs.writeFileSync(target, content);
+        new PinStore(file).forget(fpA);
+      },
+    });
+    daemon.add(fpB);
+    assert.equal(daemon.has(fpA), false, "the revocation is not missed");
+    assert.deepEqual(daemon.list(), [fpB]);
   });
 });
 
@@ -736,6 +797,41 @@ test("a_pin_store_that_cannot_save_leaves_the_link_untrusted_and_closed", async 
   }
 });
 
+test("pin_write_failure_does_not_trust", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "tls", "phone-pins.json");
+    const known = await phoneCert("known");
+    const phoneId = await phoneCert("phone");
+    const server = await listenAsPhone(phoneId);
+    let failing = false;
+    const pins = new PinStore(file, {
+      writeFile: (target, content) => {
+        if (failing) throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+        fs.writeFileSync(target, content);
+      },
+    });
+    pins.add(known.fingerprint256);
+    pins.armAllowNext(Date.now());
+    failing = true;
+    const { link, logs } = newLink(pins);
+    const failures = () => logs.entries.filter((e) => e.event === "phone_link_pin_store_failed").length;
+    dialTls(link, server);
+    await waitUntil(() => failures() === 1, "the failed write was not reported");
+    assert.equal(pins.has(phoneId.fingerprint256), false, "a pin that was not saved is not kept in memory");
+    assert.equal(link.trustedConnected, false);
+
+    // The redial finds nothing to trust it by and tries to pin it again.
+    await waitUntil(() => link.socket === undefined, "the refused link was not closed");
+    await settle(40);
+    dialTls(link, server);
+    await waitUntil(() => failures() === 2, "the redial was not refused on the same failure");
+    await settle(30);
+    assert.equal(link.trustedConnected, false, "never trusted while the pin cannot be saved");
+    assert.equal(pins.has(phoneId.fingerprint256), false);
+    assert.deepEqual(new PinStore(file).list(), [known.fingerprint256]);
+  });
+});
+
 test("an_unreadable_pins_file_refuses_every_dial", async () => {
   await withTempDir(async (dir) => {
     const file = path.join(dir, "phone-pins.json");
@@ -1082,6 +1178,40 @@ test("rotate_steer_cuts_off_connected_wss_phone", async () => {
   });
 });
 
+test("revocation_logged_once (wshub)", async () => {
+  await withTempDir(async (dir) => {
+    const tlsDir = path.join(dir, "tls");
+    const first = ensureSteerSecret(tlsDir);
+    const { hub, logs, agent } = await newHub({
+      steer: () => readSteerSecret(tlsDir),
+      steerFile: path.join(tlsDir, "steer.secret"),
+      trustCheckIntervalMs: 5,
+    });
+    const phone = await connectPhone(hub, agent, { tls: true, steer: first });
+    assert.equal(hub.hasTrustedClient, true);
+    phone.stall(); // a hung phone never answers the close frame
+    rotateSteerSecret(tlsDir);
+    await waitUntil(() => !hub.hasAuthenticatedClient, "the revoked client was not dropped at once");
+    await settle(150); // many re-check passes
+    assert.equal(logs.entries.filter((e) => e.event === "ws_trust_revoked").length, 1);
+  });
+});
+
+test("revocation_logged_once (phonelink)", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "tls", "phone-pins.json");
+    const phoneId = await phoneCert("phone");
+    const server = await listenAsPhone(phoneId);
+    const { link, logs } = newLink(new PinStore(file), { trustCheckIntervalMs: 5 });
+    dialTls(link, server);
+    await waitUntil(() => link.trustedConnected, "link never became trusted");
+    new PinStore(file).forget(phoneId.fingerprint256);
+    await waitUntil(() => !link.connected, "the forgotten phone was not dropped");
+    await settle(150);
+    assert.equal(logs.entries.filter((e) => e.event === "phone_link_trust_revoked").length, 1);
+  });
+});
+
 test("wss_without_a_configured_secret_trusts_nobody", async () => {
   const { hub, agent, stop } = await newHub({ steer: () => undefined });
   const phone = await connectPhone(hub, agent, { tls: true, steer: STEER });
@@ -1263,6 +1393,129 @@ test("revoked_phone_receives_no_alerts_after_revocation (phonelink, pin forgotte
         phone.frames.slice(seen).some((f) => f.type === "approval_request" || f.type === "alert"),
         false,
       );
+    },
+  );
+});
+
+// ---- revocation hands everything held for the phone back to the laptop ----
+
+/** `phones forget` for the dialled phone, `pair --rotate-steer` for a wss one; both from another process. */
+function revoke(transport, phone, coderDir) {
+  const tlsDir = path.join(coderDir, "tls");
+  if (transport === "wshub") rotateSteerSecret(tlsDir);
+  else new PinStore(path.join(tlsDir, "phone-pins.json")).forget(phone.fingerprint);
+}
+
+const askUserQuestion = (sessionId, toolUseId) => ({
+  hook_event_name: "PreToolUse",
+  session_id: sessionId,
+  tool_name: "AskUserQuestion",
+  tool_use_id: toolUseId,
+  tool_input: { questions: [{ question: "Pick", header: "Pick", options: [{ label: "A" }, { label: "B" }] }] },
+});
+
+for (const transport of TRANSPORTS) {
+  test(`revocation_releases_held_approval_to_laptop_immediately (${transport})`, async () => {
+    await withDaemon(
+      { transport, tls: true, attached: [{ provider: "claude", id: "s1" }] },
+      async ({ phone, httpPort, coderDir }) => {
+        const reply = postHook(httpPort, {
+          hook_event_name: "PermissionRequest",
+          session_id: "s1",
+          tool_name: "Bash",
+          tool_input: { command: "ls" },
+        });
+        await phone.waitFor("approval_request");
+        phone.stall(); // from here the phone answers nothing, not even a close frame
+        revoke(transport, phone, coderDir);
+        const outcome = await Promise.race([reply, settle(3000).then(() => "held")]);
+        assert.deepEqual(outcome, {}, "the laptop prompt gets it, without waiting for the phone to hang up");
+      },
+    );
+  });
+
+  test(`revocation_releases_held_stop_wait_and_question (${transport})`, async () => {
+    await withDaemon(
+      { transport, tls: true, attached: [{ provider: "claude", id: "s1" }, { provider: "claude", id: "s2" }] },
+      async ({ daemon, phone, httpPort, coderDir }) => {
+        const stop = postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" });
+        const question = postHook(httpPort, askUserQuestion("s2", "tu-1"));
+        await waitUntil(
+          () => daemon.stopWait.state("s1").waiting && daemon.questionRelay.isWaiting("tu-1"),
+          "the Stop and the question were not held for the trusted phone",
+          3000,
+        );
+        phone.stall();
+        revoke(transport, phone, coderDir);
+        const outcome = await Promise.race([Promise.all([stop, question]), settle(3000).then(() => "held")]);
+        assert.deepEqual(outcome, [{}, {}], "both go back to the laptop");
+        assert.equal(daemon.stopWait.state("s1").waiting, false);
+        assert.equal(daemon.questionRelay.isWaiting("tu-1"), false);
+      },
+    );
+  });
+}
+
+// ---- the `phones forget` CLI ----
+
+/** Runs the real CLI against a withDaemon state dir, with HOME there too so nothing real is touched. */
+function runCli(coderDir, args) {
+  const root = path.dirname(coderDir);
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [path.join(__dirname, "..", "dist", "cli.js"), ...args],
+      { env: { ...process.env, HOME: root, NEXUS_AGENTD_STATE_DIR: path.join(root, "nexus-agentd") }, timeout: 10_000 },
+      (error, stdout, stderr) => (error ? reject(Object.assign(error, { stderr })) : resolve({ stdout, stderr })),
+    );
+  });
+}
+
+const steerOnDisk = async (coderDir) => (await fsp.readFile(path.join(coderDir, "tls", "steer.secret"), "utf8")).trim();
+
+test("forget_all_rotates_steer_and_cuts_wss", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ phone, httpPort, coderDir, steer }) => {
+      const before = phone.sendFrame("mode_set", ["claude:s1", "acceptEdits"]);
+      assert.equal((await phone.waitFor("ack", (f) => f.msgId === before.msgId)).result, "applied");
+      const closesBefore = phone.closes;
+      const { stdout } = await runCli(coderDir, ["phones", "forget", "--all"]);
+      assert.match(stdout, /steering secret was rotated/);
+      assert.match(stdout, /pair again/);
+      assert.notEqual(await steerOnDisk(coderDir), steer, "forgetting everything also rotates the steering secret");
+      await phone.waitForClose(closesBefore, 3000);
+      const reply = await Promise.race([
+        postHook(httpPort, {
+          hook_event_name: "PermissionRequest",
+          session_id: "s1",
+          tool_name: "Bash",
+          tool_input: { command: "ls" },
+        }),
+        settle(1000).then(() => "held"),
+      ]);
+      assert.deepEqual(reply, {}, "no phone can steer now");
+    },
+  );
+});
+
+test("forget_one_prints_rotate_hint_and_keeps_steer", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ phone, coderDir, steer }) => {
+      const lost = (await phoneCert("lost")).fingerprint256;
+      new PinStore(path.join(coderDir, "tls", "phone-pins.json")).add(lost);
+      const closesBefore = phone.closes;
+      const { stdout } = await runCli(coderDir, ["phones", "forget", lost]);
+      assert.ok(
+        stdout.includes('This phone can still steer over the paired WebSocket link until you run "pair --rotate-steer".'),
+        stdout,
+      );
+      assert.equal(await steerOnDisk(coderDir), steer, "one phone forgotten keeps the secret");
+      await settle(100);
+      assert.equal(phone.closes, closesBefore);
+      const frame = phone.sendFrame("mode_set", ["claude:s1", "acceptEdits"]);
+      assert.equal((await phone.waitFor("ack", (f) => f.msgId === frame.msgId)).result, "applied");
     },
   );
 });

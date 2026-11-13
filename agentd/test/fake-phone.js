@@ -90,6 +90,7 @@ function createFakePhone({ transport, tls = false, pin, cert, steer, onFrame } =
   let waiters = [];
   let writeFrame = null;
   let closeTransport = () => {};
+  let stallTransport = () => {};
   let started = false;
   let closeWaiters = [];
 
@@ -192,6 +193,11 @@ function createFakePhone({ transport, tls = false, pin, cert, steer, onFrame } =
       closeTransport();
       writeFrame = null;
     },
+
+    /** Stops reading, as a hung phone does: it answers nothing from here on, not even a close frame. */
+    stall() {
+      stallTransport();
+    },
   };
 
   async function startPhoneLink({ port, host, token }) {
@@ -233,6 +239,9 @@ function createFakePhone({ transport, tls = false, pin, cert, steer, onFrame } =
       for (const socket of sockets) socket.destroy();
       server.close();
     };
+    stallTransport = () => {
+      for (const socket of sockets) socket.pause();
+    };
     return new Promise((resolve, reject) => {
       server.once("error", reject);
       server.listen(port, host, () => resolve({ port: server.address().port }));
@@ -249,6 +258,7 @@ function createFakePhone({ transport, tls = false, pin, cert, steer, onFrame } =
       : new WebSocket(`ws://${host}:${port}`);
     writeFrame = (frame) => socket.send(JSON.stringify(frame));
     closeTransport = () => socket.terminate();
+    stallTransport = () => socket.pause();
     socket.on("close", noteClosed);
     socket.on("message", (data) => {
       const frame = parse(data.toString());

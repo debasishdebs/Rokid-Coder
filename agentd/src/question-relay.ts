@@ -229,11 +229,16 @@ export class QuestionRelay {
     }
   }
 
-  /** Releases every hold, so no HTTP request is left open when the daemon stops. */
-  dispose(): void {
+  /** No phone that could answer is left: every held question goes back to the TUI. */
+  releaseAll(): void {
     for (const hold of [...this.holds.values()]) {
       hold.settle("cancelled", {});
     }
+  }
+
+  /** Releases every hold, so no HTTP request is left open when the daemon stops. */
+  dispose(): void {
+    this.releaseAll();
   }
 
   isWaiting(toolUseId: string): boolean {

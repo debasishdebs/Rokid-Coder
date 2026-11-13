@@ -353,6 +353,17 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       phoneV2?.onChannelConnected();
     }
   };
+  // A phone was forgotten or its steering secret rotated. Unlike a dropped link
+  // it is not coming back, so with no trusted phone left everything held for
+  // one goes back to the laptop now, without waiting for its socket to close:
+  // approvals, questions and Stop waits alike.
+  const onPhoneTrustRevoked = (): void => {
+    if (!trustedPhoneConnected()) {
+      approvals?.onLinkDisconnected();
+      stopWait.releaseAll();
+      questionRelay.releaseAll();
+    }
+  };
 
   const hub = new WsHub(config, sessions, logger, {
     detailProvider,
@@ -366,6 +377,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     v2: v2Hooks,
     onClientConnected: onPhoneConnected,
     onClientDisconnected: () => onPhoneDisconnected(false),
+    onTrustRevoked: onPhoneTrustRevoked,
   });
   wsHub = hub;
   const link = new PhoneLink({
@@ -391,6 +403,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     v2: v2Hooks,
     onConnected: onPhoneConnected,
     onDisconnected: (wasTrusted) => onPhoneDisconnected(wasTrusted),
+    onTrustRevoked: onPhoneTrustRevoked,
   });
   phoneLink = link;
   // Either direction can carry an approval. The daemon dials the phone on the
