@@ -54,12 +54,13 @@ async function waitUntil(predicate, message, timeoutMs = 2000) {
 
 /** A TLS phone as PhoneLink sees one: records every line it is sent and answers hello. */
 async function listenAsPhone(identity) {
-  const seen = { connections: 0, lines: [] };
+  const seen = { connections: 0, closes: 0, lines: [] };
   const sockets = new Set();
   const server = tls.createServer({ key: identity.key, cert: identity.cert }, (socket) => {
     seen.connections += 1;
     sockets.add(socket);
     socket.on("error", () => {});
+    socket.on("close", () => { seen.closes += 1; });
     let buffer = "";
     socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
@@ -76,6 +77,8 @@ async function listenAsPhone(identity) {
   return {
     port,
     seen,
+    /** A frame from the phone to agentd over the live link. */
+    send: (frame) => { for (const socket of sockets) socket.write(`${JSON.stringify(frame)}\n`); },
     close: () => {
       for (const socket of sockets) socket.destroy();
       server.close();
@@ -594,8 +597,9 @@ test("a_pin_store_that_cannot_save_leaves_the_link_untrusted_and_closed", async 
   const { link, logs, stop } = newLink(pins);
   try {
     dialTls(link, server);
-    await waitUntil(() => logs.entries.some((e) => e.event === "phone_link_pins_unreadable"), "not reported");
+    await waitUntil(() => logs.entries.some((e) => e.event === "phone_link_pin_store_failed"), "not reported");
     await settle(30);
+    assert.equal(logs.entries.some((e) => e.event === "phone_link_pins_unreadable"), false, "its own event, not a read failure");
     assert.equal(link.trustedConnected, false);
     assert.equal(link.connected, false);
   } finally {
@@ -655,6 +659,128 @@ test("tls_phone_target_prefix_is_parsed_in_the_config", () => {
   assert.deepEqual(parsePhoneTarget("tls://phone.local"), { host: "phone.local", port: 8792, tls: true });
   assert.deepEqual(parsePhoneTarget("100.64.1.2:9000"), { host: "100.64.1.2", port: 9000 });
   assert.equal(parsePhoneTarget("tls://"), undefined);
+});
+
+test("forget_disconnects_live_phonelink_and_refuses_steering", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "tls", "phone-pins.json");
+    const phoneId = await phoneCert("phone");
+    const otherId = await phoneCert("other");
+    const server = await listenAsPhone(phoneId);
+    try {
+      // First: the gate alone. An in-memory set has no file to watch and the
+      // timer is far off, so only the live check can be what stops the phone.
+      const memory = new PinStore();
+      memory.add(otherId.fingerprint256);
+      memory.add(phoneId.fingerprint256);
+      const gate = newLink(memory, { trustCheckIntervalMs: 3_600_000 });
+      try {
+        dialTls(gate.link, server);
+        await waitUntil(() => gate.link.trustedConnected, "link never became trusted");
+        memory.forget(phoneId.fingerprint256); // `agentd phones forget`
+        assert.equal(gate.link.trustedConnected, false, "monitor-only the moment the pin is gone");
+        assert.equal(gate.link.sendApprovalRequest({ type: "approval_request", requestId: "r" }), false);
+        assert.equal(gate.link.sendFrame({ type: "alert" }), false);
+        server.send({ type: "approval_decision", v: 1, requestId: "r", decision: "allow" });
+        await waitUntil(
+          () => server.seen.lines.some((f) => f.type === "ack" && f.result === "rejected" && f.error === "monitor_only"),
+          "a steering frame from a forgotten phone was not refused",
+        );
+        assert.equal(gate.link.connected, true, "the gate does not need the drop");
+      } finally {
+        gate.stop();
+      }
+
+      // Then the drop: with the pin file watched, the live link is closed.
+      const pins = new PinStore(file);
+      pins.add(otherId.fingerprint256);
+      pins.add(phoneId.fingerprint256);
+      const live = newLink(pins);
+      try {
+        const closesBefore = server.seen.closes;
+        dialTls(live.link, server);
+        await waitUntil(() => live.link.trustedConnected, "link never became trusted again");
+        new PinStore(file).forget(phoneId.fingerprint256.replace(/:/g, "").slice(0, 16)); // from the CLI
+        await waitUntil(() => server.seen.closes > closesBefore && !live.link.connected, "the link was not dropped");
+        const revoked = live.logs.entries.find((e) => e.event === "phone_link_trust_revoked");
+        assert.ok(revoked, "logged");
+        assert.equal(revoked.meta.fingerprint, short(phoneId.fingerprint256), "shortened");
+      } finally {
+        live.stop();
+      }
+    } finally {
+      server.close();
+    }
+  });
+});
+
+test("forget_all_disconnects_all", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "tls", "phone-pins.json");
+    const phoneId = await phoneCert("phone");
+    const server = await listenAsPhone(phoneId);
+    const pins = new PinStore(file);
+    const { link, stop } = newLink(pins);
+    try {
+      dialTls(link, server);
+      await waitUntil(() => link.trustedConnected, "link never became trusted");
+      new PinStore(file).forgetAll();
+      await waitUntil(() => !link.connected && server.seen.closes >= 1, "forget --all did not drop the live link");
+      assert.equal(link.trustedConnected, false);
+    } finally {
+      stop();
+      server.close();
+    }
+  });
+});
+
+test("allow_next_is_consumed_by_a_first_admission_through_the_empty_set", async () => {
+  const first = await phoneCert("first");
+  const second = await phoneCert("second");
+  const firstServer = await listenAsPhone(first);
+  const secondServer = await listenAsPhone(second);
+  const pins = new PinStore();
+  pins.armAllowNext(Date.now());
+  const one = newLink(pins);
+  try {
+    dialTls(one.link, firstServer);
+    await waitUntil(() => one.link.trustedConnected, "first phone was not admitted");
+    assert.equal(pins.allowNextOpen(Date.now()), false, "the window went with the admission");
+    one.link.stop();
+    const two = newLink(pins);
+    try {
+      dialTls(two.link, secondServer);
+      await waitUntil(() => two.logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "second not refused");
+      assert.deepEqual(secondServer.seen.lines, []);
+    } finally {
+      two.stop();
+    }
+  } finally {
+    one.stop();
+    firstServer.close();
+    secondServer.close();
+  }
+});
+
+test("a_stalling_tls_peer_is_backed_off_not_retried_in_seconds_while_a_phone_is_trusted", async () => {
+  const sockets = [];
+  const silent = net.createServer((socket) => { sockets.push(socket); socket.on("error", () => {}); });
+  const port = await new Promise((resolve) => silent.listen(0, "127.0.0.1", () => resolve(silent.address().port)));
+  const pins = new PinStore();
+  pins.add((await phoneCert("trusted")).fingerprint256);
+  const { link, stop } = newLink(pins, { helloTimeoutMs: 40 });
+  try {
+    link.connectToPhone({ host: "127.0.0.1", port, name: "stall", tls: true });
+    await waitUntil(() => sockets.length === 1 && link.socket === undefined, "the stall did not time out");
+    await settle(60); // far past reconnectDelayMs (20 ms) that would have allowed a redial
+    link.connectToPhone({ host: "127.0.0.1", port, name: "stall", tls: true });
+    await settle(60);
+    assert.equal(sockets.length, 1, "refusal backoff, not the short reconnect delay");
+  } finally {
+    stop();
+    for (const socket of sockets) socket.destroy();
+    silent.close();
+  }
 });
 
 // ---- WsHub: the phone dials agentd, which is the TLS server ----
@@ -770,27 +896,60 @@ test("a_token_taken_over_plaintext_does_not_steer_over_wss", async () => {
   }
 });
 
-test("rotating_the_steer_secret_takes_effect_at_the_next_hello", async () => {
+test("rotating_the_steer_secret_cuts_off_the_old_secret_everywhere", async () => {
   let current = STEER;
-  const { hub, agent, stop } = await newHub({ steer: () => current });
+  // No file to watch and no timer worth waiting for: this is the gate alone.
+  const { hub, agent, stop } = await newHub({ steer: () => current, trustCheckIntervalMs: 3_600_000 });
   const before = await connectPhone(hub, agent, { tls: true, steer: STEER });
   try {
     assert.equal(hub.hasTrustedClient, true);
     current = "a-freshly-rotated-secret";
+    // The phone that was steering is monitor-only from this moment, still connected.
+    assert.equal(hub.hasTrustedClient, false);
+    assert.equal(await steeringRefused(before), true, "its steering frames are refused");
+    assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r0" }), false);
     const stale = await connectPhone(hub, agent, { tls: true, steer: STEER });
-    assert.equal(await steeringRefused(stale), true, "the old secret no longer steers");
+    assert.equal(await steeringRefused(stale), true, "the old secret no longer steers at the next hello either");
     const fresh = await connectPhone(hub, agent, { tls: true, steer: current });
     assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r" }), true);
     await fresh.waitFor("approval_request");
-    await before.waitFor("approval_request");
     await settle(30);
     assert.equal(stale.frames.some((f) => f.type === "approval_request"), false);
+    assert.equal(before.frames.some((f) => f.type === "approval_request"), false);
     stale.close();
     fresh.close();
   } finally {
     before.close();
     await stop();
   }
+});
+
+test("rotate_steer_cuts_off_connected_wss_phone", async () => {
+  await withTempDir(async (dir) => {
+    const tlsDir = path.join(dir, "tls");
+    const first = ensureSteerSecret(tlsDir);
+    const { hub, logs, agent, stop } = await newHub({
+      steer: () => readSteerSecret(tlsDir),
+      steerFile: path.join(tlsDir, "steer.secret"),
+    });
+    const steering = await connectPhone(hub, agent, { tls: true, steer: first });
+    const monitor = await connectPhone(hub, agent, { tls: true, steer: "never-valid" });
+    try {
+      assert.equal(hub.hasTrustedClient, true);
+      const closesBefore = steering.closes;
+      rotateSteerSecret(tlsDir); // `agentd pair --rotate-steer`, from another process
+      await steering.waitForClose(closesBefore, 3000);
+      assert.equal(hub.hasTrustedClient, false);
+      assert.ok(logs.entries.some((e) => e.event === "ws_trust_revoked"));
+      assert.equal(JSON.stringify(logs.entries).includes(first), false);
+      await settle(50);
+      assert.equal(monitor.closes, 0, "a monitor never held steering, so it stays");
+    } finally {
+      steering.close();
+      monitor.close();
+      await stop();
+    }
+  });
 });
 
 test("wss_without_a_configured_secret_trusts_nobody", async () => {
@@ -921,4 +1080,59 @@ test("steer_never_appears_on_the_dialled_link_or_in_logs", async () => {
       server.close();
     }
   });
+});
+
+test("revoked_phone_receives_no_alerts_after_revocation (wshub, secret rotated)", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ phone, httpPort, coderDir }) => {
+      const seen = phone.frames.length;
+      rotateSteerSecret(path.join(coderDir, "tls")); // `agentd pair --rotate-steer`
+      const reply = await Promise.race([
+        postHook(httpPort, {
+          hook_event_name: "PermissionRequest",
+          session_id: "s1",
+          tool_name: "Bash",
+          tool_input: { command: "ls" },
+        }),
+        settle(1000).then(() => "held"),
+      ]);
+      assert.deepEqual(reply, {}, "not held for a phone that can no longer answer");
+      await settle(50);
+      assert.equal(
+        phone.frames.slice(seen).some((f) => f.type === "approval_request" || f.type === "alert"),
+        false,
+      );
+    },
+  );
+});
+
+test("revoked_phone_receives_no_alerts_after_revocation (phonelink, pin forgotten)", async () => {
+  await withDaemon(
+    { transport: "phonelink", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ phone, httpPort, coderDir }) => {
+      const file = path.join(coderDir, "tls", "phone-pins.json");
+      const store = new PinStore(file);
+      assert.deepEqual(store.list(), [phone.fingerprint]);
+      store.add((await phoneCert("other")).fingerprint256);
+      const seen = phone.frames.length;
+      const closesBefore = phone.closes;
+      store.forget(phone.fingerprint);
+      const reply = await Promise.race([
+        postHook(httpPort, {
+          hook_event_name: "PermissionRequest",
+          session_id: "s1",
+          tool_name: "Bash",
+          tool_input: { command: "ls" },
+        }),
+        settle(1000).then(() => "held"),
+      ]);
+      assert.deepEqual(reply, {}, "not held for a forgotten phone");
+      await phone.waitForClose(closesBefore, 3000);
+      assert.equal(
+        phone.frames.slice(seen).some((f) => f.type === "approval_request" || f.type === "alert"),
+        false,
+      );
+    },
+  );
 });

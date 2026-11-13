@@ -125,7 +125,7 @@ async function main(): Promise<void> {
       const steer = rotate ? rotateSteerSecret(tlsDir) : ensureSteerSecret(tlsDir);
       if (rotate) {
         process.stderr.write(
-          "Steering secret rotated: phones paired before now can still monitor but cannot steer until they pair again.\n",
+          "Steering secret rotated. A running agentd now disconnects every phone that was steering with the old secret and refuses its steering frames; they must pair again with this new pairing payload.\n",
         );
       }
       const payload = pairingPayload(config, cert.fingerprint256, steer);
@@ -167,10 +167,16 @@ async function main(): Promise<void> {
         const which = process.argv[4];
         if (which === "--all") {
           pins.forgetAll();
-          process.stdout.write("Forgot all phones; the next phone to connect is trusted on first use.\n");
+          process.stdout.write(
+            "Forgot all phones. A running agentd disconnects the phone it has linked; the next phone to connect is trusted on first use.\n",
+          );
         } else if (which) {
           const removed = pins.forget(which);
-          process.stdout.write(removed.length > 0 ? `Forgot ${removed.join(", ")}\n` : "No such phone.\n");
+          process.stdout.write(
+            removed.length > 0
+              ? `Forgot ${removed.join(", ")}. A running agentd disconnects it.\n`
+              : "No such phone.\n",
+          );
         } else {
           throw new Error("Usage: agentd phones forget <fingerprint|--all>");
         }

@@ -21,7 +21,7 @@ import {
 import type { SessionStore } from "./session-store";
 import type { TerminalInputOutcome } from "./terminal-input";
 import { TailscalePeerDiscovery } from "./tailnet-discovery";
-import { PinStore, shortFingerprint } from "./tls";
+import { PinStore, shortFingerprint, watchFiles } from "./tls";
 import { DETAIL_MESSAGE_LIMIT } from "./transcript-messages";
 import type {
   AgentConfig,
@@ -53,6 +53,7 @@ export const THREAD_START_TIMEOUT_MS = 30_000;
 export const CODEX_DETAIL_REFRESH_DELAY_MS = 1_000;
 /** The phone's read loop times out at 90s; two of these fit inside it. */
 const LINK_PING_INTERVAL_MS = 30_000;
+const TRUST_CHECK_INTERVAL_MS = 1_000;
 const MAX_THREAD_PROMPT_BYTES = 16 * 1024;
 
 export interface PhoneLinkOptions {
@@ -83,6 +84,8 @@ export interface PhoneLinkOptions {
   operatorMessage?: (message: string) => void;
   discoveryPort?: number;
   helloTimeoutMs?: number;
+  /** How often a live link re-checks that its phone is still trusted (a file watch also triggers it). */
+  trustCheckIntervalMs?: number;
   reconnectDelayMs?: number;
   targetRefreshIntervalMs?: number;
   threadStartTimeoutMs?: number;
@@ -199,6 +202,7 @@ export class PhoneLink {
   private detailSendInFlight?: Promise<void>;
   private pendingDetailSessionId?: string;
   private pingTimer?: NodeJS.Timeout;
+  private stopTrustWatch?: () => void;
   private buffer = "";
   private sequence = 0;
   private openSessionId?: string;
@@ -226,7 +230,7 @@ export class PhoneLink {
 
   constructor(private readonly options: PhoneLinkOptions) {
     const send = (frame: Record<string, unknown>): void => void this.send(frame);
-    const isTrusted = (): boolean => this.linkTrusted;
+    const isTrusted = (): boolean => this.trusted;
     this.channel = {
       transport: "phonelink",
       get trusted() {
@@ -290,6 +294,8 @@ export class PhoneLink {
     this.clearHelloTimer();
     this.clearDetailRefreshTimer();
     this.clearPingTimer();
+    this.stopTrustWatch?.();
+    this.stopTrustWatch = undefined;
     this.pendingDetailSessionId = undefined;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
@@ -307,23 +313,51 @@ export class PhoneLink {
     return this.authenticated && this.socket !== undefined && !this.socket.destroyed;
   }
 
+  /**
+   * Whether this link may steer right now. Not fixed at connect: the peer's
+   * cert must still be in the trusted set, so `phones forget` takes effect on a
+   * live link at once (frames are refused, nothing trusted-only is sent) and
+   * the link is then dropped by `recheckTrust`.
+   */
+  private get trusted(): boolean {
+    if (!this.linkTrusted || !this.peerFingerprint) {
+      return false;
+    }
+    try {
+      return this.pins.has(this.peerFingerprint);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Drops a live link whose phone has been removed from the trusted set. */
+  private recheckTrust(): void {
+    if (this.linkTrusted && !this.trusted && this.socket && !this.socket.destroyed) {
+      this.options.logger.warn("phone_link_trust_revoked", {
+        target: this.connectedTo ?? "unknown",
+        fingerprint: this.peerFingerprint ? shortFingerprint(this.peerFingerprint) : "none",
+      });
+      this.socket.destroy();
+    }
+  }
+
   /** True while the link is up and has proved who it is, which is what may hold a tool call. */
   get trustedConnected(): boolean {
-    return this.connected && this.linkTrusted;
+    return this.connected && this.trusted;
   }
 
   /** Approvals, alerts and their resolutions go to a trusted phone only: a monitor-only one cannot answer them. */
   sendApprovalRequest(request: ApprovalRequest): boolean {
-    return this.linkTrusted && this.send({ ...request });
+    return this.trusted && this.send({ ...request });
   }
 
   /** Any other frame for the phone, such as the v2 alert; false when the link is not up and trusted. */
   sendFrame(frame: Record<string, unknown>): boolean {
-    return this.linkTrusted && this.send(frame);
+    return this.trusted && this.send(frame);
   }
 
   sendApprovalResolved(requestId: string, outcome: ApprovalOutcome): boolean {
-    return this.linkTrusted && this.send({ type: "approval_resolved", v: 1, requestId, outcome });
+    return this.trusted && this.send({ type: "approval_resolved", v: 1, requestId, outcome });
   }
 
   /** Streams an appended conversation message if the phone is reading that session. */
@@ -539,6 +573,14 @@ export class PhoneLink {
     );
   }
 
+  private hasTrustedPhones(): boolean {
+    try {
+      return !this.pins.isEmpty();
+    } catch {
+      return true;
+    }
+  }
+
   private pinsUnreadable(error: unknown): void {
     // Fail closed: with the set unreadable nobody can be told from a stranger.
     this.options.logger.error("phone_link_pins_unreadable", {
@@ -602,6 +644,8 @@ export class PhoneLink {
     const target = this.connectedTo;
     this.clearHelloTimer();
     this.clearPingTimer();
+    this.stopTrustWatch?.();
+    this.stopTrustWatch = undefined;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     this.socket = undefined;
@@ -804,6 +848,14 @@ export class PhoneLink {
       this.send({ type: "ping", t: this.now() });
     }, LINK_PING_INTERVAL_MS);
     this.pingTimer.unref();
+    if (this.linkTrusted) {
+      const file = this.pins.filePath;
+      this.stopTrustWatch = watchFiles(
+        file ? [file] : [],
+        this.options.trustCheckIntervalMs ?? TRUST_CHECK_INTERVAL_MS,
+        () => this.recheckTrust(),
+      );
+    }
     this.options.onConnected?.();
   }
 
@@ -819,21 +871,25 @@ export class PhoneLink {
       return false;
     }
     try {
-      if (!this.pins.has(fingerprint)) {
-        const viaWindow = !this.pins.isEmpty();
-        if (!this.mayTrust(fingerprint)) {
-          return false;
-        }
-        this.pins.add(fingerprint);
-        if (viaWindow) {
-          this.pins.closeAllowNext();
-        }
-        this.options.logger.info("phone_link_pinned", { fingerprint: shortFingerprint(fingerprint) });
+      if (!this.pins.has(fingerprint) && !this.mayTrust(fingerprint)) {
+        return false;
       }
     } catch (error) {
-      // Unpinned means untrusted: better refused than trusted by a store that cannot remember it.
       this.pinsUnreadable(error);
       return false;
+    }
+    if (!this.pins.has(fingerprint)) {
+      try {
+        // Adding also closes an open allow-next window: one admission per arming.
+        this.pins.add(fingerprint);
+      } catch (error) {
+        // Unpinned means untrusted: better refused than trusted by a store that cannot remember it.
+        this.options.logger.error("phone_link_pin_store_failed", {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      }
+      this.options.logger.info("phone_link_pinned", { fingerprint: shortFingerprint(fingerprint) });
     }
     this.linkTrusted = true;
     return true;
@@ -888,6 +944,15 @@ export class PhoneLink {
       target: this.connectedTo ?? "unknown",
       timeoutMs: this.options.helloTimeoutMs ?? PHONE_HELLO_TIMEOUT_MS,
     });
+    // While a phone is trusted, a TLS peer that stalls is not who we dial: back
+    // off as for any refusal, or a host that keeps stalling holds the one link
+    // slot for most of every cycle and starves the real phone.
+    if (this.connectedTo && (socket as Partial<TLSSocket>).encrypted === true && this.hasTrustedPhones()) {
+      this.rejectedPhones.set(this.connectedTo, {
+        retryAt: this.now() + REFUSAL_RECONNECT_DELAY_MS,
+        reportedReason: "handshake_stalled",
+      });
+    }
     socket.destroy();
   }
 

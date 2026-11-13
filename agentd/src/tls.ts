@@ -11,6 +11,7 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  watch,
   writeSync,
 } from "node:fs";
 import path from "node:path";
@@ -153,14 +154,47 @@ function steerFile(dir: string): string {
   return path.join(dir, "steer.secret");
 }
 
-/** The secret a wss phone must present, with the token, to steer. Undefined until one is made. */
-export function readSteerSecret(dir: string = defaultTlsDir()): string | undefined {
+/** Identifies a file's current content cheaply: replaced files (rename) get a new inode. */
+function fileSignature(file: string): string | undefined {
   try {
-    const value = readFileSync(steerFile(dir), "utf8").trim();
-    return value.length >= 32 ? value : undefined;
+    const stat = statSync(file);
+    return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
   } catch {
     return undefined;
   }
+}
+
+const steerCache = new Map<string, { signature: string; value: string | undefined }>();
+
+/**
+ * The secret a wss phone must present, with the token, to steer. Undefined
+ * until one is made. Read on every steering check, so the file is re-read only
+ * when its signature changes.
+ */
+export function readSteerSecret(dir: string = defaultTlsDir()): string | undefined {
+  const file = steerFile(dir);
+  const signature = fileSignature(file);
+  if (signature === undefined) {
+    steerCache.delete(file);
+    return undefined;
+  }
+  const cached = steerCache.get(file);
+  if (cached && cached.signature === signature) {
+    return cached.value;
+  }
+  let value: string | undefined;
+  try {
+    const text = readFileSync(file, "utf8").trim();
+    value = text.length >= 32 ? text : undefined;
+  } catch {
+    value = undefined;
+  }
+  steerCache.set(file, { signature, value });
+  return value;
+}
+
+export function steerSecretFile(dir: string = defaultTlsDir()): string {
+  return steerFile(dir);
 }
 
 /**
@@ -179,13 +213,51 @@ export function rotateSteerSecret(dir: string = defaultTlsDir()): string {
   return secret;
 }
 
+/** The digest a connection keeps of the secret it presented, so the secret itself is not held. */
+export function secretDigest(value: string): Buffer {
+  return createHash("sha256").update(value).digest();
+}
+
 /** Constant-time compare that is safe for unequal lengths. */
 export function secretMatches(received: unknown, expected: string): boolean {
   if (typeof received !== "string" || expected.length === 0) {
     return false;
   }
-  const digest = (value: string): Buffer => createHash("sha256").update(value).digest();
-  return timingSafeEqual(digest(received), digest(expected));
+  return timingSafeEqual(secretDigest(received), secretDigest(expected));
+}
+
+/** True when `digest` is the digest of `expected`: the live check for a connection admitted earlier. */
+export function digestMatchesSecret(digest: Buffer, expected: string | undefined): boolean {
+  return expected !== undefined && expected.length > 0 && timingSafeEqual(digest, secretDigest(expected));
+}
+
+/**
+ * Calls `onChange` when any of `files` may have changed: `fs.watch` on each
+ * parent directory for promptness, and a poll for platforms or edits it
+ * misses. Returns a function that stops both.
+ */
+export function watchFiles(files: string[], intervalMs: number, onChange: () => void): () => void {
+  const watchers = [...new Set(files.map((file) => path.dirname(file)))].flatMap((dir) => {
+    try {
+      const watcher = watch(dir, (_event, name) => {
+        if (name === null || files.some((file) => path.basename(file) === name.toString())) {
+          onChange();
+        }
+      });
+      watcher.on("error", () => undefined);
+      return [watcher];
+    } catch {
+      return [];
+    }
+  });
+  const timer = setInterval(onChange, intervalMs);
+  timer.unref();
+  return () => {
+    clearInterval(timer);
+    for (const watcher of watchers) {
+      watcher.close();
+    }
+  };
 }
 
 /**
@@ -201,10 +273,16 @@ export function secretMatches(received: unknown, expected: string): boolean {
 export class PinStore {
   private phones = new Set<string>();
   private allowNextUntil = 0;
+  private signature: string | undefined;
 
   /** Without a file the set lives only as long as the process. */
   constructor(private readonly file?: string) {
     this.reload();
+  }
+
+  /** The backing file, for watchers; undefined for a store that lives only in memory. */
+  get filePath(): string | undefined {
+    return this.file;
   }
 
   list(): string[] {
@@ -230,6 +308,8 @@ export class PinStore {
     }
     this.reload();
     this.phones.add(normalized);
+    // A phone admitted through the empty set used up an open window too.
+    this.allowNextUntil = 0;
     this.persist();
   }
 
@@ -287,7 +367,12 @@ export class PinStore {
   // over would turn the next stranger into the first-use phone.
   private reload(): void {
     const file = this.file;
-    if (!file || !existsSync(file)) {
+    if (!file) {
+      return;
+    }
+    // The set is consulted on every steering frame, so an unchanged file is not re-read.
+    const signature = fileSignature(file);
+    if (signature === undefined || signature === this.signature) {
       return;
     }
     let value: unknown;
@@ -320,6 +405,7 @@ export class PinStore {
       }
       phones.add(normalized);
     }
+    this.signature = signature;
     this.phones = phones;
     this.allowNextUntil =
       typeof record.allowNextUntil === "number" && Number.isFinite(record.allowNextUntil)
@@ -336,6 +422,7 @@ export class PinStore {
       this.file,
       `${JSON.stringify({ version: PINS_VERSION, phones: [...this.phones], allowNextUntil: this.allowNextUntil }, null, 2)}\n`,
     );
+    this.signature = fileSignature(this.file);
   }
 }
 

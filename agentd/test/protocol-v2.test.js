@@ -802,9 +802,9 @@ test("fake_phone_cli_pairs_prints_frames_and_sends_a_frame_from_argv", async () 
       const child = spawn(process.execPath, [
         path.join(__dirname, "fake-phone.js"),
         "--transport", "wshub", "--port", String(wsPort), "--token", token, "--tls", "true",
-        "--pin", agentFingerprint, "--steer", steer, "--wait", "1500",
+        "--pin", agentFingerprint, "--wait", "1500",
         "mode_set", "claude:s1", "acceptEdits",
-      ]);
+      ], { env: { ...process.env, FAKE_PHONE_STEER: steer } });
       let out = "";
       child.stdout.on("data", (chunk) => (out += chunk));
       await new Promise((resolve) => child.once("exit", resolve));

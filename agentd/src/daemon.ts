@@ -25,7 +25,7 @@ import { QuestionRelay } from "./question-relay";
 import { TranscriptTailManager, readTranscriptHeading } from "./transcript";
 import { DETAIL_MESSAGE_LIMIT, readRecentMessages } from "./transcript-messages";
 import { sessionKeyOf } from "./protocol-v2";
-import { ensureAgentCert, ensureSteerSecret, PinStore, readSteerSecret } from "./tls";
+import { ensureAgentCert, ensureSteerSecret, PinStore, readSteerSecret, steerSecretFile } from "./tls";
 import type { AgentProvider, HookPayload } from "./types";
 import { WsHub } from "./ws-server";
 
@@ -360,8 +360,9 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
     tls: { key: agentCert.key, cert: agentCert.cert },
-    // Read at each hello, so `pair --rotate-steer` takes effect without a restart.
+    // Checked live, and the file watched: `pair --rotate-steer` cuts off connected phones without a restart.
     steer: () => readSteerSecret(tlsDir),
+    steerFile: steerSecretFile(tlsDir),
     v2: v2Hooks,
     onClientConnected: onPhoneConnected,
     onClientDisconnected: () => onPhoneDisconnected(false),

@@ -8,7 +8,7 @@ import type { TLSSocket } from "node:tls";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { NotAttachedError } from "./attach-registry";
 import { gateFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
-import { secretMatches } from "./tls";
+import { digestMatchesSecret, secretDigest, secretMatches, watchFiles } from "./tls";
 import { SessionStore } from "./session-store";
 import type {
   ApprovalDecision,
@@ -40,8 +40,12 @@ function refuseHttp(_request: IncomingMessage, response: ServerResponse): void {
 
 interface ClientState {
   authenticated: boolean;
-  /** Arrived over TLS and proved the steering secret in its hello. */
-  trusted: boolean;
+  /**
+   * Digest of the steering secret this TLS client presented at hello and that
+   * matched then; undefined for a monitor. Trust is this digest still matching
+   * the current secret (`isTrusted`), so a rotation cuts the client off.
+   */
+  steerDigest?: Buffer;
   /** The connection is TLS; trust needs this and the secret. */
   encrypted: boolean;
   channel: PhoneChannel;
@@ -76,6 +80,10 @@ export interface WsHubOptions {
    * token alone, which any plaintext link can see, lets a client in as a monitor.
    */
   steer?: () => string | undefined;
+  /** The file behind `steer`, watched so a rotation drops the phones that held the old secret. */
+  steerFile?: string;
+  /** How often live clients are re-checked against the current secret (the file watch also triggers it). */
+  trustCheckIntervalMs?: number;
   v2?: PhoneV2Hooks;
   /** A client finished its handshake, after it has its snapshot. */
   onClientConnected?: () => void;
@@ -99,6 +107,7 @@ export class WsHub {
   private secureServer?: https.Server;
   private sockets?: WebSocketServer;
   private keepaliveTimer?: NodeJS.Timeout;
+  private stopTrustWatch?: () => void;
   private readonly clients = new Map<WebSocket, ClientState>();
   private sequence = 0;
   private readonly unsubscribeUpsert: () => void;
@@ -157,6 +166,11 @@ export class WsHub {
         const interval = this.options.keepaliveIntervalMs ?? 30_000;
         this.keepaliveTimer = setInterval(() => this.keepalive(), interval);
         this.keepaliveTimer.unref();
+        this.stopTrustWatch = watchFiles(
+          this.options.steerFile ? [this.options.steerFile] : [],
+          this.options.trustCheckIntervalMs ?? 1_000,
+          () => this.recheckTrust(),
+        );
         resolve();
       };
       server.once("error", onError);
@@ -194,6 +208,8 @@ export class WsHub {
       clearInterval(this.keepaliveTimer);
       this.keepaliveTimer = undefined;
     }
+    this.stopTrustWatch?.();
+    this.stopTrustWatch = undefined;
     for (const [socket, state] of this.clients) {
       clearTimeout(state.helloTimer);
       if (state.pongTimer) {
@@ -227,14 +243,14 @@ export class WsHub {
       }
     }, this.options.helloTimeoutMs ?? 5000);
     helloTimer.unref();
+    const hub = this;
     const state: ClientState = {
       authenticated: false,
-      trusted: false,
       encrypted,
       channel: {
         transport: "wshub",
         get trusted() {
-          return state.trusted;
+          return hub.isTrusted(state);
         },
         send: (frame) => this.send(socket, frame),
       },
@@ -313,7 +329,7 @@ export class WsHub {
         return;
       }
       state.authenticated = true;
-      state.trusted = this.grantsSteering(state, message.steer);
+      state.steerDigest = this.grantsSteering(state, message.steer);
       state.lastPongAt = Date.now();
       clearTimeout(state.helloTimer);
       this.armPongDeadline(socket, state);
@@ -388,16 +404,37 @@ export class WsHub {
    * in constant time and a length mismatch is just a mismatch. A plaintext
    * client that sends one has put it on the wire, so that is logged.
    */
-  private grantsSteering(state: ClientState, presented: unknown): boolean {
+  private grantsSteering(state: ClientState, presented: unknown): Buffer | undefined {
     if (typeof presented !== "string") {
-      return false;
+      return undefined;
     }
     if (!state.encrypted) {
       this.logger.warn("ws_steer_over_plaintext");
-      return false;
+      return undefined;
     }
     const expected = this.options.steer?.();
-    return expected !== undefined && secretMatches(presented, expected);
+    return expected !== undefined && secretMatches(presented, expected)
+      ? secretDigest(presented)
+      : undefined;
+  }
+
+  /** Live: the secret the client proved must still be the current one. */
+  private isTrusted(state: ClientState): boolean {
+    return (
+      state.encrypted &&
+      state.steerDigest !== undefined &&
+      digestMatchesSecret(state.steerDigest, this.options.steer?.())
+    );
+  }
+
+  /** Closes clients that proved a secret which has since been rotated away. */
+  private recheckTrust(): void {
+    for (const [socket, state] of this.clients) {
+      if (state.authenticated && state.steerDigest !== undefined && !this.isTrusted(state)) {
+        this.logger.warn("ws_trust_revoked", { reason: "steer_rotated" });
+        socket.close(4403, "steering secret rotated");
+      }
+    }
   }
 
   private async sendDetail(socket: WebSocket, sessionId: string): Promise<void> {
@@ -450,7 +487,7 @@ export class WsHub {
    */
   get hasTrustedClient(): boolean {
     for (const state of this.clients.values()) {
-      if (state.authenticated && state.trusted) {
+      if (state.authenticated && this.isTrusted(state)) {
         return true;
       }
     }
@@ -510,7 +547,7 @@ export class WsHub {
   private broadcastToTrusted(message: Record<string, unknown>): boolean {
     let delivered = false;
     for (const [socket, state] of this.clients) {
-      if (state.authenticated && state.trusted) {
+      if (state.authenticated && this.isTrusted(state)) {
         this.send(socket, message);
         delivered = true;
       }

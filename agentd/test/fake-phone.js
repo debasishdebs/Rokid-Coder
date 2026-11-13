@@ -22,7 +22,8 @@
  *   node test/fake-phone.js --transport wshub --port 8792 --token T mode_set claude:ID acceptEdits
  * `--wait MS` exits after MS; otherwise it stays up until SIGINT. A real agentd
  * accepts steering frames only over TLS: add `--tls true` (wshub also needs
- * `--pin <agentd fingerprint> --steer <secret>`); over plaintext they come back
+ * `--pin <agentd fingerprint>` and the secret in the FAKE_PHONE_STEER environment
+ * variable or in a file named by `--steer-file`, never on argv, where `ps` shows it); over plaintext they come back
  * `ack rejected monitor_only`.
  */
 const net = require("node:net");
@@ -90,6 +91,13 @@ function createFakePhone({ transport, tls = false, pin, cert, steer, onFrame } =
   let writeFrame = null;
   let closeTransport = () => {};
   let started = false;
+  let closeWaiters = [];
+
+  function noteClosed() {
+    phone.closes += 1;
+    const ready = closeWaiters.splice(0);
+    ready.forEach((fn) => fn());
+  }
 
   function record(frame) {
     frames.push(frame);
@@ -114,6 +122,19 @@ function createFakePhone({ transport, tls = false, pin, cert, steer, onFrame } =
     transport,
     tls,
     pin,
+    /** How many times agentd (or this fake) closed the link; see waitForClose. */
+    closes: 0,
+    /**
+     * Resolves when the link has closed more times than `since` (take `since`
+     * from `phone.closes` before causing the close, or a fast close is missed).
+     */
+    waitForClose(since, timeoutMs = DEFAULT_TIMEOUT_MS) {
+      return new Promise((resolve, reject) => {
+        if (phone.closes > since) return resolve();
+        const timer = setTimeout(() => reject(new Error("timed out waiting for the link to close")), timeoutMs);
+        closeWaiters.push(() => { clearTimeout(timer); resolve(); });
+      });
+    },
     /** wshub: the steering secret from the pairing payload; sent in hello, only a wss hello that carries it steers. */
     steer,
     /** phonelink over TLS: the sha256 fingerprint of this phone's cert, once started. */
@@ -179,7 +200,7 @@ function createFakePhone({ transport, tls = false, pin, cert, steer, onFrame } =
     if (identity) phone.fingerprint = identity.fingerprint256 ?? tlsFingerprint(identity.cert);
     const onConnection = (socket) => {
       sockets.add(socket);
-      socket.on("close", () => sockets.delete(socket));
+      socket.on("close", () => { sockets.delete(socket); noteClosed(); });
       socket.on("error", () => {});
       writeFrame = (frame) => socket.write(`${JSON.stringify(frame)}\n`);
       let buffer = "";
@@ -228,6 +249,7 @@ function createFakePhone({ transport, tls = false, pin, cert, steer, onFrame } =
       : new WebSocket(`ws://${host}:${port}`);
     writeFrame = (frame) => socket.send(JSON.stringify(frame));
     closeTransport = () => socket.terminate();
+    socket.on("close", noteClosed);
     socket.on("message", (data) => {
       const frame = parse(data.toString());
       if (frame) record(frame);
@@ -283,7 +305,8 @@ async function main() {
     transport: args.transport,
     tls: args.tls === "true",
     pin: args.pin,
-    steer: args.steer,
+    steer: process.env.FAKE_PHONE_STEER
+      ?? (args["steer-file"] ? require("node:fs").readFileSync(args["steer-file"], "utf8").trim() : undefined),
     onFrame: (received) => process.stdout.write(`${JSON.stringify(received)}\n`),
   });
   const { port } = await phone.start({
