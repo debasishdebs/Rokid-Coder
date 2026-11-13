@@ -89,6 +89,26 @@ export class AlertQueue {
     return entry ? { ...entry.alert } : undefined;
   }
 
+  /**
+   * Hides an alert from the glasses without settling it: it leaves the display
+   * slot but stays queued as shown, so it is still answerable and still comes
+   * back as a reminder.
+   */
+  park(id: string): void {
+    const entry = this.entries.get(id);
+    if (!entry) {
+      return;
+    }
+    const t = this.now();
+    entry.alert.state = "shown";
+    entry.shownAt = t;
+    entry.firstShownAt ??= t;
+    if (this.slot === entry) {
+      this.slot = undefined;
+    }
+    this.service();
+  }
+
   /** Removes an alert whose subject went away (answered at the laptop, session ended). */
   withdraw(id: string, reason: "expired" | "withdrawn" = "withdrawn"): void {
     const entry = this.entries.get(id);

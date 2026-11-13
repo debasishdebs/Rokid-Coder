@@ -7,7 +7,7 @@ const { extractTranscriptUpdate, readTranscriptHeading } = require("../dist/tran
 const { SessionStore } = require("../dist/session-store.js");
 const { silentLogger } = require("../dist/logger.js");
 const { PhoneSettingsStore, DEFAULT_ALERT_TIMINGS } = require("../dist/phone-settings.js");
-const { authorize, classifyFrame } = require("../dist/protocol-v2.js");
+const { authorize, classifyFrame, gateFrame } = require("../dist/protocol-v2.js");
 const { buildFrame } = require("./fake-phone.js");
 const { withDaemon, postHook, settle } = require("./helpers/daemon.js");
 
@@ -164,16 +164,120 @@ test("duplicate_followup_acked_once_applied_once", async () => {
   }
 });
 
-test("a_refused_steering_frame_still_consumes_its_msgid", async () => {
+test("a_frame_that_ran_consumes_its_msgid_and_one_without_an_id_is_refused", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
     async ({ phone }) => {
+      // Reached apply (and found nobody waiting): the id is spent.
       const frame = phone.sendFrame("followup", ["claude:s1", "nobody is waiting"]);
       assert.equal((await ackFor(phone, frame.msgId)).error, "not_waiting");
       phone.send(frame);
       await phone.waitFor("ack", (f) => f.msgId === frame.msgId && f.result === "duplicate");
       phone.send({ type: "followup", v: 2, sessionKey: "claude:s1", text: "no id" });
       assert.equal((await phone.waitFor("ack", (f) => f.msgId === "")).error, "bad_msg_id");
+    },
+  );
+});
+
+test("a_frame_refused_before_apply_does_not_consume_its_msgid", async () => {
+  // Refused at the gate over plaintext, then the same id over a trusted link.
+  const msgId = "reused-1";
+  const frame = { type: "mode_set", v: 2, sessionKey: "claude:s1", mode: "acceptEdits", confirmed: false, msgId };
+  const seeded = { transport: "wshub", attached: [{ provider: "claude", id: "s1" }] };
+  await withDaemon({ ...seeded, tls: false }, async ({ phone, coderDir }) => {
+    phone.send(frame);
+    assert.equal((await ackFor(phone, msgId)).error, "monitor_only");
+    assert.equal(await exists(path.join(coderDir, "applied-ids.json")), false);
+  });
+  await withDaemon({ ...seeded, tls: true }, async ({ daemon, phone }) => {
+    // Refused by a check (nothing named "s2" is attached), id still free.
+    const stranger = { ...frame, sessionKey: "claude:s2" };
+    phone.send(stranger);
+    assert.equal((await ackFor(phone, msgId)).error, "not_attached");
+    daemon.attachRegistry.attach("claude", "s2", "plugin");
+    phone.send(stranger);
+    await phone.waitFor("ack", (f) => f.msgId === msgId && f.result === "applied");
+    assert.equal(daemon.approvalPolicy.get("claude:s2"), "acceptEdits");
+    // Bad shape and an unconfirmed approve-all are refusals too.
+    phone.send({ ...frame, msgId: "reused-2", mode: "sudo" });
+    assert.equal((await ackFor(phone, "reused-2")).error, "bad_mode");
+    phone.send({ ...frame, msgId: "reused-2", mode: "approveAll", confirmed: false });
+    await phone.waitFor("ack", (f) => f.msgId === "reused-2" && f.error === "confirm_required");
+    phone.send({ ...frame, msgId: "reused-2", mode: "approveAll", confirmed: true });
+    await phone.waitFor("ack", (f) => f.msgId === "reused-2" && f.result === "applied");
+  });
+});
+
+test("the_same_msgid_sent_over_plaintext_then_trusted_is_applied_not_duplicate", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ daemon }) => {
+      const frame = { type: "mode_set", v: 2, sessionKey: "claude:s1", mode: "acceptEdits", confirmed: false, msgId: "reused-3" };
+      const acks = [];
+      const link = (trusted) => ({ transport: "wshub", trusted, send: (f) => acks.push(f) });
+      const deliver = (channel) => gateFrame(frame, channel) && daemon.phoneV2.handle(frame, channel);
+
+      deliver(link(false));
+      assert.deepEqual([acks[0].result, acks[0].error], ["rejected", "monitor_only"]);
+      assert.equal(daemon.approvalPolicy.get("claude:s1"), "ask");
+
+      deliver(link(true));
+      await settle();
+      assert.deepEqual([acks[1].result, acks[1].error], ["applied", undefined]);
+      assert.equal(daemon.approvalPolicy.get("claude:s1"), "acceptEdits");
+    },
+  );
+});
+
+test("a_plaintext_dismiss_only_parks_an_approval_which_a_trusted_action_still_answers", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ daemon, phone, httpPort }) => {
+      const reply = postHook(httpPort, {
+        hook_event_name: "PermissionRequest",
+        session_id: "s1",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      const alert = await phone.waitFor("alert", (f) => f.kind === "approval");
+      phone.send({ type: "alert_shown", v: 2, id: alert.id });
+      phone.send({ type: "alert_dismissed", v: 2, id: alert.id });
+      await settle();
+      assert.equal(daemon.phoneV2.alerts.get(alert.id).state, "shown");
+      assert.equal(daemon.phoneV2.alerts.current(), undefined, "hidden from the glasses");
+      assert.equal(phone.frames.some((f) => f.type === "alert_closed" && f.id === alert.id), false);
+
+      const answer = phone.sendFrame("alert_action", [alert.id, "allow"]);
+      assert.equal((await ackFor(phone, answer.msgId)).result, "applied");
+      assert.equal((await reply).hookSpecificOutput.decision.behavior, "allow");
+    },
+  );
+});
+
+test("a_plaintext_dismiss_leaves_an_approval_and_a_question_in_the_queue_but_closes_a_done", async () => {
+  await withDaemon(
+    { transport: "phonelink", tls: false, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ daemon, phone, httpPort }) => {
+      postHook(httpPort, {
+        hook_event_name: "PermissionRequest",
+        session_id: "s1",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      });
+      const approval = await phone.waitFor("alert", (f) => f.kind === "approval");
+      const question = daemon.phoneV2.alerts.push({
+        sessionKey: "claude:s1",
+        kind: "done",
+        title: "Done",
+        body: "x",
+        createdAt: Date.now(),
+      });
+      phone.send({ type: "alert_dismissed", v: 2, id: approval.id });
+      await settle();
+      assert.equal(daemon.phoneV2.alerts.get(approval.id).state, "shown");
+      phone.send({ type: "alert_dismissed", v: 2, id: question });
+      await settle();
+      assert.equal(daemon.phoneV2.alerts.get(question), undefined);
     },
   );
 });
@@ -428,10 +532,10 @@ test("settings_sync_updates_wait_limit_and_caps_at_3600s", async () => {
       assert.equal(daemon.stopWait.currentWaitLimitMs, 600_000);
 
       phone.send({ ...frame, msgId: "sync-3", timings: { ...timings, dwellMs: -1 } });
-      assert.equal((await ackFor(phone, "sync-3")).error, "invalid_timings");
+      assert.equal((await ackFor(phone, "sync-3")).error, "bad_settings");
       assert.equal(daemon.stopWait.currentWaitLimitMs, 600_000);
       phone.send({ ...frame, msgId: "sync-4", waitLimitMs: "forever" });
-      assert.equal((await ackFor(phone, "sync-4")).error, "invalid_wait_limit");
+      assert.equal((await ackFor(phone, "sync-4")).error, "bad_settings");
 
       // What was saved is what the next start reads.
       const reread = new PhoneSettingsStore(path.join(coderDir, "settings.json"));
@@ -711,6 +815,72 @@ test("approve_all_left_by_a_previous_run_is_reported_when_the_phone_connects", a
       assert.equal((await phone.waitFor("alert", (f) => f.kind === "notice")).sessionKey, "claude:old");
       assert.equal(daemon.approvalPolicy.get("claude:old"), "ask");
       assert.deepEqual(daemon.takeResetNotices(), []);
+    },
+  );
+});
+
+test("settings_sync_floors_reject_values_below_them_and_change_nothing", async () => {
+  for (const transport of TRANSPORTS) {
+    await withDaemon({ transport, tls: false }, async ({ daemon, phone, coderDir }) => {
+      const good = { ...DEFAULT_ALERT_TIMINGS };
+      const cases = [
+        ["floor-1", { ...good, dwellMs: 999 }, 600_000],
+        ["floor-2", { ...good, ackTimeoutMs: 0 }, 600_000],
+        ["floor-3", { ...good, retryBackoffMs: [5000, 500] }, 600_000],
+        ["floor-4", { ...good, reminderMs: 29_999 }, 600_000],
+        ["floor-5", { ...good, expireMs: 999 }, 600_000],
+        ["floor-6", good, 29_999],
+        ["floor-7", good, 0],
+      ];
+      for (const [msgId, timings, waitLimitMs] of cases) {
+        phone.send({ type: "settings_sync", v: 2, timings, waitLimitMs, msgId });
+        const ack = await ackFor(phone, msgId);
+        assert.deepEqual([ack.result, ack.error], ["rejected", "bad_settings"], msgId);
+      }
+      assert.equal(await exists(path.join(coderDir, "settings.json")), false);
+      assert.equal(daemon.stopWait.currentWaitLimitMs, 1_800_000);
+
+      // Exactly on the floors is fine.
+      phone.send({
+        type: "settings_sync",
+        v: 2,
+        timings: { ...good, dwellMs: 1000, reminderMs: 30_000 },
+        waitLimitMs: 30_000,
+        msgId: "floor-ok",
+      });
+      assert.equal((await ackFor(phone, "floor-ok")).result, "applied");
+      assert.equal(daemon.stopWait.currentWaitLimitMs, 30_000);
+    });
+  }
+});
+
+test("question_answer_keys_cannot_reach_a_prototype_or_grow_unbounded", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ phone, httpPort }) => {
+      const reply = postHook(httpPort, {
+        hook_event_name: "PreToolUse",
+        session_id: "s1",
+        tool_name: "AskUserQuestion",
+        tool_use_id: "toolu_p",
+        tool_input: { questions: [{ question: "Pick", options: [{ label: "A" }], multiSelect: false }] },
+      });
+      const alert = await phone.waitFor("alert", (f) => f.kind === "question");
+      for (const bad of [
+        '{"__proto__":"x"}',
+        '{"constructor":"x"}',
+        '{"prototype":["x"]}',
+        JSON.stringify({ ["k".repeat(4001)]: "x" }),
+      ]) {
+        const frame = phone.sendFrame("question_answer", ["claude:s1", alert.id, "toolu_p", bad]);
+        assert.equal((await ackFor(phone, frame.msgId)).error, "bad_answers", bad.slice(0, 30));
+      }
+      // The refusals left the question open and their ids free.
+      const ok = phone.sendFrame("question_answer", ["claude:s1", alert.id, "toolu_p", '{"Pick":"A"}']);
+      assert.equal((await ackFor(phone, ok.msgId)).result, "applied");
+      const hook = await reply;
+      assert.equal(Object.getPrototypeOf(hook.hookSpecificOutput.updatedInput.answers), Object.prototype);
+      assert.equal(hook.hookSpecificOutput.updatedInput.answers.Pick, "A");
     },
   );
 });

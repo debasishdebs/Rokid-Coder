@@ -33,8 +33,16 @@ function isDefaultMode(value: unknown): value is DefaultMode {
   return value === "ask" || value === "acceptEdits";
 }
 
-function duration(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
+/**
+ * Floors, because settings_sync is allowed on a plaintext link: without them a
+ * monitor-only peer could set every threshold to nothing and flood the glasses.
+ */
+export const MIN_TIMING_MS = 1_000;
+export const MIN_REMINDER_MS = 30_000;
+export const MIN_WAIT_LIMIT_MS = 30_000;
+
+function duration(value: unknown, floor = MIN_TIMING_MS): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= floor
     ? Math.min(Math.round(value), MAX_WAIT_LIMIT_MS)
     : undefined;
 }
@@ -48,7 +56,7 @@ export function parseTimings(value: unknown): AlertTimings | undefined {
   const ageBoostMs = duration(record.ageBoostMs);
   const dwellMs = duration(record.dwellMs);
   const ackTimeoutMs = duration(record.ackTimeoutMs);
-  const reminderMs = duration(record.reminderMs);
+  const reminderMs = duration(record.reminderMs, MIN_REMINDER_MS);
   const expireMs = duration(record.expireMs);
   const backoff = record.retryBackoffMs;
   if (
@@ -58,7 +66,7 @@ export function parseTimings(value: unknown): AlertTimings | undefined {
   ) {
     return undefined;
   }
-  const retryBackoffMs = backoff.map(duration);
+  const retryBackoffMs = backoff.map((step) => duration(step));
   if (retryBackoffMs.some((step) => step === undefined)) {
     return undefined;
   }
@@ -67,7 +75,7 @@ export function parseTimings(value: unknown): AlertTimings | undefined {
 
 /** The wait limit is capped at an hour, the longest the hooks' own timeouts allow. */
 export function parseWaitLimitMs(value: unknown): number | undefined {
-  return duration(value);
+  return duration(value, MIN_WAIT_LIMIT_MS);
 }
 
 export function parseDefaultModes(value: unknown): DefaultModes | undefined {

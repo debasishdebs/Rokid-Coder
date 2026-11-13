@@ -37,6 +37,7 @@ const MAX_MSG_ID_CHARS = 128;
 const MAX_FOLLOWUP_BYTES = 16 * 1024;
 const MAX_ANSWER_ENTRIES = 32;
 const MAX_ANSWER_CHARS = 4000;
+const FORBIDDEN_ANSWER_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
 const MAX_SETTING_CHARS = 100;
 const HEADING_FALLBACK_CHARS = 48;
 /**
@@ -408,7 +409,7 @@ export class PhoneV2 {
         break;
       case "alert_dismissed":
         if (typeof frame.id === "string") {
-          this.alerts.onDismissed(frame.id);
+          this.dismiss(frame.id);
         }
         break;
       case "settings_sync":
@@ -425,15 +426,32 @@ export class PhoneV2 {
     return true;
   }
 
+  /**
+   * Dismissing hides an alert from the glasses; it never settles one. A dismiss
+   * is a monitor frame and may come over plaintext, so an approval or question
+   * alert is only parked: it stays answerable through a later trusted
+   * alert_action or question_answer. The others have nothing left to answer.
+   */
+  private dismiss(id: string): void {
+    const kind = this.bindings.get(id)?.kind;
+    if (kind === "approval" || kind === "question") {
+      this.alerts.park(id);
+    } else {
+      this.alerts.onDismissed(id);
+    }
+  }
+
   private ack(channel: PhoneChannel, msgId: string, result: AckFrame["result"], error?: string): void {
     channel.send({ type: "ack", v: 2, msgId, result, ...(error ? { error } : {}) });
   }
 
   /**
-   * The msgId is consumed the moment it is first seen, before the frame is
-   * checked or applied, so a retry of a refused frame needs a fresh id and a
-   * replay can never run twice. The record is synchronous; only the applying is
-   * allowed to wait.
+   * A msgId is consumed only when the frame is actually about to be applied:
+   * a frame refused by the gate or by any check (bad shape, not attached, wrong
+   * session, ...) leaves its id free, so the phone can resend it once the cause
+   * is gone. Each handler calls `record` after its last check and before its
+   * first effect, synchronously, so a replay can never run twice; only the
+   * applying itself is allowed to wait.
    */
   private async steer(frame: Record<string, unknown>, channel: PhoneChannel): Promise<void> {
     const msgId = nonEmptyString(frame.msgId, MAX_MSG_ID_CHARS);
@@ -445,10 +463,10 @@ export class PhoneV2 {
       this.ack(channel, msgId, "duplicate");
       return;
     }
-    this.deps.appliedIds.record(msgId);
+    const record = (): void => this.deps.appliedIds.record(msgId);
     let outcome: Outcome;
     try {
-      outcome = await this.apply(frame, msgId);
+      outcome = await this.apply(frame, msgId, record);
     } catch (error) {
       this.deps.logger.warn("phone_v2_apply_failed", {
         type: String(frame.type).slice(0, 40),
@@ -463,24 +481,24 @@ export class PhoneV2 {
     this.ack(channel, msgId, outcome.ok ? "applied" : "rejected", outcome.ok ? undefined : outcome.error);
   }
 
-  private apply(frame: Record<string, unknown>, msgId: string): Outcome | Promise<Outcome> {
+  private apply(frame: Record<string, unknown>, msgId: string, record: () => void): Outcome | Promise<Outcome> {
     switch (frame.type) {
       case "alert_action":
-        return this.alertAction(frame);
+        return this.alertAction(frame, record);
       case "followup":
-        return this.followup(frame, msgId);
+        return this.followup(frame, msgId, record);
       case "question_answer":
-        return this.questionAnswer(frame, msgId);
+        return this.questionAnswer(frame, msgId, record);
       case "mode_set":
-        return this.modeSet(frame);
+        return this.modeSet(frame, record);
       case "mode_revoke_all":
-        return this.modeRevokeAll();
+        return this.modeRevokeAll(record);
       case "codex_settings":
-        return this.codexSettings(frame);
+        return this.codexSettings(frame, record);
       case "codex_compact":
-        return this.codexCompact(frame);
+        return this.codexCompact(frame, record);
       case "defaults_set":
-        return this.defaultsSet(frame);
+        return this.defaultsSet(frame, record);
       default:
         return fail("unknown_frame");
     }
@@ -498,7 +516,7 @@ export class PhoneV2 {
     return { ...parsed, key: sessionKeyOf(parsed.provider, parsed.id) };
   }
 
-  private alertAction(frame: Record<string, unknown>): Outcome {
+  private alertAction(frame: Record<string, unknown>, record: () => void): Outcome {
     const alertId = nonEmptyString(frame.id, MAX_MSG_ID_CHARS);
     const alert = alertId ? this.alerts.get(alertId) : undefined;
     const binding = alertId ? this.bindings.get(alertId) : undefined;
@@ -512,12 +530,13 @@ export class PhoneV2 {
       return fail("unknown_action");
     }
     // The request can only be decided through its own alert, whatever the phone says it is about.
+    record();
     return this.deps.approvals.handleDecision(binding.requestId, frame.action)
       ? OK
       : fail("no_longer_pending");
   }
 
-  private async followup(frame: Record<string, unknown>, msgId: string): Promise<Outcome> {
+  private async followup(frame: Record<string, unknown>, msgId: string, record: () => void): Promise<Outcome> {
     const target = this.target(frame.sessionKey);
     if ("ok" in target) {
       return target;
@@ -526,6 +545,7 @@ export class PhoneV2 {
     if (text.trim().length === 0 || Buffer.byteLength(text, "utf8") > MAX_FOLLOWUP_BYTES) {
       return fail("bad_text");
     }
+    record();
     if (target.provider === "claude") {
       switch (this.deps.stopWait.deliver(target.id, text, msgId)) {
         case "delivered":
@@ -540,7 +560,7 @@ export class PhoneV2 {
     return OK;
   }
 
-  private async questionAnswer(frame: Record<string, unknown>, msgId: string): Promise<Outcome> {
+  private async questionAnswer(frame: Record<string, unknown>, msgId: string, record: () => void): Promise<Outcome> {
     const alertId = nonEmptyString(frame.alertId, MAX_MSG_ID_CHARS);
     const requestRef = nonEmptyString(frame.requestRef, 512);
     const alert = alertId ? this.alerts.get(alertId) : undefined;
@@ -563,6 +583,7 @@ export class PhoneV2 {
     if (!answers) {
       return fail("bad_answers");
     }
+    record();
     if (alert.question.source === "claude_tool") {
       return this.deps.questionRelay.answer(requestRef, answers, msgId) ? OK : fail("not_waiting");
     }
@@ -575,8 +596,13 @@ export class PhoneV2 {
     if (!record || Object.keys(record).length === 0 || Object.keys(record).length > MAX_ANSWER_ENTRIES) {
       return undefined;
     }
-    const answers: Record<string, string | string[]> = {};
+    // No prototype, and no key that could reach one: the answers go on to be
+    // spread and indexed by question text the phone chose.
+    const answers: Record<string, string | string[]> = Object.create(null);
     for (const [question, answer] of Object.entries(record)) {
+      if (question.length > MAX_ANSWER_CHARS || FORBIDDEN_ANSWER_KEYS.has(question)) {
+        return undefined;
+      }
       const parts = Array.isArray(answer) ? answer : [answer];
       if (
         parts.length > MAX_ANSWER_ENTRIES ||
@@ -589,7 +615,7 @@ export class PhoneV2 {
     return answers;
   }
 
-  private modeSet(frame: Record<string, unknown>): Outcome {
+  private modeSet(frame: Record<string, unknown>, record: () => void): Outcome {
     const target = this.target(frame.sessionKey);
     if ("ok" in target) {
       return target;
@@ -598,7 +624,12 @@ export class PhoneV2 {
     if (mode !== "ask" && mode !== "acceptEdits" && mode !== "approveAll") {
       return fail("bad_mode");
     }
+    // The policy refuses this too; asking here keeps a refusal from spending the id.
+    if (mode === "approveAll" && frame.confirmed !== true) {
+      return fail("confirm_required");
+    }
     // policy.set does not know about attachment, which is why target() asked.
+    record();
     let result;
     try {
       result = this.deps.approvalPolicy.set(target.key, mode as TempMode, frame.confirmed === true);
@@ -612,7 +643,8 @@ export class PhoneV2 {
     return OK;
   }
 
-  private modeRevokeAll(): Outcome {
+  private modeRevokeAll(record: () => void): Outcome {
+    record();
     // revokeAll's notices are not queued anywhere: announcing them is on us.
     for (const notice of this.deps.approvalPolicy.revokeAll()) {
       this.announceReset(notice);
@@ -620,7 +652,7 @@ export class PhoneV2 {
     return OK;
   }
 
-  private codexSettings(frame: Record<string, unknown>): Outcome {
+  private codexSettings(frame: Record<string, unknown>, record: () => void): Outcome {
     const target = this.target(frame.sessionKey);
     if ("ok" in target) {
       return target;
@@ -633,11 +665,12 @@ export class PhoneV2 {
     if ((frame.model !== undefined && !model) || (frame.effort !== undefined && !effort) || (!model && !effort)) {
       return fail("bad_settings");
     }
+    record();
     this.deps.codex.setPendingSettings(target.id, { model, effort });
     return OK;
   }
 
-  private async codexCompact(frame: Record<string, unknown>): Promise<Outcome> {
+  private async codexCompact(frame: Record<string, unknown>, record: () => void): Promise<Outcome> {
     const target = this.target(frame.sessionKey);
     if ("ok" in target) {
       return target;
@@ -645,15 +678,17 @@ export class PhoneV2 {
     if (target.provider !== "codex") {
       return fail("unsupported");
     }
+    record();
     await this.deps.codex.compact(target.id);
     return OK;
   }
 
-  private defaultsSet(frame: Record<string, unknown>): Outcome {
+  private defaultsSet(frame: Record<string, unknown>, record: () => void): Outcome {
     const defaultModes = parseDefaultModes(frame.defaultModes);
     if (!defaultModes) {
       return fail("invalid_default");
     }
+    record();
     try {
       this.deps.settings.update({ defaultModes });
     } catch {
@@ -683,7 +718,7 @@ export class PhoneV2 {
     const parsedTimings = parseTimings(frame.timings);
     const waitLimitMs = parseWaitLimitMs(frame.waitLimitMs);
     if (!parsedTimings || waitLimitMs === undefined) {
-      this.ack(channel, msgId, "rejected", parsedTimings ? "invalid_wait_limit" : "invalid_timings");
+      this.ack(channel, msgId, "rejected", "bad_settings");
       return;
     }
     try {
