@@ -1,0 +1,346 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { AlertQueue } = require("../dist/alerts.js");
+
+const TIMINGS = {
+  ageBoostMs: 30_000,
+  dwellMs: 8_000,
+  ackTimeoutMs: 5_000,
+  retryBackoffMs: [5_000, 10_000, 20_000],
+  reminderMs: 300_000,
+  expireMs: 1_800_000,
+};
+
+function setup(timings = TIMINGS) {
+  let t = 1_000_000;
+  const frames = [];
+  const queue = new AlertQueue(timings, (frame) => {
+    frames.push(frame);
+    return true;
+  }, () => t);
+  return {
+    queue,
+    frames,
+    now: () => t,
+    advance(ms) {
+      t += ms;
+      queue.tick();
+    },
+  };
+}
+
+function alert(kind, extra = {}) {
+  return { sessionKey: "claude:s1", kind, title: `${kind} title`, body: `${kind} body`, createdAt: 1_000_000, ...extra };
+}
+
+/** Pushes an approval that holds the glasses until the test acts on it. */
+function hold(env) {
+  const id = env.queue.push(alert("approval", { createdAt: env.now() }));
+  env.queue.onShown(id);
+  return id;
+}
+
+/** Acks and acts on whatever is current, returning its kind. */
+function drain(env) {
+  const kinds = [];
+  for (let current = env.queue.current(); current; current = env.queue.current()) {
+    kinds.push(current.kind);
+    env.queue.onShown(current.id);
+    env.queue.onActed(current.id);
+  }
+  return kinds;
+}
+
+test("orders_by_priority_then_age", () => {
+  const env = setup();
+  const blocker = hold(env);
+  const at = (offset) => env.now() + offset;
+  env.queue.push(alert("done", { createdAt: at(0) }));
+  env.queue.push(alert("notice", { createdAt: at(1) }));
+  env.queue.push(alert("error", { createdAt: at(2), title: "old error" }));
+  env.queue.push(alert("question", { createdAt: at(3) }));
+  env.queue.push(alert("error", { createdAt: at(4), title: "new error" }));
+  env.queue.push(alert("approval", { createdAt: at(5), title: "second approval" }));
+
+  env.queue.onActed(blocker);
+  const sent = [];
+  for (let current = env.queue.current(); current; current = env.queue.current()) {
+    sent.push(`${current.kind}:${current.title}`);
+    env.queue.onShown(current.id);
+    env.queue.onActed(current.id);
+  }
+  assert.deepEqual(sent, [
+    "approval:second approval",
+    "question:question title",
+    "error:old error",
+    "error:new error",
+    "notice:notice title",
+    "done:done title",
+  ]);
+});
+
+test("age_boost_promotes_after_30s", () => {
+  const env = setup();
+  const blocker = hold(env);
+  env.queue.push(alert("done", { createdAt: env.now() - 31_000, title: "stale done" }));
+  env.queue.push(alert("error", { createdAt: env.now(), title: "fresh error" }));
+  env.queue.onActed(blocker);
+  assert.equal(env.queue.current().title, "stale done");
+  assert.equal(env.queue.current().promoted, true);
+
+  const fresh = setup();
+  const holder = hold(fresh);
+  fresh.queue.push(alert("done", { createdAt: fresh.now() - 29_000, title: "young done" }));
+  fresh.queue.push(alert("error", { createdAt: fresh.now(), title: "fresh error" }));
+  fresh.queue.onActed(holder);
+  assert.equal(fresh.queue.current().title, "fresh error");
+  assert.equal(fresh.queue.current().promoted, false);
+});
+
+test("age_boost_does_not_preempt_a_shown_alert", () => {
+  const env = setup();
+  const id = env.queue.push(alert("done", { createdAt: env.now(), title: "shown done" }));
+  env.queue.onShown(id);
+  env.queue.push(alert("error", { createdAt: env.now() - 31_000 }));
+  env.advance(1_000);
+  assert.equal(env.queue.current().title, "shown done");
+});
+
+test("dwell_holds_shown_alert_8s", () => {
+  const env = setup();
+  const first = env.queue.push(alert("done", { title: "first" }));
+  env.queue.onShown(first);
+  env.queue.push(alert("error", { title: "second" }));
+
+  env.advance(7_999);
+  assert.equal(env.queue.current().title, "first");
+  assert.equal(env.frames.length, 1);
+
+  env.advance(1);
+  assert.equal(env.queue.current().title, "second");
+  assert.equal(env.frames.length, 2);
+  assert.equal(env.frames[1].title, "second");
+});
+
+test("acting_on_the_shown_alert_releases_the_glasses_inside_the_dwell", () => {
+  const env = setup();
+  const first = env.queue.push(alert("done", { title: "first" }));
+  env.queue.onShown(first);
+  env.queue.push(alert("error", { title: "second" }));
+  env.advance(1_000);
+  env.queue.onActed(first);
+  assert.equal(env.queue.current().title, "second");
+});
+
+test("preempts_done_with_approval_and_requeues", () => {
+  const env = setup();
+  const done = env.queue.push(alert("done", { createdAt: env.now(), title: "done" }));
+  env.queue.onShown(done);
+  env.queue.push(alert("done", { createdAt: env.now() - 5_000, title: "older done" }));
+  env.advance(3_000);
+
+  const approval = env.queue.push(alert("approval", { createdAt: env.now(), title: "approval" }));
+  assert.equal(env.queue.current().id, approval);
+  assert.equal(env.frames.at(-1).kind, "approval");
+  assert.equal(env.queue.waitingCount(), 2);
+
+  // The displaced alert returns at the head of its class, ahead of the older one.
+  env.queue.onShown(approval);
+  env.queue.onActed(approval);
+  assert.equal(env.queue.current().id, done);
+  assert.equal(env.queue.current().state, "sent");
+  assert.equal(env.frames.at(-1).id, done);
+});
+
+test("preempt_also_displaces_an_alert_still_waiting_for_its_ack", () => {
+  const env = setup();
+  env.queue.push(alert("done", { title: "unacked" }));
+  env.queue.push(alert("approval", { title: "approval" }));
+  assert.equal(env.queue.current().title, "approval");
+});
+
+test("only_a_new_approval_preempts_and_never_another_approval", () => {
+  const env = setup();
+  const first = env.queue.push(alert("approval", { createdAt: env.now(), title: "first" }));
+  env.queue.onShown(first);
+  env.queue.push(alert("approval", { createdAt: env.now(), title: "second" }));
+  const error = setup();
+  const shown = error.queue.push(alert("done", { title: "done" }));
+  error.queue.onShown(shown);
+  error.queue.push(alert("error", { title: "error" }));
+  error.queue.push(alert("question", { title: "question" }));
+  env.advance(1_000);
+  error.advance(1_000);
+  assert.equal(env.queue.current().title, "first");
+  assert.equal(error.queue.current().title, "done");
+});
+
+test("retries_until_shown_with_backoff", () => {
+  const env = setup();
+  const id = env.queue.push(alert("question"));
+  assert.equal(env.frames.length, 1);
+
+  env.advance(4_999);
+  assert.equal(env.frames.length, 1);
+  env.advance(1); // +5 s
+  assert.equal(env.frames.length, 2);
+
+  env.advance(9_999);
+  assert.equal(env.frames.length, 2);
+  env.advance(1); // +10 s
+  assert.equal(env.frames.length, 3);
+
+  env.advance(19_999);
+  assert.equal(env.frames.length, 3);
+  env.advance(1); // +20 s
+  assert.equal(env.frames.length, 4);
+
+  env.advance(20_000); // the last backoff value is kept
+  assert.equal(env.frames.length, 5);
+  assert.equal(env.queue.current().attempts, 5);
+  assert.deepEqual(new Set(env.frames.map((f) => f.id)), new Set([id]));
+
+  env.queue.onShown(id);
+  assert.equal(env.queue.current().state, "shown");
+  env.advance(60_000);
+  assert.equal(env.frames.length, 5);
+});
+
+test("a_refused_or_throwing_sink_still_follows_the_retry_schedule", () => {
+  let t = 0;
+  let calls = 0;
+  const queue = new AlertQueue(TIMINGS, () => {
+    calls += 1;
+    if (calls === 2) {
+      throw new Error("link down");
+    }
+    return false;
+  }, () => t);
+  queue.push({ ...alert("error"), createdAt: 0 });
+  t += 5_000;
+  queue.tick();
+  t += 10_000;
+  queue.tick();
+  assert.equal(calls, 3);
+  assert.equal(queue.current().state, "sent");
+});
+
+test("reminds_every_X_until_Y_then_expires", () => {
+  const env = setup();
+  const id = env.queue.push(alert("error", { createdAt: env.now() }));
+  env.queue.onShown(id);
+  assert.equal(env.frames.length, 1);
+
+  const X = TIMINGS.reminderMs;
+  for (let n = 1; n <= 5; n += 1) {
+    env.advance(X - 1);
+    assert.equal(env.frames.length, n);
+    env.advance(1);
+    assert.equal(env.frames.length, n + 1);
+    assert.equal(env.frames.at(-1).id, id);
+    env.queue.onShown(id);
+  }
+  // 5 reminders at 5-minute spacing; the next would land exactly on Y = 30 min.
+  env.advance(X);
+  assert.equal(env.frames.length, 6);
+  assert.equal(env.queue.current(), undefined);
+  assert.equal(env.queue.waitingCount(), 0);
+  env.advance(X);
+  assert.equal(env.frames.length, 6);
+});
+
+test("an_alert_that_is_never_shown_expires_instead_of_retrying_forever", () => {
+  const env = setup();
+  env.queue.push(alert("done", { createdAt: env.now() }));
+  env.advance(TIMINGS.expireMs);
+  assert.equal(env.queue.current(), undefined);
+  const sent = env.frames.length;
+  env.advance(60_000);
+  assert.equal(env.frames.length, sent);
+});
+
+test("waiting_count_in_every_frame", () => {
+  const env = setup();
+  const first = env.queue.push(alert("approval", { createdAt: env.now(), title: "a" }));
+  assert.equal(env.frames[0].waiting, 0);
+  env.queue.onShown(first);
+  env.queue.push(alert("error", { createdAt: env.now(), title: "b" }));
+  env.queue.push(alert("done", { createdAt: env.now(), title: "c" }));
+  assert.equal(env.queue.waitingCount(), 2);
+
+  env.queue.onActed(first);
+  assert.equal(env.frames[1].title, "b");
+  assert.equal(env.frames[1].waiting, 1);
+  env.queue.onShown(env.frames[1].id);
+  env.queue.onActed(env.frames[1].id);
+  assert.equal(env.frames[2].title, "c");
+  assert.equal(env.frames[2].waiting, 0);
+  for (const frame of env.frames) {
+    assert.equal(typeof frame.waiting, "number");
+  }
+});
+
+test("frames_carry_the_v2_alert_shape_with_actions_and_question", () => {
+  const env = setup();
+  const question = {
+    requestRef: "req-1",
+    source: "claude_tool",
+    items: [{ text: "Which?", options: [{ label: "A" }], multiSelect: false, allowFreeText: true }],
+  };
+  const id = env.queue.push(alert("question", { actions: ["answer"], question }));
+  assert.deepEqual(env.frames[0], {
+    type: "alert",
+    v: 2,
+    id,
+    sessionKey: "claude:s1",
+    kind: "question",
+    title: "question title",
+    body: "question body",
+    actions: ["answer"],
+    question,
+    waiting: 0,
+  });
+  env.queue.push(alert("done"));
+  const plain = env.queue.current();
+  assert.equal(plain.id, id);
+  env.queue.onActed(id);
+  assert.equal("actions" in env.frames[1], false);
+  assert.equal("question" in env.frames[1], false);
+});
+
+test("expire_session_drops_its_alerts_only", () => {
+  const env = setup();
+  const s1a = env.queue.push(alert("approval", { createdAt: env.now(), title: "s1 current" }));
+  env.queue.onShown(s1a);
+  env.queue.push(alert("error", { createdAt: env.now(), title: "s1 queued" }));
+  env.queue.push(alert("done", { createdAt: env.now(), sessionKey: "codex:t1", title: "t1 queued" }));
+
+  env.queue.expireSession("claude:s1", "session_ended");
+
+  assert.equal(env.queue.current().title, "t1 queued");
+  assert.equal(env.queue.waitingCount(), 0);
+  env.queue.onShown(s1a); // a late ack for the dropped alert is ignored
+  assert.equal(env.queue.current().state, "sent");
+  assert.deepEqual(drain(env), ["done"]);
+});
+
+test("stale_acks_and_unknown_ids_are_ignored", () => {
+  const env = setup();
+  const first = hold(env);
+  const queued = env.queue.push(alert("done"));
+  env.queue.onShown(queued); // still queued: never sent, so nothing to acknowledge
+  env.queue.onActed("nope");
+  env.queue.onDismissed("nope");
+  env.queue.onActed(first);
+  assert.equal(env.queue.current().id, queued);
+  assert.equal(env.queue.current().state, "sent");
+});
+
+test("dismissed_alert_is_dropped_and_the_next_is_sent", () => {
+  const env = setup();
+  const first = env.queue.push(alert("error", { title: "first" }));
+  env.queue.push(alert("done", { title: "second" }));
+  env.queue.onDismissed(first);
+  assert.equal(env.queue.current().title, "second");
+  assert.equal(env.queue.waitingCount(), 0);
+});
