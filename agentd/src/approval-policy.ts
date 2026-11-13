@@ -71,6 +71,12 @@ export class ApprovalPolicy {
     const previous = this.modes.get(sessionKey);
     const previousSince = this.approveAllSince.get(sessionKey);
     this.apply(sessionKey, mode);
+    if (mode !== "approveAll") {
+      // A downgrade must stick even if its record cannot be rewritten; the worst
+      // case is a spurious restart notice.
+      this.persistQuietly();
+      return { ok: true };
+    }
     try {
       this.persist();
     } catch (error) {

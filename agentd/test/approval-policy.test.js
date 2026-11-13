@@ -249,3 +249,30 @@ test("daemon_resets_approve_all_on_session_end_and_detach_and_reports_restart", 
     },
   );
 });
+
+test("approve_all_grant_is_refused_when_its_record_cannot_be_written", () => {
+  const { dir } = tempFile();
+  const blocker = path.join(dir, "blocker");
+  writeFileSync(blocker, "not a directory");
+  const policy = policyAt(path.join(blocker, "approve-all.json"));
+  assert.throws(() => policy.set("claude:s1", "approveAll", true));
+  assert.equal(policy.get("claude:s1"), "ask");
+  assert.equal(policy.decide("claude:s1", request("command")), undefined);
+  rmSync(dir, { recursive: true });
+});
+
+test("downgrade_from_approve_all_sticks_when_its_record_cannot_be_written", () => {
+  const { dir, file } = tempFile();
+  const policy = policyAt(file);
+  assert.deepEqual(policy.set("claude:s1", "approveAll", true), { ok: true });
+  // Make the state path unwritable: the directory's parent becomes a file.
+  rmSync(dir, { recursive: true });
+  writeFileSync(dir, "now a file");
+  assert.deepEqual(policy.set("claude:s1", "ask", false), { ok: true });
+  assert.equal(policy.get("claude:s1"), "ask");
+  assert.equal(policy.decide("claude:s1", request("command")), undefined);
+
+  assert.deepEqual(policy.set("claude:s2", "acceptEdits", false), { ok: true });
+  assert.equal(policy.get("claude:s2"), "acceptEdits");
+  rmSync(dir);
+});
