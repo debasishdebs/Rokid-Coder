@@ -263,6 +263,10 @@ Glasses/phone (Nexus code reading; devices are attached over adb but nothing was
   treat as quiet (display only). **[call]**
 
 ## 7. Constraints
+- **UI follows the same Material design patterns as the author's other Rokid apps [user]:** LiveFit
+  (phone, watch, glasses) and PCA use Kotlin + Jetpack Compose. Plan 2's phone screens and glasses
+  HUD reuse their Material-based components, theme and interaction patterns (`core/hud/Hud.kt`,
+  `HudController.kt`, `ConfirmOverlay.kt`, `PopupOverlay.kt`) wherever Nexus card types allow.
 - **v1 host: macOS only.** Windows v2 (WSL likely). **[user]**
 - **Remote VM later**: keep the phone↔host link host-agnostic (Tailscale already
   works this way); don't assume loopback-only for anything except hooks →
