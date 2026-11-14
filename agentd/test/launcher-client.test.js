@@ -83,3 +83,31 @@ test("rk_claude_hub_cancel_while_waiting_types_nothing", async () => {
     });
   });
 });
+
+// R161: the fake shows no dialog, so the model command fails dialog_not_seen
+// and Claude's file never moves. A restarted agentd knows nothing of that.
+test("uncertainty_survives_agentd_restart_and_blocks_next_command", async () => {
+  await withTempDir(async (dir) => {
+    await withBoundRk(dir, { FAKE_SESSION_ID: "sess-e2e", FAKE_NO_DIALOG: "1" }, async ({ hub, run, key }) => {
+      assert.deepEqual(await hub.send(key, { command: "model", model: "haiku" }), { ok: false, error: "dialog_not_seen" });
+      await hub.stop();
+      const sessionsDir = path.join(dir, "sessions");
+      const configDir = path.join(dir, "rokid-coder");
+      const registry = new AttachRegistry({ file: path.join(configDir, "attached.json"), logger: silentLogger });
+      const restarted = new LauncherHub({ configDir, claudeSessionsDir: sessionsDir, logger: silentLogger, registry });
+      await restarted.start();
+      try {
+        const binding = await until(() => restarted.binding(key), 8000, "the rebind after the restart");
+        assert.equal(binding.uncertain, true, "the launcher said so in its launcher_bind");
+        assert.deepEqual(await restarted.send(key, { command: "text", text: "never typed" }), { ok: false, error: "uncertain" });
+        // agentd's own false does not clear the launcher's true.
+        restarted.setUncertain(key, false);
+        assert.deepEqual(await restarted.send(key, { command: "text", text: "never typed" }), { ok: false, error: "uncertain" });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        assert.equal(run.out.includes("never typed"), false);
+      } finally {
+        await restarted.stop();
+      }
+    });
+  });
+});

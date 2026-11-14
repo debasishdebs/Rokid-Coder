@@ -1,4 +1,4 @@
-import type { LaptopInput } from "./laptop-input";
+import { REPLAY_GAP_MS, type LaptopInput } from "./laptop-input";
 import type { CommandError, TypeCommand } from "./launcher-hub";
 import { OutputScanner } from "./output-scanner";
 import type { PtyChild } from "./pty";
@@ -24,6 +24,11 @@ export interface TypistResult {
 export interface BindingView {
   gen: number;
   uncertain: boolean;
+  /**
+   * R161: the write the launcher's own uncertainty dates from. Only Claude's
+   * file showing idle after it, or a laptop prompt, clears the uncertainty.
+   */
+  uncertainSince?: number;
 }
 
 const OUTPUT_QUIET_MS = 500;
@@ -92,7 +97,10 @@ export class Typist {
   /** The first write of the last command whose held keys still wait for positive readiness. */
   private releaseAfter?: number;
   private lastOutputAt: number;
+  /** The last command's first write, which an uncertainty agentd reports dates from. */
+  private lastWrittenAt?: number;
   private timer?: unknown;
+  private replayTimer?: unknown;
   private exited = false;
   private disposed = false;
 
@@ -112,6 +120,7 @@ export class Typist {
     });
     pty.onExit(() => this.onExit());
     input.onTakeover(() => this.onTakeover());
+    input.dropHeldWhile(() => this.dialogMayBeOpen());
   }
 
   run(cmd: TypeCommand): Promise<TypistResult> {
@@ -138,14 +147,51 @@ export class Typist {
     if (active.phase === "dialog" || active.phase === "confirm") {
       // The dialog may be open: Esc, and nothing else.
       this.pty.write(ESC);
-      this.options.binding.uncertain = true;
+      this.markUncertain(active.writtenAt);
     } else if (active.phase === "recovering") {
-      this.options.binding.uncertain = true;
+      this.markUncertain(active.writtenAt);
     }
     this.settle(active, "cancelled");
     // R148: a compact agentd gave up on stops owning input at once.
     this.end(active, active.phase === "compacting" ? "unless_held" : "when_ready");
     this.step();
+  }
+
+  /**
+   * R160: the link to agentd is gone, so nothing will ever end the command in
+   * flight, a compact past its ok included. It stops owning input at once.
+   */
+  cancelActive(): void {
+    if (this.active) {
+      this.cancel(this.active.cmd.cmdId);
+    }
+  }
+
+  /**
+   * R161: the binding is uncertain, from the launcher's own failure or from
+   * agentd's word; it dates from `since`, or the last command's write.
+   */
+  markUncertain(since?: number): void {
+    const binding = this.options.binding;
+    const at = since ?? this.lastWrittenAt ?? this.clock.now();
+    binding.uncertainSince = binding.uncertain ? Math.max(binding.uncertainSince ?? at, at) : at;
+    binding.uncertain = true;
+  }
+
+  /** R161: still uncertain, unless Claude's own file has since shown it idle. */
+  uncertain(): boolean {
+    const binding = this.options.binding;
+    if (binding.uncertain && binding.uncertainSince !== undefined && this.ready(binding.uncertainSince)) {
+      binding.uncertain = false;
+      binding.uncertainSince = undefined;
+    }
+    return binding.uncertain;
+  }
+
+  /** R161: a laptop prompt is positive proof the wearer dealt with whatever was on screen. */
+  clearUncertain(): void {
+    this.options.binding.uncertain = false;
+    this.options.binding.uncertainSince = undefined;
   }
 
   /** agentd's correlated PostCompact for this compact. */
@@ -162,6 +208,8 @@ export class Typist {
     this.disposed = true;
     this.clock.clearTimeout(this.timer);
     this.timer = undefined;
+    this.clock.clearTimeout(this.replayTimer);
+    this.replayTimer = undefined;
     this.releaseAfter = undefined;
     const active = this.active;
     this.active = undefined;
@@ -250,7 +298,7 @@ export class Typist {
       this.end(active);
       return;
     }
-    if (binding.uncertain) {
+    if (this.uncertain()) {
       this.settle(active, "uncertain");
       this.end(active);
       return;
@@ -271,6 +319,7 @@ export class Typist {
   private firstWrite(active: Active, now: number): void {
     const { cmd } = active;
     active.writtenAt = now;
+    this.lastWrittenAt = now;
     active.scanner = new OutputScanner();
     this.input.hold();
     switch (cmd.command) {
@@ -309,7 +358,7 @@ export class Typist {
     }
     active.settled = true;
     if (error === "dialog_not_seen") {
-      this.options.binding.uncertain = true;
+      this.markUncertain(active.writtenAt);
     }
     active.resolve(error ? { ok: false, error } : { ok: true });
   }
@@ -349,7 +398,7 @@ export class Typist {
       this.releaseAfter = undefined;
       return;
     }
-    if (this.options.binding.uncertain || !this.ready(after)) {
+    if (this.uncertain() || !this.ready(after)) {
       return;
     }
     this.releaseAfter = undefined;
@@ -359,12 +408,40 @@ export class Typist {
     }
   }
 
+  /**
+   * A `/model` dialog may be on screen: the command's own, or one an
+   * uncertainty says may still be. A held Enter replayed into it would confirm
+   * whatever it shows (R151).
+   */
+  private dialogMayBeOpen(): boolean {
+    const active = this.active;
+    if (active?.cmd.command === "model" && active.writtenAt !== undefined) {
+      return true;
+    }
+    return this.options.binding.uncertain;
+  }
+
   private onTakeover(): void {
-    this.releaseAfter = undefined;
     const active = this.active;
     if (active?.writtenAt !== undefined) {
       this.settle(active, "taken_over");
       this.end(active);
+    }
+    this.releaseAfter = undefined;
+    if (this.input.replayPending) {
+      // R151: the takeover key has gone alone; the held keys follow after the gap.
+      this.clock.clearTimeout(this.replayTimer);
+      this.replayTimer = this.clock.setTimeout(() => {
+        this.replayTimer = undefined;
+        if (this.disposed || this.exited || !this.input.replayPending) {
+          return;
+        }
+        const held = this.input.flushHeld();
+        if (held) {
+          this.pty.write(held);
+        }
+        this.step();
+      }, REPLAY_GAP_MS);
     }
   }
 
@@ -372,6 +449,8 @@ export class Typist {
     this.exited = true;
     this.clock.clearTimeout(this.timer);
     this.timer = undefined;
+    this.clock.clearTimeout(this.replayTimer);
+    this.replayTimer = undefined;
     this.releaseAfter = undefined;
     const active = this.active;
     if (active) {

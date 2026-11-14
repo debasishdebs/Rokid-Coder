@@ -177,6 +177,11 @@ export class SessionStates {
     return true;
   }
 
+  /** A command holds the session's claim. */
+  claimed(key: SessionKey): boolean {
+    return this.entries.get(key)?.inFlight === true;
+  }
+
   release(key: SessionKey): void {
     const entry = this.entries.get(key);
     if (entry) {
@@ -241,6 +246,8 @@ export interface LauncherPort {
   /** R148: cancel one command on the connection that received it, past its result too. */
   cancelCommand(cmdId: string): void;
   setUncertain(key: SessionKey, uncertain: boolean): void;
+  /** R149: Claude took a prompt in the session. */
+  promptSubmitted(key: SessionKey, at: number): void;
   laptopDraft(key: SessionKey): boolean;
   compactDone(key: SessionKey, cmdId: string): void;
   onChange(cb: (key: SessionKey) => void): void;
@@ -325,6 +332,11 @@ export class LauncherRouter {
       if (running && problem) {
         running.abort(problem);
       }
+      // R161: a binding that starts uncertain (its launcher said so, and this
+      // agentd never saw the write) clears only on an idle newer than now.
+      if (this.port.binding(key)?.uncertain && this.states.latchAt(key) === undefined) {
+        this.states.latch(key, this.clock());
+      }
       this.look(key, true);
     });
   }
@@ -377,6 +389,37 @@ export class LauncherRouter {
 
   onHook(key: SessionKey, event: string, payload: Record<string, unknown>): void {
     this.states.onHook(key, event, payload);
+    if (event === "UserPromptSubmit" && this.port.binding(key)) {
+      // R163: a laptop turn started; a reply queued before it is not for it.
+      this.cancelUnwritten(key);
+      this.port.promptSubmitted(key, this.clock());
+    }
+  }
+
+  /**
+   * R163: a Stop hold opened, or an approval or a question is now pending.
+   * A dispatched command not yet typed is cancelled; one already typed is
+   * left alone, since a `/model` mid-dialog must not get another Esc.
+   */
+  onBlocked(key: SessionKey): void {
+    if (this.port.binding(key)) {
+      this.cancelUnwritten(key);
+      this.look(key, true);
+    }
+  }
+
+  /** A Stop hold ended other than by a delivery: what the phone shows may change. */
+  onHoldReleased(key: SessionKey): void {
+    if (this.port.binding(key)) {
+      this.look(key, true);
+    }
+  }
+
+  private cancelUnwritten(key: SessionKey): void {
+    const running = this.running.get(key);
+    if (running && !running.written) {
+      running.abort("cancelled");
+    }
   }
 
   /** The session ended or was detached: whatever waits or runs on it is cancelled. */
@@ -434,7 +477,8 @@ export class LauncherRouter {
         return problem;
       }
       const state = this.states.state(key);
-      if (state === "held" && takeHeld) {
+      // A command still in flight finishes first; a delivery beside it would race it.
+      if (state === "held" && takeHeld && !this.states.claimed(key)) {
         return "held";
       }
       if (this.port.binding(key)?.uncertain) {

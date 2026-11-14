@@ -11,6 +11,15 @@ const NEUTRAL_CONTROLS = new Set(["\x01", "\x02", "\x04", "\x05", "\x06", "\x0b"
 const NEUTRAL_FINALS = new Set(["C", "D", "H", "F", "I", "O"]);
 /** CSI parameter and intermediate bytes, private prefixes (`<`, `=`, `>`, `?`) included. */
 const CSI_BODY = /^[0-?]*[ -/]*$/;
+/** The key code, its modifiers and its event type; alternate codes and text are allowed and ignored. */
+const KITTY_KEY = /^(\d+)(?::\d*)*(?:;(\d*)(?::(\d+))?(?:;[\d:]*)?)?$/;
+const KITTY_ESC = 27;
+const KITTY_C = 99;
+const KITTY_CTRL = 4;
+/** Caps Lock and Num Lock: reported as modifiers, they change nothing about Ctrl-C. */
+const KITTY_LOCKS = 64 | 128;
+/** R151: after a takeover key, held keys wait this long, so Esc and the next key are not read as one Alt chord. */
+export const REPLAY_GAP_MS = 100;
 
 /**
  * R145's proof of a submit for one read of Claude's sessions file: it says busy,
@@ -34,6 +43,8 @@ class DraftTracker {
   enterPending = false;
   /** Counts the Enters that armed `enterPending`, so a watch restarts only for a new one. */
   enters = 0;
+  /** R149: an Enter on a draft is the last thing typed; unlike `enterPending` it does not lapse. */
+  enterLast = false;
   private inPaste = false;
 
   clone(): DraftTracker {
@@ -41,8 +52,16 @@ class DraftTracker {
     copy.draft = this.draft;
     copy.enterPending = this.enterPending;
     copy.enters = this.enters;
+    copy.enterLast = this.enterLast;
     copy.inPaste = this.inPaste;
     return copy;
+  }
+
+  /** The prompt is known empty. */
+  clear(): void {
+    this.draft = false;
+    this.enterPending = false;
+    this.enterLast = false;
   }
 
   /** Applies `data`; says whether it held a bare Esc or a Ctrl-C, outside a paste. */
@@ -64,7 +83,9 @@ class DraftTracker {
       if (ch === ESC) {
         const next = data[i + 1];
         if (next === "[") {
-          i = this.csi(data, i);
+          const csi = this.csi(data, i);
+          takeover ||= csi.takeover;
+          i = csi.next;
           continue;
         }
         if (next === "O" && i + 2 < data.length) {
@@ -83,12 +104,12 @@ class DraftTracker {
       if (ch === "\r") {
         // An Enter on an empty prompt proves nothing and leaves nothing.
         this.enterPending = this.draft;
+        this.enterLast = this.draft;
         if (this.enterPending) {
           this.enters += 1;
         }
       } else if (ch === "\x03") {
-        this.draft = false;
-        this.enterPending = false;
+        this.clear();
         takeover = true;
       } else if (ch >= " " || !NEUTRAL_CONTROLS.has(ch)) {
         // Printable, Tab, Backspace, newline, and any control key not known to be harmless.
@@ -103,10 +124,11 @@ class DraftTracker {
   private mark(): void {
     this.draft = true;
     this.enterPending = false;
+    this.enterLast = false;
   }
 
-  /** One CSI starting at `i`; returns where the next key starts. */
-  private csi(data: string, i: number): number {
+  /** One CSI starting at `i`; says where the next key starts, and whether it was a takeover key. */
+  private csi(data: string, i: number): { next: number; takeover: boolean } {
     let j = i + 2;
     while (j < data.length && data[j] >= " " && data[j] <= "?") {
       j += 1;
@@ -116,11 +138,14 @@ class DraftTracker {
       // Cut off at the chunk's end, or malformed: assume the worst, and go on
       // after the bytes that can belong to it so a later Ctrl-C is still seen.
       this.mark();
-      return final === undefined ? data.length : j;
+      return { next: final === undefined ? data.length : j, takeover: false };
     }
     const params = data.slice(i + 2, j);
+    let takeover = false;
     if (!CSI_BODY.test(params)) {
       this.mark();
+    } else if (final === "u") {
+      takeover = this.kittyKey(params);
     } else if (params === "200" && final === "~") {
       this.inPaste = true;
       this.mark();
@@ -129,7 +154,38 @@ class DraftTracker {
     } else if (!NEUTRAL_FINALS.has(final)) {
       this.mark(); // Up/Down recall history; Delete and the rest edit
     }
-    return j + 1;
+    return { next: j + 1, takeover };
+  }
+
+  /**
+   * R164: a key in the kitty keyboard protocol, `CSI code[:alt…][;mods[:event][;text]] u`.
+   * Esc and Ctrl-C are takeovers exactly as their legacy bytes are; anything
+   * else that is pressed may type. Returns whether it was a takeover.
+   */
+  private kittyKey(params: string): boolean {
+    if (params.startsWith("?")) {
+      return false; // the terminal answering a flags query, not a key
+    }
+    const match = KITTY_KEY.exec(params);
+    if (!match) {
+      this.mark();
+      return false;
+    }
+    const code = Number(match[1]);
+    const mods = match[2] ? Number(match[2]) - 1 : 0;
+    if (match[3] === "3") {
+      return false; // a release types nothing
+    }
+    if (code === KITTY_ESC) {
+      this.mark();
+      return true;
+    }
+    if (code === KITTY_C && (mods & ~KITTY_LOCKS) === KITTY_CTRL) {
+      this.clear();
+      return true;
+    }
+    this.mark();
+    return false;
   }
 }
 
@@ -142,20 +198,29 @@ export interface LaptopInputOptions {
 /**
  * The user's keyboard. While automation owns input the keys are held, except
  * that Esc or Ctrl-C is a takeover: it passes, and the held keys are the
- * user's again. `draft` describes the prompt as it will be once every held
- * key has been delivered.
+ * user's again, replayed by the typist after a gap (R151). Keys that would
+ * land in an open `/model` dialog are dropped, not held. `draft` describes
+ * the prompt as it will be once every held key has been delivered.
  */
 export class LaptopInput {
   private delivered = new DraftTracker();
   /** Set while holding: the delivered state with the held keys applied. */
   private projected?: DraftTracker;
   private held = "";
+  /** R151: a takeover passed and the held keys wait out the gap; keys typed meanwhile queue behind them. */
+  private replaying = false;
+  /** R151: held keys that would land in an open `/model` dialog are dropped instead. */
+  private dropping: () => boolean = () => false;
+  private droppedThisHold = false;
   private enterAt?: number;
+  /** When the last Enter that armed `enterLast` reached the prompt. */
+  private lastEnterAt?: number;
   /** Which Enter the current watch is for. */
   private watchedEnter = 0;
   private submitTimer?: unknown;
   private readonly takeoverListeners: Array<() => void> = [];
   private readonly draftListeners: Array<(draft: boolean) => void> = [];
+  private readonly droppedListeners: Array<() => void> = [];
 
   constructor(private readonly options: LaptopInputOptions) {}
 
@@ -172,26 +237,49 @@ export class LaptopInput {
     return this.held.length > 0;
   }
 
+  /** A takeover passed and the held keys are due after the gap. */
+  get replayPending(): boolean {
+    return this.replaying;
+  }
+
   key(data: string): "pass" | "hold" {
     const before = this.draft;
     if (!this.projected) {
-      this.delivered.feed(data);
+      this.deliver(data);
       this.watchSubmit();
       this.notify(before);
       return "pass";
     }
     const probe = this.projected.clone();
     if (probe.feed(data).takeover) {
-      // The key goes first, then the held keys are replayed after it.
-      this.delivered.feed(data);
-      this.delivered.feed(this.held);
-      this.projected = undefined;
+      // The key goes first; the held keys follow it after the gap (R151).
+      this.deliver(data);
+      if (this.held) {
+        const projected = this.delivered.clone();
+        projected.feed(this.held);
+        this.projected = projected;
+        this.replaying = true;
+      } else {
+        this.projected = undefined;
+        this.replaying = false;
+      }
       for (const cb of [...this.takeoverListeners]) {
         cb();
       }
-      this.watchSubmit();
+      if (!this.projected) {
+        this.watchSubmit();
+      }
       this.notify(before);
       return "pass";
+    }
+    if (!this.replaying && this.dropping()) {
+      if (!this.droppedThisHold) {
+        this.droppedThisHold = true;
+        for (const cb of [...this.droppedListeners]) {
+          cb();
+        }
+      }
+      return "hold";
     }
     this.projected = probe;
     this.held += data;
@@ -203,6 +291,7 @@ export class LaptopInput {
   hold(): void {
     if (!this.projected) {
       this.projected = this.delivered.clone();
+      this.droppedThisHold = false;
       this.stopSubmitWatch();
     }
   }
@@ -210,13 +299,41 @@ export class LaptopInput {
   /** Ends holding and returns the held keys, which the caller must write next. */
   flushHeld(): string {
     if (this.projected) {
+      if (this.projected.enters !== this.delivered.enters) {
+        this.lastEnterAt = this.options.clock.now();
+      }
       this.delivered = this.projected;
       this.projected = undefined;
       this.watchSubmit();
     }
+    this.replaying = false;
     const held = this.held;
     this.held = "";
     return held;
+  }
+
+  /**
+   * R149: agentd saw Claude take a prompt at `at`. A draft whose last key was
+   * an Enter, made before then, was that prompt; anything typed since is not.
+   */
+  promptSubmitted(at: number): void {
+    if (!this.delivered.enterLast || this.lastEnterAt === undefined || this.lastEnterAt > at) {
+      return;
+    }
+    const before = this.draft;
+    this.delivered.clear();
+    this.stopSubmitWatch();
+    if (this.projected) {
+      const projected = this.delivered.clone();
+      projected.feed(this.held);
+      this.projected = projected;
+    }
+    this.notify(before);
+  }
+
+  /** R151: while `when` says so, a held key is dropped rather than kept for replay. */
+  dropHeldWhile(when: () => boolean): void {
+    this.dropping = when;
   }
 
   onTakeover(cb: () => void): void {
@@ -225,6 +342,19 @@ export class LaptopInput {
 
   onDraftChange(cb: (draft: boolean) => void): void {
     this.draftListeners.push(cb);
+  }
+
+  /** The first key dropped while one hold lasts. */
+  onKeysDropped(cb: () => void): void {
+    this.droppedListeners.push(cb);
+  }
+
+  private deliver(data: string): void {
+    const enters = this.delivered.enters;
+    this.delivered.feed(data);
+    if (this.delivered.enters !== enters) {
+      this.lastEnterAt = this.options.clock.now();
+    }
   }
 
   dispose(): void {
@@ -260,8 +390,7 @@ export class LaptopInput {
     }
     if (this.options.busySince?.(at)) {
       const before = this.draft;
-      this.delivered.draft = false;
-      this.delivered.enterPending = false;
+      this.delivered.clear();
       this.enterAt = undefined;
       this.notify(before);
     } else if (this.options.clock.now() - at >= SUBMIT_PROOF_MS) {

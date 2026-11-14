@@ -128,6 +128,10 @@ Limits to know about:
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result
   cannot be seen, the session is marked uncertain and further commands are refused until you check it.
 - A follow-up is one bracketed paste of at most 16 KiB.
+- While a glasses command types, your keys are held and replayed once Claude is ready again; Esc or
+  Ctrl-C takes over at once. Keys typed while a glasses model change may have Claude's model dialog open
+  are dropped instead, so none can answer the dialog. `rk` rings the bell when it drops keys and says
+  so again after Claude exits.
 - One launcher holds a session. A second launcher for the same session is refused.
 - If agentd is not running or has its launcher socket off, `rk claude` still starts Claude, says so in
   its banner, and attaches by itself if agentd comes up later. Nothing is lost except the glasses.

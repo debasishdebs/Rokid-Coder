@@ -5,6 +5,7 @@ const path = require("node:path");
 const { Typist, sessionReady } = require("../dist/launcher/typist.js");
 const { LaptopInput, sessionBusySince } = require("../dist/launcher/laptop-input.js");
 const { readClaudeSession } = require("../dist/launcher/claude-sessions.js");
+const { LauncherClient } = require("../dist/launcher/launcher-client.js");
 const { spawnPty } = require("../dist/launcher/pty.js");
 const { withTempDir } = require("./helpers/daemon.js");
 const { FAKE_CLAUDE, until, waitDead, rkEnv, readJson } = require("./helpers/rk.js");
@@ -102,13 +103,11 @@ function setup({ gen = 1 } = {}) {
     binding,
     onWritten: (cmdId, at) => written.push({ cmdId, at }),
   });
-  // rk's stdin path: a passed key goes to the child, then anything a takeover released.
+  // rk's stdin path: a passed key goes to the child; the typist replays what a takeover released.
   const type = (data) => {
     const verdict = input.key(data);
     if (verdict === "pass") {
       pty.write(data);
-      const held = input.flushHeld();
-      if (held) pty.write(held);
     }
     return verdict;
   };
@@ -648,32 +647,38 @@ test("esc_during_model_takes_over_and_writes_nothing_more", async () => {
   assert.equal(t.type("\x1b"), "pass");
   await flush();
   assert.deepEqual(box.result, { ok: false, error: "taken_over" });
-  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\x1b", "ab"], "Esc, then the held keys");
+  // R151: keys typed while the dialog may be open are dropped, never replayed into it.
+  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\x1b"]);
   t.pty.emit("Switch model?\r\nSet model to haiku");
   await t.advance(20_000);
-  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\x1b", "ab"]);
+  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\x1b"]);
   assert.equal(t.binding.uncertain, false);
   // The user owns input again.
   assert.equal(t.type("c"), "pass");
   t.typist.dispose();
 });
 
-test("held_keys_replayed_after_model_ok_without_status_bump", async () => {
+test("input_free_after_model_ok_without_status_bump_and_dialog_keys_dropped", async () => {
   const t = setup();
+  let dropped = 0;
+  t.input.onKeysDropped(() => dropped++);
   const box = await t.run({ command: "model", model: "haiku" }, 600);
   // The dialog made the file busy; it never goes idle again after the switch.
   t.session.status = "busy";
   t.session.statusUpdatedAt = t.clock.now();
   assert.equal(t.type("he"), "hold");
   t.pty.emit("Switch model?");
-  assert.equal(t.type("llo"), "hold");
+  assert.equal(t.type("llo\r"), "hold");
   assert.deepEqual(t.pty.writes, ["/model haiku\r", "\r"], "held while the command owns input");
   t.pty.emit("Set model to haiku");
-  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\r", "hello"], "R142: replayed at the result");
+  // R142: the result frees input at once. R151: nothing typed into the dialog is replayed.
+  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\r"]);
+  assert.equal(dropped, 1, "the user is told once per hold");
   await flush();
   assert.deepEqual(box.result, { ok: true });
+  assert.equal(t.input.holding, false);
+  assert.equal(t.input.draft, false, "dropped keys never reached the prompt");
   assert.equal(t.type("!"), "pass");
-  assert.equal(t.input.draft, true, "the replayed keys are a draft");
   t.typist.dispose();
 });
 
@@ -728,6 +733,7 @@ test("cancel_after_compact_ok_releases_ownership", async () => {
       assert.deepEqual(v.pty.writes, ["/compact\r", "qw"]);
     } else {
       assert.equal(v.type("\x03"), "pass");
+      await v.advance(100);
       assert.deepEqual(v.pty.writes, ["/compact\r", "\x03", "qw"]);
     }
     v.typist.dispose();
@@ -785,6 +791,7 @@ test("held_keys_not_replayed_after_compact_timeout_until_idle_or_takeover", asyn
       assert.deepEqual(t.pty.writes, ["/compact\r", "queuedmore"]);
     } else {
       assert.equal(t.type("\x03"), "pass");
+      await t.advance(100);
       assert.deepEqual(t.pty.writes, ["/compact\r", "\x03", "queuedmore"]);
     }
     // The replayed keys are a draft, so the waiting command never types over them.
@@ -794,7 +801,7 @@ test("held_keys_not_replayed_after_compact_timeout_until_idle_or_takeover", asyn
   }
 });
 
-test("held_keys_not_replayed_after_failed_model_recovery_until_idle_or_takeover", async () => {
+test("keys_after_failed_model_recovery_dropped_until_idle_or_takeover", async () => {
   for (const release of ["idle", "takeover"]) {
     const t = setup();
     const box = await t.run({ command: "model", model: "haiku" }, 600);
@@ -802,18 +809,22 @@ test("held_keys_not_replayed_after_failed_model_recovery_until_idle_or_takeover"
     await t.advance(5100 + 1100);
     assert.deepEqual(box.result, { ok: false, error: "dialog_not_seen" });
     assert.equal(t.binding.uncertain, true);
-    freshIdle(t);
+    assert.equal(t.type("\r"), "hold", "an uncertain prompt may still show the dialog");
     await t.advance(5000);
     assert.deepEqual(t.pty.writes, ["/model haiku\r", "\x1b"], "an uncertain binding is not positively ready");
     if (release === "idle") {
-      // agentd's binding_state clears it once the prompt is shown usable.
-      t.binding.uncertain = false;
+      // R161: Claude's file shows idle after the write, which is the launcher's own proof.
+      freshIdle(t);
       await t.advance(200);
-      assert.deepEqual(t.pty.writes, ["/model haiku\r", "\x1b", "typed"]);
+      assert.equal(t.binding.uncertain, false);
+      assert.equal(t.input.holding, false);
     } else {
       assert.equal(t.type("\x1b"), "pass");
-      assert.deepEqual(t.pty.writes, ["/model haiku\r", "\x1b", "\x1b", "typed"]);
+      await t.advance(200);
     }
+    // R151: nothing typed while the dialog may have been open is replayed.
+    assert.deepEqual(t.pty.writes.filter((w) => w !== "\x1b"), ["/model haiku\r"]);
+    assert.equal(t.type("x"), "pass");
     t.typist.dispose();
   }
 });
@@ -869,3 +880,151 @@ async function withFake(extra, body) {
     }
   });
 }
+
+test("takeover_esc_then_held_keys_after_gap_no_alt_chord", async () => {
+  const t = setup();
+  await t.run({ command: "compact" }, 600);
+  t.session.status = "busy";
+  t.session.statusUpdatedAt = t.clock.now();
+  assert.equal(t.type("ab"), "hold");
+  assert.equal(t.type("\x1b"), "pass");
+  assert.deepEqual(t.pty.writes, ["/compact\r", "\x1b"], "the Esc goes alone");
+  await t.advance(99);
+  assert.equal(t.type("c"), "hold", "a key in the gap queues behind the held ones");
+  assert.deepEqual(t.pty.writes, ["/compact\r", "\x1b"]);
+  await t.advance(1);
+  assert.deepEqual(t.pty.writes, ["/compact\r", "\x1b", "abc"], "R151: 100 ms later, so Esc+a is no Alt-a");
+  assert.equal(t.input.holding, false);
+  assert.equal(t.type("d"), "pass");
+  t.typist.dispose();
+
+  // A held Enter never follows an Esc into a /model dialog: it is dropped.
+  const u = setup();
+  let dropped = 0;
+  u.input.onKeysDropped(() => dropped++);
+  await u.run({ command: "model", model: "haiku" }, 600);
+  assert.equal(u.type("\r"), "hold");
+  assert.equal(u.type("\x1b"), "pass");
+  await u.advance(500);
+  assert.deepEqual(u.pty.writes, ["/model haiku\r", "\x1b"]);
+  assert.equal(dropped, 1);
+  u.typist.dispose();
+});
+
+test("kitty_protocol_esc_and_ctrl_c_take_over", async () => {
+  const takeovers = {
+    "\x1b[27u": true,
+    "\x1b[27;1u": true,
+    "\x1b[27;1:1u": true,
+    "\x1b[99;5u": false,
+    "\x1b[99;5:1u": false,
+    "\x1b[99;69u": false, // Ctrl with Caps Lock on
+  };
+  for (const [key, draftAfter] of Object.entries(takeovers)) {
+    const t = setup();
+    await t.run({ command: "compact" }, 600);
+    t.session.status = "busy";
+    t.session.statusUpdatedAt = t.clock.now();
+    assert.equal(t.type("x"), "hold");
+    assert.equal(t.type(key), "pass", `${JSON.stringify(key)} takes over`);
+    await t.advance(100);
+    assert.deepEqual(t.pty.writes, ["/compact\r", key, "x"]);
+    assert.equal(t.input.holding, false);
+    t.typist.dispose();
+    // As drafts, the same as the legacy bytes: Esc may leave text, Ctrl-C clears.
+    const input = new LaptopInput({ clock: new FakeClock() });
+    input.key("abc");
+    input.key(key);
+    assert.equal(input.draft, true === draftAfter, `${JSON.stringify(key)} as a draft`);
+  }
+  // A release, or the terminal's answer to a flags query, is no key; a printable is a draft.
+  const t = setup();
+  await t.run({ command: "compact" }, 600);
+  assert.equal(t.type("\x1b[27;1:3u"), "hold", "an Esc release is no takeover");
+  t.typist.dispose();
+  const input = new LaptopInput({ clock: new FakeClock() });
+  input.key("\x1b[?1u");
+  input.key("\x1b[99;5:3u");
+  assert.equal(input.draft, false);
+  input.key("\x1b[97u");
+  assert.equal(input.draft, true, "a CSI-u printable is a draft");
+});
+
+test("enter_while_busy_cleared_by_prompt_submitted", async () => {
+  const t = setup();
+  // Claude is already busy, so its file never shows the Enter's submit (R145).
+  t.session.status = "busy";
+  t.session.statusUpdatedAt = t.clock.now() - 5000;
+  t.type("next question");
+  t.type("\r");
+  await t.advance(2000);
+  assert.equal(t.input.draft, true, "conservative until agentd proves the submit");
+  t.input.promptSubmitted(t.clock.now() - 2500);
+  assert.equal(t.input.draft, true, "a prompt taken before the Enter is not this one");
+  t.input.promptSubmitted(t.clock.now());
+  assert.equal(t.input.draft, false, "R149");
+  // A key typed after the Enter keeps the draft.
+  t.type("more");
+  t.type("\r");
+  t.type("x");
+  t.input.promptSubmitted(t.clock.now());
+  assert.equal(t.input.draft, true);
+  t.typist.dispose();
+});
+
+test("link_drop_after_compact_ok_releases_keyboard", async () => {
+  await withTempDir(async (dir) => {
+    const pty = new FakePty();
+    const clock = new FakeClock();
+    const file = path.join(dir, `${pty.pid}.json`);
+    const write = (status, at) => fs.writeFileSync(file, JSON.stringify({ pid: pty.pid, sessionId: "s1", status, statusUpdatedAt: at }));
+    write("idle", clock.now() - 10_000);
+    const sent = [];
+    const binding = { gen: 1, uncertain: false };
+    const client = new LauncherClient({ child: pty, send: (frame) => sent.push(frame), binding, sessionsDir: dir, clock });
+    client.setSession({ pid: pty.pid, sessionId: "s1", status: "idle" });
+    client.onBound("s1");
+    client.onLinkUp();
+    try {
+      client.onFrame({ type: "type_command", cmdId: "k1", gen: 1, command: "compact" });
+      clock.advance(600);
+      await flush();
+      assert.deepEqual(sent.filter((f) => f.type === "command_result"), [{ type: "command_result", cmdId: "k1", ok: true }]);
+      write("busy", clock.now());
+      client.onStdin("held");
+      assert.deepEqual(pty.writes, ["/compact\r"], "the compact owns input");
+      // agentd goes away: no compact_done or cancel_command can ever come.
+      client.onLinkDown();
+      client.onStdin("!");
+      assert.deepEqual(pty.writes, ["/compact\r"], "keys held before the drop wait for positive readiness");
+      write("idle", clock.now() + 1);
+      clock.advance(1000);
+      await flush();
+      assert.deepEqual(pty.writes, ["/compact\r", "held!"]);
+      client.onStdin("y");
+      assert.deepEqual(pty.writes, ["/compact\r", "held!", "y"], "the keyboard echoes at once");
+      // And the next command after the reconnect is not refused busy.
+      client.onLinkUp();
+      client.onStdin("\x03");
+      client.onFrame({ type: "type_command", cmdId: "k2", gen: 1, command: "compact" });
+      clock.advance(600);
+      await flush();
+      assert.deepEqual(sent.filter((f) => f.cmdId === "k2" && f.type === "command_result"), [
+        { type: "command_result", cmdId: "k2", ok: true },
+      ]);
+
+      // With nothing held, the link drop frees the keyboard at once.
+      client.onFrame({ type: "compact_done", cmdId: "k2" });
+      client.onFrame({ type: "type_command", cmdId: "k3", gen: 1, command: "compact" });
+      write("idle", clock.now() + 2);
+      clock.advance(600);
+      await flush();
+      const before = pty.writes.length;
+      client.onLinkDown();
+      client.onStdin("z");
+      assert.deepEqual(pty.writes.slice(before), ["z"]);
+    } finally {
+      client.dispose();
+    }
+  });
+});

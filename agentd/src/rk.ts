@@ -16,6 +16,8 @@ const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not a
 // R155: printed before the bind, so it says attaching; only the phone shows the bind itself.
 const ATTACHING =
   "Rokid-Coder launcher: attaching… From the glasses you can reply at any time, compact, and change model (changing model also sets your default for new sessions).";
+const KEYS_DROPPED =
+  "Rokid-Coder: keys you typed while a model change from the glasses had Claude's model dialog open were dropped, so none could answer the dialog.";
 const SOCKET_OFF = "Rokid-Coder: agentd is running but its launcher socket is off — this session is not attached.";
 // U5: everything the banner needs is said before the TUI takes the screen.
 const CLAUDE_COMMANDS_LINE = "  In Claude, {/rokid:status} shows this session's state and {/rokid:off} stops sending it to the glasses.";
@@ -263,6 +265,9 @@ async function runClaude(args: string[]): Promise<void> {
     const done = (): void => {
       try {
         restoreTerminal(saved);
+        if (keysDropped) {
+          fs.writeSync(2, `${KEYS_DROPPED}\n`);
+        }
         if (shutdown?.note) {
           fs.writeSync(2, shutdown.note);
         }
@@ -298,10 +303,17 @@ async function runClaude(args: string[]): Promise<void> {
 
   // ---- the launcher link and session binding ----
   const sessionsDir = claudeSessionsDir();
-  const binding = { gen: 0, uncertain: false };
+  const binding: { gen: number; uncertain: boolean; uncertainSince?: number } = { gen: 0, uncertain: false };
   let boundId: string | undefined;
   let requestedId: string | undefined;
   const client = new LauncherClient({ child, send: (frame) => link.send(frame), binding, sessionsDir });
+  // R151: keys typed while a glasses /model dialog may be open are dropped. The
+  // bell says so at once without drawing over Claude's screen; the line after exit says why.
+  let keysDropped = false;
+  client.input.onKeysDropped(() => {
+    keysDropped = true;
+    process.stdout.write("\x07");
+  });
 
   const link: LauncherLink = new LauncherLink(
     socketPath,
@@ -337,7 +349,11 @@ async function runClaude(args: string[]): Promise<void> {
           case "binding_state":
             if (typeof frame.gen === "number" && typeof frame.uncertain === "boolean") {
               binding.gen = frame.gen;
-              binding.uncertain = frame.uncertain;
+              // R161: agentd's false never clears the launcher's own true; a
+              // restarted agentd knows nothing of it.
+              if (frame.uncertain) {
+                client.agentdUncertain();
+              }
             }
             break;
           default:
@@ -365,7 +381,7 @@ async function runClaude(args: string[]): Promise<void> {
         client.setSession(session);
         if (session.sessionId !== boundId && session.sessionId !== requestedId) {
           requestedId = session.sessionId;
-          link.send({ type: "launcher_bind", sessionId: session.sessionId });
+          link.send({ type: "launcher_bind", sessionId: session.sessionId, uncertain: client.uncertain() });
         }
       }
     }

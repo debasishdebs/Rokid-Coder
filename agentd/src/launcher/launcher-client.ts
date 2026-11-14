@@ -90,14 +90,20 @@ export class LauncherClient {
 
   /** Bytes from the user's terminal. */
   onStdin(data: string): void {
+    // After a takeover the typist replays the held keys, a gap after this one (R151).
     if (this.input.key(data) === "pass") {
       this.child.write(data);
-      // After a takeover the held keys follow the key that took over.
-      const held = this.input.flushHeld();
-      if (held) {
-        this.child.write(held);
-      }
     }
+  }
+
+  /** R161: agentd says the binding is uncertain; the launcher keeps that until it sees proof otherwise. */
+  agentdUncertain(): void {
+    this.typist.markUncertain();
+  }
+
+  /** R161: the launcher's own uncertainty, after a fresh look at Claude's file. */
+  uncertain(): boolean {
+    return this.typist.uncertain();
   }
 
   /** The owned session the bind poll found. It counts for readiness only once agentd accepts it. */
@@ -126,6 +132,13 @@ export class LauncherClient {
           this.typist.compactDone(frame.cmdId);
         }
         return true;
+      case "prompt_submitted":
+        // R149 and R161: Claude took a prompt typed at the laptop.
+        if (typeof frame.at === "number" && Number.isFinite(frame.at)) {
+          this.input.promptSubmitted(frame.at);
+          this.typist.clearUncertain();
+        }
+        return true;
       default:
         return false;
     }
@@ -149,12 +162,11 @@ export class LauncherClient {
     this.clock.clearTimeout(this.reportTimer);
   }
 
+  /** R160: whatever was in flight, past its result too, is abandoned with the link that sent it. */
   private linkChanged(): void {
     this.epoch += 1;
-    const running = this.running;
-    if (running) {
-      this.typist.cancel(running.cmdId);
-    }
+    this.running = undefined;
+    this.typist.cancelActive();
   }
 
   private onTypeCommand(frame: Frame): void {

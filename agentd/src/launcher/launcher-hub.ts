@@ -290,6 +290,14 @@ export class LauncherHub {
     }
   }
 
+  /** R149: Claude took a prompt in this session; the launcher may clear a draft it was holding on to. */
+  promptSubmitted(key: SessionKey, at: number): void {
+    const connection = this.byKey.get(key);
+    if (connection?.binding) {
+      this.write(connection, { type: "prompt_submitted", at });
+    }
+  }
+
   /** A compact this launcher typed has really finished (Task 4 saw its PostCompact). */
   compactDone(key: SessionKey, cmdId: string): void {
     const connection = this.byKey.get(key);
@@ -484,10 +492,15 @@ export class LauncherHub {
     }
     switch (frame.type) {
       case "launcher_bind":
-        if (!hasShape(frame, ["type", "sessionId"]) || typeof frame.sessionId !== "string" || !SESSION_ID.test(frame.sessionId)) {
+        if (
+          !hasShape(frame, ["type", "sessionId"], ["uncertain"]) ||
+          typeof frame.sessionId !== "string" ||
+          !SESSION_ID.test(frame.sessionId) ||
+          (frame.uncertain !== undefined && typeof frame.uncertain !== "boolean")
+        ) {
           return "bad_frame";
         }
-        this.onBind(connection, frame.sessionId);
+        this.onBind(connection, frame.sessionId, frame.uncertain === true);
         return undefined;
       case "command_result": {
         if (
@@ -575,7 +588,8 @@ export class LauncherHub {
    * is acceptable under R48, which trusts the user's own processes; the
    * socket's 0700 dir and 0600 mode keep other users out.
    */
-  private onBind(connection: Connection, sessionId: string): void {
+  /** `uncertain` is the launcher's own (R161): a binding never starts more certain than its launcher is. */
+  private onBind(connection: Connection, sessionId: string, uncertain: boolean): void {
     const hello = connection.hello as Hello;
     const reject = (reason: string): void => {
       this.options.logger.info("launcher_bind_rejected", { reason });
@@ -592,6 +606,9 @@ export class LauncherHub {
     const current = connection.binding;
     if (current?.key === key) {
       this.write(connection, { type: "bind_accepted", gen: current.gen });
+      if (uncertain) {
+        this.setUncertain(key, true);
+      }
       return;
     }
     if (!isPidAlive(hello.childPid)) {
@@ -641,14 +658,14 @@ export class LauncherHub {
       gen: this.generation,
       childPid: hello.childPid,
       claudePid: session.pid,
-      uncertain: false,
+      uncertain,
     };
     connection.binding = binding;
     this.byKey.set(key, connection);
     this.unbound.delete(key);
     this.options.logger.info("launcher_bound", { gen: binding.gen });
     this.write(connection, { type: "bind_accepted", gen: binding.gen });
-    this.write(connection, { type: "binding_state", gen: binding.gen, uncertain: false });
+    this.write(connection, { type: "binding_state", gen: binding.gen, uncertain });
     this.emit(key);
     this.options.onBound?.({ sessionId, status: session.status, ...(session.cwd ? { cwd: session.cwd } : {}) });
   }

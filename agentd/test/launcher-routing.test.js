@@ -694,3 +694,72 @@ test("bind_before_any_hook_shows_the_session_in_launcher_mode", async () => {
     assert.equal(upsert.session.cwd, "/work/demo");
   }, { sessionStart: false, sessionCwd: "/work/demo" });
 });
+
+// R163: the launcher holds the dispatched reply (a laptop draft, say) and has
+// typed nothing; whatever then waits on the wearer or the laptop cancels it.
+test("stop_hold_opening_cancels_queued_command", async () => {
+  await withBound(async ({ daemon, launcher, followup, ack, heldStop }) => {
+    followup("R1", "sq1");
+    const frame = await launcher.waitFor("type_command");
+    const { reply } = await heldStop();
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);
+    assert.equal((await ack("sq1")).error, "cancelled");
+    // The launcher answers the cancel as the typist would; the hold ends at the laptop.
+    launcher.send({ type: "command_result", cmdId: frame.cmdId, ok: false, error: "cancelled" });
+    daemon.stopWait.releaseByLaptop(ID);
+    assert.deepEqual(await reply, {});
+    await settle(300);
+    assert.equal(launcher.of("type_command").length, 1, "nothing is sent again");
+  });
+});
+
+test("pending_approval_cancels_queued_command", async () => {
+  await withBound(async ({ daemon, httpPort, launcher, followup, ack }) => {
+    followup("R1", "pa1");
+    const frame = await launcher.waitFor("type_command");
+    const asked = postHook(httpPort, {
+      hook_event_name: "PermissionRequest",
+      session_id: ID,
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+    });
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);
+    assert.equal((await ack("pa1")).error, "cancelled");
+    daemon.approvals.resolveSession(ID);
+    await asked;
+  });
+  // A question waiting on the wearer does the same.
+  await withBound(async ({ daemon, httpPort, launcher, followup, ack }) => {
+    followup("R1", "pa2");
+    const frame = await launcher.waitFor("type_command");
+    const asked = postHook(httpPort, {
+      hook_event_name: "PreToolUse",
+      session_id: ID,
+      tool_name: "AskUserQuestion",
+      tool_use_id: "toolu_q1",
+      tool_input: { questions: [{ question: "Which?", header: "Pick", multiSelect: false, options: [{ label: "A" }, { label: "B" }] }] },
+    });
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);
+    assert.equal((await ack("pa2")).error, "cancelled");
+    daemon.questionRelay.releaseByLaptop(ID);
+    await asked;
+  });
+});
+
+test("queued_reply_never_typed_after_a_later_laptop_turn", async () => {
+  await withBound(async ({ httpPort, launcher, claude, followup, ack }) => {
+    followup("yes, do it", "qr1");
+    const frame = await launcher.waitFor("type_command");
+    // The wearer's laptop turn T2 starts before the launcher could type R1.
+    await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: ID, prompt: "T2" });
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);
+    assert.equal((await ack("qr1")).error, "cancelled");
+    // R149: the launcher hears of the prompt.
+    const submitted = await launcher.waitFor("prompt_submitted");
+    assert.equal(typeof submitted.at, "number");
+    claude.write("busy");
+    claude.write("idle");
+    await settle(400);
+    assert.equal(launcher.of("type_command").length, 1, "R1 is never sent again");
+  });
+});

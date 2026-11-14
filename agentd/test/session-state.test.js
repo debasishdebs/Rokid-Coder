@@ -67,6 +67,8 @@ function fakePort() {
       }
     },
     laptopDraft: (key) => port.drafts.get(key) === true,
+    submitted: [],
+    promptSubmitted: (key, at) => port.submitted.push({ key, at }),
     compactDone: (key, cmdId) => port.compactDones.push(cmdId),
     onChange: (cb) => changes.push(cb),
     onCommandWritten: (cb) => written.push(cb),

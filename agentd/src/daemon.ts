@@ -202,8 +202,14 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   stopWait.onRelease((sessionId, reason) => {
     if (reason === "delivered") {
       launcherRouter.onStopDelivered(sessionKeyOf("claude", sessionId));
+    } else {
+      launcherRouter.onHoldReleased(sessionKeyOf("claude", sessionId));
     }
   });
+  // R163: whatever now waits on the wearer or the laptop makes a reply queued
+  // before it stale, so one not yet typed is cancelled.
+  stopWait.onOpened((sessionId) => launcherRouter.onBlocked(sessionKeyOf("claude", sessionId)));
+  questionRelay.onOpened(({ sessionKey }) => launcherRouter.onBlocked(sessionKey));
   const discovered = await discoverRecentSessions(path.join(claudeDir, "projects"), logger);
   for (const session of discovered) {
     sessions.addDiscovered(session);
@@ -388,6 +394,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       // ExitPlanMode is different: it is a real sign-off, never auto-allowed.
       if (payload.tool_name === "AskUserQuestion") {
         return {};
+      }
+      // R163: a permission prompt is now waiting, on the phone or at the laptop.
+      if (sessionId) {
+        launcherRouter.onBlocked(sessionKeyOf("claude", sessionId));
       }
       return approvals?.request(payload, closed) ?? {};
     }
