@@ -18,7 +18,9 @@ async function withTempDir(body) {
   }
 }
 
-function freePort() {
+const handedOut = new Set();
+
+function probeFreePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.once("error", reject);
@@ -27,6 +29,79 @@ function freePort() {
       server.close(() => resolve(port));
     });
   });
+}
+
+/**
+ * A port nothing listens on. The kernel may hand a just-closed port to the
+ * next caller, so a port this process gave out before is not given again
+ * (up to 5 draws): two daemons starting together would collide on it.
+ */
+async function freePort() {
+  let port;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    port = await probeFreePort();
+    if (!handedOut.has(port)) break;
+  }
+  handedOut.add(port);
+  return port;
+}
+
+// Daemons read their state dirs from the process environment as they start, so
+// concurrent withDaemon calls take turns through the start, and the last one
+// out restores the environment.
+let envHolders = 0;
+let envSaved;
+let startTurn = Promise.resolve();
+
+function holdEnv() {
+  if (envHolders === 0) {
+    envSaved = { state: process.env.NEXUS_AGENTD_STATE_DIR, claude: process.env.NEXUS_AGENTD_CLAUDE_DIR };
+  }
+  envHolders += 1;
+}
+
+function releaseEnv() {
+  envHolders -= 1;
+  if (envHolders > 0) return;
+  for (const [key, value] of [["NEXUS_AGENTD_STATE_DIR", envSaved.state], ["NEXUS_AGENTD_CLAUDE_DIR", envSaved.claude]]) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+/**
+ * Starts the daemon on fresh ports, retrying up to 5 times when a port turns
+ * out to be taken after all (another process drew it between probe and bind).
+ */
+async function startOnFreePorts({ base, stateDir, coderDir, claudeDir, phoneHosts }) {
+  const previous = startTurn;
+  let done;
+  startTurn = new Promise((resolve) => { done = resolve; });
+  await previous;
+  try {
+    for (let attempt = 1; ; attempt += 1) {
+      const httpPort = await freePort();
+      const wsPort = await freePort();
+      const discoveryPort = await freePort();
+      saveConfig({
+        ...base,
+        httpPort,
+        wsPort,
+        phoneHosts,
+        tailnetDiscovery: false,
+        rokidCoder: { stateDir: coderDir },
+      }, stateDir);
+      process.env.NEXUS_AGENTD_STATE_DIR = stateDir;
+      process.env.NEXUS_AGENTD_CLAUDE_DIR = claudeDir;
+      try {
+        return { daemon: await startDaemon({ discoveryPort }), httpPort, wsPort };
+      } catch (error) {
+        if (error?.code !== "EADDRINUSE" || attempt >= 5) throw error;
+      }
+    }
+  } finally {
+    done();
+  }
 }
 
 function postHook(port, payload, headers = {}) {
@@ -107,28 +182,24 @@ async function withDaemon({ transport, tls = true, attached = [], discovered = [
     if (tls) {
       pinFakePhone({ coderDir, phone }, { arm: transport === "phonelink" });
     }
-    const httpPort = await freePort();
-    const wsPort = await freePort();
     const base = ensureConfig(stateDir);
     let phonePort;
     if (transport === "phonelink") {
       phonePort = (await phone.start({ token: base.token })).port;
     }
-    saveConfig({
-      ...base,
-      httpPort,
-      wsPort,
-      phoneHosts: transport === "phonelink" ? [`127.0.0.1:${phonePort}`] : [],
-      tailnetDiscovery: false,
-      rokidCoder: { stateDir: coderDir },
-    }, stateDir);
 
-    const saved = { state: process.env.NEXUS_AGENTD_STATE_DIR, claude: process.env.NEXUS_AGENTD_CLAUDE_DIR };
-    process.env.NEXUS_AGENTD_STATE_DIR = stateDir;
-    process.env.NEXUS_AGENTD_CLAUDE_DIR = claudeDir;
+    holdEnv();
     let daemon;
     try {
-      daemon = await startDaemon({ discoveryPort: await freePort() });
+      const started = await startOnFreePorts({
+        base,
+        stateDir,
+        coderDir,
+        claudeDir,
+        phoneHosts: transport === "phonelink" ? [`127.0.0.1:${phonePort}`] : [],
+      });
+      daemon = started.daemon;
+      const { httpPort, wsPort } = started;
       // The steering secret the daemon made; a wss phone sends it to steer.
       const steer = (await fsp.readFile(path.join(coderDir, "tls", "steer.secret"), "utf8")).trim();
       if (tls) phone.steer = steer;
@@ -142,10 +213,7 @@ async function withDaemon({ transport, tls = true, attached = [], discovered = [
     } finally {
       phone.close();
       await daemon?.stop();
-      for (const [key, value] of [["NEXUS_AGENTD_STATE_DIR", saved.state], ["NEXUS_AGENTD_CLAUDE_DIR", saved.claude]]) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
+      releaseEnv();
     }
   });
 }
