@@ -72,7 +72,7 @@ class AgentdProtocolCodecTest {
         assertEquals(AgentProvider.CODEX, detail.provider)
         assertTrue(
             codec.parse(
-                """{"type":"detail","provider":"openclaw","sessionId":"same","messages":[]}""",
+                """{"type":"detail","provider":"gemini","sessionId":"same","messages":[]}""",
             ) is AgentdAction.Ignore,
         )
     }

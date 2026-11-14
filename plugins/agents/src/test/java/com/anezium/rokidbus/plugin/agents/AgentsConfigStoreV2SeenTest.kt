@@ -9,21 +9,27 @@ class AgentsConfigStoreV2SeenTest {
     private val prefs = MemoryPrefs()
     private fun store() = AgentsConfigStore(prefs) { 0L }
 
-    private fun session(machineId: String?, provider: AgentProvider = AgentProvider.CLAUDE) = AgentSession(
-        id = "s1", provider = provider, machineId = machineId, status = AgentStatus.NEEDS_YOU,
-    )
-
     private val pairing = AgentdConfig(host = "100.1.2.3", port = 8792, token = "t", name = "laptop")
 
     @Test
-    fun v1_attention_is_openclaw_only() {
-        val engine = AttentionDecisionEngine({ null }, { _, _ -> })
-        val waiting = listOf(session("m1"), session("m1", AgentProvider.CODEX), session(null, AgentProvider.OPENCLAW))
+    fun retired_provider_keys_are_cleared_and_the_rest_kept() {
+        prefs.edit()
+            .putBoolean("openclaw.enabled", true)
+            .putString("openclaw.host", "gw")
+            .putString("openclaw.device_seed", "c2VlZA==")
+            .putString("notification.claude:s1", "needs_you:1")
+            .putBoolean("notifications.permission_asked", true)
+            .apply()
+        store().saveAgentd(pairing, true)
 
-        // agentd's own providers speak through v2 alerts only, whatever the link is doing.
-        val pending = engine.pending(waiting) { !v1AttentionApplies(it) }
+        store().clearRetiredKeys()
 
-        assertEquals(listOf(AgentProvider.OPENCLAW), pending.map { it.session.provider })
+        assertEquals(emptyList<String>(), prefs.map.keys.filter { it.startsWith("openclaw.") || it.startsWith("notification.") })
+        assertTrue(store().notificationPermissionAsked())
+        assertEquals(pairing, store().load().agentd)
+        assertTrue(store().load().agentdEnabled)
+        // Nothing left to clear is a no-op.
+        store().clearRetiredKeys()
     }
 
     @Test
@@ -63,17 +69,13 @@ class AgentsConfigStoreV2SeenTest {
 
     @Test
     fun stop_turns_every_provider_off_and_keeps_the_pairing() {
-        val config = store().apply {
-            saveAgentd(pairing, true)
-            saveOpenClaw(OpenClawConfig(host = "gw", token = "t"), true)
-        }
+        val config = store().apply { saveAgentd(pairing, true) }
         assertTrue(config.load().shouldMonitor)
 
         config.stopMonitoring()
 
         val after = config.load()
         assertFalse(after.agentdEnabled)
-        assertFalse(after.openClawEnabled)
         assertFalse(after.shouldMonitor)
         assertEquals(pairing, after.agentd)
     }

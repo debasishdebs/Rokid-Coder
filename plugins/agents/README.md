@@ -1,8 +1,8 @@
 # Agents
 
-Agents is the mission-control plugin for coding-agent sessions. It merges the
-Claude Code and Codex sessions carried by `nexus-agentd` with OpenClaw
-Gateway sessions, keeps the connections in a low-priority foreground service,
+Agents is the mission-control plugin for coding-agent sessions. It watches the
+Claude Code and Codex sessions carried by `nexus-agentd`, keeps the
+connections in a low-priority foreground service,
 holds one visible monitoring notification on the phone, and renders a structured
 Nexus card plus alert bands on the glasses.
 
@@ -76,8 +76,7 @@ The settings screen reads top to bottom: Monitoring (one switch for the
 `nexus-agentd` link, which carries Claude Code and Codex, with a status line
 that counts the watched sessions) and Computers (every linked machine with
 its state). Each computer has its own screen with its anchored projects and
-its Forget; the OpenClaw gateway is configured at the bottom of the Add a
-computer screen. With no computer yet, the Computers card shows **Add your first
+its Forget. With no computer yet, the Computers card shows **Add your first
 computer** and "Pairing takes two minutes — tap Add your first computer."
 Further down are Security (the pairing TTL), Alert history and the alert
 choices, including the voice reply length.
@@ -120,8 +119,6 @@ then flows through the ordinary monitoring to the board.
   The command is `agentd` (the
   `bin` of the daemon package), not `nexus-agentd`, which is only the
   protocol and service name.
-- OpenClaw: enter the Gateway host, port (default `18789`), and token. A host
-  may include `ws://` or `wss://`; a plain host uses `ws://`.
 - **Agents posts no alert on the phone, with one exception.** See
   [The monitoring notification](#the-monitoring-notification).
 - **A sound per alert kind, off by Do Not Disturb or the quiet toggle.** See
@@ -131,8 +128,7 @@ then flows through the ordinary monitoring to the board.
   while they are known to be off the head. The quiet setting is the
   `alerts.quiet` preference.
 
-Settings, auth tokens, the OpenClaw device seed, alert fingerprints, and the
-Gateway-issued device token use the plugin's private `nexus_plugin_agents`
+Settings and auth tokens use the plugin's private `nexus_plugin_agents`
 `SharedPreferences`. This follows Transit’s existing plain-`SharedPreferences`
 pattern; no token or pairing payload is logged.
 
@@ -250,9 +246,8 @@ phone. Both directions are TLS (1.2 or later), pinned both ways:
   once. Rotate the steering secret with `agentd pair --rotate-steer`; every
   phone must then pair again.
 - **Out of scope.** The computer's loopback hook port (127.0.0.1:8791), the
-  launcher's unix socket, OpenClaw's own link and the Nexus phone-to-glasses
-  link are not part of this and are unchanged. Anything on `ws://` today is
-  OpenClaw's.
+  launcher's unix socket and the Nexus phone-to-glasses link are not part of
+  this and are unchanged.
 - **Older daemons.** An agentd that predates the client certificate cannot
   link at all. It fails closed, so update the daemon and the phone together.
 
@@ -274,11 +269,6 @@ short:
 
 `agentd link-phone <host[:port]>` stays available as a manual override, and
 pasting the pairing line stays available as the no-Tailscale fallback.
-
-The current OpenClaw protocol requires device identity in addition to the
-shared Gateway token. On the first remote connection, approve the new
-**Nexus Agents** device in OpenClaw. The plugin persists its identity so this is
-normally a one-time step.
 
 ## HUD and background behavior
 
@@ -321,15 +311,6 @@ receive it. Use a phone hub that advertises it with Agents.
 
 If nobody answers, the daemon's timeout expires and Claude asks on the computer
 as it always would. Being away means being asked later, never being decided for.
-
-A session that starts asking for the wearer raises an **interactive notice** —
-the band from hub 1.0.46 — rather than fighting for the whole surface. Several
-sessions asking at once become one band, and a tap on it opens the board on the
-session that rang. The fingerprint that stops an alert repeating is committed
-only once the hub has taken the notice, so an alert that could not be delivered
-is offered again on the next update instead of being silently marked as sent.
-Nothing is queued for glasses that are asleep: the session simply stays at the
-top of the board, which is where the wearer will look.
 
 Unlike ordinary dormant Nexus plugins, this product explicitly requires a
 monitoring foreground service and alerts while its HUD is closed. The
@@ -579,86 +560,9 @@ and the fixtures in `contracts/`.
   `settings_sync` (the alert timings, the wait limit *Y* and the pairing TTL),
   which overwrites the computer's copy. Edit these in the Settings screen, not on
   the laptop.
-- **Alerts come from the v2 frames.** Once a computer has spoken v2, the older
-  v1 approval and status attention for that computer's Claude and Codex
-  sessions stays off, even while the link is down, so nothing alerts twice.
-  The v1 status alert is for OpenClaw sessions only.
-
-### OpenClaw Gateway v4
-
-The implementation was derived from the source clone at
-`C:\Users\saim2\.codex-detached\rokidnexus\agents-p1\openclaw`:
-
-- Protocol version 4 and minimum general-client version 4:
-  `packages/gateway-protocol/src/version.ts:2`.
-- `connect` parameters (protocol range, client, role/scopes, device, and token
-  auth) and `hello-ok`:
-  `packages/gateway-protocol/src/schema/frames.ts:33` and
-  `packages/gateway-protocol/src/schema/frames.ts:75`.
-- `req`, `res`, and `event` frame envelopes:
-  `packages/gateway-protocol/src/schema/frames.ts:155`,
-  `packages/gateway-protocol/src/schema/frames.ts:163`, and
-  `packages/gateway-protocol/src/schema/frames.ts:172`.
-- Generic `gateway-client` identity and `backend` mode:
-  `packages/gateway-protocol/src/client-info.ts:23` and
-  `packages/gateway-protocol/src/client-info.ts:50`.
-- Challenge-first Android handshake and connect request:
-  `apps/android/app/src/main/java/ai/openclaw/app/gateway/GatewaySession.kt:986`,
-  `apps/android/app/src/main/java/ai/openclaw/app/gateway/GatewaySession.kt:1042`,
-  and
-  `apps/android/app/src/main/java/ai/openclaw/app/gateway/GatewaySession.kt:1242`.
-- Canonical signed device-auth payload v3:
-  `apps/android/app/src/main/java/ai/openclaw/app/gateway/DeviceAuthPayload.kt:7`.
-- Persistent Ed25519 device identity semantics:
-  `apps/android/app/src/main/java/ai/openclaw/app/gateway/DeviceIdentityStore.kt:11`
-  and
-  `apps/android/app/src/main/java/ai/openclaw/app/gateway/DeviceIdentityStore.kt:174`.
-- `sessions.list` parameters and server handler:
-  `packages/gateway-protocol/src/schema/sessions.ts:285` and
-  `src/gateway/server-methods/sessions-read.ts:220`.
-- `sessions.subscribe` and its `sessions.changed` subscription:
-  `src/gateway/server-methods/sessions-subscriptions.ts:35` and
-  `src/gateway/server-methods/session-change-event.ts:51`.
-- Session title/activity/run/error/CWD fields:
-  `packages/gateway-protocol/src/schema/sessions-row.ts:27`,
-  `packages/gateway-protocol/src/schema/sessions-row.ts:43`,
-  `packages/gateway-protocol/src/schema/sessions-row.ts:45`,
-  `packages/gateway-protocol/src/schema/sessions-row.ts:54`, and
-  `packages/gateway-protocol/src/schema/sessions-row.ts:75`.
-- Active-run projection returned by `sessions.list`:
-  `src/gateway/server-methods/sessions-read.ts:333` and
-  `src/gateway/server-methods/sessions-read.ts:364`.
-- `exec.approval.requested` request fields and event timestamps:
-  `packages/gateway-protocol/src/schema/exec-approvals.ts:235` and
-  `src/gateway/server-methods/approval-shared.ts:255`.
-- Approval event scope and session-change read scope:
-  `src/gateway/server-broadcast.ts:43` and
-  `src/gateway/server-broadcast.ts:71`.
-
-Wire traffic sent by this plugin is limited to:
-
-1. the signed `connect` request with token auth;
-2. `sessions.list`;
-3. `sessions.subscribe`.
-
-It listens for `sessions.changed`, `exec.approval.requested`, and
-`exec.approval.resolved`. A session-change event triggers an authoritative
-re-list instead of locally guessing a patch. The approval events are observed
-only; the plugin never sends an approval resolution, session message, command,
-or agent-spawn request.
-
-Mapping is deliberately conservative:
-
-- `hasActiveRun:true` or Gateway status `running` → `working`;
-- a live exec-approval request for that session → `needs_you`;
-- Gateway status `failed`, `killed`, or `timeout`, or `lastRunError` →
-  `error`;
-- everything else → `idle`, with Gateway status notes kept as
-  `statusDetail`.
-
-The connection requests `operator.read` plus `operator.approvals`; the latter is
-required by the Gateway event guard to receive approval-request events. The
-implementation contains no approval method or resolution frame.
+- **Alerts come from the v2 frames.** There is no v1 status band: with no
+  link up the board shows the computer is not connected, and nothing else
+  stands in for an alert.
 
 ## Build and test
 
@@ -687,16 +591,8 @@ JSON choice as Transit, plus the repository’s existing OkHttp `4.12.0`.
 
 ## Phase 1 limits and risks
 
-- OpenClaw approval events are live broadcasts. The permitted Phase 1 method
-  subset has no authoritative pending-approval list/replay, so an approval
-  already pending before a reconnect may not appear until OpenClaw emits a new
-  related event.
-- `sessions.list` is capped at 200 rows per refresh. The HUD can show 63 session
-  rows because a Nexus card is limited to 64 rows including the header.
-- Plain `ws://` is still possible for **OpenClaw's** Gateway (an upstream Nexus
-  link, not Rokid-Coder's). It sends credentials over an unencrypted tailnet
-  connection. Configure `wss://` when the Gateway has TLS; the plugin does not weaken TLS or
-  install a custom trust manager.
+- The HUD can show 63 session rows because a Nexus card is limited to 64 rows
+  including the header.
 - No boot receiver is present. Monitoring starts after configuration, an
   explicit connection test, or a Nexus HUD open, as required for Phase 1.
 - Approve/deny and session spawning exist; typed replies to a running session
@@ -733,7 +629,3 @@ JSON choice as Transit, plus the repository’s existing OkHttp `4.12.0`.
   screen-off, stationary, unplugged phone may not see a transition until a
   maintenance window. The alert arrives on the glasses, not the phone, so it
   reaches the wearer when the phone next runs the monitor.
-- The device identity is signed by a hand-written Ed25519 implementation. Its
-  signatures are RFC 8032 conformant but the arithmetic is not constant-time,
-  which is acceptable on a private tailnet and must be replaced with a vetted
-  library before any public release.

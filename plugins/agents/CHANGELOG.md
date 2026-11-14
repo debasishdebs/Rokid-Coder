@@ -2,7 +2,7 @@
 
 ## 1.0.0
 
-- Add Claude Code, Codex, and OpenClaw session monitoring.
+- Add Claude Code and Codex session monitoring.
 - Add a unified HUD mission-control board and a conversation view that reads
   like prose: whole messages, Codex history included, scrolled chunk by chunk
   with a role badge marking where each message starts.
@@ -10,7 +10,6 @@
 - Gather the three ways to link a computer — automatic on the home Wi-Fi,
   Tailscale from anywhere, a pasted pairing line — on one Add a computer
   screen, with a link window that shows its countdown and can be cancelled.
-  The OpenClaw gateway is configured there too.
 - Give each computer its own screen, and let the wearer walk its folders over
   the link to anchor project folders — the ground the glasses will start
   sessions from.

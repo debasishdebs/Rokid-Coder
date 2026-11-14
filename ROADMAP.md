@@ -375,7 +375,7 @@ the rows above.
 In order.
 
 1. **Agents, as a private alpha.** Already in the tree (`plugins/agents`):
-   Claude Code, Codex, and OpenClaw sessions on the HUD, notices for
+   Claude Code and Codex sessions on the HUD, notices for
    permission prompts, a pin for progress, the next task dictated. It is the
    Terminal/Agent product, and it is being reworked to speak the protocol of
    Alleycat — the daemon behind [litter](https://github.com/0xSero/litter) —

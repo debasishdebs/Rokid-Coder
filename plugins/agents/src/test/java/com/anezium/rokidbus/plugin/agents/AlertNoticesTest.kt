@@ -149,10 +149,6 @@ class AlertNoticesTest {
                 assertTrue(update.footer!!.length <= 40)
             }
             AlertNotices.brief(text, text)
-            AlertNotices.statusNotice(session(AgentStatus.NEEDS_YOU).copy(title = text), text)
-            AlertNotices.statusNotice(
-                session(AgentStatus.ERROR).copy(title = text, statusDetail = text), text,
-            )
             val reader = AlertNotices.outputReader(
                 alert(kind = AlertKind.DONE, title = text, body = text),
                 session(AgentStatus.DONE).copy(title = text, lastAssistantText = text.repeat(10)),
@@ -174,25 +170,6 @@ class AlertNoticesTest {
 
         // Only a command agentd had to cut loses Allow (R128).
         assertEquals(listOf("deny", "more"), AlertNotices.build(alert().copy(truncated = true), wake = true).actionIds())
-    }
-
-    @Test
-    fun v1_status_notice_keeps_the_summary_and_offers_no_action() {
-        val needs = session(AgentStatus.NEEDS_YOU).copy(
-            provider = AgentProvider.OPENCLAW,
-            pendingRequest = AgentPendingRequest(PendingRequestKind.PERMISSION, "Run command", 42),
-        )
-        val notice = AlertNotices.statusNotice(needs, summary = "wants to run Bash")
-
-        assertEquals("wants to run Bash", notice.body)
-        assertTrue(notice.actions.isEmpty())
-        assertTrue(notice.interactive)
-        assertEquals("TAP open", notice.footer)
-        // An error has nothing to approve, so it says what failed.
-        val failed = AlertNotices.statusNotice(
-            session(AgentStatus.ERROR).copy(statusDetail = "Process failed"), summary = "",
-        )
-        assertEquals("Process failed", failed.body)
     }
 
     @Test
@@ -283,7 +260,6 @@ class AlertNoticesTest {
         val titles = listOf(
             AlertNotices.build(alert(kind = AlertKind.NOTICE, title = emoji), wake = false).title!!,
             AlertNotices.brief(emoji, "x").title!!,
-            AlertNotices.statusNotice(session(AgentStatus.ERROR).copy(title = emoji), "").title!!,
         )
         for (title in titles) assertFalse(title, Character.isHighSurrogate(title.last()))
     }

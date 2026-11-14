@@ -72,7 +72,6 @@ class SettingsScreenTest {
                 session("a", AgentStatus.NEEDS_YOU),
                 session("b", AgentStatus.WORKING),
                 session("c", AgentStatus.IDLE, AgentProvider.CODEX),
-                session("d", AgentStatus.NEEDS_YOU, AgentProvider.OPENCLAW),
             ),
         )
         assertEquals("WATCHING · 1 NEEDS YOU · 1 RUNNING · 1 IDLE", line.text)

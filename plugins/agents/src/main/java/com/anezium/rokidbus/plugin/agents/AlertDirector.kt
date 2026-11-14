@@ -20,9 +20,6 @@ interface AlertGlasses {
     /** Several briefs in one band, one per line. */
     fun briefLines(title: String, lines: List<String>) = brief(title, lines.joinToString(" · "))
 
-    /** Nothing of the alerts' is on the band slot any more: a deferred v1 attention may take it. */
-    fun slotFree() = Unit
-
     /** A fresh alert's band was taken: make its sound, if the phone and the wearer allow it. */
     fun playSound(sound: AlertSound) = Unit
 
@@ -95,16 +92,6 @@ class AlertDirector(
     private val briefs = ArrayDeque<Brief>()
     private var onScreen: Brief? = null
     private var briefTimer: (() -> Unit)? = null
-    private var busy = false
-
-    /** Sessions that had a v2 alert on this link; v1 attention must not ring for them too. */
-    private val alertedSessions = HashSet<String>()
-
-    /** True while an alert band, a brief or a queued brief holds the slot. Read where [post]ed work runs. */
-    val slotBusy: Boolean get() = bandId != null || onScreen != null || briefs.isNotEmpty()
-
-    /** True when [sessionKey] had a v2 alert since the link came up (R92's per-generation guard). */
-    fun hadAlert(sessionKey: String): Boolean = sessionKey in alertedSessions
 
     private var boardKeys: Set<String> = emptySet()
 
@@ -120,15 +107,11 @@ class AlertDirector(
         when (event) {
             is AgentdEvent.LinkUp -> {
                 goneId = null
-                alertedSessions.clear()
                 apply(coordinator.onLinkUp())
             }
             is AgentdEvent.LinkDown -> apply(coordinator.onLinkDown())
             is AgentdEvent.Action -> when (val action = event.action) {
-                is AgentdAction.Alert -> {
-                    alertedSessions += action.sessionKey
-                    apply(coordinator.onAlert(reshowIfGone(action)))
-                }
+                is AgentdAction.Alert -> apply(coordinator.onAlert(reshowIfGone(action)))
                 is AgentdAction.AlertClosed -> apply(coordinator.onAlertClosed(action.id, action.reason))
                 is AgentdAction.FollowupClosed -> apply(coordinator.invalidateSession(action.sessionKey))
                 is AgentdAction.Ack -> {
@@ -270,7 +253,7 @@ class AlertDirector(
         settle()
     }
 
-    /** Shows the next brief when the slot is free, and says so once it has emptied. */
+    /** Shows the next brief when the slot is free. */
     private fun settle() {
         if (bandId == null && onScreen == null) {
             val next = briefs.removeFirstOrNull()
@@ -282,9 +265,6 @@ class AlertDirector(
                 briefTimer = schedule(BRIEF_STALE_MS) { post { briefDone(); settle() } }
             }
         }
-        val nowBusy = slotBusy
-        if (busy && !nowBusy) glasses()?.slotFree()
-        busy = nowBusy
     }
 
     private fun briefDone() {

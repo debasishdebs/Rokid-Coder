@@ -85,24 +85,6 @@ object AlertNotices {
     )
 
     /**
-     * The v1 band for an OpenClaw session that needs the wearer or failed.
-     * [summary] is what the session is waiting on.
-     */
-    fun statusNotice(session: AgentSession, summary: String): NexusNotice {
-        val waiting = session.status == AgentStatus.NEEDS_YOU
-        return NexusNotice(
-            title = session.displayTitle.line(TITLE_CHARS),
-            body = when {
-                waiting -> summary.line(BRIEF_BODY_CHARS)
-                else -> (session.statusDetail ?: "stopped with an error").line(BRIEF_BODY_CHARS)
-            },
-            footer = "TAP open",
-            interactive = true,
-            ttlMs = if (waiting) DONE_TTL_MS else NOTICE_TTL_MS,
-        )
-    }
-
-    /**
      * The output a Done or error tap opens: the alert's summary first, then the
      * full text. [conversation] is the readable conversation when it has loaded;
      * until then the session's last assistant text stands in for it.
@@ -171,7 +153,6 @@ object AlertNotices {
         when (AgentProvider.fromWire(alert.sessionKey.substringBefore(':'))) {
             AgentProvider.CLAUDE -> "CLAUDE"
             AgentProvider.CODEX -> "CODEX"
-            AgentProvider.OPENCLAW -> "OPENCLAW"
             null -> "AGENT"
         }
 

@@ -66,8 +66,7 @@ object BoardModel {
             badge = when (session.provider) {
                 AgentProvider.CLAUDE -> "CLAUDE"
                 AgentProvider.CODEX -> "CODEX"
-                AgentProvider.OPENCLAW -> null
-            }?.take(BADGE_CHARS),
+            }.take(BADGE_CHARS),
             trail = trail,
             sub = (fileAndStep ?: fallbackSub)?.singleLine(SUB_CHARS)?.takeIf(String::isNotBlank),
             // Approve-all is a standing permission, so it is loud whatever the session is doing.

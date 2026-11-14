@@ -266,7 +266,7 @@ class BoardModelTest {
         val board = BoardCards.sessionsCard(
             sessions = emptyList(),
             connections = emptyMap(),
-            config = AgentsConfig(agentdEnabled = true, agentd = null, openClawEnabled = false, openClaw = null),
+            config = AgentsConfig(agentdEnabled = true, agentd = null),
             selectedKey = null,
             waiting = 0,
             quiet = false,
@@ -296,8 +296,8 @@ class BoardModelTest {
         pairing = pairing,
     )
 
-    private val monitoringOn = AgentsConfig(agentdEnabled = true, agentd = null, openClawEnabled = false, openClaw = null)
-    private val monitoringOff = AgentsConfig(agentdEnabled = false, agentd = null, openClawEnabled = false, openClaw = null)
+    private val monitoringOn = AgentsConfig(agentdEnabled = true, agentd = null)
+    private val monitoringOff = AgentsConfig(agentdEnabled = false, agentd = null)
 
     @Test
     fun board_shows_pair_a_computer_when_none_trusted() {

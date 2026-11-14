@@ -233,7 +233,7 @@ class AgentdProtocolV2Test {
         assertEquals(AgentdAction.Ignore, codec.parse(alertJson { put("kind", 7) }))
         // A question with nothing to answer, a bad session key and a bad id are dropped the same way.
         assertEquals(AgentdAction.Ignore, codec.parse(alertJson { put("kind", "question") }))
-        assertEquals(AgentdAction.Ignore, codec.parse(alertJson { put("sessionKey", "openclaw:x") }))
+        assertEquals(AgentdAction.Ignore, codec.parse(alertJson { put("sessionKey", "gemini:x") }))
         assertEquals(AgentdAction.Ignore, codec.parse(alertJson { put("sessionKey", "claude:") }))
         assertEquals(AgentdAction.Ignore, codec.parse(alertJson { remove("id") }))
         assertEquals(AgentdAction.Ignore, codec.parse(alertJson { put("v", 1) }))
@@ -634,7 +634,7 @@ class AgentdProtocolV2Test {
         refused { AgentdProtocolCodec.codexCompact("codex:t", "") }
         refused { AgentdProtocolCodec.codexCompact("codex:t", "m".repeat(MAX_MSG_ID_CHARS + 1)) }
         refused { AgentdProtocolCodec.followup("fx-claude", "hi", MSG_ID) }
-        refused { AgentdProtocolCodec.followup("openclaw:x", "hi", MSG_ID) }
+        refused { AgentdProtocolCodec.followup("gemini:x", "hi", MSG_ID) }
         refused { AgentdProtocolCodec.modelsRequest("claude:") }
         // Approve-all is never unconfirmed, and never a default.
         refused { AgentdProtocolCodec.modeSet(key, TempMode.APPROVE_ALL, confirmed = false, msgId = MSG_ID) }

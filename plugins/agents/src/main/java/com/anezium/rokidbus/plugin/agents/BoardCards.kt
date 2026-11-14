@@ -114,11 +114,6 @@ internal object BoardCards {
             ) {
                 add(problemRow("Claude pairing rejected", "re-pair in the phone app"))
             }
-            if (config.openClawEnabled &&
-                connections[AgentProvider.OPENCLAW]?.state == ConnectionState.AUTH_FAILED
-            ) {
-                add(problemRow("OpenClaw auth failed", "check the token in the phone app"))
-            }
         }
 
         // The HUD does not scroll: keep a window around the selection.
@@ -229,12 +224,12 @@ internal object BoardCards {
     }
 
     private fun emptyRow(config: AgentsConfig): NexusCardLine = NexusCardLine(
-        text = if (config.agentdEnabled || config.openClawEnabled) {
+        text = if (config.agentdEnabled) {
             "Nothing running"
         } else {
             "Set up a provider in the phone app"
         },
-        sub = if (config.agentdEnabled || config.openClawEnabled) {
+        sub = if (config.agentdEnabled) {
             "sessions appear here as soon as an agent starts"
         } else {
             null
@@ -401,5 +396,4 @@ internal fun AgentProvider.enabledIn(config: AgentsConfig): Boolean = when (this
     // on exactly when the daemon is. It gets its own switch when the settings
     // screen learns to offer a choice of harness.
     AgentProvider.CLAUDE, AgentProvider.CODEX -> config.agentdEnabled
-    AgentProvider.OPENCLAW -> config.openClawEnabled
 }

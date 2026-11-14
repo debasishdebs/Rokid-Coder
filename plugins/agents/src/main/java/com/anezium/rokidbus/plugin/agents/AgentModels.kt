@@ -6,7 +6,6 @@ enum class AgentProvider(
 ) {
     CLAUDE("claude", "CC"),
     CODEX("codex", "CX"),
-    OPENCLAW("openclaw", "OC"),
     ;
 
     companion object {
@@ -15,8 +14,7 @@ enum class AgentProvider(
 
         /**
          * The providers the daemon link speaks for. A snapshot from it is
-         * authoritative for all of them at once, while OpenClaw arrives on its
-         * own connection and must never be touched by one.
+         * authoritative for all of them at once.
          */
         val AGENTD_PROVIDERS = setOf(CLAUDE, CODEX)
     }

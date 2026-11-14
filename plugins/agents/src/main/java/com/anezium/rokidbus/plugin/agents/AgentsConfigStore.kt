@@ -44,30 +44,15 @@ internal object PairingCopy {
 /** A computer the phone signed out because it went unused past the pairing TTL (U7). */
 data class SignedOut(val name: String, val atMs: Long, val unusedDays: Int)
 
-data class OpenClawConfig(
-    val host: String,
-    val port: Int = DEFAULT_PORT,
-    val token: String,
-) {
-    val configured: Boolean
-        get() = host.isNotBlank() && port in 1..65535 && token.isNotBlank()
-
-    companion object {
-        const val DEFAULT_PORT = 18789
-    }
-}
-
 data class AgentsConfig(
     val agentdEnabled: Boolean,
     val agentd: AgentdConfig?,
-    val openClawEnabled: Boolean,
-    val openClaw: OpenClawConfig?,
 ) {
     // The agentd link (Claude Code and Codex) needs no configuration any more:
     // enabling it makes the phone listen, and the daemon on the LAN finds it
     // by itself.
     val shouldMonitor: Boolean
-        get() = agentdEnabled || openClawEnabled && openClaw?.configured == true
+        get() = agentdEnabled
 }
 
 sealed interface AgentdPairingParseResult {
@@ -192,19 +177,9 @@ class AgentsConfigStore internal constructor(
                 steer = prefs.getString(KEY_AGENTD_STEER, null),
             )
         }?.takeIf(AgentdConfig::configured)
-        val openClawHost = prefs.getString(KEY_OPENCLAW_HOST, null)
-        val openClaw = openClawHost?.let {
-            OpenClawConfig(
-                host = it,
-                port = prefs.getInt(KEY_OPENCLAW_PORT, OpenClawConfig.DEFAULT_PORT),
-                token = prefs.getString(KEY_OPENCLAW_TOKEN, "").orEmpty(),
-            )
-        }?.takeIf(OpenClawConfig::configured)
         return AgentsConfig(
             agentdEnabled = prefs.getBoolean(KEY_AGENTD_ENABLED, false),
             agentd = agentd,
-            openClawEnabled = prefs.getBoolean(KEY_OPENCLAW_ENABLED, false),
-            openClaw = openClaw,
         )
     }
 
@@ -268,10 +243,7 @@ class AgentsConfigStore internal constructor(
      * notification's Stop uses it, so the Monitoring switch reads off afterwards.
      */
     fun stopMonitoring() {
-        prefs.edit()
-            .putBoolean(KEY_AGENTD_ENABLED, false)
-            .putBoolean(KEY_OPENCLAW_ENABLED, false)
-            .apply()
+        prefs.edit().putBoolean(KEY_AGENTD_ENABLED, false).apply()
     }
 
     /**
@@ -302,45 +274,6 @@ class AgentsConfigStore internal constructor(
 
     fun markNotificationPermissionAsked() {
         prefs.edit().putBoolean(KEY_NOTIFICATIONS_ASKED, true).apply()
-    }
-
-    fun saveOpenClaw(config: OpenClawConfig?, enabled: Boolean) {
-        val previous = load().openClaw
-        prefs.edit().apply {
-            putBoolean(KEY_OPENCLAW_ENABLED, enabled)
-            if (config == null) {
-                remove(KEY_OPENCLAW_HOST)
-                remove(KEY_OPENCLAW_PORT)
-                remove(KEY_OPENCLAW_TOKEN)
-            } else {
-                putString(KEY_OPENCLAW_HOST, config.host)
-                putInt(KEY_OPENCLAW_PORT, config.port)
-                putString(KEY_OPENCLAW_TOKEN, config.token)
-            }
-            if (config != previous) {
-                remove(KEY_OPENCLAW_DEVICE_TOKEN)
-            }
-        }.apply()
-    }
-
-    fun openClawSeed(): ByteArray? = prefs.getString(KEY_OPENCLAW_SEED, null)
-        ?.let { runCatching { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) }.getOrNull() }
-        ?.takeIf { it.size == 32 }
-
-    fun saveOpenClawSeed(seed: ByteArray) {
-        require(seed.size == 32)
-        prefs.edit().putString(
-            KEY_OPENCLAW_SEED,
-            android.util.Base64.encodeToString(seed, android.util.Base64.NO_WRAP),
-        ).apply()
-    }
-
-    fun openClawDeviceToken(): String? =
-        prefs.getString(KEY_OPENCLAW_DEVICE_TOKEN, null)?.takeIf(String::isNotBlank)
-
-    fun saveOpenClawDeviceToken(token: String) {
-        if (token.isBlank()) return
-        prefs.edit().putString(KEY_OPENCLAW_DEVICE_TOKEN, token).apply()
     }
 
     /**
@@ -730,22 +663,17 @@ class AgentsConfigStore internal constructor(
 
     private fun machineKey(machineId: String): String = "$KEY_MACHINE_PREFIX$machineId"
 
-    fun notificationFingerprint(sessionKey: String): String? =
-        prefs.getString("$KEY_NOTIFICATION_PREFIX$sessionKey", null)
-
-    fun saveNotificationFingerprint(sessionKey: String, fingerprint: String) {
-        prefs.edit().putString("$KEY_NOTIFICATION_PREFIX$sessionKey", fingerprint).apply()
-    }
-
     /**
-     * An alert fingerprint outlives the session it describes, so without this
-     * the preferences file grows by one entry per session the wearer ever saw.
+     * What the OpenClaw provider and the v1 attention band left behind: the
+     * gateway's settings, its device key and token, and one fingerprint per
+     * session ever announced. Nothing reads them any more; a no-op once gone.
      */
-    fun forgetNotificationFingerprints(sessionKeys: Set<String>) {
-        if (sessionKeys.isEmpty()) return
-        prefs.edit().apply {
-            sessionKeys.forEach { remove("$KEY_NOTIFICATION_PREFIX$it") }
-        }.apply()
+    fun clearRetiredKeys() {
+        val retired = prefs.all.keys.filter {
+            it.startsWith(RETIRED_OPENCLAW_PREFIX) || it.startsWith(RETIRED_NOTIFICATION_PREFIX)
+        }
+        if (retired.isEmpty()) return
+        prefs.edit().apply { retired.forEach(::remove) }.apply()
     }
 
     private companion object {
@@ -765,13 +693,8 @@ class AgentsConfigStore internal constructor(
         const val KEY_TTL_MIGRATED = "security.ttl_migrated"
         const val KEY_SIGNED_OUT_PREFIX = "signed_out."
         const val KEY_SIGNED_OUT_DAYS_PREFIX = "signed_out_days."
-        const val KEY_OPENCLAW_ENABLED = "openclaw.enabled"
-        const val KEY_OPENCLAW_HOST = "openclaw.host"
-        const val KEY_OPENCLAW_PORT = "openclaw.port"
-        const val KEY_OPENCLAW_TOKEN = "openclaw.token"
-        const val KEY_OPENCLAW_SEED = "openclaw.device_seed"
-        const val KEY_OPENCLAW_DEVICE_TOKEN = "openclaw.device_token"
-        const val KEY_NOTIFICATION_PREFIX = "notification."
+        const val RETIRED_OPENCLAW_PREFIX = "openclaw."
+        const val RETIRED_NOTIFICATION_PREFIX = "notification."
         const val KEY_ALERTS_QUIET = "alerts.quiet"
         const val KEY_ALERT_SETTINGS = "alerts.settings"
         const val KEY_NOTIFICATIONS_ASKED = "notifications.permission_asked"

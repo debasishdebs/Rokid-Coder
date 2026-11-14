@@ -58,7 +58,6 @@ object AlertSoundPolicy {
     private fun toolName(provider: AgentProvider): String = when (provider) {
         AgentProvider.CLAUDE -> "Claude"
         AgentProvider.CODEX -> "Codex"
-        AgentProvider.OPENCLAW -> "OpenClaw"
     }
 
     /** What follows the tool's name in the spoken line; the settings screen shows the same words. */

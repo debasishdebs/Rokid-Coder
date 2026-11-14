@@ -60,9 +60,6 @@ class AgentsMonitorService : Service() {
             onSecureConnected = AgentsRuntime::announceSecureConnection,
         )
     }
-    private val openClawClient by lazy {
-        OpenClawClient(httpClient, AgentsRuntime.store, configStore, serviceScope, VERSION_NAME)
-    }
     private val linkServer by lazy {
         AgentdLinkServer(
             AgentsRuntime.store, configStore, serviceScope, tlsIdentity,
@@ -77,11 +74,9 @@ class AgentsMonitorService : Service() {
         )
     }
     private var runningAgentd: AgentdConfig? = null
-    private var runningOpenClaw: OpenClawConfig? = null
     private var listenerBesideDialled = false
     private var windowWatch: Job? = null
     private var temporaryAgentd: Job? = null
-    private var temporaryOpenClaw: Job? = null
 
     /** False once monitoring is stopping: a late session change must not post the notification back. */
     private var monitoring = true
@@ -136,6 +131,7 @@ class AgentsMonitorService : Service() {
         serviceScope.launch {
             agentdClient.needsRepair.collect(AgentsRuntime::setNeedsRepair)
         }
+        configStore.clearRetiredKeys()
         // Before the first reconcile: whatever went unused while the service was down is signed out first.
         ttlTick()
         serviceScope.launch {
@@ -148,7 +144,7 @@ class AgentsMonitorService : Service() {
         serviceScope.launch {
             while (true) {
                 delay(PRUNE_INTERVAL_MS)
-                configStore.forgetNotificationFingerprints(AgentsRuntime.store.prune())
+                AgentsRuntime.store.prune()
                 // Expiry must not wait for another alert: the history ages out on this clock too.
                 AgentsRuntime.history.pruneNow(configStore.historyPolicy())
                 // This loop is the heartbeat: a tick that arrives far late is
@@ -170,10 +166,6 @@ class AgentsMonitorService : Service() {
             ACTION_TEST_AGENTD -> {
                 if (configStore.load().shouldMonitor) reconcile()
                 testAgentd()
-            }
-            ACTION_TEST_OPENCLAW -> {
-                if (configStore.load().shouldMonitor) reconcile()
-                testOpenClaw()
             }
             ACTION_OPEN_DETAIL -> {
                 intent.getStringExtra(EXTRA_SESSION_ID)?.let { sessionId ->
@@ -311,10 +303,8 @@ class AgentsMonitorService : Service() {
 
     override fun onDestroy() {
         temporaryAgentd?.cancel()
-        temporaryOpenClaw?.cancel()
         agentdClient.stop(clearSessions = true)
         linkServer.stop(clearSessions = true)
-        openClawClient.stop(clearSessions = true)
         releasePluginService()
         httpClient.dispatcher.executorService.shutdown()
         serviceScope.cancel()
@@ -401,19 +391,6 @@ class AgentsMonitorService : Service() {
         // A slot refused before the door opened is dialled again for as long as it stays open.
         if (windowOpen && config.agentdEnabled && wantedAgentd != null) agentdClient.retryRefused(wantedAgentd)
         watchWindow(windowOpen)
-        if (config.openClawEnabled) {
-            temporaryOpenClaw?.cancel()
-            temporaryOpenClaw = null
-        }
-        val wantedOpenClaw = config.openClaw?.takeIf { config.openClawEnabled && it.configured }
-        if (wantedOpenClaw != runningOpenClaw) {
-            if (wantedOpenClaw == null) {
-                openClawClient.stop(clearSessions = true)
-            } else {
-                openClawClient.start(wantedOpenClaw)
-            }
-            runningOpenClaw = wantedOpenClaw
-        }
     }
 
     /** The window's end is a change nobody else announces: reconcile again then, and the listener goes back to the normal rule. */
@@ -447,29 +424,8 @@ class AgentsMonitorService : Service() {
         }
     }
 
-    private fun testOpenClaw() {
-        val config = configStore.load()
-        val gateway = config.openClaw ?: return stopIfNoConfiguredProvider()
-        openClawClient.start(gateway)
-        runningOpenClaw = if (config.openClawEnabled) gateway else null
-        temporaryOpenClaw?.cancel()
-        temporaryOpenClaw = null
-        if (!config.openClawEnabled) {
-            temporaryOpenClaw = serviceScope.launch {
-                delay(TEST_WINDOW_MS)
-                if (configStore.load().openClawEnabled) return@launch
-                openClawClient.stop(clearSessions = true)
-                temporaryOpenClaw = null
-                stopIfNoConfiguredProvider()
-            }
-        }
-    }
-
     private fun stopIfNoConfiguredProvider() {
-        if (!configStore.load().shouldMonitor &&
-            temporaryAgentd?.isActive != true &&
-            temporaryOpenClaw?.isActive != true
-        ) {
+        if (!configStore.load().shouldMonitor && temporaryAgentd?.isActive != true) {
             stopMonitoring()
         }
     }
@@ -481,9 +437,7 @@ class AgentsMonitorService : Service() {
         listenerBesideDialled = false
         agentdClient.stop(clearSessions = true)
         linkServer.stop(clearSessions = true)
-        openClawClient.stop(clearSessions = true)
         runningAgentd = null
-        runningOpenClaw = null
         releasePluginService()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -506,8 +460,6 @@ class AgentsMonitorService : Service() {
             "com.anezium.rokidbus.plugin.agents.action.STOP"
         const val ACTION_TEST_AGENTD =
             "com.anezium.rokidbus.plugin.agents.action.TEST_AGENTD"
-        const val ACTION_TEST_OPENCLAW =
-            "com.anezium.rokidbus.plugin.agents.action.TEST_OPENCLAW"
         const val ACTION_OPEN_DETAIL =
             "com.anezium.rokidbus.plugin.agents.action.OPEN_DETAIL"
         const val ACTION_CLOSE_DETAIL =
@@ -669,7 +621,6 @@ class AgentsMonitorService : Service() {
                 // Codex arrives over the daemon's link, so testing it is testing
                 // the daemon: there is no second connection to prove.
                 AgentProvider.CLAUDE, AgentProvider.CODEX -> ACTION_TEST_AGENTD
-                AgentProvider.OPENCLAW -> ACTION_TEST_OPENCLAW
             }
             ContextCompat.startForegroundService(
                 context,

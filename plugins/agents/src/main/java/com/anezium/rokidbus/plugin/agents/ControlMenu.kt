@@ -89,7 +89,7 @@ object ControlMenu {
         listOf(TempMode.ASK, TempMode.ACCEPT_EDITS, TempMode.APPROVE_ALL)
 
     /**
-     * The main menu, in order. A session without v2 (OpenClaw, an old daemon)
+     * The main menu, in order. A session without v2 (an old daemon)
      * has nothing to steer, so it offers only its output. Effort is Codex's.
      */
     fun items(

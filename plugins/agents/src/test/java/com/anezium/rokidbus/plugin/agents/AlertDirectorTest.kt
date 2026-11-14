@@ -34,7 +34,6 @@ class AlertDirectorTest {
         override fun hideBand() { log += "hide" }
         val briefs = mutableListOf<Pair<String, String>>()
         override fun brief(title: String, body: String) { log += "brief $title"; briefs += title to body }
-        override fun slotFree() { log += "free" }
         val merged = mutableListOf<List<String>>()
         override fun briefLines(title: String, lines: List<String>) { log += "brief $title"; merged += lines }
         override fun openOutput(alert: AgentdAction.Alert) { log += "output ${alert.id}" }
@@ -327,7 +326,7 @@ class AlertDirectorTest {
         director.onBandAction("allow")
 
         // A press that arrives for the band the link-up hid answers nothing, and says so.
-        assertEquals(listOf("hide", "show CLAUDE · approve", "hide", "free", "brief No longer waiting"), glasses.log)
+        assertEquals(listOf("hide", "show CLAUDE · approve", "hide", "brief No longer waiting"), glasses.log)
         assertEquals(emptyList<String>(), types())
     }
 
@@ -432,9 +431,6 @@ class AlertDirectorTest {
         // No close ever comes; the timer alone moves the queue on, with nothing else arriving.
         fireTimer()
         assertEquals(listOf("hide", "brief One", "brief Two"), glasses.log)
-
-        fireTimer()
-        assertEquals("free", glasses.log.last())
     }
 
     @Test
@@ -550,18 +546,6 @@ class AlertDirectorTest {
     }
 
     @Test
-    fun a_session_with_a_v2_alert_is_the_alerts_to_announce() {
-        up()
-        assertFalse(director.hadAlert("claude:s1"))
-        feed(alert())
-        assertTrue(director.hadAlert("claude:s1"))
-        assertFalse(director.hadAlert("claude:s2"))
-
-        up()
-        assertFalse(director.hadAlert("claude:s1"))
-    }
-
-    @Test
     fun the_service_flag_is_cleared_before_the_director_hears_a_band_close() {
         val order = mutableListOf<String>()
         for (reason in listOf(NexusNoticeCloseReason.USER, NexusNoticeCloseReason.TIMEOUT, NexusNoticeCloseReason.REPLACED)) {
@@ -579,22 +563,6 @@ class AlertDirectorTest {
         order.clear()
         routeNoticeClose(NexusNoticeCloseReason.TIMEOUT, false, { order += "clear" }, { order += "band" }, { order += "brief" })
         assertEquals(listOf("brief"), order)
-    }
-
-    @Test
-    fun attention_retriggered_after_band_close() {
-        up()
-        feed(alert())
-        assertFalse("free" in glasses.log)
-
-        director.onBrief("One", "a")
-        director.onBandClosed(NexusNoticeCloseReason.USER)
-        // The queued brief still holds the slot.
-        assertFalse("free" in glasses.log)
-
-        director.onBriefClosed()
-        assertEquals("free", glasses.log.last())
-        assertEquals(1, glasses.log.count { it == "free" })
     }
 
     @Test

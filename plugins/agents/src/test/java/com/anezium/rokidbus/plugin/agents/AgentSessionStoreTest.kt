@@ -23,13 +23,13 @@ class AgentSessionStoreTest {
             nowMs = 200,
         )
         store.replaceProvider(
-            AgentProvider.OPENCLAW,
+            AgentProvider.CODEX,
             listOf(
-                session("error", AgentProvider.OPENCLAW, AgentStatus.ERROR, activity = 200),
-                session("working-new", AgentProvider.OPENCLAW, AgentStatus.WORKING, activity = 150),
+                session("error", AgentProvider.CODEX, AgentStatus.ERROR, activity = 200),
+                session("working-new", AgentProvider.CODEX, AgentStatus.WORKING, activity = 150),
                 session(
                     "need-old",
-                    AgentProvider.OPENCLAW,
+                    AgentProvider.CODEX,
                     AgentStatus.NEEDS_YOU,
                     pendingAt = 20,
                 ),

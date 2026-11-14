@@ -179,7 +179,7 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
         item {
             SettingsCard {
                 NoticeText(
-                    "Mission control for Claude Code and Codex sessions, and OpenClaw. Agents never " +
+                    "Mission control for Claude Code and Codex sessions. Agents never " +
                         "alerts this phone: when a session needs you, it says so on your glasses. Its " +
                         "one notification just shows that monitoring is running.",
                     tag = "intro",
@@ -242,7 +242,7 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
 private fun MonitoringCard(state: SettingsUiState, actions: SettingsActions) {
     SettingsCard {
         SwitchRow(
-            "Monitor sessions", "Claude Code, Codex, and OpenClaw", state.monitoring, actions.onMonitoring, tag = "monitor_switch",
+            "Monitor sessions", "Claude Code and Codex", state.monitoring, actions.onMonitoring, tag = "monitor_switch",
         )
         StatusLine(state.link.text, state.link.tone, tag = "link_state")
         state.trust?.let { NoticeText(it, error = it == SettingsCopy.PAIR_AGAIN, tag = "link_trust") }

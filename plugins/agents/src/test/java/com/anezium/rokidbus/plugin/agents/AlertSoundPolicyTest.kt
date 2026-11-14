@@ -52,7 +52,7 @@ class AlertSoundPolicyTest {
         assertEquals(AlertSound.Speak("Claude needs approval"), sound(AlertKind.APPROVAL))
         assertEquals(AlertSound.Speak("Codex needs approval"), sound(AlertKind.APPROVAL, AgentProvider.CODEX))
         assertEquals(AlertSound.Speak("Claude has a question"), sound(AlertKind.QUESTION))
-        assertEquals(AlertSound.Speak("OpenClaw has a question"), sound(AlertKind.QUESTION, AgentProvider.OPENCLAW))
+        assertEquals(AlertSound.Speak("Codex has a question"), sound(AlertKind.QUESTION, AgentProvider.CODEX))
         assertEquals(AlertSound.Speak("Claude hit an error"), sound(AlertKind.ERROR))
         AgentProvider.values().forEach { assertEquals(AlertSound.None, sound(AlertKind.NOTICE, it)) }
     }

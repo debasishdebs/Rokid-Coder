@@ -44,12 +44,6 @@ import java.util.UUID
 class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val configStore by lazy { AgentsConfigStore(applicationContext) }
-    private val attention by lazy {
-        AttentionDecisionEngine(
-            readFingerprint = configStore::notificationFingerprint,
-            writeFingerprint = configStore::saveNotificationFingerprint,
-        )
-    }
     private val dnd by lazy { InterruptionFilterReader(applicationContext) }
     private var surface: NexusSurfaceSession? = null
     private var surfaceShown = false
@@ -71,9 +65,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
      * quietly drift onto a different session between looking and pressing.
      */
     private var selectedKey: String? = null
-
-    /** The session the last band was about, so a tap lands on it. */
-    private var noticeTargetKey: String? = null
 
     private var ageTicker: Job? = null
 
@@ -185,7 +176,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         )
     }
 
-    private val band by lazy { AlertBand({ nexusClient }, screen, attention) }
+    private val band by lazy { AlertBand({ nexusClient }, screen) }
 
     /** The Done or error alert whose summary heads the open conversation. */
     private var outputAlert: AgentdAction.Alert? = null
@@ -293,15 +284,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 .flatMapLatest { it?.waiting ?: flowOf(0) }
                 .distinctUntilChanged()
                 .collect { if (surfaceShown) render(show = false) }
-        }
-        serviceScope.launch {
-            // Attention follows sessions alone. It used to ride the combined
-            // flow above, so a computer that was simply unreachable — its
-            // client cycling connecting/disconnected — re-raised the band on
-            // every flip, which on the glasses reads as a screen that will not
-            // stop blinking. Whether a session needs the wearer has nothing to
-            // do with whether the daemon is currently answering.
-            AgentsRuntime.store.sessions.collectLatest { raiseAttention() }
         }
         stopFollowingRemovals = controlSender.follow(AgentsRuntime.store)
         // A session holding a kept id keeps its owner record.
@@ -439,7 +421,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
     }
 
-    /** A tap on the band means "show me": open the board on the session that rang. */
+    /** A tap on the band means "show me": an alert's band takes it, any other band opens the board. */
     override fun onNexusNoticeInput(event: NexusInputEvent) {
         if (event.action != KeyEvent.ACTION_DOWN) return
         if (!GlassesKeys.isEnter(event)) return
@@ -448,7 +430,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             AgentsRuntime.alertDirector?.onBandInput()
             return
         }
-        noticeTargetKey?.let { selectedKey = it }
         if (!surfaceShown) attemptAdoption()
     }
 
@@ -457,7 +438,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         if (screen.v2BandUp)AgentsRuntime.alertDirector?.onBandAction(id)
     }
 
-    /** Display evidence belongs to an alert's band; a brief or v1 attention band has no alert to credit. */
+    /** Display evidence belongs to an alert's band; a brief's band has no alert to credit. */
     override fun onNexusNoticeShown() {
         if (screen.v2BandUp) AgentsRuntime.alertDirector?.onBandShown()
     }
@@ -489,10 +470,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     // ----------------------------------------------------------------- alerts
-
-    private fun raiseAttention() {
-        band.raiseAttention()?.let { noticeTargetKey = it }
-    }
 
     override fun showBand(notice: NexusNotice): Boolean = band.show(notice)
 
@@ -529,11 +506,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     override fun brief(title: String, body: String) = band.briefNow(title, body)
 
     override fun briefLines(title: String, lines: List<String>) = band.briefLines(title, lines)
-
-    /** What kept a v1 or OpenClaw attention waiting is gone: offer it again. */
-    override fun slotFree() {
-        serviceScope.launch { raiseAttention() }
-    }
 
     override fun openOutput(alert: AgentdAction.Alert) {
         val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
