@@ -12,11 +12,12 @@ package com.anezium.rokidbus.plugin.agents
  * answer box: it sits over its parent, and gives the screen back to it when it
  * closes. The parent is hidden meanwhile and accepts nothing.
  *
- * Pure bookkeeping: the service keeps each card's own data and clears it when
- * it opens another kind.
+ * Pure bookkeeping: [GlassesScreen] keeps each card's own data and clears it when
+ * it opens another kind. The control menu is a card too, so its ENTER guard is
+ * this one.
  */
 class ActiveCard(private val guardMs: Long = 600L) {
-    enum class Kind { NONE, VOICE, QUESTION, ALERT_DECISION, REQUEST_DECISION, REPLY }
+    enum class Kind { NONE, VOICE, QUESTION, ALERT_DECISION, REQUEST_DECISION, REPLY, MENU }
 
     var kind: Kind = Kind.NONE
         private set
