@@ -56,7 +56,13 @@ Last updated 2026-11-15. The detailed SDD ledgers exist only on the original Mac
   - a private in-process GlassesSurface adapter (R2)
   - Windows = agentd inside WSL2 with mirrored networking (R4)
   - a parity gate after the restructure (R6/R6′)
-- Next step: the user approves the design, then the plan is written (writing-plans), then the tasks are built in parallel with one Codex review.
+- **The user has APPROVED the design** (U35–U39, 2026-11-15):
+  - the code pairing
+  - the private interface and no store
+  - installer prerequisite checks
+  - Tailscale as an optional connector
+  - Nexus as the embedded core, with a coexistence warning
+- Next step: then the plan is written (writing-plans), then the tasks are built in parallel with one Codex review.
 - **Windows requires WSL (U34).** Settle where agentd runs (preferably inside WSL with mirrored networking) at the start of the Windows session.
 
 ## Windows work list (for the fresh Windows conversation)

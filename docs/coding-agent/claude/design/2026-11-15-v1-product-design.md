@@ -106,7 +106,7 @@ Every screen and every CLI step says what to do next (U5).
     - How does the phone's discovery (UDP 8793) and TLS dial-in reach a WSL2 instance? Mirrored networking, or a port proxy.
     - What does the `.exe` install?
   - Preference **[call]**: run `agentd` where the CLIs run (inside WSL), with WSL mirrored networking, so the hooks and the launcher socket stay local. The `.exe` then checks for WSL and sets this up.
-- Status: Codex review rounds 1–3 done (§10, §11); **Codex VERDICT: READY**. Awaiting the user's approval.
+- Status: Codex READY (§10, §11). The user has confirmed every open point (§12: U35–U39). **Approved for planning.**
 
 ## 10. Revisions after the Codex design review (`docs/coding-agent/codex/reviews/2026-11-15-v1-design-review.md`)
 These override §§3, 5, 6 and 8 where they differ. All are **[call]** unless marked otherwise.
@@ -269,7 +269,7 @@ Rules:
   - It is offered only when Wi-Fi pairing fails, or behind a "Use it away from home" link.
   - The computer installer's prerequisite check lists Tailscale as optional, with an install link.
   - Not built: embedding Tailscale (tsnet/libtailscale/Headscale), our own relay, port forwarding. These are post-1.0 decisions.
-- **Nexus is not a connector** **[call, pending the user's confirmation]**.
+- **U39: Nexus is not a connector (user confirmed).**
   - It is the embedded core: the glasses link, rendering and speech, behind the private `GlassesSurface` interface.
   - Making it optional or external would bring back the two-app friction and the open plugin host (U31).
   - **Coexistence:** onboarding detects an installed upstream Rokid Nexus app (`com.anezium.rokidbus.phone`). Both can't hold the glasses link, so the app says "Rokid Nexus is installed — close or uninstall it so Rokid Coder can connect to your glasses".
