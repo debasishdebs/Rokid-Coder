@@ -1,0 +1,228 @@
+package com.anezium.rokidbus.plugin.agents
+
+import com.anezium.rokidbus.client.plugin.NexusNoticeCloseReason
+import java.util.UUID
+
+/**
+ * The phone's mirror of agentd's alert queue: decides when the glasses band
+ * shows, refreshes, wakes and sounds, and what goes back to agentd. agentd owns
+ * the order, the dwell and the preemption; this only follows the `reason` each
+ * frame carries and never holds the alerts waiting behind the current one.
+ *
+ * A display episode is one band instance, from its show until that band
+ * closes. Display evidence belongs to the episode: the first evidence sends
+ * `alert_shown`, and a `retry` of the same band while it has evidence sends it
+ * again, since agentd takes an ack only while the alert is out on the wire.
+ * Only the wearer's own doing is evidence (R33): the hub's shown report, an
+ * action, an input, a close by the user. A timeout, replacement, owner hide or
+ * disconnect is not, since the glasses can time out a band that never attached (R47).
+ *
+ * Pure and not thread-safe: the service calls it from one coroutine, routes
+ * every [Effect.Send] through `AgentdWire.write`, which classifies the frame by
+ * its type, and renders the rest. The session and harness of an alert come
+ * from its `sessionKey` only (R79).
+ */
+class AlertCoordinator(
+    private val clock: () -> Long,
+    private val newMsgId: () -> String = { UUID.randomUUID().toString() },
+) {
+    sealed interface Effect {
+        /** A fresh band for [alert], replacing any band up now. */
+        data class Show(val alert: AgentdAction.Alert, val wake: Boolean, val sound: Boolean) : Effect
+
+        /** The same band, refreshed in place (`+N waiting`, text); never sounds. */
+        data class Update(val alert: AgentdAction.Alert) : Effect
+        data object Hide : Effect
+
+        /** A line for agentd, built by the codec. */
+        data class Send(val line: String) : Effect
+        data class Brief(val title: String, val body: String) : Effect
+
+        /** Drop the decision or question card and any voice draft bound to [alertId]. */
+        data class Invalidate(val alertId: String) : Effect
+
+        /** The wearer asked for more on [alert]: open its decision card, bound to it. */
+        data class OpenDecision(val alert: AgentdAction.Alert) : Effect
+
+        /** The wearer will answer [alert]: open its question card, bound to it. */
+        data class OpenQuestion(val alert: AgentdAction.Alert) : Effect
+    }
+
+    private class Episode(val alert: AgentdAction.Alert) {
+        var evidence = false
+    }
+
+    /** What the phone remembers of an id across its bands, until agentd closes it or the link comes back. */
+    private class Seen {
+        var evidence = false
+        var wokeAt: Long? = null
+        val msgIds = HashMap<String, String>()
+    }
+
+    private var episode: Episode? = null
+    private val seen = bounded<Seen>()
+    private val cards = bounded<AgentdAction.Alert>()
+
+    /** The alert whose band is up, or null. */
+    val current: AgentdAction.Alert? get() = episode?.alert
+
+    fun onAlert(alert: AgentdAction.Alert): List<Effect> {
+        val up = episode?.takeIf { it.alert.id == alert.id }
+        return when (alert.reason) {
+            AlertReason.NEW, AlertReason.REMINDER -> show(alert, wake = true, sound = true)
+            AlertReason.RETRY -> if (up != null) {
+                refresh(up, alert) + if (up.evidence) listOf(shown(alert.id)) else emptyList()
+            } else {
+                show(alert, wake = unconfirmed(alert.id), sound = false)
+            }
+            AlertReason.RESUME -> if (up != null) refresh(up, alert) else show(alert, wake = unconfirmed(alert.id), sound = false)
+            AlertReason.UPDATE -> if (up != null) refresh(up, alert) else emptyList()
+        }
+    }
+
+    /** agentd closed the alert for a reason the glasses did not cause. */
+    fun onAlertClosed(id: String, @Suppress("UNUSED_PARAMETER") reason: String): List<Effect> {
+        val effects = mutableListOf<Effect>()
+        if (episode?.alert?.id == id) {
+            episode = null
+            effects += Effect.Hide
+        }
+        if (cards.remove(id) != null) effects += Effect.Invalidate(id)
+        seen.remove(id)
+        return effects
+    }
+
+    /**
+     * After hello_ack, before any later frame: whatever the phone held may be
+     * stale. agentd requeues its former occupant and sends by priority, so
+     * nothing here expects a replay or an order (R28).
+     */
+    fun onLinkUp(): List<Effect> {
+        episode = null
+        seen.clear()
+        return listOf(Effect.Hide) + invalidateWhere { true }
+    }
+
+    /** A card answered over a link that is gone would answer nothing; the band stays until the link is back. */
+    fun onLinkDown(): List<Effect> = invalidateWhere { true }
+
+    /** The session left the board, or its follow-up closed: its bound cards answer nothing any more. */
+    fun invalidateSession(sessionKey: String): List<Effect> = invalidateWhere { it.sessionKey == sessionKey }
+
+    /** The hub's `/notice/shown` or `/notice/input` for this id's band. */
+    fun onShownEvidence(id: String): List<Effect> = evidence(id)
+
+    /**
+     * A notice action from the band, or a confirm from a card bound to [id].
+     * An id with neither has nothing left to answer.
+     */
+    fun onAction(id: String, action: String, secure: Boolean): List<Effect> {
+        val onBand = episode?.alert?.takeIf { it.id == id }
+        val alert = onBand ?: cards[id] ?: return listOf(Effect.Brief(NO_LONGER_WAITING, ""))
+        val effects = evidence(id).toMutableList()
+        when (action) {
+            ALLOW, DENY -> effects += if (secure) {
+                Effect.Send(AgentdProtocolCodec.alertAction(id, action, msgIdFor(id, action)))
+            } else {
+                Effect.Brief(MONITOR_ONLY_TITLE, MONITOR_ONLY_BODY)
+            }
+            MORE -> {
+                cards[id] = alert
+                effects += Effect.OpenDecision(alert)
+            }
+            ANSWER -> {
+                cards[id] = alert
+                effects += Effect.OpenQuestion(alert)
+            }
+            LATER -> {
+                if (onBand != null) {
+                    episode = null
+                    effects += Effect.Hide
+                }
+                effects += Effect.Send(AgentdProtocolCodec.alertDismissed(id))
+            }
+        }
+        return effects
+    }
+
+    /** The band for [id] closed. Only the wearer's close is evidence; any close ends the episode. */
+    fun onBandClosed(id: String, reason: NexusNoticeCloseReason): List<Effect> {
+        if (episode?.alert?.id != id) return emptyList()
+        val effects = if (reason == NexusNoticeCloseReason.USER) {
+            // agentd parks an approval or question and brings it back as a reminder (R22).
+            evidence(id) + Effect.Send(AgentdProtocolCodec.alertDismissed(id))
+        } else {
+            emptyList()
+        }
+        episode = null
+        return effects
+    }
+
+    private fun show(alert: AgentdAction.Alert, wake: Boolean, sound: Boolean): List<Effect> {
+        episode = Episode(alert)
+        if (wake) seenOf(alert.id).wokeAt = clock()
+        return listOf(Effect.Show(alert, wake = wake, sound = sound))
+    }
+
+    private fun refresh(up: Episode, alert: AgentdAction.Alert): List<Effect> {
+        episode = Episode(alert).also { it.evidence = up.evidence }
+        return listOf(Effect.Update(alert))
+    }
+
+    /** Never shown, and no wake asked for in the last minute: worth a fresh wake after a failed or throttled one. */
+    private fun unconfirmed(id: String): Boolean {
+        val seen = seen[id] ?: return true
+        val wokeAt = seen.wokeAt
+        return !seen.evidence && (wokeAt == null || clock() - wokeAt >= WAKE_INTERVAL_MS)
+    }
+
+    private fun evidence(id: String): List<Effect> {
+        val live = episode?.takeIf { it.alert.id == id } ?: return emptyList()
+        seenOf(id).evidence = true
+        if (live.evidence) return emptyList()
+        live.evidence = true
+        return listOf(shown(id))
+    }
+
+    private fun shown(id: String): Effect = Effect.Send(AgentdProtocolCodec.alertShown(id))
+
+    /** One msgId per (alert, action), reused when the wearer presses it again, so agentd applies it once. */
+    private fun msgIdFor(id: String, action: String): String =
+        seenOf(id).msgIds.getOrPut(action, newMsgId)
+
+    private fun seenOf(id: String): Seen = seen.getOrPut(id, ::Seen)
+
+    private fun invalidateWhere(predicate: (AgentdAction.Alert) -> Boolean): List<Effect> {
+        val gone = cards.values.filter(predicate).map { it.id }
+        gone.forEach(cards::remove)
+        return gone.map(Effect::Invalidate)
+    }
+
+    companion object {
+        const val WAKE_INTERVAL_MS = 60_000L
+        const val NO_LONGER_WAITING = "No longer waiting"
+        const val MONITOR_ONLY_TITLE = "Monitor only"
+        const val MONITOR_ONLY_BODY = "approve on laptop"
+
+        const val ALLOW = "allow"
+        const val DENY = "deny"
+        const val MORE = "more"
+        const val ANSWER = "answer"
+        const val LATER = "later"
+
+        /**
+         * agentd closes an id without telling the phone when the glasses
+         * dismissed it, so what the phone remembers per id is capped.
+         */
+        private const val MAX_TRACKED_IDS = 64
+
+        /** The band's footer, or null when nothing waits behind the alert. */
+        fun footer(alert: AgentdAction.Alert): String? =
+            alert.waiting.takeIf { it > 0 }?.let { "+$it waiting" }
+
+        private fun <V> bounded(): LinkedHashMap<String, V> = object : LinkedHashMap<String, V>() {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, V>?): Boolean =
+                size > MAX_TRACKED_IDS
+        }
+    }
+}
