@@ -475,6 +475,28 @@ class AgentsConfigStore internal constructor(
         prefs.edit().putInt(KEY_PAIRING_TTL_DAYS, days).apply()
     }
 
+    // ------------------------------------------------------------ alert history (U1)
+
+    /** Whether a closed session's alerts stay in the history (phone-only). */
+    fun historyKeepAfterSession(): Boolean = prefs.getBoolean(KEY_HISTORY_KEEP_AFTER_SESSION, false)
+
+    fun setHistoryKeepAfterSession(keep: Boolean) {
+        prefs.edit().putBoolean(KEY_HISTORY_KEEP_AFTER_SESSION, keep).apply()
+    }
+
+    /** Hours an alert stays in the history (phone-only). */
+    fun historyWindowHours(): Int =
+        prefs.getInt(KEY_HISTORY_WINDOW_HOURS, DEFAULT_HISTORY_WINDOW_HOURS).takeIf { it in HISTORY_WINDOW_CHOICES }
+            ?: DEFAULT_HISTORY_WINDOW_HOURS
+
+    fun setHistoryWindowHours(hours: Int) {
+        if (hours !in HISTORY_WINDOW_CHOICES) return
+        prefs.edit().putInt(KEY_HISTORY_WINDOW_HOURS, hours).apply()
+    }
+
+    fun historyPolicy(): HistoryPolicy =
+        HistoryPolicy(historyWindowHours() * HOUR_MS, historyKeepAfterSession())
+
     /** The outbound pairing was used just now: a secure hello_ack, or a link that is still up. */
     @Synchronized
     fun touchAgentdUsed(now: Long = wallClock()) {
@@ -725,6 +747,8 @@ class AgentsConfigStore internal constructor(
         const val KEY_AGENTD_STEER = "agentd.steer"
         const val KEY_AGENTD_LAST_USED = "agentd.last_used_at"
         const val KEY_PAIRING_TTL_DAYS = "security.pairing_ttl_days"
+        const val KEY_HISTORY_KEEP_AFTER_SESSION = "history.keep_after_session"
+        const val KEY_HISTORY_WINDOW_HOURS = "history.window_hours"
         const val KEY_TTL_MIGRATED = "security.ttl_migrated"
         const val KEY_SIGNED_OUT_PREFIX = "signed_out."
         const val KEY_SIGNED_OUT_DAYS_PREFIX = "signed_out_days."
@@ -755,7 +779,12 @@ class AgentsConfigStore internal constructor(
 internal const val LINK_WINDOW_DURATION_MS = 2L * 60L * 1000L
 
 private const val DAY_MS = 24L * 60L * 60L * 1000L
+private const val HOUR_MS = 60L * 60L * 1000L
 
 /** What Sign out unused computers offers, in days. */
 val PAIRING_TTL_CHOICES: List<Int> = listOf(3, 7, 14, 30, 90)
 const val DEFAULT_PAIRING_TTL_DAYS = 14
+
+/** What History window offers, in hours. */
+val HISTORY_WINDOW_CHOICES: List<Int> = listOf(1, 4, 12, 24)
+const val DEFAULT_HISTORY_WINDOW_HOURS = 24

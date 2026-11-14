@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -105,6 +106,9 @@ class AgentsMonitorService : Service() {
                 val cancel: () -> Unit = { timer.cancel() }
                 cancel
             },
+            history = AgentsRuntime.history,
+            historyPolicy = { configStore.historyPolicy() },
+            headingOf = { key -> AgentsRuntime.store.sessions.value.firstOrNull { it.key == key }?.historyHeading() },
         )
     }
 
@@ -227,7 +231,11 @@ class AgentsMonitorService : Service() {
             ACTION_PUSH_SETTINGS -> syncSettings()
             ACTION_SEND_V2 -> {
                 // A line that is not one JSON object comes back Refused, unsent.
-                intent.getStringExtra(EXTRA_FRAME)?.let(::writeToAgentd)
+                intent.getStringExtra(EXTRA_FRAME)?.let { frame ->
+                    if (writeToAgentd(frame) == AgentdWire.Result.Sent) followupSession(frame)?.let { key ->
+                        AgentsRuntime.alertDirector?.onFollowupWritten(key)
+                    }
+                }
             }
             else -> reconcile()
         }
@@ -278,6 +286,11 @@ class AgentsMonitorService : Service() {
      */
     private fun writeToAgentd(line: String): AgentdWire.Result =
         combined(listOf(agentdClient.write(line), linkServer.write(line)))
+
+    /** The session of a `followup` frame, or null for any other frame. */
+    private fun followupSession(frame: String): String? = runCatching {
+        JSONObject(frame).takeIf { it.optString("type") == "followup" }?.optString("sessionKey")?.takeIf(String::isNotBlank)
+    }.getOrNull()
 
     private fun combined(results: List<AgentdWire.Result>): AgentdWire.Result = when {
         AgentdWire.Result.Sent in results -> AgentdWire.Result.Sent

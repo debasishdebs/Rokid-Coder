@@ -109,6 +109,20 @@ class AgentsSettingsActivity : ComponentActivity() {
             startActivity(Intent(this, AddComputerActivity::class.java).putExtra(AddComputerActivity.EXTRA_GUIDED, true))
         },
         onAlerts = ::changeAlerts,
+        onHistoryKeep = { keep ->
+            configStore.setHistoryKeepAfterSession(keep)
+            pruneHistory()
+            refresh()
+        },
+        onHistoryWindow = { hours ->
+            configStore.setHistoryWindowHours(hours)
+            pruneHistory()
+            refresh()
+        },
+        onClearHistory = {
+            AgentsRuntime.history.clear()
+            refresh()
+        },
         onPairingTtl = { days ->
             configStore.setPairingTtlDays(days)
             // Told to agentd now, and a shorter limit may sign a computer out right away.
@@ -168,6 +182,7 @@ class AgentsSettingsActivity : ComponentActivity() {
                     ) { _, _, _ -> }.collect { refresh() }
                 }
                 launch { AgentsRuntime.linkedMachines.collect { refresh() } }
+                launch { AgentsRuntime.history.entries.collect { refresh() } }
             }
         }
     }
@@ -195,7 +210,17 @@ class AgentsSettingsActivity : ComponentActivity() {
             batteryAllowed = batteryExemptionGranted(this),
             batteryFrozen = suspended,
             phoneFingerprint = phoneFingerprint,
+            history = AgentsRuntime.history.entries.value,
+            historyKeepAfterSession = configStore.historyKeepAfterSession(),
+            historyWindowHours = configStore.historyWindowHours(),
+            nowMs = AgentsRuntime.history.now(),
         )
+    }
+
+    /** A new window or keep rule applies to what is already there, not only to what comes next. */
+    private fun pruneHistory() {
+        val policy = configStore.historyPolicy()
+        AgentsRuntime.history.prune(AgentsRuntime.history.now(), policy.windowMs, policy.keepAfterSession)
     }
 
     private fun computerRows(config: AgentsConfig): List<ComputerRow> {

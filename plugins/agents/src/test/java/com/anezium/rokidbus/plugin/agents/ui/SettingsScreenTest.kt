@@ -2,6 +2,9 @@ package com.anezium.rokidbus.plugin.agents.ui
 
 import com.anezium.rokidbus.plugin.agents.AgentProvider
 import com.anezium.rokidbus.plugin.agents.AgentSession
+import com.anezium.rokidbus.plugin.agents.AlertKind
+import com.anezium.rokidbus.plugin.agents.HistoryEntry
+import com.anezium.rokidbus.plugin.agents.Outcome
 import com.anezium.rokidbus.plugin.agents.AgentStatus
 import com.anezium.rokidbus.plugin.agents.ConnectionState
 import com.anezium.rokidbus.plugin.agents.ProviderConnectionState
@@ -79,5 +82,42 @@ class SettingsScreenTest {
     fun first_computer_copy_is_exact() {
         assertEquals("Pairing takes two minutes — tap Add your first computer.", SettingsCopy.PAIR_HINT)
         assertEquals("Add your first computer", SettingsCopy.ADD_FIRST_COMPUTER)
+    }
+
+    private fun entry(
+        outcome: Outcome = Outcome.PENDING,
+        label: String? = null,
+        count: Int = 1,
+        error: String? = null,
+        endedAt: Long? = null,
+    ) = HistoryEntry(
+        alertId = "A", sessionKey = "claude:s1", provider = "CLAUDE", kind = AlertKind.APPROVAL, heading = "my-repo",
+        firstShownAtMs = 0L, shownCount = count, outcome = outcome, actionLabel = label, endedAtMs = endedAt,
+        lastError = error,
+    )
+
+    @Test
+    fun history_copy_is_exact() {
+        assertEquals("No alerts yet — they'll appear here as your agents ask for things.", HistoryCopy.EMPTY)
+        assertEquals("Clear history", HistoryCopy.CLEAR)
+    }
+
+    @Test
+    fun history_row_names_what_asked_and_how_it_ended() {
+        val minute = 60_000L
+        val row = historyRow(entry(Outcome.ACTED, "Allowed", endedAt = 3 * minute), now = 5 * minute)
+        assertEquals("CLAUDE · approval · my-repo", row.title)
+        assertEquals("Allowed · 2 min ago", row.sub)
+        assertEquals("Handled · just now", historyRow(entry(Outcome.ACTED), now = 0L).sub)
+        assertEquals("Ignored — timed out · 2 h ago", historyRow(entry(Outcome.EXPIRED), now = 130 * minute).sub)
+        assertEquals("Handled on laptop · just now", historyRow(entry(Outcome.WITHDRAWN), now = 0L).sub)
+        assertEquals("Waiting · just now · shown 3×", historyRow(entry(count = 3), now = 0L).sub)
+    }
+
+    @Test
+    fun a_refused_answer_reads_not_sent_while_waiting() {
+        assertEquals("Not sent: monitor_only · just now", historyRow(entry(error = "monitor_only"), now = 0L).sub)
+        assertEquals("Read · just now", historyRow(entry(Outcome.DISMISSED, "Read"), now = 0L).sub)
+        assertEquals("Dismissed · just now", historyRow(entry(Outcome.DISMISSED), now = 0L).sub)
     }
 }

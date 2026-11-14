@@ -48,6 +48,9 @@ class AlertDirectorTest {
     private val written = mutableListOf<JSONObject>()
     private var secure = true
     private var now = 0L
+    private var writeResult: AgentdWire.Result = AgentdWire.Result.Sent
+    private val history = AlertHistory(clock = { now })
+    private var keepAfterSession = true
 
     private class Timer(val delayMs: Long, val work: () -> Unit) {
         var cancelled = false
@@ -64,7 +67,7 @@ class AlertDirectorTest {
 
     private val director = AlertDirector(
         coordinator = AlertCoordinator(clock = { now }),
-        write = { written += JSONObject(it) },
+        write = { written += JSONObject(it); writeResult },
         secure = { secure },
         glasses = { glasses },
         post = { it() },
@@ -73,6 +76,9 @@ class AlertDirectorTest {
             val cancel: () -> Unit = { timer.cancelled = true }
             cancel
         },
+        history = history,
+        historyPolicy = { HistoryPolicy(windowMs = 24 * 3_600_000L, keepAfterSession = keepAfterSession) },
+        headingOf = { "my-repo" },
     )
 
     private fun alert(
@@ -157,8 +163,8 @@ class AlertDirectorTest {
         feed(alert(id = "B", reason = "new", kind = "done"))
         feed(alert(id = "B", reason = "reminder", kind = "done"))
 
-        // The refused update re-shows A without a sound; a reminder is a fresh sound.
-        assertEquals(listOf("A", "B", "B"), glasses.cues)
+        // The refused update re-shows A without a sound; a reminder wakes but never speaks.
+        assertEquals(listOf("A", "B"), glasses.cues)
     }
 
     @Test
@@ -609,7 +615,7 @@ class AlertDirectorTest {
         val queue = ArrayDeque<() -> Unit>()
         val queued = AlertDirector(
             coordinator = AlertCoordinator(clock = { now }),
-            write = { written += JSONObject(it) },
+            write = { written += JSONObject(it); AgentdWire.Result.Sent },
             secure = { true },
             glasses = { glasses },
             post = { queue.addLast(it) },
@@ -635,7 +641,7 @@ class AlertDirectorTest {
     fun an_approval_with_no_glasses_is_not_left_for_a_refresh_to_find() {
         val absent = AlertDirector(
             coordinator = AlertCoordinator(clock = { now }),
-            write = { written += JSONObject(it) },
+            write = { written += JSONObject(it); AgentdWire.Result.Sent },
             secure = { true },
             glasses = { null },
             post = { it() },
@@ -651,7 +657,7 @@ class AlertDirectorTest {
     fun an_old_service_destroyed_late_never_clears_the_newer_directors_slot() {
         fun fresh() = AlertDirector(
             coordinator = AlertCoordinator(clock = { now }),
-            write = { },
+            write = { AgentdWire.Result.Sent },
             secure = { true },
             glasses = { glasses },
             post = { it() },
@@ -667,5 +673,133 @@ class AlertDirectorTest {
 
         assertTrue(AgentsRuntime.clearAlertDirector(newer))
         assertEquals(null, AgentsRuntime.alertDirector)
+    }
+
+    // ------------------------------------------------------------ alert history (U1)
+
+    private fun entry(id: String = "A") = history.entries.value.single { it.alertId == id }
+
+    @Test
+    fun acted_on_glasses_records_label() {
+        up()
+        feed(alert(id = "A"))
+        assertEquals("CLAUDE", entry().provider)
+        assertEquals("my-repo", entry().heading)
+
+        director.onBandAction(AlertCoordinator.ALLOW)
+        // The frame is written, but only agentd's word ends the entry.
+        assertEquals(Outcome.PENDING, entry().outcome)
+        assertEquals("Allowed", entry().actionLabel)
+
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("A", "acted")))
+        assertEquals(Outcome.ACTED, entry().outcome)
+        assertEquals("Allowed", entry().actionLabel)
+    }
+
+    @Test
+    fun send_without_link_records_nothing() {
+        up()
+        feed(alert(id = "A"))
+        writeResult = AgentdWire.Result.MonitorOnly
+        director.onBandAction(AlertCoordinator.DENY)
+        assertEquals(null, entry().actionLabel)
+
+        // A brief-only refusal never writes, so it records nothing either.
+        secure = false
+        director.onBandAction(AlertCoordinator.ALLOW)
+        assertEquals(null, entry().actionLabel)
+        assertEquals(Outcome.PENDING, entry().outcome)
+
+        // The same alert closed with nothing attempted from here reads Handled.
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("A", "acted")))
+        assertEquals("Handled", entry().actionLabel)
+    }
+
+    @Test
+    fun rejected_answer_stays_pending_with_error() {
+        up()
+        feed(alert(id = "A"))
+        director.onBandAction(AlertCoordinator.ALLOW)
+        val sent = written.single { it.getString("type") == "alert_action" }
+        director.onEvent(AgentdEvent.Action(AgentdAction.Ack(sent.getString("msgId"), "rejected", "wrong_request")))
+
+        assertEquals(Outcome.PENDING, entry().outcome)
+        assertEquals("wrong_request", entry().lastError)
+        assertEquals(null, entry().actionLabel)
+    }
+
+    @Test
+    fun answered_on_laptop_is_withdrawn() {
+        up()
+        feed(alert(id = "A"))
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("A", "withdrawn")))
+        assertEquals(Outcome.WITHDRAWN, entry().outcome)
+    }
+
+    @Test
+    fun expired_is_ignored_timed_out() {
+        up()
+        feed(alert(id = "A"))
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("A", "expired")))
+        assertEquals(Outcome.EXPIRED, entry().outcome)
+    }
+
+    @Test
+    fun dismissed_approval_stays_pending_then_reminder_counts() {
+        up()
+        feed(alert(id = "A"))
+        director.onBandAction(AlertCoordinator.LATER)
+        assertEquals(Outcome.PENDING, entry().outcome)
+        assertEquals(1, entry().shownCount)
+
+        // A user close of the band is a dismissal too.
+        feed(alert(id = "A", reason = "reminder"))
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+        assertEquals(Outcome.PENDING, entry().outcome)
+        assertEquals(2, entry().shownCount)
+
+        // A retry of the same band is not another showing.
+        feed(alert(id = "A", reason = "reminder"))
+        feed(alert(id = "A", reason = "retry"))
+        assertEquals(3, entry().shownCount)
+    }
+
+    @Test
+    fun a_done_dismissed_or_read_is_final() {
+        up()
+        feed(alert(id = "D", kind = "done"))
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+        assertEquals(Outcome.DISMISSED, entry("D").outcome)
+        assertEquals(null, entry("D").actionLabel)
+
+        feed(alert(id = "E", kind = "done"))
+        director.onBandInput()
+        assertEquals(Outcome.DISMISSED, entry("E").outcome)
+        assertEquals("Read", entry("E").actionLabel)
+    }
+
+    @Test
+    fun session_end_marks_pending_withdrawn() {
+        up()
+        director.onBoard(setOf("claude:s1"))
+        feed(alert(id = "A"))
+        director.onBoard(emptySet())
+        assertEquals(Outcome.WITHDRAWN, entry().outcome)
+
+        // Without keep-after-session, the next change drops what a closed session left.
+        keepAfterSession = false
+        feed(alert(id = "B", sessionKey = "claude:s2"))
+        assertEquals(listOf("B"), history.entries.value.map { it.alertId })
+    }
+
+    @Test
+    fun a_followup_written_marks_the_done_replied() {
+        up()
+        feed(alert(id = "D", kind = "done"))
+        director.onFollowupWritten("claude:s1")
+        assertEquals("Replied", entry("D").actionLabel)
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("D", "acted")))
+        assertEquals(Outcome.ACTED, entry("D").outcome)
+        assertEquals("Replied", entry("D").actionLabel)
     }
 }

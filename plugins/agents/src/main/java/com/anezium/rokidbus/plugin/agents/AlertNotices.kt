@@ -22,6 +22,9 @@ object AlertNotices {
     /** Where the glasses offer no Allow because agentd had to cut the command or path (R128). */
     const val COMMAND_CUT = "Command cut — review on laptop"
 
+    /** The footer of a reminder band: agentd re-sent an alert still waiting for the wearer. */
+    const val REMINDER = "Reminder"
+
     private const val TITLE_CHARS = 32
     private const val FOOTER_CHARS = 40
     private const val BRIEF_BODY_CHARS = 240
@@ -193,8 +196,13 @@ object AlertNotices {
     }
 
     private fun footer(alert: AgentdAction.Alert): String? {
-        val text = AlertCoordinator.footer(alert)
-            ?: "TAP read".takeIf { alert.kind == AlertKind.DONE || alert.kind == AlertKind.ERROR }
+        val waiting = AlertCoordinator.footer(alert)
+        // A reminder says so (it is silent on the glasses), in place of any other footer but the count.
+        val text = if (alert.reason == AlertReason.REMINDER) {
+            listOfNotNull(REMINDER, waiting).joinToString(" · ")
+        } else {
+            waiting ?: "TAP read".takeIf { alert.kind == AlertKind.DONE || alert.kind == AlertKind.ERROR }
+        }
         return text?.let { cut(it, FOOTER_CHARS) }
     }
 

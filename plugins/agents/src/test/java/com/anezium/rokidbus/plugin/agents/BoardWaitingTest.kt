@@ -20,7 +20,7 @@ class BoardWaitingTest {
     private val glasses = Glasses()
     private val director = AlertDirector(
         coordinator = AlertCoordinator(clock = { 0L }),
-        write = {},
+        write = { AgentdWire.Result.Sent },
         secure = { true },
         glasses = { glasses },
         post = { it() },

@@ -49,12 +49,17 @@ interface AlertGlasses {
  */
 class AlertDirector(
     private val coordinator: AlertCoordinator,
-    private val write: (String) -> Unit,
+    private val write: (String) -> AgentdWire.Result,
     private val secure: () -> Boolean,
     private val glasses: () -> AlertGlasses?,
     private val post: (() -> Unit) -> Unit,
     /** Runs [work] after the delay and returns what cancels it; the lost-close fallback of a brief. */
     private val schedule: (Long, () -> Unit) -> (() -> Unit) = { _, _ -> {} },
+    /** What the settings screen reads: every alert the glasses showed, and how it ended. */
+    private val history: AlertHistory = AlertHistory(System::currentTimeMillis),
+    private val historyPolicy: () -> HistoryPolicy = { HistoryPolicy.DEFAULT },
+    /** A session's heading for the history; null when the board has none. */
+    private val headingOf: (String) -> String? = { null },
 ) {
     /** The alert whose band the director put up and has not seen end. Only [post]ed work touches it. */
     private var bandId: String? = null
@@ -131,7 +136,18 @@ class AlertDirector(
     fun onBoard(keys: Set<String>) = post {
         val gone = boardKeys - keys
         boardKeys = keys
-        gone.forEach { apply(coordinator.invalidateSession(it)) }
+        gone.forEach {
+            history.onSessionGone(it)
+            apply(coordinator.invalidateSession(it))
+        }
+    }
+
+    /**
+     * A `followup` for [sessionKey] was written to agentd: the wearer replied to its Done or error.
+     * Called only for a frame the wire reported Sent.
+     */
+    fun onFollowupWritten(sessionKey: String) = post {
+        history.onReplied(sessionKey)
     }
 
     /**
@@ -148,7 +164,10 @@ class AlertDirector(
         val id = bandId ?: return@post orphanedBand()
         val alert = coordinator.current?.takeIf { it.id == id } ?: return@post
         apply(coordinator.onShownEvidence(id))
-        if (alert.kind == AlertKind.DONE || alert.kind == AlertKind.ERROR) glasses()?.openOutput(alert)
+        if (alert.kind == AlertKind.DONE || alert.kind == AlertKind.ERROR) {
+            history.onDismissed(id, read = true)
+            glasses()?.openOutput(alert)
+        }
     }
 
     /**
@@ -221,6 +240,8 @@ class AlertDirector(
 
     private fun apply(effects: List<AlertCoordinator.Effect>) {
         applyEffects(effects)
+        val policy = historyPolicy()
+        history.prune(history.now(), policy.windowMs, policy.keepAfterSession)
         _waiting.value = coordinator.current?.waiting ?: 0
         settle()
     }
@@ -282,7 +303,15 @@ class AlertDirector(
                     goneId = null
                     glasses()?.hideBand()
                 }
-                is AlertCoordinator.Effect.Send -> write(effect.line)
+                is AlertCoordinator.Effect.Send -> {
+                    val result = write(effect.line)
+                    // Only a frame the wire wrote counts as the wearer's answer (a refusal is told by its brief).
+                    effect.attempt?.takeIf { result == AgentdWire.Result.Sent }
+                        ?.let { history.onActionAttempted(it.alertId, it.label) }
+                }
+                is AlertCoordinator.Effect.Dismissed -> history.onDismissed(effect.alertId)
+                is AlertCoordinator.Effect.Rejected -> history.onActionRejected(effect.alertId, effect.error)
+                is AlertCoordinator.Effect.Closed -> history.onClosed(effect.alertId, effect.reason)
                 // The coordinator's refusal briefs are Not sent; that title is ours, never agentd's.
                 is AlertCoordinator.Effect.Brief -> onBrief(
                     effect.title,
@@ -306,11 +335,12 @@ class AlertDirector(
             return
         }
         bandId = alert.id
+        history.onShown(alert, headingOf(alert.sessionKey) ?: alert.sessionKey.substringAfter(':'))
         bandSerial++
         goneId = null
         // The alert took the slot from whatever brief was on it.
         briefDone()
-        // The coordinator marks only a NEW or REMINDER band as a sound, never a retry.
+        // The coordinator marks only a NEW band as a sound, never a retry or a reminder.
         if (sound) glasses()?.speakCue(alert)
     }
 

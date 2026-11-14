@@ -149,13 +149,13 @@ class AlertCoordinatorTest {
     }
 
     @Test
-    fun reminder_after_timeout_shows_with_sound() {
+    fun reminder_shows_and_wakes_but_never_sounds() {
         val reminder = replay("reminder")
         val timeout = reminder.steps.single { it.first.optJSONObject("glasses")?.optString("event") == "closed" }
         assertEquals(emptyList<Effect>(), timeout.second)
         val show = reminder.onFrame("A", "reminder", 0).single() as Effect.Show
         assertTrue(show.wake)
-        assertTrue(show.sound)
+        assertFalse(show.sound)
     }
 
     @Test
@@ -191,7 +191,9 @@ class AlertCoordinatorTest {
     fun preempted_alert_resumes_without_sound() {
         val preemption = replay("preemption")
         val closed = preemption.steps.single { it.first.optJSONObject("agentd")?.optString("type") == "alert_closed" }.second
-        assertEquals(listOf(Effect.Hide), closed)
+        // The reason agentd gave is passed on for the history; the band comes down.
+        assertEquals(listOf(Effect.Hide), closed.filterNot { it is Effect.Closed })
+        assertEquals(1, closed.count { it is Effect.Closed })
         val resume = preemption.onFrame("A", "resume").single() as Effect.Show
         assertFalse(resume.sound)
         // The notice was seen before the approval took its band, so it does not wake the glasses again.
@@ -204,7 +206,7 @@ class AlertCoordinatorTest {
         val close = park.steps.single { it.first.optJSONObject("glasses")?.optString("event") == "closed" }.second
         assertEquals(listOf("alert_shown", "alert_dismissed"), types(close))
         val again = park.onFrame("A", "reminder").single() as Effect.Show
-        assertTrue(again.sound)
+        assertFalse(again.sound)
         assertTrue(again.wake)
         assertEquals("A", again.alert.id)
     }
@@ -286,11 +288,11 @@ class AlertCoordinatorTest {
     }
 
     @Test
-    fun reminder_while_band_up_reshows_with_sound_and_resets_evidence() {
+    fun reminder_while_band_up_reshows_silently_and_resets_evidence() {
         val reminder = replay("reminder")
         // The second reminder lands while the first reminder's band is still up.
         val reshow = reminder.onFrame("A", "reminder", 1).single() as Effect.Show
-        assertTrue(reshow.sound)
+        assertFalse(reshow.sound)
         assertTrue(reshow.wake)
         // Its evidence was reset: the replay matched a third alert_shown to agentd's log.
         assertEquals(3, reminder.effects.count { it is Effect.Send })
@@ -408,10 +410,13 @@ class AlertCoordinatorTest {
         coordinator.onAlert(alert(id = "B", kind = AlertKind.NOTICE))
         assertEquals(listOf("alert_action"), types(coordinator.onCardConfirm("A", "deny", secure = true)))
 
-        assertEquals(listOf(Effect.Invalidate("A")), coordinator.onAlertClosed("A", "withdrawn"))
+        assertEquals(
+            listOf(Effect.Closed("A", "withdrawn"), Effect.Invalidate("A")),
+            coordinator.onAlertClosed("A", "withdrawn"),
+        )
         assertEquals(listOf(NO_LONGER_WAITING), coordinator.onCardConfirm("A", "allow", secure = true))
         // Closing the alert on the band takes the band down as well.
-        assertEquals(listOf(Effect.Hide), coordinator.onAlertClosed("B", "expired"))
+        assertEquals(listOf(Effect.Closed("B", "expired"), Effect.Hide), coordinator.onAlertClosed("B", "expired"))
         assertNull(coordinator.current)
     }
 
@@ -603,5 +608,28 @@ class AlertCoordinatorTest {
         assertEquals(AlertReason.NEW, show.alert.reason)
         assertTrue(show.sound)
         assertTrue(show.wake)
+    }
+
+    @Test
+    fun an_answer_carries_its_label_for_the_history_and_a_dismissal_says_so() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(alert())
+        val allow = coordinator.onAction("A", "allow", secure = true).filterIsInstance<Effect.Send>().single { it.attempt != null }
+        assertEquals(Effect.Attempt("A", "Allowed"), allow.attempt)
+        val deny = coordinator.onAction("A", "deny", secure = true).filterIsInstance<Effect.Send>().single { it.attempt != null }
+        assertEquals(Effect.Attempt("A", "Denied"), deny.attempt)
+        // A refused press has no frame, so nothing to record.
+        assertEquals(emptyList<Effect.Send>(), coordinator.onAction("A", "allow", secure = false).filterIsInstance<Effect.Send>().filter { it.attempt != null })
+        assertTrue(Effect.Dismissed("A") in coordinator.onAction("A", "later", secure = true))
+    }
+
+    @Test
+    fun a_rejected_ack_names_the_alert_it_was_for() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(alert())
+        val frame = sends(coordinator.onAction("A", "allow", secure = true)).single { it.getString("type") == "alert_action" }
+        val effects = coordinator.onAck(AgentdAction.Ack(frame.getString("msgId"), "rejected", "wrong_request"))
+        assertEquals(Effect.Rejected("A", "wrong_request"), effects.first())
+        assertEquals(emptyList<Effect>(), coordinator.onAck(AgentdAction.Ack("elsewhere", "rejected", "x")))
     }
 }

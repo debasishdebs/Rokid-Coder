@@ -36,8 +36,23 @@ class AlertCoordinator(
         data class Update(val alert: AgentdAction.Alert) : Effect
         data object Hide : Effect
 
-        /** A line for agentd, built by the codec. */
-        data class Send(val line: String) : Effect
+        /**
+         * A line for agentd, built by the codec. An [attempt] says it answers an alert
+         * from here; it is recorded only once the wire reports the line written.
+         */
+        data class Send(val line: String, val attempt: Attempt? = null) : Effect
+
+        /** The wearer answered [alertId] with [label] (`Allowed`, `Denied`, `Answered`). */
+        data class Attempt(val alertId: String, val label: String)
+
+        /** The wearer dismissed or closed [alertId]'s band. */
+        data class Dismissed(val alertId: String) : Effect
+
+        /** agentd refused what this phone sent for [alertId]. */
+        data class Rejected(val alertId: String, val error: String) : Effect
+
+        /** agentd closed [alertId] for [reason] (`acted`, `expired`, `withdrawn`). */
+        data class Closed(val alertId: String, val reason: String) : Effect
         data class Brief(val title: String, val body: String) : Effect
 
         /** Drop the decision or question card and any voice draft bound to [alertId]. */
@@ -71,7 +86,9 @@ class AlertCoordinator(
     fun onAlert(alert: AgentdAction.Alert): List<Effect> {
         val up = episode?.takeIf { it.alert.id == alert.id }
         return when (alert.reason) {
-            AlertReason.NEW, AlertReason.REMINDER -> show(alert, wake = true, sound = true)
+            AlertReason.NEW -> show(alert, wake = true, sound = true)
+            // A reminder wakes the glasses but never speaks: the wearer already heard this alert.
+            AlertReason.REMINDER -> show(alert, wake = true, sound = false)
             AlertReason.RETRY, AlertReason.RESUME -> if (up != null) {
                 refresh(up, alert) + if (up.evidence) listOf(shown(alert.id)) else emptyList()
             } else {
@@ -82,8 +99,8 @@ class AlertCoordinator(
     }
 
     /** agentd closed the alert for a reason the glasses did not cause. */
-    fun onAlertClosed(id: String, @Suppress("UNUSED_PARAMETER") reason: String): List<Effect> {
-        val effects = mutableListOf<Effect>()
+    fun onAlertClosed(id: String, reason: String): List<Effect> {
+        val effects = mutableListOf<Effect>(Effect.Closed(id, reason))
         if (episode?.alert?.id == id) {
             episode = null
             effects += Effect.Hide
@@ -136,6 +153,7 @@ class AlertCoordinator(
                 episode = null
                 effects += Effect.Hide
                 effects += Effect.Send(AgentdProtocolCodec.alertDismissed(id))
+                effects += Effect.Dismissed(id)
             }
         }
         return effects
@@ -152,7 +170,7 @@ class AlertCoordinator(
             ALLOW, DENY -> listOf(answer(id, action, secure))
             LATER -> {
                 cards.remove(id)
-                listOf(Effect.Send(AgentdProtocolCodec.alertDismissed(id)))
+                listOf(Effect.Send(AgentdProtocolCodec.alertDismissed(id)), Effect.Dismissed(id))
             }
             else -> emptyList()
         }
@@ -183,7 +201,7 @@ class AlertCoordinator(
         } catch (_: IllegalArgumentException) {
             return listOf(Effect.Brief(NOT_SENT, NOT_SENT_BODY))
         }
-        return listOf(Effect.Send(line))
+        return listOf(Effect.Send(line, Effect.Attempt(id, AlertHistory.ANSWERED)))
     }
 
     /**
@@ -193,9 +211,12 @@ class AlertCoordinator(
      */
     fun onAck(ack: AgentdAction.Ack): List<Effect> {
         if (ack.result != "rejected" || ack.msgId.isEmpty()) return emptyList()
-        if (seen.values.none { ack.msgId in it.msgIds.values }) return emptyList()
+        val id = seen.entries.firstOrNull { ack.msgId in it.value.msgIds.values }?.key ?: return emptyList()
         val why = ack.error?.singleLine(REJECTION_CHARS)?.takeIf(String::isNotBlank)
-        return listOf(Effect.Brief(NOT_SENT, if (why != null) "$NOT_SENT_BODY · $why" else NOT_SENT_BODY))
+        return listOf(
+            Effect.Rejected(id, why ?: REFUSED),
+            Effect.Brief(NOT_SENT, if (why != null) "$NOT_SENT_BODY · $why" else NOT_SENT_BODY),
+        )
     }
 
     /** The band for [id] closed. Only the wearer's close is evidence; any close ends the episode. */
@@ -203,7 +224,7 @@ class AlertCoordinator(
         if (episode?.alert?.id != id) return emptyList()
         val effects = if (reason == NexusNoticeCloseReason.USER) {
             // agentd parks an approval or question and brings it back as a reminder (R22).
-            evidence(id) + Effect.Send(AgentdProtocolCodec.alertDismissed(id))
+            evidence(id) + Effect.Send(AgentdProtocolCodec.alertDismissed(id)) + Effect.Dismissed(id)
         } else {
             emptyList()
         }
@@ -243,7 +264,10 @@ class AlertCoordinator(
         !secure -> notConnected()
         // The last lock: no glasses path allows a command agentd had to cut (R128).
         action == ALLOW && alertOf(id)?.truncated == true -> Effect.Brief(NOT_SENT, AlertNotices.COMMAND_CUT)
-        else -> Effect.Send(AgentdProtocolCodec.alertAction(id, action, msgIdFor(id, action)))
+        else -> Effect.Send(
+            AgentdProtocolCodec.alertAction(id, action, msgIdFor(id, action)),
+            Effect.Attempt(id, if (action == ALLOW) AlertHistory.ALLOWED else AlertHistory.DENIED),
+        )
     }
 
     private fun alertOf(id: String): AgentdAction.Alert? = episode?.alert?.takeIf { it.id == id } ?: cards[id]
@@ -286,6 +310,7 @@ class AlertCoordinator(
         const val NOT_CONNECTED = "Computer not connected"
         private const val QUESTION_ANSWER = "question_answer"
         private const val REJECTION_CHARS = 120
+        private const val REFUSED = "refused"
 
         const val ALLOW = "allow"
         const val DENY = "deny"

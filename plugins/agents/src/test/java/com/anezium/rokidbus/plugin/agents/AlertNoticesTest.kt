@@ -19,6 +19,7 @@ class AlertNoticesTest {
         sessionKey: String = "claude:s1",
         title: String = "title",
         body: String = "Run npm test",
+        reason: AlertReason = AlertReason.NEW,
     ) = AgentdAction.Alert(
         id = "A",
         sessionKey = sessionKey,
@@ -28,13 +29,29 @@ class AlertNoticesTest {
         actions = emptyList(),
         question = null,
         waiting = waiting,
-        reason = AlertReason.NEW,
+        reason = reason,
     )
 
     private fun session(
         status: AgentStatus,
         provider: AgentProvider = AgentProvider.CLAUDE,
     ) = AgentSession(id = "s1", provider = provider, title = "my-repo", status = status)
+
+    @Test
+    fun reminder_footer_says_reminder() {
+        assertEquals("Reminder", AlertNotices.build(alert(reason = AlertReason.REMINDER), wake = true).footer)
+        assertEquals(
+            "Reminder · +2 waiting",
+            AlertNotices.build(alert(waiting = 2, reason = AlertReason.REMINDER), wake = true).footer,
+        )
+        // A Done band's "TAP read" gives way to it; a fresh one keeps its own footer.
+        assertEquals(
+            "Reminder",
+            AlertNotices.build(alert(kind = AlertKind.DONE, reason = AlertReason.REMINDER), wake = true).footer,
+        )
+        assertEquals("TAP read", AlertNotices.build(alert(kind = AlertKind.DONE), wake = true).footer)
+        assertEquals("+1 waiting", AlertNotices.build(alert(waiting = 1), wake = true).footer)
+    }
 
     private fun NexusNotice.actionIds() = actions.map { it.id }
 
@@ -234,7 +251,7 @@ class AlertNoticesTest {
         }
         val director = AlertDirector(
             coordinator = AlertCoordinator(clock = { 0L }),
-            write = { written += it },
+            write = { written += it; AgentdWire.Result.Sent },
             secure = { true },
             glasses = { glasses },
             post = { it() },

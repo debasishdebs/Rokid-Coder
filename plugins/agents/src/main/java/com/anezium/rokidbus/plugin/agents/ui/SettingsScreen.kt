@@ -30,6 +30,8 @@ import com.anezium.rokidbus.plugin.agents.AgentStatus
 import com.anezium.rokidbus.plugin.agents.AgentProvider
 import com.anezium.rokidbus.plugin.agents.AlertSettings
 import com.anezium.rokidbus.plugin.agents.ConnectionState
+import com.anezium.rokidbus.plugin.agents.DEFAULT_HISTORY_WINDOW_HOURS
+import com.anezium.rokidbus.plugin.agents.HistoryEntry
 import com.anezium.rokidbus.plugin.agents.PAIRING_TTL_CHOICES
 import com.anezium.rokidbus.plugin.agents.SignedOut
 import com.anezium.rokidbus.plugin.agents.ProviderConnectionState
@@ -121,6 +123,11 @@ internal data class SettingsUiState(
     val signedOut: List<SignedOut> = emptyList(),
     /** R75: the first 16 hex digits, grouped, to hold against agentd's log; null until read. */
     val phoneFingerprint: String? = null,
+    /** The alert history, newest first, and what to keep of it (U1); [nowMs] is when it was read. */
+    val history: List<HistoryEntry> = emptyList(),
+    val historyKeepAfterSession: Boolean = false,
+    val historyWindowHours: Int = DEFAULT_HISTORY_WINDOW_HOURS,
+    val nowMs: Long = 0L,
 )
 
 internal class SettingsActions(
@@ -135,6 +142,9 @@ internal class SettingsActions(
     val onQuiet: (Boolean) -> Unit,
     val onRevokeAll: () -> Unit,
     val onPairingTtl: (Int) -> Unit = {},
+    val onHistoryKeep: (Boolean) -> Unit = {},
+    val onHistoryWindow: (Int) -> Unit = {},
+    val onClearHistory: () -> Unit = {},
     val onBatteryGrant: () -> Unit,
     val onBatteryAppInfo: () -> Unit,
     val onUninstall: () -> Unit,
@@ -142,6 +152,11 @@ internal class SettingsActions(
 
 @Composable
 internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
+    var historyOpen by remember { mutableStateOf(false) }
+    if (historyOpen) {
+        HistoryScreen(state, actions, onBack = { historyOpen = false })
+        return
+    }
     SettingsPage(title = "Agents", onBack = actions.onBack, tag = "agents_settings") {
         item {
             SettingsCard {
@@ -166,6 +181,9 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
 
         item { SectionLabel("Alerts") }
         item { AlertsCard(state.alerts, actions) }
+
+        item { SectionLabel("History") }
+        item { HistoryCard(state, actions, onOpen = { historyOpen = true }) }
 
         item { SectionLabel("Sound") }
         item {

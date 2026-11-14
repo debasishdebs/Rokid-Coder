@@ -350,6 +350,9 @@ open class AgentSessionStore {
 object AgentsRuntime {
     val store = AgentSessionStore()
 
+    /** The alerts the glasses showed and how each ended; in memory, lost with the process. */
+    val history = AlertHistory(System::currentTimeMillis)
+
     /**
      * True while the hub has the plugin's surface open. The monitor service
      * stops the plugin service when it has nothing left to watch, and doing that
