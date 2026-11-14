@@ -308,4 +308,27 @@ object AgentsRuntime {
     fun announceLinkedMachine(machineName: String) {
         _linkedMachines.tryEmit(machineName)
     }
+
+    private val _linkSecure = MutableStateFlow(false)
+
+    /** True while some transport to agentd is bound as steering-capable. */
+    val linkSecure: StateFlow<Boolean> = _linkSecure.asStateFlow()
+
+    internal fun setLinkSecure(secure: Boolean) {
+        _linkSecure.value = secure
+    }
+
+    /**
+     * Link changes and inbound v2 actions, emitted from the transport thread in
+     * arrival order. `LinkUp` comes after hello_ack and before the first frame
+     * that follows it. Not replayed: a late collector starts from the next link.
+     */
+    val events: MutableSharedFlow<AgentdEvent> = MutableSharedFlow(
+        replay = 0,
+        extraBufferCapacity = 256,
+    )
+
+    internal fun emitEvent(event: AgentdEvent) {
+        events.tryEmit(event)
+    }
 }

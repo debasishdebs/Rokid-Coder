@@ -8,6 +8,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -15,49 +16,63 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 class AgentdClient(
     private val httpClient: OkHttpClient,
     private val store: AgentSessionStore,
     private val scope: CoroutineScope,
     private val versionName: String,
+    onEvent: (AgentdEvent) -> Unit = AgentsRuntime::emitEvent,
 ) {
     private var loopJob: Job? = null
     private val sockets = GenerationSlot<WebSocket>()
 
+    /** OkHttp only enqueues, so this never blocks the caller's thread. */
+    private val wire = AgentdWire { line -> sockets.current()?.send(line) ?: false }
+    private val link = AgentdLinkBinding(wire, onEvent)
+
+    /** Whether this transport may carry steering frames right now. */
+    val linkSecure: StateFlow<Boolean> get() = wire.secure
+
     /** Survives reconnects: the daemon forgets, the wearer should not. */
     @Volatile private var openSessionId: String? = null
 
-    fun openDetail(sessionId: String) {
+    fun openDetail(sessionId: String): AgentdWire.Result {
         openSessionId = sessionId
-        sockets.current()?.send(AgentdProtocolCodec.detailOpen(sessionId))
+        return write(AgentdProtocolCodec.detailOpen(sessionId))
     }
 
-    fun closeDetail() {
+    fun closeDetail(): AgentdWire.Result {
         openSessionId = null
-        sockets.current()?.send(AgentdProtocolCodec.DETAIL_CLOSE)
+        return write(AgentdProtocolCodec.DETAIL_CLOSE)
     }
 
-    fun decideApproval(requestId: String, decision: ApprovalDecision) {
-        sockets.current()?.send(AgentdProtocolCodec.approvalDecision(requestId, decision))
-    }
+    fun decideApproval(requestId: String, decision: ApprovalDecision): AgentdWire.Result =
+        write(AgentdProtocolCodec.approvalDecision(requestId, decision))
 
-    fun sendSessionInput(requestId: String, sessionId: String, text: String) {
-        sockets.current()?.send(AgentdProtocolCodec.sessionInput(requestId, sessionId, text))
-    }
+    fun sendSessionInput(requestId: String, sessionId: String, text: String): AgentdWire.Result =
+        write(AgentdProtocolCodec.sessionInput(requestId, sessionId, text))
 
-    fun requestFolders(requestId: String, path: String?) {
-        sockets.current()?.send(AgentdProtocolCodec.fsList(requestId, path))
-    }
+    fun requestFolders(requestId: String, path: String?): AgentdWire.Result =
+        write(AgentdProtocolCodec.fsList(requestId, path))
 
-    fun requestThreadStart(requestId: String, provider: AgentProvider, path: String, prompt: String) {
-        sockets.current()?.send(AgentdProtocolCodec.threadStart(requestId, provider, path, prompt))
-    }
+    fun requestThreadStart(
+        requestId: String,
+        provider: AgentProvider,
+        path: String,
+        prompt: String,
+    ): AgentdWire.Result = write(AgentdProtocolCodec.threadStart(requestId, provider, path, prompt))
+
+    /** Any prebuilt frame line, v2 or v1; the wire decides whether it may leave. */
+    fun write(line: String): AgentdWire.Result = wire.write(line)
 
     @Synchronized
     fun start(config: AgentdConfig) {
         loopJob?.cancel()
         val advance = sockets.advance()
+        // After the advance, so a hello_ack still in flight cannot bind behind us.
+        link.downCurrent()
         advance.previous?.cancel()
         val job = scope.launch(start = CoroutineStart.LAZY) {
             runConnectionLoop(config, advance.generation)
@@ -70,7 +85,9 @@ class AgentdClient(
     fun stop(clearSessions: Boolean) {
         loopJob?.cancel()
         loopJob = null
-        sockets.advance().previous?.cancel()
+        val advance = sockets.advance()
+        link.downCurrent()
+        advance.previous?.cancel()
         store.setConnection(AgentProvider.CLAUDE, ConnectionState.DISCONNECTED)
         store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
         if (clearSessions) {
@@ -128,6 +145,7 @@ class AgentdClient(
         val codec = AgentdProtocolCodec().also(AgentdProtocolCodec::reset)
         val ended = CompletableDeferred<ConnectionOutcome>()
         val connected = AtomicBoolean(false)
+        val linkGeneration = AtomicReference<Long?>(null)
         lateinit var deadlines: ConnectionDeadlines
 
         fun isLive(): Boolean = sockets.isCurrent(generation) && !ended.isCompleted
@@ -146,6 +164,8 @@ class AgentdClient(
                     webSocket.cancel()
                     return
                 }
+                // The handshake precedes the binding, so it is written to this
+                // socket directly; every later line goes through the wire.
                 if (!webSocket.send(codec.hello(config.token, versionName))) {
                     ended.complete(ConnectionOutcome.Retry)
                     return
@@ -158,6 +178,8 @@ class AgentdClient(
                 when (val action = codec.parse(text)) {
                     is AgentdAction.HelloAcknowledged -> {
                         if (!connected.compareAndSet(false, true)) return
+                        // Plaintext WebSocket: monitor-only until the link is TLS with a verified pin.
+                        linkGeneration.set(link.up(secure = false, stillLive = ::isLive) ?: return)
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()
@@ -175,7 +197,7 @@ class AgentdClient(
                             action.sessions,
                         )
                         // A fresh connection knows nothing of the open conversation.
-                        openSessionId?.let { webSocket.send(AgentdProtocolCodec.detailOpen(it)) }
+                        openSessionId?.let { write(AgentdProtocolCodec.detailOpen(it)) }
                     }
                     is AgentdAction.Upsert -> {
                         if (connected.get()) store.upsert(action.session)
@@ -219,17 +241,15 @@ class AgentdClient(
                         if (connected.get()) store.setSessionInputResult(action.result)
                     }
                     is AgentdAction.Send -> {
+                        // Nothing but the handshake is written before the link is bound.
+                        if (!connected.get()) return
                         if (action.text == AgentdProtocolCodec.REFRESH) {
-                            if (!connected.get()) return
                             deadlines.arm(DEADLINE_SNAPSHOT, "Daemon refresh timed out")
                         }
-                        if (!webSocket.send(action.text)) {
+                        if (write(action.text) != AgentdWire.Result.Sent) {
                             ended.complete(ConnectionOutcome.Retry)
                         }
                     }
-                    // Only the LAN link sees a daemon hello: here we are the client.
-                    // The v2 frames are parsed here and acted on by the alert layer (Plan 2, Task 2).
-                    is AgentdAction.Hello,
                     is AgentdAction.Alert,
                     is AgentdAction.AlertClosed,
                     is AgentdAction.Ack,
@@ -237,6 +257,9 @@ class AgentdClient(
                     is AgentdAction.ModeReset,
                     is AgentdAction.Models,
                     is AgentdAction.DetailRejected,
+                    -> link.deliver(linkGeneration.get(), action)
+                    // Only the LAN link sees a daemon hello: here we are the client.
+                    is AgentdAction.Hello,
                     AgentdAction.Ignore,
                     -> Unit
                 }
@@ -278,6 +301,8 @@ class AgentdClient(
         try {
             ended.await()
         } finally {
+            // Unbound before the slot is cleared, so no write outlives this connection's trust.
+            linkGeneration.get()?.let(link::down)
             deadlines.clearAll()
         }
     }

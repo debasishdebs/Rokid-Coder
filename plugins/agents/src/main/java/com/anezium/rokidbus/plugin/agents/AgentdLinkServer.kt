@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.plugin.agents
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
@@ -28,12 +29,34 @@ import java.net.SocketException
  * asymmetry — the daemon broadcasts, we answer by unicast, and Windows lets that
  * reply back in because it answers a broadcast the PC itself just sent.
  */
-class AgentdLinkServer(
+class AgentdLinkServer internal constructor(
     private val store: AgentSessionStore,
-    private val configStore: AgentsConfigStore,
+    private val authorizeMachine: (AgentdAction.Hello) -> MachineTrustResult,
+    private val touchMachineSeen: (String) -> Unit,
     private val scope: CoroutineScope,
-    private val onMachineTrusted: (String) -> Unit = {},
+    private val onMachineTrusted: (String) -> Unit,
+    onEvent: (AgentdEvent) -> Unit,
 ) {
+    constructor(
+        store: AgentSessionStore,
+        configStore: AgentsConfigStore,
+        scope: CoroutineScope,
+        onMachineTrusted: (String) -> Unit = {},
+    ) : this(
+        store = store,
+        authorizeMachine = { hello ->
+            configStore.authorizeMachine(
+                machineId = hello.machineId,
+                token = hello.token,
+                machineName = hello.machineName,
+            )
+        },
+        touchMachineSeen = { machineId -> configStore.touchMachineSeen(machineId) },
+        scope = scope,
+        onMachineTrusted = onMachineTrusted,
+        onEvent = AgentsRuntime::emitEvent,
+    )
+
     private var acceptJob: Job? = null
     private var discoveryJob: Job? = null
     private var serverSocket: ServerSocket? = null
@@ -41,6 +64,22 @@ class AgentdLinkServer(
     private val clientLock = Any()
 
     @Volatile private var client: LinkConnection? = null
+
+    /**
+     * Callers are UI/service threads; Android forbids socket writes there. The
+     * wire holds its lock across this call, and the client is only swapped after
+     * the old generation is unbound, so a line always reaches the connection the
+     * wire was bound to.
+     */
+    private val wire = AgentdWire { line ->
+        val connection = client ?: return@AgentdWire false
+        scope.launch(Dispatchers.IO) { connection.send(line) }
+        true
+    }
+    private val link = AgentdLinkBinding(wire, onEvent)
+
+    /** Whether this transport may carry steering frames right now. */
+    val linkSecure: StateFlow<Boolean> get() = wire.secure
 
     fun start() {
         if (acceptJob != null) return
@@ -59,6 +98,7 @@ class AgentdLinkServer(
         runCatching { discoverySocket?.close() }
         discoverySocket = null
         synchronized(clientLock) {
+            link.downCurrent()
             client.also { client = null }
         }?.close()
         store.setLinkMachine(null)
@@ -67,35 +107,29 @@ class AgentdLinkServer(
         if (clearSessions) store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
     }
 
-    fun openDetail(sessionId: String) {
-        send(AgentdProtocolCodec.detailOpen(sessionId))
-    }
+    fun openDetail(sessionId: String): AgentdWire.Result =
+        write(AgentdProtocolCodec.detailOpen(sessionId))
 
-    fun closeDetail() {
-        send(AgentdProtocolCodec.DETAIL_CLOSE)
-    }
+    fun closeDetail(): AgentdWire.Result = write(AgentdProtocolCodec.DETAIL_CLOSE)
 
-    fun decideApproval(requestId: String, decision: ApprovalDecision) {
-        send(AgentdProtocolCodec.approvalDecision(requestId, decision))
-    }
+    fun decideApproval(requestId: String, decision: ApprovalDecision): AgentdWire.Result =
+        write(AgentdProtocolCodec.approvalDecision(requestId, decision))
 
-    fun sendSessionInput(requestId: String, sessionId: String, text: String) {
-        send(AgentdProtocolCodec.sessionInput(requestId, sessionId, text))
-    }
+    fun sendSessionInput(requestId: String, sessionId: String, text: String): AgentdWire.Result =
+        write(AgentdProtocolCodec.sessionInput(requestId, sessionId, text))
 
-    fun requestFolders(requestId: String, path: String?) {
-        send(AgentdProtocolCodec.fsList(requestId, path))
-    }
+    fun requestFolders(requestId: String, path: String?): AgentdWire.Result =
+        write(AgentdProtocolCodec.fsList(requestId, path))
 
-    fun requestThreadStart(requestId: String, provider: AgentProvider, path: String, prompt: String) {
-        send(AgentdProtocolCodec.threadStart(requestId, provider, path, prompt))
-    }
+    fun requestThreadStart(
+        requestId: String,
+        provider: AgentProvider,
+        path: String,
+        prompt: String,
+    ): AgentdWire.Result = write(AgentdProtocolCodec.threadStart(requestId, provider, path, prompt))
 
-    /** Callers are UI/service threads; Android forbids socket writes there. */
-    private fun send(payload: String) {
-        val connection = client ?: return
-        scope.launch(Dispatchers.IO) { connection.send(payload) }
-    }
+    /** Any prebuilt frame line, v2 or v1; the wire decides whether it may leave. */
+    fun write(line: String): AgentdWire.Result = wire.write(line)
 
     private suspend fun acceptLoop() {
         while (scope.isActive) {
@@ -120,15 +154,9 @@ class AgentdLinkServer(
         }
     }
 
-    private fun serve(connection: LinkConnection) {
+    internal fun serve(connection: LinkConnection) {
         val codec = AgentdProtocolCodec()
-        val gate = AgentdInboundGate { hello ->
-            configStore.authorizeMachine(
-                machineId = hello.machineId,
-                token = hello.token,
-                machineName = hello.machineName,
-            )
-        }
+        val gate = AgentdInboundGate(authorizeMachine)
         codec.reset()
         try {
             connection.lines { line ->
@@ -139,8 +167,11 @@ class AgentdLinkServer(
                         if (decision.newlyTrusted) {
                             onMachineTrusted(decision.hello.machineName)
                         }
+                        // The handshake precedes the binding, so it is written to this
+                        // candidate directly; every later line goes through the wire.
                         if (!connection.send(HELLO_ACK)) return@lines false
-                        configStore.touchMachineSeen(decision.hello.machineId)
+                        if (!bind(connection)) return@lines false
+                        touchMachineSeen(decision.hello.machineId)
                         store.setLinkMachine(
                             LinkMachine(
                                 machineId = decision.hello.machineId,
@@ -185,12 +216,13 @@ class AgentdLinkServer(
                 if (client !== connection) {
                     false
                 } else {
+                    connection.generation?.let(link::down)
                     client = null
                     true
                 }
             }
             if (wasActive) {
-                connection.machineId?.let(configStore::touchMachineSeen)
+                connection.machineId?.let(touchMachineSeen)
                 store.setLinkMachine(null)
                 store.setConnection(
                     AgentProvider.CLAUDE,
@@ -203,11 +235,25 @@ class AgentdLinkServer(
         }
     }
 
+    /** The previous connection's trust ends before this one becomes the client. */
     private fun activate(connection: LinkConnection) {
         val previous = synchronized(clientLock) {
+            client?.generation?.let(link::down)
             client.also { client = connection }
         }
         if (previous !== connection) previous?.close()
+    }
+
+    /**
+     * After hello_ack: binds the wire to this connection and announces the link,
+     * before the next line is read. False when the connection was replaced while
+     * the acknowledgement was going out.
+     */
+    private fun bind(connection: LinkConnection): Boolean = synchronized(clientLock) {
+        if (client !== connection) return@synchronized false
+        // Plaintext TCP: monitor-only until the link is TLS with a verified pin.
+        connection.generation = link.up(secure = false)
+        true
     }
 
     private fun isActive(connection: LinkConnection): Boolean =
@@ -237,10 +283,7 @@ class AgentdLinkServer(
             is AgentdAction.FolderListing -> store.setFsListing(action.listing)
             is AgentdAction.ThreadStarted -> store.setThreadStart(action.result)
             is AgentdAction.SessionInputAnswered -> store.setSessionInputResult(action.result)
-            is AgentdAction.Send -> connection.send(action.text)
-            // The v2 frames are parsed here and acted on by the alert layer (Plan 2, Task 2).
-            is AgentdAction.Hello,
-            is AgentdAction.HelloAcknowledged,
+            is AgentdAction.Send -> wire.write(action.text)
             is AgentdAction.Alert,
             is AgentdAction.AlertClosed,
             is AgentdAction.Ack,
@@ -248,6 +291,9 @@ class AgentdLinkServer(
             is AgentdAction.ModeReset,
             is AgentdAction.Models,
             is AgentdAction.DetailRejected,
+            -> link.deliver(connection.generation, action)
+            is AgentdAction.Hello,
+            is AgentdAction.HelloAcknowledged,
             AgentdAction.Ignore,
             -> Unit
         }
@@ -365,6 +411,9 @@ internal fun isTailnetAddress(address: String?): Boolean {
 internal class LinkConnection(private val socket: Socket) {
     /** Set once hello is accepted; identifies who holds this connection. */
     @Volatile var machineId: String? = null
+
+    /** The wire generation, set once hello_ack is out and the link is bound. */
+    @Volatile var generation: Long? = null
 
     val remoteAddress: String? get() = socket.inetAddress?.hostAddress
 

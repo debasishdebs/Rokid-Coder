@@ -12,6 +12,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.UUID
@@ -52,10 +53,19 @@ class AgentsMonitorService : Service() {
     private var temporaryAgentd: Job? = null
     private var temporaryOpenClaw: Job? = null
 
+    // Hook point (Task 4): the AlertCoordinator lives here, in this service, so no
+    // alert depends on the plugin service being alive. It collects
+    // AgentsRuntime.events and writes through writeToAgentd.
+
     override fun onCreate() {
         super.onCreate()
         notifications.createChannels()
         startForeground(MONITOR_NOTIFICATION_ID, notifications.monitorNotification())
+        serviceScope.launch {
+            combine(agentdClient.linkSecure, linkServer.linkSecure) { dialled, listened ->
+                dialled || listened
+            }.collect(AgentsRuntime::setLinkSecure)
+        }
         serviceScope.launch {
             while (true) {
                 delay(PRUNE_INTERVAL_MS)
@@ -114,11 +124,16 @@ class AgentsMonitorService : Service() {
                 val decision = ApprovalDecision.values()
                     .firstOrNull { it.wireValue == intent.getStringExtra(EXTRA_DECISION) }
                 if (requestId != null && decision != null) {
-                    agentdClient.decideApproval(requestId, decision)
-                    linkServer.decideApproval(requestId, decision)
+                    val results = listOf(
+                        agentdClient.decideApproval(requestId, decision),
+                        linkServer.decideApproval(requestId, decision),
+                    )
                     // The wearer answered: the question is gone from the board
                     // whether or not the daemon's acknowledgement makes it back.
-                    AgentsRuntime.store.resolveApproval(requestId)
+                    // A decision the wire refused never left, so it stays.
+                    if (combined(results) == AgentdWire.Result.Sent) {
+                        AgentsRuntime.store.resolveApproval(requestId)
+                    }
                 }
             }
             ACTION_SEND_SESSION_INPUT -> {
@@ -130,12 +145,28 @@ class AgentsMonitorService : Service() {
                     linkServer.sendSessionInput(requestId, sessionId, text)
                 }
             }
+            ACTION_SEND_V2 -> {
+                intent.getStringExtra(EXTRA_FRAME)?.let(::writeToAgentd)
+            }
             else -> reconcile()
         }
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /**
+     * A prebuilt frame line to whichever transport holds the link. The wire of
+     * each one classifies it; a steering frame over plaintext is MonitorOnly.
+     */
+    private fun writeToAgentd(line: String): AgentdWire.Result =
+        combined(listOf(agentdClient.write(line), linkServer.write(line)))
+
+    private fun combined(results: List<AgentdWire.Result>): AgentdWire.Result = when {
+        AgentdWire.Result.Sent in results -> AgentdWire.Result.Sent
+        AgentdWire.Result.MonitorOnly in results -> AgentdWire.Result.MonitorOnly
+        else -> AgentdWire.Result.NoLink
+    }
 
     override fun onDestroy() {
         temporaryAgentd?.cancel()
@@ -146,6 +177,7 @@ class AgentsMonitorService : Service() {
         releasePluginService()
         httpClient.dispatcher.executorService.shutdown()
         serviceScope.cancel()
+        AgentsRuntime.setLinkSecure(false)
         super.onDestroy()
     }
 
@@ -285,6 +317,8 @@ class AgentsMonitorService : Service() {
             "com.anezium.rokidbus.plugin.agents.action.THREAD_START"
         const val ACTION_SEND_SESSION_INPUT =
             "com.anezium.rokidbus.plugin.agents.action.SEND_SESSION_INPUT"
+        const val ACTION_SEND_V2 =
+            "com.anezium.rokidbus.plugin.agents.action.SEND_V2"
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_MACHINE_ID = "machineId"
         const val EXTRA_PATH = "path"
@@ -293,6 +327,7 @@ class AgentsMonitorService : Service() {
         const val EXTRA_REQUEST_ID = "requestId"
         const val EXTRA_DECISION = "decision"
         const val EXTRA_TEXT = "text"
+        const val EXTRA_FRAME = "frame"
         private const val MONITOR_NOTIFICATION_ID = 3101
         private const val TEST_WINDOW_MS = 15_000L
         private const val PRUNE_INTERVAL_MS = 60_000L
@@ -342,6 +377,16 @@ class AgentsMonitorService : Service() {
                     .putExtra(EXTRA_REQUEST_ID, requestId)
                     .putExtra(EXTRA_SESSION_ID, sessionId)
                     .putExtra(EXTRA_TEXT, text),
+            )
+        }
+
+        /** A prebuilt protocol v2 frame line, from the AgentdProtocolCodec builders. */
+        fun sendV2(context: Context, frame: String) {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, AgentsMonitorService::class.java)
+                    .setAction(ACTION_SEND_V2)
+                    .putExtra(EXTRA_FRAME, frame),
             )
         }
 
