@@ -10,17 +10,12 @@ const path = require("node:path");
 
 try {
   if (process.platform === "darwin") {
-    const helper = path.join(
-      __dirname,
-      "..",
-      "node_modules",
-      "node-pty",
-      "prebuilds",
-      `${process.platform}-${process.arch}`,
-      "spawn-helper",
-    );
-    if (fs.existsSync(helper) && (fs.statSync(helper).mode & 0o111) === 0) {
-      fs.chmodSync(helper, 0o755);
+    const modules = path.join(__dirname, "..", "node_modules");
+    const helper = path.join(modules, "node-pty", "prebuilds", `${process.platform}-${process.arch}`, "spawn-helper");
+    // R132: only a file whose real path is inside agentd's own node_modules.
+    const real = fs.existsSync(helper) ? fs.realpathSync(helper) : undefined;
+    if (real && real.startsWith(fs.realpathSync(modules) + path.sep) && (fs.statSync(real).mode & 0o111) === 0) {
+      fs.chmodSync(real, 0o755);
     }
   }
 } catch {

@@ -514,9 +514,36 @@ test("postinstall_sets_exec_bit_on_agentds_own_spawn_helper", async (t) => {
       );
       assert.equal(fs.statSync(helper).mode & 0o111, 0o111, "exec bit set");
       assert.equal(fs.statSync(other).mode & 0o111, 0, "nothing outside node_modules is touched");
+      // R132: a spawn-helper that is a symlink out of node_modules is left alone.
+      fs.rmSync(helper);
+      fs.symlinkSync(other, helper);
+      await new Promise((resolve, reject) =>
+        spawn(process.execPath, [path.join(scripts, "postinstall.js")], { stdio: "ignore" }).once("exit", (code) =>
+          code === 0 ? resolve() : reject(new Error(`postinstall exited ${code}`)),
+        ),
+      );
+      assert.equal(fs.statSync(other).mode & 0o111, 0, "the link's target is not chmodded");
     } finally {
       fs.rmSync(other, { force: true });
     }
+  });
+});
+
+test("runtime_spawn_helper_chmod_contained_to_agentds_node_modules", async () => {
+  const { insideModules } = require("../dist/launcher/pty.js");
+  await withTempDir(async (dir) => {
+    const modules = path.join(dir, "node_modules");
+    const inside = path.join(modules, "node-pty", "spawn-helper");
+    fs.mkdirSync(path.dirname(inside), { recursive: true });
+    fs.writeFileSync(inside, "x");
+    const outside = path.join(dir, "elsewhere");
+    fs.writeFileSync(outside, "x");
+    const link = path.join(modules, "node-pty", "linked-helper");
+    fs.symlinkSync(outside, link);
+    assert.equal(insideModules(inside, modules), fs.realpathSync(inside));
+    assert.equal(insideModules(link, modules), undefined, "a symlink out of node_modules");
+    assert.equal(insideModules(outside, modules), undefined, "a hoisted or parent copy");
+    assert.equal(insideModules(path.join(modules, "missing"), modules), undefined);
   });
 });
 
@@ -779,4 +806,33 @@ test("launcher_link_closes_on_oversize_line_bad_json_or_unknown_frame", async ()
       }
     });
   }
+});
+
+test("refused_bind_is_retried_with_backoff", async () => {
+  await withTempDir(async (dir) => {
+    const { events, logger } = capturingLogger();
+    await withHub(
+      dir,
+      async (ctx) => {
+        const { run } = await startRkOn(ctx.env, dir, { FAKE_SESSION_ID: "sess-backoff" });
+        try {
+          await until(() => ctx.hub.binding("claude:sess-backoff"), 5000, "the bind");
+          ctx.registry.detach("claude", "sess-backoff");
+          const refusals = () => events.filter((e) => e.event === "launcher_bind_rejected" && e.meta.reason === "detached");
+          const seen = [];
+          const start = Date.now();
+          while (Date.now() - start < 7000) {
+            if (refusals().length > seen.length) seen.push(Date.now() - start);
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          // M5: 2 s, then 4 s; a fixed 2 s retry would have asked three times by now.
+          assert.equal(seen.length, 2, `refusals at ${seen.join(", ")} ms`);
+          assert.ok(seen[1] - seen[0] >= 3000, `the second wait is longer: ${seen.join(", ")} ms`);
+        } finally {
+          run.child.kill("SIGKILL");
+        }
+      },
+      { logger },
+    );
+  });
 });

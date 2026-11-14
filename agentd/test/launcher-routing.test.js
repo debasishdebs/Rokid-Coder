@@ -763,3 +763,40 @@ test("queued_reply_never_typed_after_a_later_laptop_turn", async () => {
     assert.equal(launcher.of("type_command").length, 1, "R1 is never sent again");
   });
 });
+
+// M7: the SessionStart replay on bind is for a session the store has never seen.
+test("rebind_does_not_reset_an_existing_session_record", async () => {
+  await withBound(async ({ daemon, httpPort, launcher, child }) => {
+    await postHook(httpPort, { hook_event_name: "Notification", session_id: ID, message: "Claude needs your permission to use Bash" });
+    assert.equal(daemon.sessions.get(ID).status, "needs_you");
+    // The launcher's link blips; Claude's file still reads idle.
+    launcher.close();
+    await until(() => daemon.launchers.binding(KEY) === undefined, 3000, "the unbind");
+    const again = await connect(daemon.launchers.socketPath);
+    try {
+      again.send({ type: "launcher_hello", v: 1, launcherId: "L2", provider: "claude", childPid: child.pid });
+      again.send({ type: "launcher_bind", sessionId: ID });
+      await again.waitFor("bind_accepted");
+      assert.equal(daemon.sessions.get(ID).status, "needs_you");
+      assert.equal(daemon.sessions.get(ID).pendingRequest?.kind, "permission");
+    } finally {
+      again.close();
+    }
+  });
+});
+
+// M9 and M5: /rokid:on in an rk claude session /rokid:off detached rebinds it
+// there and then, so the reply is the launcher's and no retry is waited for.
+test("rokid_on_after_off_rebinds_at_once_with_the_launcher_text", async () => {
+  await withBound(async ({ daemon, httpPort, launcher }) => {
+    await postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "rokid:off", session_id: ID });
+    await launcher.waitFor("bind_rejected", (f) => f.reason === "detached");
+    assert.equal(daemon.launchers.binding(KEY), undefined);
+    const accepted = launcher.of("bind_accepted").length;
+    const reply = await postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "rokid:on", session_id: ID });
+    assert.deepEqual(reply, { decision: "block", reason: LAUNCHER_ATTACH_TEXT });
+    assert.ok(daemon.launchers.binding(KEY), "bound before the reply");
+    assert.equal(daemon.attachRegistry.mode("claude", ID), "launcher");
+    await until(() => launcher.of("bind_accepted").length > accepted, 2000, "the launcher told of it");
+  });
+});

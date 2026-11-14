@@ -160,8 +160,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     },
     // Claude's SessionStart came before the bind and was dropped as unattached;
     // an idle session at its prompt is shown to the phone now, not at the first prompt.
+    // M7: only a session the store has no record of; a rebind after a reconnect
+    // or /rokid:on must not reset one (a pending prompt the phone shows, say).
     onBound: ({ sessionId, status, cwd }) => {
-      if (status === "idle") {
+      if (status === "idle" && !sessions.get(sessionId)) {
         sessions.handleHook({
           session_id: sessionId,
           ...(cwd ? { cwd } : {}),

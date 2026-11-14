@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
-const { probeStatus } = require("../dist/launcher/status-probe.js");
+const { probeStatus, launcherSocketTrusted } = require("../dist/launcher/status-probe.js");
 const { withTempDir, freePort } = require("./helpers/daemon.js");
 const { pairPhone } = require("./helpers/rk.js");
 
@@ -51,5 +51,35 @@ test("status_probe_reports_down_unpaired_and_paired", async () => {
       fs.writeFileSync(path.join(configDir, "tls", "phone-pins.json"), "not json");
       assert.deepEqual(await probeStatus(), { agentd: "down", paired: true, launcherSocket: false });
     });
+  });
+});
+
+test("launcher_socket_trusted_only_in_a_private_dir_of_ours", async () => {
+  await withTempDir(async (dir) => {
+    const configDir = path.join(dir, "rokid-coder");
+    fs.mkdirSync(configDir, { mode: 0o700 });
+    const sockPath = path.join(configDir, "launcher.sock");
+    const socket = net.createServer((connection) => connection.destroy());
+    await listening(socket, sockPath);
+    try {
+      assert.equal(launcherSocketTrusted(sockPath), true);
+      // A dir another local user could have made or can write into.
+      fs.chmodSync(configDir, 0o755);
+      assert.equal(launcherSocketTrusted(sockPath), false, "group or other bits");
+      await withProbeEnv({ ROKID_RK_CONFIG_DIR: configDir, NEXUS_AGENTD_HTTP_PORT: String(await freePort()) }, async () => {
+        assert.equal((await probeStatus()).launcherSocket, false);
+      });
+      fs.chmodSync(configDir, 0o700);
+      // The dir reached through a symlink is not a real dir of ours.
+      const link = path.join(dir, "linked");
+      fs.symlinkSync(configDir, link);
+      assert.equal(launcherSocketTrusted(path.join(link, "launcher.sock")), false, "a symlinked dir");
+      // Not a socket at all.
+      const plain = path.join(configDir, "plain");
+      fs.writeFileSync(plain, "");
+      assert.equal(launcherSocketTrusted(plain), false, "a plain file");
+    } finally {
+      await closed(socket);
+    }
   });
 });

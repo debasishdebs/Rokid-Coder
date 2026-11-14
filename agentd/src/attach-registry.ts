@@ -205,7 +205,9 @@ export class AttachRegistry {
    * connected yet, so every launcher session is plugin until its launcher
    * rebinds. Explicit detaches whose launcher child is gone are dropped, and so
    * are unadopted ones whose session no live Claude is running (`isSessionLive`;
-   * without it they are kept). No change events: nothing is listening yet, and
+   * without it they are kept). A launcher session no live Claude is running is
+   * dropped too (M10): `rk claude` attached it by itself, and nothing else
+   * would ever remove it. No change events: nothing is listening yet, and
    * nothing was attached or detached.
    */
   reconcileLaunchers(
@@ -214,10 +216,15 @@ export class AttachRegistry {
     const isAlive = options.isAlive ?? isPidAlive;
     let changed = false;
     for (const [key, entry] of this.entries) {
-      if (entry.mode === "launcher") {
-        this.entries.set(key, { ...entry, mode: "plugin" });
-        changed = true;
+      if (entry.mode !== "launcher") {
+        continue;
       }
+      if (options.isSessionLive !== undefined && !options.isSessionLive(key)) {
+        this.entries.delete(key);
+      } else {
+        this.entries.set(key, { ...entry, mode: "plugin" });
+      }
+      changed = true;
     }
     for (const [key, entry] of this.explicitDetaches) {
       const gone = entry.childPid === undefined

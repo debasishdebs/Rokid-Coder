@@ -187,7 +187,10 @@ export function handleAttachCommand(
       if (provider === "claude") {
         context.onAttached(payload, sessionId);
       }
-      const text = provider === "codex" ? CODEX_ATTACH_TEXT : bound ? LAUNCHER_ATTACH_TEXT : ATTACH_TEXT;
+      // M9: in a session `/rokid:off` had detached from its launcher, the opt-in
+      // rebinds the launcher at once, so the reply is the launcher's.
+      const launcher = bound || (provider === "claude" && context.isLauncherBound?.(sessionId) === true);
+      const text = provider === "codex" ? CODEX_ATTACH_TEXT : launcher ? LAUNCHER_ATTACH_TEXT : ATTACH_TEXT;
       const unpaired = context.phones?.paired() === false;
       return block(unpaired ? `${text}\nNo phone paired yet — type ${pairCommand(provider)}` : text);
     }

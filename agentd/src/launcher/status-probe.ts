@@ -79,7 +79,30 @@ function agentdHealthy(): Promise<boolean> {
   });
 }
 
+/**
+ * M6: the socket and the directory holding it are this user's, the directory
+ * a real one closed to everybody else, as agentd itself insists (R52). Any
+ * other socket at the path could belong to another local user, who could then
+ * type into this user's Claude.
+ */
+export function launcherSocketTrusted(socketPath: string): boolean {
+  const uid = process.getuid?.();
+  if (uid === undefined) {
+    return true;
+  }
+  try {
+    const dir = fs.lstatSync(path.dirname(socketPath));
+    const socket = fs.lstatSync(socketPath);
+    return dir.isDirectory() && dir.uid === uid && (dir.mode & 0o077) === 0 && socket.isSocket() && socket.uid === uid;
+  } catch {
+    return false;
+  }
+}
+
 function socketAnswers(socketPath: string): Promise<boolean> {
+  if (!launcherSocketTrusted(socketPath)) {
+    return Promise.resolve(false);
+  }
   return new Promise((resolve) => {
     const socket = net.createConnection(socketPath);
     socket.once("connect", () => {

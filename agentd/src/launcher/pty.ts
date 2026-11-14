@@ -25,11 +25,28 @@ export interface PtyOptions {
 
 const TTY_EOF = "\x04";
 
+/** agentd's own node_modules: dist/launcher/pty.js is two levels below the package. */
+const OWN_MODULES = path.join(__dirname, "..", "..", "node_modules");
+
+/**
+ * R132: `file`'s real path when it lies inside `modules`' real path, symlinks
+ * resolved on both sides; undefined otherwise, or when either is unreadable.
+ */
+export function insideModules(file: string, modules: string): string | undefined {
+  try {
+    const real = fs.realpathSync(file);
+    const root = fs.realpathSync(modules);
+    return real.startsWith(root + path.sep) ? real : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * node-pty 1.1.0 ships its macOS spawn-helper without the execute bit, and npm
  * does not run node-pty's install script unless allowed. Without the bit every
- * spawn fails with `posix_spawnp failed`, so restore it once, inside our own
- * node_modules.
+ * spawn fails with `posix_spawnp failed`, so restore it once, and only on the
+ * copy inside agentd's own node_modules (R132), never a hoisted or parent one.
  */
 let helperChecked = false;
 function ensureSpawnHelperExecutable(): void {
@@ -42,8 +59,8 @@ function ensureSpawnHelperExecutable(): void {
   }
   try {
     const root = path.dirname(require.resolve("node-pty/package.json"));
-    const helper = path.join(root, "prebuilds", `${process.platform}-${process.arch}`, "spawn-helper");
-    if (fs.existsSync(helper) && (fs.statSync(helper).mode & 0o111) === 0) {
+    const helper = insideModules(path.join(root, "prebuilds", `${process.platform}-${process.arch}`, "spawn-helper"), OWN_MODULES);
+    if (helper && (fs.statSync(helper).mode & 0o111) === 0) {
       fs.chmodSync(helper, 0o755);
     }
   } catch {

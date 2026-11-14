@@ -9,7 +9,7 @@ import { claudeSessionsDir, findOwnedClaudeSession } from "./launcher/claude-ses
 import { LauncherClient } from "./launcher/launcher-client";
 import { offerPairing } from "./launcher/pair-prompt";
 import { spawnPty, type PtyChild } from "./launcher/pty";
-import { launcherSocketPath, probeStatus, type StatusProbe } from "./launcher/status-probe";
+import { launcherSocketPath, launcherSocketTrusted, probeStatus, type StatusProbe } from "./launcher/status-probe";
 import { KittyKeyboardTracker, restoreTerminal, saveTerminal } from "./launcher/terminal";
 
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
@@ -42,6 +42,9 @@ const CODEX_UNREACHABLE_LINE = "  agentd isn't running, so nothing can attach ye
 const SESSION_POLL_FAST_MS = 500;
 const SESSION_POLL_SLOW_MS = 2000;
 const RECONNECT_MS = 2000;
+/** M5: a refused bind is asked again after 2 s, then 4, 8, … at most 30 s apart. */
+const BIND_RETRY_FIRST_MS = 2000;
+const BIND_RETRY_MAX_MS = 30_000;
 const MAX_FRAME_BYTES = 64 * 1024;
 const HARD_EXIT_AFTER_KILL_MS = 2000;
 
@@ -90,7 +93,11 @@ function resolveExecutable(bin: string): string | undefined {
   return undefined;
 }
 
+/** Only a socket that is provably this user's is connected to; anything else is as good as absent. */
 function tryConnect(socketPath: string): Promise<net.Socket | undefined> {
+  if (!launcherSocketTrusted(socketPath)) {
+    return Promise.resolve(undefined);
+  }
   return new Promise((resolve) => {
     const socket = net.createConnection(socketPath);
     socket.once("connect", () => {
@@ -349,6 +356,9 @@ async function runClaude(args: string[]): Promise<void> {
   const binding: { gen: number; uncertain: boolean; uncertainSince?: number } = { gen: 0, uncertain: false };
   let boundId: string | undefined;
   let requestedId: string | undefined;
+  /** The session the last launcher_bind named; agentd may accept it later, on /rokid:on. */
+  let askedId: string | undefined;
+  let refused: { sessionId: string; delay: number; retryAt: number } | undefined;
   const client = new LauncherClient({ child, send: (frame) => link.send(frame), binding, sessionsDir });
   // R151: keys typed while a glasses /model dialog may be open are dropped. The
   // bell says so at once without drawing over Claude's screen; the line after exit says why.
@@ -365,6 +375,8 @@ async function runClaude(args: string[]): Promise<void> {
       onUp: () => {
         boundId = undefined;
         requestedId = undefined;
+        askedId = undefined;
+        refused = undefined;
         client.onBound(undefined);
         client.onLinkUp();
         if (gaveUp && !finished) {
@@ -378,11 +390,17 @@ async function runClaude(args: string[]): Promise<void> {
       onFrame: (frame) => {
         switch (frame.type) {
           case "bind_accepted":
-            boundId = requestedId ?? boundId;
+            boundId = requestedId ?? askedId ?? boundId;
+            refused = undefined;
             client.onBound(boundId);
             binding.gen = typeof frame.gen === "number" ? frame.gen : binding.gen;
             break;
           case "bind_rejected":
+            if (askedId !== undefined) {
+              const delay = refused?.sessionId === askedId ? Math.min(refused.delay * 2, BIND_RETRY_MAX_MS) : BIND_RETRY_FIRST_MS;
+              // Less a poll's slack, so a retry due now is not put off to the next one.
+              refused = { sessionId: askedId, delay, retryAt: Date.now() + delay - SESSION_POLL_SLOW_MS / 4 };
+            }
             requestedId = undefined;
             if (frame.reason === "detached") {
               boundId = undefined;
@@ -422,8 +440,10 @@ async function runClaude(args: string[]): Promise<void> {
       if (session) {
         everFound = true;
         client.setSession(session);
-        if (session.sessionId !== boundId && session.sessionId !== requestedId) {
+        const waiting = refused?.sessionId === session.sessionId && Date.now() < refused.retryAt;
+        if (session.sessionId !== boundId && session.sessionId !== requestedId && !waiting) {
           requestedId = session.sessionId;
+          askedId = session.sessionId;
           link.send({ type: "launcher_bind", sessionId: session.sessionId, uncertain: client.uncertain() });
         }
       }

@@ -589,6 +589,8 @@ test("startup_rewrites_launcher_mode_to_plugin", async (t) => {
   });
   const live = sleeper(t);
   sessionFile(sessionsDir, live.pid, "offlive");
+  const running = sleeper(t);
+  sessionFile(sessionsDir, running.pid, "s1");
   await withDaemon(
     {
       transport: "wshub",
@@ -598,6 +600,8 @@ test("startup_rewrites_launcher_mode_to_plugin", async (t) => {
           entries: [
             { provider: "claude", id: "s1", mode: "launcher", attachedAt: 1 },
             { provider: "claude", id: "s2", mode: "plugin", attachedAt: 2 },
+            // M10: rk attached it by itself, and no Claude runs it any more.
+            { provider: "claude", id: "s3", mode: "launcher", attachedAt: 3 },
           ],
           explicitDetaches: [
             { key: "claude:gone", launcherId: "L9", childPid: deadPid },
@@ -612,6 +616,7 @@ test("startup_rewrites_launcher_mode_to_plugin", async (t) => {
       assert.equal(daemon.attachRegistry.mode("claude", "s1"), "plugin");
       assert.equal(daemon.attachRegistry.mode("claude", "s2"), "plugin");
       assert.equal(daemon.launchers.binding(KEY("s1")), undefined);
+      assert.equal(daemon.attachRegistry.isAttached("claude", "s3"), false);
       const saved = JSON.parse(fs.readFileSync(path.join(coderDir, "attached.json"), "utf8"));
       assert.deepEqual(saved.entries.map((e) => e.mode), ["plugin", "plugin"]);
       assert.deepEqual(saved.explicitDetaches, [

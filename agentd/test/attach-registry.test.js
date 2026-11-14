@@ -263,3 +263,24 @@ for (const transport of TRANSPORTS) {
     );
   });
 }
+
+test("startup_prunes_launcher_sessions_no_live_claude_runs", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "attached.json");
+    const first = new AttachRegistry({ file });
+    first.attach("claude", "ended", "launcher");
+    first.attach("claude", "running", "launcher");
+    first.attach("claude", "opted-in", "plugin");
+    const second = new AttachRegistry({ file });
+    second.reconcileLaunchers({ isSessionLive: (key) => key === "claude:running" });
+    assert.equal(second.isAttached("claude", "ended"), false, "M10: rk attached it, and it is over");
+    assert.equal(second.mode("claude", "running"), "plugin", "a live one waits for its launcher to rebind");
+    assert.equal(second.mode("claude", "opted-in"), "plugin", "an explicit opt-in is kept");
+    assert.equal(new AttachRegistry({ file }).isAttached("claude", "ended"), false, "and the file says so");
+    // Without a readable sessions dir nothing is known to be over.
+    const third = new AttachRegistry({ file });
+    third.attach("claude", "unknown", "launcher");
+    third.reconcileLaunchers();
+    assert.equal(third.mode("claude", "unknown"), "plugin");
+  });
+});

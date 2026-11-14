@@ -99,8 +99,11 @@ export interface AlertFrame {
 
 /**
  * The answer to every steering frame. `applied` and `duplicate` both mean the
- * frame took effect once; `rejected` never consumes the msgId, so the phone may
- * resend the same frame once the cause (`error`) is gone.
+ * frame took effect once. `rejected` normally leaves the msgId unused, so the
+ * phone may resend the same frame once the cause (`error`) is gone. The one
+ * exception (R152): a launcher command that was typed into the session and
+ * then failed is `rejected` with its msgId spent, and a resend answers
+ * `duplicate` rather than typing it again.
  */
 export interface AckFrame {
   type: "ack";

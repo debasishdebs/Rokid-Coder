@@ -1,5 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, unlinkSync, type Stats } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  unlinkSync,
+  type Stats,
+} from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import type { AttachChange, AttachRegistry } from "../attach-registry";
@@ -111,6 +122,8 @@ interface Connection {
   pending?: Pending;
   /** The last command sent here, still addressable after its result (a compact owns input until it is done). */
   lastCmdId?: string;
+  /** The launcher's last `launcher_bind`, so a refused one can be retried here when the refusal ends. */
+  lastBind?: { sessionId: string; uncertain: boolean };
   draft: boolean;
   closed: boolean;
 }
@@ -163,6 +176,8 @@ export class LauncherHub {
   /** Why each key's last binding ended: `exited` when its launcher went away, `cancelled` when it moved on. */
   private readonly unbound = new Map<SessionKey, CommandError>();
   private generation = 0;
+  /** Set while a bind runs: the registry change a bind itself makes must not start another. */
+  private bindRunning = false;
   private stopListening?: () => void;
 
   constructor(options: LauncherHubOptions) {
@@ -363,14 +378,40 @@ export class LauncherHub {
     if (!stats.isDirectory()) {
       return "config dir is not a directory";
     }
+    // Every later check and the chmod go through this fd, so the path cannot
+    // be swapped for a symlink or another directory in between.
+    let fd: number;
+    try {
+      fd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    } catch (error) {
+      const code = errorCode(error);
+      return code === "ELOOP" ? "config dir is a symlink" : code === "ENOTDIR" ? "config dir is not a directory" : `config dir unusable (${code})`;
+    }
+    try {
+      return this.checkOpenConfigDir(fd);
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  private checkOpenConfigDir(fd: number): string | undefined {
+    let stats: Stats;
+    try {
+      stats = fstatSync(fd);
+    } catch (error) {
+      return `config dir unusable (${errorCode(error)})`;
+    }
+    if (!stats.isDirectory()) {
+      return "config dir is not a directory";
+    }
     if (stats.uid !== process.getuid?.()) {
       return "config dir is not owned by this user";
     }
     let mode = stats.mode & 0o777;
     if ((mode & 0o077) !== 0) {
       try {
-        chmodSync(dir, 0o700);
-        mode = lstatSync(dir).mode & 0o777;
+        fchmodSync(fd, 0o700);
+        mode = fstatSync(fd).mode & 0o777;
       } catch (error) {
         return `could not tighten the config dir (${errorCode(error)})`;
       }
@@ -500,6 +541,7 @@ export class LauncherHub {
         ) {
           return "bad_frame";
         }
+        connection.lastBind = { sessionId: frame.sessionId, uncertain: frame.uncertain === true };
         this.onBind(connection, frame.sessionId, frame.uncertain === true);
         return undefined;
       case "command_result": {
@@ -590,6 +632,15 @@ export class LauncherHub {
    */
   /** `uncertain` is the launcher's own (R161): a binding never starts more certain than its launcher is. */
   private onBind(connection: Connection, sessionId: string, uncertain: boolean): void {
+    this.bindRunning = true;
+    try {
+      this.bind(connection, sessionId, uncertain);
+    } finally {
+      this.bindRunning = false;
+    }
+  }
+
+  private bind(connection: Connection, sessionId: string, uncertain: boolean): void {
     const hello = connection.hello as Hello;
     const reject = (reason: string): void => {
       this.options.logger.info("launcher_bind_rejected", { reason });
@@ -676,10 +727,11 @@ export class LauncherHub {
    * the launcher's identity.
    */
   private onRegistryChange({ kind, entry }: AttachChange): void {
-    if (kind !== "detached") {
+    const key = sessionKeyOf(entry.provider, entry.id);
+    if (kind === "attached") {
+      this.retryRefusedBinds(key);
       return;
     }
-    const key = sessionKeyOf(entry.provider, entry.id);
     const connection = this.byKey.get(key);
     if (!connection?.binding || !connection.hello) {
       return;
@@ -692,6 +744,23 @@ export class LauncherHub {
     this.unbind(connection, { error: "cancelled", notify: true, demote: false });
     // The launcher learns it is no longer bound, so it may ask again after /rokid:on.
     this.write(connection, { type: "bind_rejected", reason: "detached" });
+  }
+
+  /**
+   * `/rokid:on` ended an explicit detach: a launcher still asking for that
+   * session is bound now, with the full proof, rather than at its next retry.
+   */
+  private retryRefusedBinds(key: SessionKey): void {
+    if (this.bindRunning || this.byKey.has(key)) {
+      return;
+    }
+    for (const connection of [...this.connections]) {
+      const last = connection.lastBind;
+      if (!connection.closed && !connection.binding && connection.hello && last && sessionKeyOf("claude", last.sessionId) === key) {
+        this.onBind(connection, last.sessionId, last.uncertain);
+        return;
+      }
+    }
   }
 
   private unbind(
