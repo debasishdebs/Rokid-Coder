@@ -48,6 +48,8 @@ export interface StateSources {
 
 interface CompactWatch {
   gen: number;
+  /** The launcher has typed it: a compact before that is the laptop's own. */
+  written: boolean;
   manualPreSeen: boolean;
   done: () => void;
 }
@@ -82,13 +84,19 @@ export class SessionStates {
     entry.latchAt = entry.latchAt === undefined ? at : Math.max(entry.latchAt, at);
   }
 
-  /** The command that set it is known to be done; the next one carries no barrier. */
-  clearLatch(key: SessionKey): void {
+  /**
+   * The command that set it is known to be done; the next one carries no
+   * barrier. A latch newer than `upTo` (a Stop delivery since) stays.
+   */
+  clearLatch(key: SessionKey, upTo = Number.POSITIVE_INFINITY): void {
     const entry = this.entries.get(key);
-    if (entry) {
-      entry.latchAt = undefined;
-      entry.passedLatchAt = undefined;
+    if (!entry) {
+      return;
     }
+    if (entry.latchAt === undefined || entry.latchAt <= upTo) {
+      entry.latchAt = undefined;
+    }
+    entry.passedLatchAt = undefined;
   }
 
   latchAt(key: SessionKey): number | undefined {
@@ -114,7 +122,8 @@ export class SessionStates {
       case "PreCompact": {
         const watch = this.entries.get(key)?.compact;
         if (watch) {
-          watch.manualPreSeen = payload.trigger === "manual" && this.sources.binding(key)?.gen === watch.gen;
+          watch.manualPreSeen =
+            watch.written && payload.trigger === "manual" && this.sources.binding(key)?.gen === watch.gen;
         }
         break;
       }
@@ -140,7 +149,15 @@ export class SessionStates {
    * binding `gen` is this compact finishing. One compact is watched at a time.
    */
   armCompact(key: SessionKey, gen: number, done: () => void): void {
-    this.entry(key).compact = { gen, manualPreSeen: false, done };
+    this.entry(key).compact = { gen, written: false, manualPreSeen: false, done };
+  }
+
+  /** The armed compact's first write happened. */
+  compactWritten(key: SessionKey): void {
+    const watch = this.entries.get(key)?.compact;
+    if (watch) {
+      watch.written = true;
+    }
   }
 
   disarmCompact(key: SessionKey): void {
@@ -221,6 +238,8 @@ export interface LauncherPort {
   unboundReason(key: SessionKey): SendError | undefined;
   send(key: SessionKey, cmd: Omit<TypeCommand, "cmdId" | "gen"> & { cmdId?: string }): Promise<CommandResult>;
   cancel(key: SessionKey, reason: "cancelled" | "taken_over"): void;
+  /** R148: cancel one command on the connection that received it, past its result too. */
+  cancelCommand(cmdId: string): void;
   setUncertain(key: SessionKey, uncertain: boolean): void;
   laptopDraft(key: SessionKey): boolean;
   compactDone(key: SessionKey, cmdId: string): void;
@@ -234,7 +253,8 @@ export interface RouterTimings {
   pollMs: number;
 }
 
-export type RouteOutcome = { ok: true } | { ok: false; error: string };
+/** `consumed`: the command was typed before it failed, so its msgId must not be reused. */
+export type RouteOutcome = { ok: true } | { ok: false; error: string; consumed?: boolean };
 
 export type LauncherCommand =
   | { command: "compact" }
@@ -247,6 +267,7 @@ const fail = (error: string): RouteOutcome => ({ ok: false, error });
 interface Running {
   cmdId: string;
   written: boolean;
+  writtenAt?: number;
   gen: number;
   abort: (error: string) => void;
 }
@@ -290,6 +311,8 @@ export class LauncherRouter {
       const running = this.running.get(key);
       if (running?.cmdId === cmdId) {
         running.written = true;
+        running.writtenAt ??= at;
+        this.states.compactWritten(key);
       }
     });
     this.port.onChange((key) => {
@@ -417,11 +440,14 @@ export class LauncherRouter {
       if (this.port.binding(key)?.uncertain) {
         return "uncertain";
       }
-      if (state === "ready" && this.states.claim(key)) {
+      // The launcher would hold it behind the draft anyway (Review Focus 1);
+      // waiting here keeps what agentd dispatches in line with what it shows.
+      const draft = this.port.laptopDraft(key);
+      if (state === "ready" && !draft && this.states.claim(key)) {
         return "ready";
       }
       if (this.clock() >= deadline) {
-        return "busy";
+        return state === "ready" && draft ? "laptop_draft" : "busy";
       }
       await new Promise((resolve) => setTimeout(resolve, this.timings.pollMs));
     }
@@ -432,8 +458,11 @@ export class LauncherRouter {
     const cmdId = randomUUID();
     let timer: NodeJS.Timeout | undefined;
     let compactDone: Promise<string> | undefined;
+    const running: Running = { cmdId, written: false, gen, abort: () => undefined };
+    // Typed, then failed: the msgId is spent, so a resend is a duplicate, never a retype.
+    const failed = (error: string): RouteOutcome => (running.written ? { ok: false, error, consumed: true } : fail(error));
     const interrupt = new Promise<string>((resolve) => {
-      const running: Running = { cmdId, written: false, gen, abort: resolve };
+      running.abort = resolve;
       this.running.set(key, running);
       const limit = cmd.command === "compact"
         ? this.timings.compactLimitMs
@@ -453,18 +482,18 @@ export class LauncherRouter {
       if (typeof result === "string") {
         // The launcher has not answered in time, or the session went away:
         // cancel whatever it is still doing, and say so.
-        this.port.cancel(key, "cancelled");
+        this.port.cancelCommand(cmdId);
         this.noteFailure(key, gen, cmd, result);
-        return fail(result);
+        return failed(result);
       }
       if (!result.ok) {
         const error: SendError = result.error ?? "not_ready";
         this.noteFailure(key, gen, cmd, error);
-        return fail(error);
+        return failed(error);
       }
       if (cmd.command === "model") {
         // `/model` may never flip Claude's status, and "Set model to" was seen.
-        this.states.clearLatch(key);
+        this.states.clearLatch(key, running.writtenAt ?? this.clock());
         return OK;
       }
       if (cmd.command === "text") {
@@ -472,10 +501,13 @@ export class LauncherRouter {
       }
       const end = await Promise.race([compactDone as Promise<string>, interrupt]);
       if (end !== "done") {
-        return fail(end);
+        // R148: past its ok the launcher still owns input for this compact,
+        // until compact_done; it has to hear that agentd gave up.
+        this.port.cancelCommand(cmdId);
+        return failed(end);
       }
       this.port.compactDone(key, cmdId);
-      this.states.clearLatch(key);
+      this.states.clearLatch(key, running.writtenAt ?? this.clock());
       return OK;
     } finally {
       clearTimeout(timer);

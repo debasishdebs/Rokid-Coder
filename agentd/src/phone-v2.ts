@@ -113,7 +113,8 @@ export interface PhoneV2Deps {
   tickMs?: number;
 }
 
-type Outcome = { ok: true } | { ok: false; error: string };
+/** `consumed`: it took effect before it failed (a launcher typed it), so its msgId stays spent. */
+type Outcome = { ok: true } | { ok: false; error: string; consumed?: boolean };
 const OK: Outcome = { ok: true };
 const fail = (error: string): Outcome => ({ ok: false, error });
 
@@ -542,7 +543,8 @@ export class PhoneV2 {
    * A msgId is consumed only by a frame that was applied: a frame refused by
    * the gate, by any check (bad shape, not attached, nobody waiting, ...) or
    * by the applying itself leaves its id free, so the phone can resend it once
-   * the cause is gone. Each handler calls `record` after its last check and
+   * the cause is gone. The one exception is a failure after the effect began
+   * (`consumed`, a launcher command already typed): resending it is a duplicate. Each handler calls `record` after its last check and
    * before its first effect, synchronously, so a replay can never run twice;
    * only the applying itself is allowed to wait. An id that cannot be saved is
    * refused before anything happens: after a restart it could not be told
@@ -581,7 +583,7 @@ export class PhoneV2 {
         outcome = fail("failed");
       }
     }
-    if (!outcome.ok && recorded) {
+    if (!outcome.ok && recorded && outcome.consumed !== true) {
       this.deps.appliedIds.forget(msgId);
     }
     this.deps.logger.info("phone_v2_steering", {
@@ -677,14 +679,7 @@ export class PhoneV2 {
         return fail(wait.continuationsLeft === 0 ? "cap_reached" : "not_waiting");
       }
       record();
-      switch (this.deps.stopWait.deliver(target.id, text, msgId)) {
-        case "delivered":
-          return OK;
-        case "cap_reached":
-          return fail("cap_reached");
-        default:
-          return fail("not_waiting");
-      }
+      return this.deliverHeld(target.id, text, msgId);
     }
     record();
     await this.deps.codex.followUp(target.id, text, msgId);

@@ -54,6 +54,11 @@ function fakePort() {
       port.cancels.push(reason);
       port.settle({ ok: false, error: reason });
     },
+    commandCancels: [],
+    cancelCommand(cmdId) {
+      port.commandCancels.push(cmdId);
+      if (port.pending?.cmdId === cmdId) port.settle({ ok: false, error: "cancelled" });
+    },
     setUncertain(key, uncertain) {
       const binding = port.bindings.get(key);
       if (binding && binding.uncertain !== uncertain) {
@@ -221,7 +226,7 @@ test("auto_compact_does_not_complete_launcher_compact", async () => {
   port.settle({ ok: true });
   router.onHook(KEY, "PreCompact", { trigger: "auto" });
   router.onHook(KEY, "PostCompact", { trigger: "auto" });
-  assert.deepEqual(await result, { ok: false, error: "timeout" });
+  assert.deepEqual(await result, { ok: false, error: "timeout", consumed: true });
   assert.deepEqual(port.compactDones, []);
 });
 
@@ -255,7 +260,7 @@ test("compact_applied_only_on_post_compact_of_same_generation", async () => {
   router.onHook(KEY, "PreCompact", { trigger: "manual" });
   port.rebind(KEY);
   router.onHook(KEY, "PostCompact", { trigger: "manual" });
-  assert.deepEqual(await second, { ok: false, error: "cancelled" });
+  assert.deepEqual(await second, { ok: false, error: "cancelled", consumed: true });
   assert.equal(port.compactDones.length, 1);
 });
 
@@ -266,15 +271,17 @@ test("compact_timeout_rejected", async () => {
   await until(() => port.sent.length === 1);
   port.written(Date.now());
   port.settle({ ok: true });
-  assert.deepEqual(await typed, { ok: false, error: "timeout" });
+  assert.deepEqual(await typed, { ok: false, error: "timeout", consumed: true });
   assert.deepEqual(port.compactDones, []);
+  // R148: past its ok, the launcher is told agentd gave up on it.
+  assert.deepEqual(port.commandCancels, [port.sent[0].cmdId]);
 
   // The launcher never answers at all: the hub has no timeout, so the router cancels it.
   claudeWrites(file, "idle");
   const silent = router.command(KEY, { command: "compact" });
   await until(() => port.sent.length === 2);
   assert.deepEqual(await silent, { ok: false, error: "timeout" });
-  assert.deepEqual(port.cancels, ["cancelled"]);
+  assert.deepEqual(port.commandCancels.slice(1), [port.sent[1].cmdId]);
   assert.equal(port.pending, undefined);
 });
 
@@ -284,7 +291,7 @@ test("uncertain_binding_rejects_until_laptop_prompt", async () => {
   await until(() => port.sent.length === 1);
   port.written(Date.now());
   port.settle({ ok: false, error: "dialog_not_seen" });
-  assert.deepEqual(await model, { ok: false, error: "dialog_not_seen" });
+  assert.deepEqual(await model, { ok: false, error: "dialog_not_seen", consumed: true });
   assert.equal(port.binding(KEY).uncertain, true, "R141: the launcher is told");
 
   for (const cmd of [{ command: "compact" }, { command: "model", model: "sonnet" }]) {
@@ -415,7 +422,7 @@ test("launcher_exit_while_waiting_or_compacting_is_exited", async () => {
   port.written(Date.now());
   port.settle({ ok: true });
   port.drop(KEY);
-  assert.deepEqual(await compact, { ok: false, error: "exited" });
+  assert.deepEqual(await compact, { ok: false, error: "exited", consumed: true });
   assert.equal(router.isBound(KEY), false);
   assert.deepEqual(await router.command(KEY, { command: "compact" }), { ok: false, error: "not_launcher" });
 
@@ -457,4 +464,26 @@ test("laptop_draft_makes_followup_unavailable", async () => {
   assert.equal(router.followupState(KEY), "unavailable");
   port.drafts.set(KEY, false);
   assert.equal(router.followupState(KEY), "ready");
+});
+
+test("model_ok_keeps_a_latch_newer_than_its_own_write", async () => {
+  const { port, states, router } = setup();
+  const result = router.command(KEY, { command: "model", model: "opus" });
+  await until(() => port.sent.length === 1, 200, "the dispatch");
+  const at = Date.now();
+  port.written(at);
+  // A Stop delivery while the model command runs latches later than its write.
+  states.latch(KEY, at + 500);
+  port.settle({ ok: true });
+  assert.deepEqual(await result, { ok: true });
+  assert.equal(states.latchAt(KEY), at + 500);
+
+  // With nothing newer, the ok clears the command's own latch.
+  const { port: port2, states: states2, router: router2 } = setup();
+  const second = router2.command(KEY, { command: "model", model: "haiku" });
+  await until(() => port2.sent.length === 1, 200, "the dispatch");
+  port2.written(Date.now());
+  port2.settle({ ok: true });
+  assert.deepEqual(await second, { ok: true });
+  assert.equal(states2.latchAt(KEY), undefined);
 });

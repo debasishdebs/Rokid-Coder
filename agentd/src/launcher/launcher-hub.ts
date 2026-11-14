@@ -97,6 +97,8 @@ interface Connection {
   binding?: Binding;
   /** One command at a time per launcher; its result is taken only from this connection, once. */
   pending?: Pending;
+  /** The last command sent here, still addressable after its result (a compact owns input until it is done). */
+  lastCmdId?: string;
   draft: boolean;
   closed: boolean;
 }
@@ -245,6 +247,7 @@ export class LauncherHub {
     }
     return new Promise((resolve) => {
       connection.pending = { cmdId: frame.cmdId, resolve };
+      connection.lastCmdId = frame.cmdId;
       this.write(connection, frame);
     });
   }
@@ -253,6 +256,25 @@ export class LauncherHub {
     const connection = this.byKey.get(key);
     if (connection) {
       this.settlePending(connection, reason, true);
+    }
+  }
+
+  /**
+   * R148: agentd has given up on a command the launcher may still be running
+   * (a compact past its ok owns input until compact_done). The cancel goes to
+   * the connection that received `cmdId`, bound to that session or not.
+   */
+  cancelCommand(cmdId: string): void {
+    for (const connection of this.connections) {
+      if (connection.closed || connection.lastCmdId !== cmdId) {
+        continue;
+      }
+      connection.lastCmdId = undefined;
+      if (connection.pending?.cmdId === cmdId) {
+        this.settlePending(connection, "cancelled", true);
+      } else {
+        this.write(connection, { type: "cancel_command", cmdId });
+      }
     }
   }
 

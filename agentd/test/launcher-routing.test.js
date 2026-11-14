@@ -15,7 +15,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { withDaemon, postHook, settle } = require("./helpers/daemon.js");
 const { RK, waitDead, inPty, readJson } = require("./helpers/rk.js");
-const { LAUNCHER_ATTACH_TEXT } = require("../dist/attach-command.js");
+const { LAUNCHER_ATTACH_TEXT, LAUNCHER_STATUS_TEXT } = require("../dist/attach-command.js");
 
 const ID = "ls1";
 const KEY = `claude:${ID}`;
@@ -277,7 +277,7 @@ test("delivered_followup_marks_busy_before_hook_returns", async () => {
 });
 
 test("consecutive_followups_never_type_while_claude_continues", async () => {
-  await withBound(async ({ launcher, claude, followup, ack, heldStop }) => {
+  await withBound(async ({ httpPort, launcher, claude, followup, ack, heldStop }) => {
     const { reply: first } = await heldStop();
     followup("one", "fa");
     assert.equal((await first).decision, "block");
@@ -289,8 +289,8 @@ test("consecutive_followups_never_type_while_claude_continues", async () => {
     await settle(300);
     assert.deepEqual(launcher.of("type_command"), []);
     // Its next Stop is held: the hook takes the second one, nothing is typed.
-    const { reply: second } = await heldStop();
-    const hook = await second;
+    // The waiting follow-up may take the hold at once, so await the hook itself.
+    const hook = await postHook(httpPort, { hook_event_name: "Stop", session_id: ID });
     assert.equal(hook.decision, "block");
     assert.match(hook.reason, /two/);
     assert.equal((await ack("fb")).result, "applied");
@@ -508,12 +508,98 @@ test("rebind_during_wait_cancels_and_rejects_cancelled", async () => {
   });
 });
 
+test("compact_timeout_after_ok_sends_cancel_command", async () => {
+  await withBound(async ({ launcher, command, ack }) => {
+    command({ command: "compact" }, "cx1");
+    const frame = await launcher.waitFor("type_command");
+    answer(launcher, frame);
+    assert.equal((await ack("cx1")).error, "timeout");
+    // R148: the launcher owns input until compact_done; agentd gave up, so it says so.
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId, 1000);
+    assert.deepEqual(launcher.of("compact_done"), []);
+  });
+});
+
+test("rebind_after_compact_ok_sends_cancel_to_old_connection", async () => {
+  await withBound(async ({ launcher, command, ack, rebind }) => {
+    command({ command: "compact" }, "cx2");
+    const frame = await launcher.waitFor("type_command");
+    answer(launcher, frame);
+    await settle(100);
+    await rebind("ls2");
+    assert.equal((await ack("cx2")).error, "cancelled");
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId, 1000);
+  });
+});
+
+test("detach_or_session_end_after_compact_ok_sends_cancel_command", async () => {
+  for (const end of ["detach", "SessionEnd"]) {
+    await withBound(async ({ daemon, httpPort, launcher, command, ack }) => {
+      command({ command: "compact" }, `cx3-${end}`);
+      const frame = await launcher.waitFor("type_command");
+      answer(launcher, frame);
+      await settle(100);
+      if (end === "detach") daemon.attachRegistry.detach("claude", ID);
+      else await postHook(httpPort, { hook_event_name: "SessionEnd", session_id: ID });
+      assert.equal((await ack(`cx3-${end}`)).error, "cancelled", end);
+      await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId, 1000);
+    });
+  }
+});
+
+test("laptop_compact_before_the_write_does_not_complete_glasses_compact", async () => {
+  await withBound(async ({ launcher, command, ack, compactHooks, noAck }) => {
+    command({ command: "compact" }, "lc1");
+    const frame = await launcher.waitFor("type_command");
+    // The launcher is holding it behind a draft, and the user submits a /compact of their own.
+    await compactHooks("manual");
+    answer(launcher, frame);
+    await noAck("lc1");
+    await compactHooks("manual");
+    assert.equal((await ack("lc1")).result, "applied");
+  });
+});
+
+test("written_command_rejected_keeps_its_msgId", async () => {
+  await withBound(async ({ launcher, command, ack, phone }) => {
+    command({ command: "compact" }, "wk1");
+    const frame = await launcher.waitFor("type_command");
+    answer(launcher, frame);
+    assert.equal((await ack("wk1")).error, "timeout");
+    // It was typed: a resend of the same id must not type it again.
+    command({ command: "compact" }, "wk1");
+    await until(() => phone.frames.some((f) => f.type === "ack" && f.msgId === "wk1" && f.result === "duplicate"));
+    assert.equal(launcher.of("type_command").length, 1);
+  });
+});
+
+test("laptop_draft_holds_dispatch_in_agentd", async () => {
+  await withBound(async ({ launcher, command, ack }) => {
+    launcher.send({ type: "laptop_state", draft: true });
+    await settle(100);
+    command({ command: "compact" }, "ld1");
+    assert.equal((await ack("ld1")).error, "laptop_draft");
+    assert.deepEqual(launcher.of("type_command"), []);
+  });
+});
+
+test("hub_send_refuses_an_uncertain_binding", async () => {
+  await withBound(async ({ daemon, launcher }) => {
+    daemon.launchers.setUncertain(KEY, true);
+    assert.deepEqual(await daemon.launchers.send(KEY, { command: "compact" }), { ok: false, error: "uncertain" });
+    await settle(50);
+    assert.deepEqual(launcher.of("type_command"), []);
+  });
+});
+
 test("rokid_on_keeps_a_bound_session_in_launcher_mode", async () => {
   await withBound(async ({ daemon, httpPort }) => {
     const reply = await postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "rokid:on", session_id: ID });
     assert.deepEqual(reply, { decision: "block", reason: LAUNCHER_ATTACH_TEXT });
     assert.equal(daemon.attachRegistry.mode("claude", ID), "launcher");
     assert.equal(daemon.phoneV2.decorate(daemon.sessions.get(ID)).mode, "launcher");
+    const status = await postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "rokid:status", session_id: ID });
+    assert.deepEqual(status, { decision: "block", reason: LAUNCHER_STATUS_TEXT });
   });
 });
 

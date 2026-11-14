@@ -50,6 +50,7 @@ export const LAUNCHER_ATTACH_TEXT =
   "Rokid-Coder launcher: attached. From the glasses you can reply at any time, compact, and change model (changing model also sets your default for new sessions).";
 const DETACH_TEXT = "Detached from Rokid-Coder. This session no longer sends anything to the phone.";
 const STATUS_ATTACHED_TEXT = "Attached to Rokid-Coder (plugin mode).";
+export const LAUNCHER_STATUS_TEXT = "Attached to Rokid-Coder (launcher mode, through rk claude).";
 const STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder. Type /rokid:on to attach.";
 const CODEX_STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder. Type rokid:on to attach.";
 const NO_SESSION_TEXT = "Rokid-Coder could not tell which session this is, so nothing was changed.";
@@ -153,7 +154,9 @@ export function handleAttachCommand(
     case "status":
       return block(
         registry.isAttached(provider, sessionId)
-          ? STATUS_ATTACHED_TEXT
+          ? provider === "claude" && context.isLauncherBound?.(sessionId) === true
+            ? LAUNCHER_STATUS_TEXT
+            : STATUS_ATTACHED_TEXT
           : provider === "codex"
             ? CODEX_STATUS_DETACHED_TEXT
             : STATUS_DETACHED_TEXT,
