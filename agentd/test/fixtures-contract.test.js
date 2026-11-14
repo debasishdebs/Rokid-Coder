@@ -14,7 +14,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
-const { classifyFrame } = require("../dist/protocol-v2.js");
+const { classifyFrame, FRAME_CLASS } = require("../dist/protocol-v2.js");
 const { withDaemon, postHook, settle } = require("./helpers/daemon.js");
 
 const FIXTURES = JSON.parse(
@@ -42,6 +42,19 @@ const QUESTION_HOOK = {
       },
       { question: "Which suites?", options: [{ label: "unit" }, { label: "contract" }], multiSelect: true },
     ],
+  },
+};
+
+/** What the approval alert the scenarios raise says, field by field. */
+const APPROVAL_ALERT = {
+  values: {
+    kind: "approval",
+    sessionKey: "claude:fx-claude",
+    title: "Bash",
+    body: "npm test",
+    actions: ["allow", "deny"],
+    waiting: 0,
+    reason: "new",
   },
 };
 
@@ -118,13 +131,29 @@ function bind(frame, ids = {}) {
   return walk(clone(frame));
 }
 
-/** Every field agentd sent is one the fixture shows, with the same type and version. */
-function assertWithinFixture(real, fixture, label) {
+/**
+ * The frame agentd really sent and the fixture agree field for field, in both
+ * directions: agentd sends nothing the fixture lacks, and nothing the fixture
+ * shows is missing unless the type lists it as `optional`. `values` pins the
+ * fields the scenario fixes, since the Kotlin parser reads them.
+ */
+function assertSameShape(real, fixture, label, { optional = [], values = {} } = {}) {
   assert.equal(real.type, fixture.type, label);
   assert.equal(real.v, fixture.v, `${label}: v`);
   const extra = Object.keys(real).filter((key) => !(key in fixture));
   assert.deepEqual(extra, [], `${label}: fields agentd sends that the fixture lacks`);
+  const missing = Object.keys(fixture).filter((key) => !(key in real) && !optional.includes(key));
+  assert.deepEqual(missing, [], `${label}: fields the fixture shows that agentd did not send`);
+  for (const [key, value] of Object.entries(values)) {
+    assert.deepEqual(real[key], value, `${label}: ${key}`);
+  }
 }
+
+/** Session fields the interfaces mark optional (or v1 omits when empty); everything else must be sent. */
+const OPTIONAL_SESSION_FIELDS = [
+  "turn", "nativeMode", "currentFile", "step", "context", "pendingSettings", "sandbox",
+  "lastAssistantText", "statusDetail", "pendingRequest",
+];
 
 /** Claude fx-claude and Codex fx-codex attached, on a trusted link over each transport in turn. */
 async function inFixtureDaemon(transport, options, body) {
@@ -179,6 +208,8 @@ function helpers({ daemon, phone, httpPort }) {
     },
     ack: (msgId) => phone.waitFor("ack", (frame) => frame.msgId === msgId),
     alertState: (id) => daemon.phoneV2.alerts.get(id)?.state,
+    /** The alert holding the glasses right now. */
+    occupant: () => daemon.phoneV2.alerts.current()?.id,
   };
 }
 
@@ -227,30 +258,34 @@ const HANDLERS = {
     assert.equal("sessionId" in result, false, "a refused spawn names no session");
   },
 
-  async alert_shown({ phone, approval, alertState }, fixture) {
+  async alert_shown({ phone, approval, alertState, occupant }, fixture) {
     const { alert } = await approval();
     assert.equal(alertState(alert.id), "sent");
     phone.send(bind(fixture, { alertId: alert.id }));
     await until(() => alertState(alert.id) === "shown", "the alert to be marked shown");
+    // Shown is an acknowledgement: the alert keeps the glasses.
+    assert.equal(occupant(), alert.id);
   },
 
-  async alert_dismissed({ phone, approval, alertState }, fixture) {
+  async alert_dismissed({ phone, approval, alertState, occupant }, fixture) {
     const { alert } = await approval();
+    assert.equal(occupant(), alert.id);
     phone.send(bind(fixture, { alertId: alert.id }));
-    // A dismiss comes over a monitor frame: an approval is parked, not settled.
-    await until(() => alertState(alert.id) === "shown", "the approval to be parked");
+    // A dismiss comes over a monitor frame: an approval is parked, not settled. It
+    // stays answerable but gives up the glasses, which is what tells it from "shown".
+    await until(() => occupant() === undefined, "the approval to leave the glasses");
+    assert.equal(alertState(alert.id), "shown");
     await settle();
     assert.equal(phone.frames.some((frame) => frame.type === "alert_closed"), false);
   },
 
   async alert_action({ phone, approval, ack }, fixture) {
     const { reply, alert } = await approval();
-    assertWithinFixture(alert, FROM_AGENT_VARIANTS.alert_approval, "approval alert");
-    assert.deepEqual(alert.actions, FROM_AGENT_VARIANTS.alert_approval.actions);
+    assertSameShape(alert, FROM_AGENT_VARIANTS.alert_approval, "approval alert", APPROVAL_ALERT);
     phone.send(bind(fixture, { alertId: alert.id }));
     const reply2 = await ack(fixture.msgId);
     assert.equal(reply2.result, "applied");
-    assertWithinFixture(reply2, FROM_AGENT.ack, "ack");
+    assertSameShape(reply2, FROM_AGENT.ack, "ack", { optional: ["error"], values: { msgId: fixture.msgId, result: "applied" } });
     assert.equal((await reply).hookSpecificOutput.decision.behavior, "allow");
     assert.equal((await phone.waitFor("alert_closed", (frame) => frame.id === alert.id)).reason, "acted");
   },
@@ -265,13 +300,25 @@ const HANDLERS = {
     const closed = await phone.waitFor("followup_closed");
     assert.equal(closed.reason, "delivered");
     assert.equal(closed.sessionKey, fixture.sessionKey);
-    assertWithinFixture(closed, FROM_AGENT.followup_closed, "followup_closed");
+    assertSameShape(closed, FROM_AGENT.followup_closed, "followup_closed", {
+      values: { sessionKey: fixture.sessionKey, reason: "delivered" },
+    });
   },
 
   async question_answer({ phone, question, ack }, fixture) {
     const { reply, alert } = await question();
-    assertWithinFixture(alert, FROM_AGENT.alert, "question alert");
-    assert.deepEqual(alert.question, FROM_AGENT.alert.question);
+    assertSameShape(alert, FROM_AGENT.alert, "question alert", {
+      optional: ["actions"],
+      values: {
+        kind: "question",
+        sessionKey: "claude:fx-claude",
+        title: "Question",
+        body: "Which test runner?",
+        waiting: 0,
+        reason: "new",
+        question: FROM_AGENT.alert.question,
+      },
+    });
     phone.send(bind(fixture, { alertId: alert.id }));
     assert.equal((await ack(fixture.msgId)).result, "applied");
     const hook = await reply;
@@ -295,7 +342,9 @@ const HANDLERS = {
     assert.equal(daemon.approvalPolicy.get("claude:fx-claude"), "ask");
     const reset = await phone.waitFor("mode_reset");
     assert.deepEqual([reset.sessionKey, reset.from, reset.reason], ["claude:fx-claude", "approveAll", "revoked"]);
-    assertWithinFixture(reset, FROM_AGENT.mode_reset, "mode_reset");
+    assertSameShape(reset, FROM_AGENT.mode_reset, "mode_reset", {
+      values: { sessionKey: "claude:fx-claude", from: "approveAll", reason: "revoked" },
+    });
   },
 
   async codex_settings({ phone, ack }, fixture) {
@@ -321,7 +370,9 @@ const HANDLERS = {
     const reply = await ack(fixture.msgId);
     // Reserved for Plan 3: refused, and the id stays free.
     assert.deepEqual([reply.result, reply.error, reply.v], ["rejected", "not_launcher", 2]);
-    assertWithinFixture(reply, FROM_AGENT.ack, "ack");
+    assertSameShape(reply, FROM_AGENT.ack, "ack", {
+      values: { msgId: fixture.msgId, result: "rejected", error: "not_launcher" },
+    });
   },
 
   async defaults_set({ daemon, phone, ack, coderDir }, fixture) {
@@ -367,11 +418,8 @@ test("fixture_frame_classes_match_exactly", async () => {
   }
   assert.equal(classifyFrame("a_frame_nobody_has_heard_of"), "steering");
 
-  // The map is the whole of FRAME_CLASS, so the Kotlin copy checked against it is the whole table.
-  const source = await fsp.readFile(path.join(__dirname, "../src/protocol-v2.ts"), "utf8");
-  const table = source.match(/const FRAME_CLASS[^{]*\{([\s\S]*?)\n\}\);/)[1];
-  const inSource = [...table.matchAll(/^\s+(\w+): "(?:monitor|steering)",/gm)].map((match) => match[1]).sort();
-  assert.deepEqual(Object.keys(EXPECTED_CLASSES).sort(), inSource);
+  // The map is the whole of agentd's table, so the Kotlin copy checked against it is the whole table.
+  assert.deepEqual({ ...FRAME_CLASS }, EXPECTED_CLASSES);
 });
 
 test("every_phone_to_agent_fixture_is_accepted_by_its_handler", async (t) => {
@@ -392,30 +440,53 @@ test("the_snapshot_and_upserts_agentd_sends_match_the_fixtures", async () => {
     await inFixtureDaemon(transport, {}, async ({ phone, daemon, approval }) => {
       phone.send({ type: "refresh" });
       const snapshot = await phone.waitFor("snapshot", (frame) => frame.sessions.length > 0);
-      assertWithinFixture(snapshot, FROM_AGENT.snapshot, "snapshot");
-      assert.ok(snapshot.sessions.length > 0);
+      assertSameShape(snapshot, FROM_AGENT.snapshot, "snapshot");
+      const upsertFields = Object.keys(FROM_AGENT.session_upsert.session);
+      const claude = snapshot.sessions.find((session) => session.id === CLAUDE);
       for (const session of snapshot.sessions) {
-        const extra = Object.keys(session).filter((key) => !(key in FROM_AGENT.session_upsert.session));
+        const extra = Object.keys(session).filter((key) => !upsertFields.includes(key));
         assert.deepEqual(extra, [], "snapshot session fields the fixture lacks");
       }
+      const missing = Object.keys(FROM_AGENT.snapshot.sessions[0]).filter((key) => !(key in claude));
+      assert.deepEqual(missing, [], "snapshot session fields the fixture shows that agentd did not send");
+
       daemon.codex.threads.get(CODEX).cwd = "/work/parser2";
       daemon.codex.publishThread(CODEX);
       const upsert = await phone.waitFor("session_upsert", (frame) => frame.session.id === CODEX && frame.session.cwd === "/work/parser2");
-      assertWithinFixture(upsert, FROM_AGENT.session_upsert, "session_upsert");
-      const extra = Object.keys(upsert.session).filter((key) => !(key in FROM_AGENT.session_upsert.session));
-      assert.deepEqual(extra, [], "session fields the fixture lacks");
+      assertSameShape(upsert, FROM_AGENT.session_upsert, "session_upsert");
+      assertSameShape(
+        { type: "session", v: 2, ...upsert.session },
+        { type: "session", v: 2, ...FROM_AGENT.session_upsert.session },
+        "session_upsert session",
+        {
+          optional: OPTIONAL_SESSION_FIELDS,
+          values: {
+            id: CODEX,
+            provider: "codex",
+            mode: "plugin",
+            // No live Codex app-server here, so a follow-up is not available.
+            capabilities: { compact: true, model: true, followup: "unavailable" },
+            tempMode: "ask",
+            heading: "Refactor the parser",
+          },
+        },
+      );
 
       // The laptop answers a held approval: the phone is told, and the alert withdrawn.
       const { alert, request } = await approval();
-      assertWithinFixture(alert, FROM_AGENT_VARIANTS.alert_approval, "approval alert");
-      assertWithinFixture(request, FROM_AGENT.approval_request, "approval_request");
+      assertSameShape(alert, FROM_AGENT_VARIANTS.alert_approval, "approval alert", APPROVAL_ALERT);
+      assertSameShape(request, FROM_AGENT.approval_request, "approval_request", {
+        values: {
+          sessionId: CLAUDE,
+          tool: "Bash",
+          summary: "npm test",
+        },
+      });
       daemon.approvals.resolveRequest(request.requestId);
       const resolved = await phone.waitFor("approval_resolved", (frame) => frame.requestId === request.requestId);
-      assert.equal(resolved.outcome, "local");
-      assertWithinFixture(resolved, FROM_AGENT.approval_resolved, "approval_resolved");
+      assertSameShape(resolved, FROM_AGENT.approval_resolved, "approval_resolved", { values: { outcome: "local" } });
       const closed = await phone.waitFor("alert_closed", (frame) => frame.id === alert.id);
-      assert.equal(closed.reason, "withdrawn");
-      assertWithinFixture(closed, FROM_AGENT.alert_closed, "alert_closed");
+      assertSameShape(closed, FROM_AGENT.alert_closed, "alert_closed", { values: { id: alert.id, reason: "withdrawn" } });
 
       phone.send({ type: "detail_open", sessionId: "ghost" });
       const rejected = await phone.waitFor("detail_rejected");

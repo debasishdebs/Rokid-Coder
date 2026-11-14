@@ -157,7 +157,10 @@ export interface SnapshotFrameV2 {
 /**
  * The v1 approval frames still go to trusted phones next to each approval
  * alert. They carry the same request: a phone that renders the alert should
- * deduplicate them by `requestId` rather than show the request twice.
+ * deduplicate them by `requestId` rather than show the request twice. The frame
+ * is exactly this: agentd's internal `provider`, `sessionKey` and `approvalKind`
+ * are stripped before it is sent (`toWireFrame`), so the session's harness comes
+ * from the alert, not from this frame.
  */
 export interface ApprovalRequestFrameV1 {
   type: "approval_request";
@@ -319,7 +322,7 @@ export type FrameClass = "monitor" | "steering";
  * plaintext link may carry them. The tables are exhaustive for v1 and v2, and
  * anything not listed is steering so a new frame is closed until classified.
  */
-const FRAME_CLASS: Readonly<Record<string, FrameClass>> = Object.freeze({
+export const FRAME_CLASS: Readonly<Record<string, FrameClass>> = Object.freeze({
   approval_decision: "steering",
   session_input: "steering",
   thread_start: "steering",

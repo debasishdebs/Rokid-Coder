@@ -289,6 +289,8 @@ class AgentdProtocolCodec {
                     ?: return AgentdAction.Ignore
                 AgentdAction.Ack(
                     // Empty on purpose: agentd refuses a frame without an id and has none to echo.
+                    // Never trimmed, unlike an alert id: agentd echoes the phone's own id byte for
+                    // byte, and a trimmed copy would stop matching the frame the phone sent.
                     msgId = (json.opt("msgId") as? String).orEmpty().take(MAX_MSG_ID_CHARS),
                     result = result,
                     error = json.nullableString("error", MAX_WIRE_TYPE_CHARS),

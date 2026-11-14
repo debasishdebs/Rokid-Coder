@@ -256,6 +256,76 @@ class AgentdProtocolV2Test {
         assertEquals(MAX_HUD_LABEL_CHARS, item.options[0].label.length)
     }
 
+    @Test
+    fun hostile_v2_frames_are_made_safe_not_thrown_on() {
+        val codec = AgentdProtocolCodec()
+        fun alert(patch: JSONObject.() -> Unit) = codec.parse(alertJson(patch))
+
+        // A wrong-typed or out-of-range waiting counts nothing.
+        for (waiting in listOf<Any>("3", -5, 1.5, JSONObject.NULL, JSONArray())) {
+            assertEquals(0, (alert { put("waiting", waiting) } as AgentdAction.Alert).waiting)
+        }
+        // Wrong-typed text fields are empty, not a crash.
+        val noText = alert { put("title", 7); put("body", JSONArray()) } as AgentdAction.Alert
+        assertEquals(listOf("", ""), listOf(noText.title, noText.body))
+        // actions that are not a list of strings keep only the strings.
+        assertEquals(emptyList<String>(), (alert { put("actions", "allow") } as AgentdAction.Alert).actions)
+        assertEquals(
+            listOf("ok"),
+            (alert { put("actions", JSONArray(listOf<Any?>(1, JSONObject.NULL, JSONObject(), "", "ok"))) } as AgentdAction.Alert).actions,
+        )
+        // A question that is not an object is no question; on an approval the alert still stands.
+        assertNull((alert { put("question", "nope") } as AgentdAction.Alert).question)
+        assertNull((alert { put("question", JSONArray()) } as AgentdAction.Alert).question)
+        // ...but a question alert without a usable payload is dropped.
+        fun questionAlert(question: Any) = alert { put("kind", "question"); put("question", question) }
+        assertEquals(AgentdAction.Ignore, questionAlert("nope"))
+        assertEquals(AgentdAction.Ignore, questionAlert(JSONObject().put("requestRef", "r").put("source", "claude_tool").put("items", "x")))
+        assertEquals(AgentdAction.Ignore, questionAlert(JSONObject().put("requestRef", 5).put("source", "claude_tool").put("items", JSONArray())))
+        assertEquals(
+            AgentdAction.Ignore,
+            questionAlert(
+                JSONObject().put("requestRef", "r").put("source", "claude_tool")
+                    .put("items", JSONArray(listOf<Any?>(1, "x", JSONObject().put("options", JSONArray())))),
+            ),
+        )
+
+        // Lists over the cap are cut, not refused.
+        val bigQuestion = JSONObject().put("requestRef", "r").put("source", "claude_tool").put(
+            "items",
+            JSONArray(
+                List(MAX_QUESTION_ITEMS * 2) {
+                    JSONObject().put("text", "q$it").put(
+                        "options",
+                        JSONArray(List(MAX_QUESTION_OPTIONS * 2) { option -> JSONObject().put("label", "o$option") }),
+                    )
+                },
+            ),
+        )
+        val capped = (questionAlert(bigQuestion) as AgentdAction.Alert).question!!
+        assertEquals(MAX_QUESTION_ITEMS, capped.items.size)
+        assertTrue(capped.items.all { it.options.size == MAX_QUESTION_OPTIONS })
+
+        val models = codec.parse(
+            JSONObject(fixture("models").toString())
+                .put("models", JSONArray(List(MAX_LIST_ENTRIES * 3) { "m$it" }))
+                .put("efforts", JSONArray(List(MAX_LIST_ENTRIES * 3) { "e$it" }))
+                .toString(),
+        ) as AgentdAction.Models
+        assertEquals(MAX_LIST_ENTRIES, models.models.size)
+        assertEquals(MAX_LIST_ENTRIES, models.efforts.size)
+
+        // A current that is not an object, and lists that are not lists, leave the choices empty.
+        for (current in listOf<Any>("gpt", JSONArray(listOf("gpt")), 3)) {
+            val frame = JSONObject(fixture("models").toString()).put("current", current)
+                .put("models", "gpt-6").put("efforts", JSONObject())
+            val parsed = codec.parse(frame.toString()) as AgentdAction.Models
+            assertNull(parsed.currentModel)
+            assertNull(parsed.currentEffort)
+            assertEquals(emptyList<String>(), parsed.models + parsed.efforts)
+        }
+    }
+
     // ------------------------------------------------------------ session fields
 
     @Test
