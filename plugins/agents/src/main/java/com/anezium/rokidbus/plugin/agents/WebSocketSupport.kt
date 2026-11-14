@@ -126,18 +126,19 @@ internal class ConnectionDeadlines(
     }
 }
 
-internal fun webSocketUrl(hostInput: String, port: Int): String {
+/** [secure] forces `wss://`, whatever scheme [hostInput] was written with: a pinned peer never downgrades. */
+internal fun webSocketUrl(hostInput: String, port: Int, secure: Boolean = false): String {
     val input = hostInput.trim().trimEnd('/')
     if (input.startsWith("ws://", ignoreCase = true) ||
         input.startsWith("wss://", ignoreCase = true)
     ) {
         val uri = URI(input)
-        val scheme = uri.scheme.lowercase()
+        val scheme = if (secure) "wss" else uri.scheme.lowercase()
         val host = uri.host ?: throw IllegalArgumentException("Invalid WebSocket host")
         val renderedHost = if (host.contains(':')) "[$host]" else host
         val path = uri.rawPath?.takeIf { it.isNotBlank() && it != "/" }.orEmpty()
         return "$scheme://$renderedHost:$port$path"
     }
     val renderedHost = if (input.contains(':') && !input.startsWith("[")) "[$input]" else input
-    return "ws://$renderedHost:$port"
+    return "${if (secure) "wss" else "ws"}://$renderedHost:$port"
 }

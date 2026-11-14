@@ -390,8 +390,8 @@ class AddComputerActivity : Activity() {
             return
         }
         pairingSummary.text = when (val parsed = AgentdPairingParser.parse(raw)) {
-            is AgentdPairingParseResult.Valid ->
-                "Parsed: ${parsed.config.name} · ${parsed.config.host}:${parsed.config.port}"
+            is AgentdPairingParseResult.Valid -> configStore.agentdPairingRefusal(parsed.config)
+                ?: "Parsed: ${parsed.config.name} · ${parsed.config.host}:${parsed.config.port}"
             is AgentdPairingParseResult.Invalid -> parsed.reason
         }
     }
@@ -414,7 +414,11 @@ class AddComputerActivity : Activity() {
             toast("Paste pairing data first.")
             return
         }
-        configStore.saveAgentd(config, configStore.load().agentdEnabled)
+        if (!configStore.saveAgentd(config, configStore.load().agentdEnabled)) {
+            pairingSummary.text = configStore.agentdPairingRefusal(config)
+            toast("Fix the pairing data first.")
+            return
+        }
         pairingField.text.clear()
         pairingSummary.text = "Paired: ${config.name} · ${config.host}:${config.port}"
         if (test) {

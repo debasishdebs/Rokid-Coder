@@ -430,6 +430,7 @@ class AgentdWireTest {
             touchMachineSeen = {},
             scope = scope,
             onMachineTrusted = {},
+            tlsIdentity = FixturePhoneTlsIdentity(),
             onEvent = { events += it },
         )
         val dialer = Socket(listener.inetAddress, listener.localPort)

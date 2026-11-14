@@ -93,10 +93,12 @@ class AgentdProtocolCodec {
         detailMessageCounts.clear()
     }
 
-    fun hello(token: String, versionName: String): String = JSONObject()
+    /** [steer] (R44) is for the hello of a pinned `wss://` link only; the caller decides that. */
+    fun hello(token: String, versionName: String, steer: String? = null): String = JSONObject()
         .put("type", "hello")
         .put("v", 1)
         .put("token", token)
+        .apply { if (steer != null) put("steer", steer) }
         .put(
             "client",
             JSONObject()

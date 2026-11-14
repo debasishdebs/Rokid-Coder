@@ -108,6 +108,8 @@ internal data class SettingsUiState(
     val alerts: AlertSettings,
     val batteryAllowed: Boolean,
     val batteryFrozen: Boolean,
+    /** R75: the first 16 hex digits, grouped, to hold against agentd's log; null until read. */
+    val phoneFingerprint: String? = null,
 )
 
 internal class SettingsActions(
@@ -224,6 +226,12 @@ private fun ComputersCard(state: SettingsUiState, actions: SettingsActions) {
                 } else {
                     Text("›", style = MaterialTheme.typography.titleLarge, color = AgentsColors.InkSoft)
                 }
+            }
+        }
+        state.phoneFingerprint?.let { fingerprint ->
+            Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("phone_fingerprint")) {
+                Text("This phone's fingerprint", style = MaterialTheme.typography.titleMedium)
+                Text(fingerprint, style = MaterialTheme.typography.bodyMedium, color = AgentsColors.InkSoft)
             }
         }
         SecondaryAction("Add a computer", actions.onAddComputer, tag = "add_computer")

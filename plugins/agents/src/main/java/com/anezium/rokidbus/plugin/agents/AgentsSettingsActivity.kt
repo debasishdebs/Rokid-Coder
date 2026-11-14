@@ -27,8 +27,10 @@ import com.anezium.rokidbus.plugin.agents.ui.SettingsUiState
 import com.anezium.rokidbus.plugin.agents.ui.linkLine
 import com.anezium.rokidbus.plugin.agents.ui.theme.AgentsTheme
 import com.anezium.rokidbus.plugin.agents.ui.trustLabel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 /**
@@ -41,6 +43,9 @@ class AgentsSettingsActivity : ComponentActivity() {
     private val configStore by lazy { AgentsConfigStore(applicationContext) }
     private var state by mutableStateOf<SettingsUiState?>(null)
     private var liveLink: LinkMachine? = null
+
+    /** Read once, off the main thread: the first read makes the keystore key. */
+    private var phoneFingerprint: String? = null
 
     /** The answer re-reads the screen, so the "Notifications off" line follows a no. */
     private val notificationPermission =
@@ -58,6 +63,12 @@ class AgentsSettingsActivity : ComponentActivity() {
             }
         }
         observeLink()
+        lifecycleScope.launch {
+            phoneFingerprint = withContext(Dispatchers.IO) {
+                runCatching { KeystorePhoneTlsIdentity().fingerprint256() }.getOrNull()
+            }?.let(CertPins::display)
+            refresh()
+        }
         if (configStore.load().shouldMonitor) {
             AgentsMonitorService.reconcile(applicationContext)
         }
@@ -169,6 +180,7 @@ class AgentsSettingsActivity : ComponentActivity() {
             // that demonstrably froze this app would be the screen lying about what it reports.
             batteryAllowed = batteryExemptionGranted(this),
             batteryFrozen = suspended,
+            phoneFingerprint = phoneFingerprint,
         )
     }
 
@@ -189,9 +201,11 @@ class AgentsSettingsActivity : ComponentActivity() {
             )
         }
         val paired = config.agentd ?: return rows
+        val pairedSub = "Paired by hand · ${paired.host}:${paired.port}"
         return rows + ComputerRow(
             title = paired.name,
-            sub = "Paired by hand · ${paired.host}:${paired.port}",
+            // agentd lets only a pinned link with the steering secret approve.
+            sub = if (paired.canSteer) pairedSub else "$pairedSub · ${PairingCopy.REPAIR_TO_STEER}",
             connected = false,
             machineId = null,
         )

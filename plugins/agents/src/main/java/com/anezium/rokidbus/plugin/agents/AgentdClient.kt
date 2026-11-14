@@ -17,11 +17,18 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * The paired path: the phone dials agentd's WebSocket. A pairing with a pin
+ * (`fp`) dials `wss://` through [pinnedClient] only, and never anything else;
+ * one without is the legacy `ws://` link, monitor-only. Steering needs the pin
+ * and the steering secret together, which only a pinned hello carries.
+ */
 class AgentdClient(
     private val httpClient: OkHttpClient,
     private val store: AgentSessionStore,
     private val scope: CoroutineScope,
     private val versionName: String,
+    private val pinnedClient: (pin: String) -> OkHttpClient = { pin -> pinnedOkHttpClient(httpClient, pin) },
     onEvent: (AgentdEvent) -> Unit = AgentsRuntime::emitEvent,
 ) {
     private var loopJob: Job? = null
@@ -95,11 +102,23 @@ class AgentdClient(
     }
 
     private suspend fun runConnectionLoop(config: AgentdConfig, generation: Long) {
+        val pin = when (val parsed = CertPins.parse(config.fp)) {
+            PinParse.Absent -> null
+            is PinParse.Valid -> parsed.fp
+            // A stored pin that no longer reads is still a pin: refused, never dialled as ws://.
+            PinParse.Malformed -> {
+                if (sockets.isCurrent(generation)) {
+                    store.setConnection(AgentProvider.CLAUDE, ConnectionState.AUTH_FAILED, PairingCopy.BAD_FINGERPRINT)
+                }
+                return
+            }
+        }
+        val http = if (pin == null) httpClient else pinnedClient(pin)
         val backoff = ReconnectBackoff()
         while (scope.isActive && sockets.isCurrent(generation)) {
             store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING)
             val result = try {
-                connectOnce(config, generation, backoff)
+                connectOnce(config, pin, http, generation, backoff)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Throwable) {
@@ -138,6 +157,8 @@ class AgentdClient(
 
     private suspend fun connectOnce(
         config: AgentdConfig,
+        pin: String?,
+        http: OkHttpClient,
         generation: Long,
         backoff: ReconnectBackoff,
     ): ConnectionOutcome = coroutineScope {
@@ -162,7 +183,7 @@ class AgentdClient(
             }
         }
         val request = Request.Builder()
-            .url(webSocketUrl(config.host, config.port))
+            .url(webSocketUrl(config.host, config.port, secure = pin != null))
             .build()
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -171,8 +192,12 @@ class AgentdClient(
                     return
                 }
                 // The handshake precedes the binding, so it is written to this
-                // socket directly; every later line goes through the wire.
-                if (!webSocket.send(codec.hello(config.token, versionName))) {
+                // socket directly; every later line goes through the wire. On a
+                // pinned link OkHttp opens only after the pinned trust manager and
+                // hostname check passed on the TLS session itself, so neither the
+                // token nor the secret leaves before the pin is verified.
+                val steer = config.steer.takeIf { pin != null }
+                if (!webSocket.send(codec.hello(config.token, versionName, steer))) {
                     finish(ConnectionOutcome.Retry)
                     return
                 }
@@ -184,8 +209,9 @@ class AgentdClient(
                 when (val action = codec.parse(text)) {
                     is AgentdAction.HelloAcknowledged -> {
                         if (!connected.compareAndSet(false, true)) return
-                        // Plaintext WebSocket: monitor-only until the link is TLS with a verified pin.
-                        link.up(owner, secure = false, stillLive = ::isLive) ?: return
+                        // Steering only over the pinned wss whose hello carried the secret;
+                        // a plaintext link, or a pin without the secret, is monitor-only.
+                        link.up(owner, secure = pin != null && config.steer != null, stillLive = ::isLive) ?: return
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()
@@ -295,13 +321,21 @@ class AgentdClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (sockets.isCurrent(generation)) {
-                    finish(ConnectionOutcome.Retry)
+                    finish(
+                        when {
+                            // Final until re-paired: another certificate is another computer, or someone in between.
+                            pin != null && CertPins.isPinMismatch(t) -> ConnectionOutcome.AuthFailed(PairingCopy.CERT_CHANGED)
+                            // Retried over wss again, and said so; never over ws://.
+                            pin != null && CertPins.isTlsFailure(t) -> ConnectionOutcome.RetryWithDetail(SECURE_LINK_FAILED)
+                            else -> ConnectionOutcome.Retry
+                        },
+                    )
                 } else {
                     link.end(owner)
                 }
             }
         }
-        val candidate = httpClient.newWebSocket(request, listener)
+        val candidate = http.newWebSocket(request, listener)
         if (!sockets.install(generation, candidate)) {
             candidate.cancel()
             finish(ConnectionOutcome.Retry)
@@ -317,6 +351,7 @@ class AgentdClient(
 
     private companion object {
         const val BAD_TOKEN_CLOSE_CODE = 4401
+        const val SECURE_LINK_FAILED = "Secure link failed"
         const val DEADLINE_HELLO = "hello"
         const val DEADLINE_SNAPSHOT = "snapshot"
     }

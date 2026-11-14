@@ -42,13 +42,14 @@ class AgentsMonitorService : Service() {
             .build()
     }
     private val agentdClient by lazy {
+        // A pinned pairing dials through its own client, built from this one (pinnedOkHttpClient).
         AgentdClient(httpClient, AgentsRuntime.store, serviceScope, VERSION_NAME)
     }
     private val openClawClient by lazy {
         OpenClawClient(httpClient, AgentsRuntime.store, configStore, serviceScope, VERSION_NAME)
     }
     private val linkServer by lazy {
-        AgentdLinkServer(AgentsRuntime.store, configStore, serviceScope) { machineName ->
+        AgentdLinkServer(AgentsRuntime.store, configStore, serviceScope, KeystorePhoneTlsIdentity()) { machineName ->
             AgentsRuntime.announceLinkedMachine(machineName)
         }
     }

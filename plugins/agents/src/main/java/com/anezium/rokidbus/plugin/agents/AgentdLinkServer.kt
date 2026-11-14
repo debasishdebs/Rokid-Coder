@@ -20,6 +20,7 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import javax.net.ssl.SSLSocket
 
 /**
  * Inbound link from the PC daemons.
@@ -29,6 +30,10 @@ import java.net.SocketException
  * an administrator firewall rule for the reverse. Discovery follows the same
  * asymmetry — the daemon broadcasts, we answer by unicast, and Windows lets that
  * reply back in because it answers a broadcast the PC itself just sent.
+ *
+ * Every accepted connection is TLS with [tlsIdentity]: agentd holds the phone
+ * to the certificate it pinned (R45) before it writes its hello, so the token
+ * and everything after it travel encrypted, and the link may steer.
  */
 class AgentdLinkServer internal constructor(
     private val store: AgentSessionStore,
@@ -36,12 +41,14 @@ class AgentdLinkServer internal constructor(
     private val touchMachineSeen: (String) -> Unit,
     private val scope: CoroutineScope,
     private val onMachineTrusted: (String) -> Unit,
+    private val tlsIdentity: PhoneTlsIdentity,
     onEvent: (AgentdEvent) -> Unit,
 ) {
     constructor(
         store: AgentSessionStore,
         configStore: AgentsConfigStore,
         scope: CoroutineScope,
+        tlsIdentity: PhoneTlsIdentity,
         onMachineTrusted: (String) -> Unit = {},
     ) : this(
         store = store,
@@ -55,6 +62,7 @@ class AgentdLinkServer internal constructor(
         touchMachineSeen = { machineId -> configStore.touchMachineSeen(machineId) },
         scope = scope,
         onMachineTrusted = onMachineTrusted,
+        tlsIdentity = tlsIdentity,
         onEvent = AgentsRuntime::emitEvent,
     )
 
@@ -131,7 +139,7 @@ class AgentdLinkServer internal constructor(
     private suspend fun acceptLoop() {
         while (scope.isActive) {
             try {
-                val server = ServerSocket(LINK_PORT)
+                val server = tlsServerSocket(tlsIdentity, LINK_PORT)
                 serverSocket = server
                 while (scope.isActive) {
                     val socket = server.accept()
@@ -155,8 +163,10 @@ class AgentdLinkServer internal constructor(
         val codec = AgentdProtocolCodec()
         val gate = AgentdInboundGate(authorizeMachine)
         codec.reset()
-        connection.startWriter(scope)
         try {
+            // Before the writer and the first line: nothing is read or written until TLS is up.
+            connection.handshake()
+            connection.startWriter(scope)
             connection.lines { line ->
                 when (val decision = gate.receive(codec.parse(line))) {
                     is AgentdInboundDecision.HelloAccepted -> {
@@ -250,8 +260,8 @@ class AgentdLinkServer internal constructor(
      */
     private fun bind(connection: LinkConnection): Boolean = synchronized(clientLock) {
         if (client !== connection) return@synchronized false
-        // Plaintext TCP: monitor-only until the link is TLS with a verified pin.
-        link.up(connection.linkOwner, secure = false) != null
+        // TLS, and agentd sent its hello only after it found this phone's cert in its pinned set.
+        link.up(connection.linkOwner, secure = connection.tls) != null
     }
 
     private fun isActive(connection: LinkConnection): Boolean =
@@ -334,13 +344,7 @@ class AgentdLinkServer internal constructor(
     }
 
     private fun replyTo(socket: DatagramSocket, address: InetAddress, port: Int) {
-        val payload = JSONObject()
-            .put("nexus", "agents-phone")
-            .put("v", 1)
-            .put("port", LINK_PORT)
-            .put("name", android.os.Build.MODEL ?: "phone")
-            .toString()
-            .toByteArray(Charsets.UTF_8)
+        val payload = discoveryReply(android.os.Build.MODEL ?: "phone").toByteArray(Charsets.UTF_8)
         runCatching { socket.send(DatagramPacket(payload, payload.size, address, port)) }
     }
 
@@ -348,6 +352,16 @@ class AgentdLinkServer internal constructor(
         const val LINK_PORT = 8792
         const val DISCOVERY_PORT = 8793
         private const val RETRY_DELAY_MS = 2000L
+
+        /** `tls: true` tells agentd to dial TLS; once it has pinned a phone it dials nothing else. */
+        internal fun discoveryReply(name: String): String = JSONObject()
+            .put("nexus", "agents-phone")
+            .put("v", 1)
+            .put("port", LINK_PORT)
+            .put("name", name)
+            .put("tls", true)
+            .toString()
+
         private val HELLO_ACK = JSONObject()
             .put("type", "hello_ack")
             .put("v", 1)
@@ -413,6 +427,10 @@ internal class LinkConnection(private val socket: Socket) {
     /** This connection's claim on the link binding. */
     val linkOwner = LinkOwner()
 
+    /** True once a TLS handshake has completed on this connection. */
+    @Volatile var tls = false
+        private set
+
     /** Every line after the handshake, written in order by one coroutine. */
     private val outbound = Channel<String>(Channel.UNLIMITED)
 
@@ -428,6 +446,19 @@ internal class LinkConnection(private val socket: Socket) {
         socket.keepAlive = true
         // agentd pings every 30 seconds; 90 seconds tolerates two missed intervals.
         socket.soTimeout = LINK_IDLE_TIMEOUT_MS
+    }
+
+    /**
+     * Completes the TLS handshake under its own short deadline, so a peer that
+     * opens TCP and never speaks TLS is let go quickly. A plain socket is left
+     * as it is, and stays [tls] false.
+     */
+    fun handshake() {
+        if (socket !is SSLSocket) return
+        socket.soTimeout = TLS_HANDSHAKE_TIMEOUT_MS
+        socket.startHandshake()
+        socket.soTimeout = LINK_IDLE_TIMEOUT_MS
+        tls = true
     }
 
     fun lines(onLine: (String) -> Boolean) {
@@ -489,3 +520,4 @@ internal class LineTooLongException : IOException("LAN link frame exceeds 64 KiB
 
 internal const val MAX_LINK_LINE_CHARS = 64 * 1024
 internal const val LINK_IDLE_TIMEOUT_MS = 90_000
+internal const val TLS_HANDSHAKE_TIMEOUT_MS = 10_000

@@ -10,9 +10,29 @@ data class AgentdConfig(
     val port: Int,
     val token: String,
     val name: String,
+    /** agentd's certificate pin (Node `fingerprint256`); null for a legacy plaintext pairing. */
+    val fp: String? = null,
+    /** The steering secret (R44). Kept only with [fp], sent only in a pinned wss hello, never shown. */
+    val steer: String? = null,
 ) {
     val configured: Boolean
         get() = host.isNotBlank() && port in 1..65535 && token.isNotBlank()
+
+    /** Only a pinned pairing that holds the steering secret can steer; agentd trusts nothing less. */
+    val canSteer: Boolean
+        get() = fp != null && steer != null
+
+    // The secrets stay out of every string this object becomes.
+    override fun toString(): String = "AgentdConfig(name=$name, host=$host, port=$port, pinned=${fp != null})"
+}
+
+/** What the wearer reads when a pairing line is turned away or cannot steer. */
+internal object PairingCopy {
+    const val BAD_FINGERPRINT = "Pairing line has a bad fingerprint"
+    const val BAD_STEER = "Pairing line has a bad steering secret"
+    const val PINNED_NEEDS_FINGERPRINT = "Pairing line has no fingerprint — this computer is pinned"
+    const val CERT_CHANGED = "Computer's certificate changed — re-pair"
+    const val REPAIR_TO_STEER = "Re-pair to allow approvals"
 }
 
 data class OpenClawConfig(
@@ -63,8 +83,30 @@ object AgentdPairingParser {
             ?: return AgentdPairingParseResult.Invalid("Token is missing.")
         val name = json.nullableString("name", MAX_HUD_LABEL_CHARS) ?: host
         if (port !in 1..65535) return AgentdPairingParseResult.Invalid("Port is invalid.")
-        return AgentdPairingParseResult.Valid(AgentdConfig(host, port, token, name))
+        // A fingerprint that does not read is refused, never taken as a legacy line without one.
+        val fp = if (!json.has("fp")) {
+            null
+        } else {
+            when (val pin = CertPins.parse(json.opt("fp") as? String ?: "")) {
+                is PinParse.Valid -> pin.fp
+                PinParse.Absent, PinParse.Malformed ->
+                    return AgentdPairingParseResult.Invalid(PairingCopy.BAD_FINGERPRINT)
+            }
+        }
+        val steer = if (!json.has("steer")) {
+            null
+        } else {
+            (json.opt("steer") as? String)?.takeIf(STEER::matches)
+                ?: return AgentdPairingParseResult.Invalid(PairingCopy.BAD_STEER)
+        }
+        // Without a pin there is no wss to carry the secret, so it is not kept at all.
+        return AgentdPairingParseResult.Valid(
+            AgentdConfig(host, port, token, name, fp = fp, steer = steer?.takeIf { fp != null }),
+        )
     }
+
+    /** base64url, as agentd's `randomBytes(32).toString("base64url")` writes it. */
+    private val STEER = Regex("[A-Za-z0-9_-]{32,128}")
 }
 
 data class TrustedMachine(
@@ -123,6 +165,9 @@ class AgentsConfigStore internal constructor(
                 port = prefs.getInt(KEY_AGENTD_PORT, 8792),
                 token = prefs.getString(KEY_AGENTD_TOKEN, "").orEmpty(),
                 name = prefs.getString(KEY_AGENTD_NAME, it).orEmpty(),
+                // As stored: a pin that no longer parses is refused by the client, not dropped here.
+                fp = prefs.getString(KEY_AGENTD_FP, null),
+                steer = prefs.getString(KEY_AGENTD_STEER, null),
             )
         }?.takeIf(AgentdConfig::configured)
         val openClawHost = prefs.getString(KEY_OPENCLAW_HOST, null)
@@ -141,14 +186,26 @@ class AgentsConfigStore internal constructor(
         )
     }
 
-    fun saveAgentd(config: AgentdConfig?, enabled: Boolean) {
+    /**
+     * Why [config] may not replace the stored pairing, or null when it may. A
+     * pinned slot takes only another pinned line; the pin goes only by Forget
+     * (`saveAgentd(null, …)`) or by re-pairing with a line that carries one.
+     */
+    fun agentdPairingRefusal(config: AgentdConfig): String? =
+        PairingCopy.PINNED_NEEDS_FINGERPRINT.takeIf {
+            config.fp == null && prefs.getString(KEY_AGENTD_FP, null) != null
+        }
+
+    /** False, with nothing written, when [agentdPairingRefusal] turns [config] away. */
+    fun saveAgentd(config: AgentdConfig?, enabled: Boolean): Boolean {
+        if (config != null && agentdPairingRefusal(config) != null) return false
         val current = load().agentd
         prefs.edit().apply {
             putBoolean(KEY_AGENTD_ENABLED, enabled)
             // A different computer, or none: what the old one proved is not this one's.
-            if (config == null ||
-                (current != null && (current.host != config.host || current.port != config.port || current.token != config.token))
-            ) {
+            val sameComputer = current != null && config != null && current.host == config.host &&
+                current.port == config.port && current.token == config.token && current.fp == config.fp
+            if (config == null || (current != null && !sameComputer)) {
                 remove(v2SeenKey(DIALLED))
             }
             if (config == null) {
@@ -156,13 +213,18 @@ class AgentsConfigStore internal constructor(
                 remove(KEY_AGENTD_PORT)
                 remove(KEY_AGENTD_TOKEN)
                 remove(KEY_AGENTD_NAME)
+                remove(KEY_AGENTD_FP)
+                remove(KEY_AGENTD_STEER)
             } else {
                 putString(KEY_AGENTD_HOST, config.host)
                 putInt(KEY_AGENTD_PORT, config.port)
                 putString(KEY_AGENTD_TOKEN, config.token)
                 putString(KEY_AGENTD_NAME, config.name)
+                if (config.fp != null) putString(KEY_AGENTD_FP, config.fp) else remove(KEY_AGENTD_FP)
+                if (config.steer != null) putString(KEY_AGENTD_STEER, config.steer) else remove(KEY_AGENTD_STEER)
             }
         }.apply()
+        return true
     }
 
     /**
@@ -473,6 +535,8 @@ class AgentsConfigStore internal constructor(
         const val KEY_AGENTD_PORT = "agentd.port"
         const val KEY_AGENTD_TOKEN = "agentd.token"
         const val KEY_AGENTD_NAME = "agentd.name"
+        const val KEY_AGENTD_FP = "agentd.fp"
+        const val KEY_AGENTD_STEER = "agentd.steer"
         const val KEY_OPENCLAW_ENABLED = "openclaw.enabled"
         const val KEY_OPENCLAW_HOST = "openclaw.host"
         const val KEY_OPENCLAW_PORT = "openclaw.port"
