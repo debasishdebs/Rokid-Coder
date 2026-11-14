@@ -553,12 +553,15 @@ function claudeBanner(status: StatusProbe, color: boolean): string {
     : markCommands([UNREACHABLE, CLAUDE_LIMITS_LINE, CLAUDE_START_LINE], color);
 }
 
-/** Resolves at the first key on the terminal, or after `ms`; the key is consumed. */
-function waitForKey(ms: number): Promise<void> {
+/**
+ * Resolves at the first key on the terminal, or after `ms`; the key is
+ * consumed. N7: raw mode turns Ctrl-C into a byte, so it is told apart: true.
+ */
+function waitForKey(ms: number): Promise<boolean> {
   const stdin = process.stdin;
   return new Promise((resolve) => {
     let timer: NodeJS.Timeout | undefined;
-    const done = (): void => {
+    const done = (data?: Buffer | string): void => {
       clearTimeout(timer);
       stdin.off("data", done);
       stdin.off("end", done);
@@ -568,7 +571,7 @@ function waitForKey(ms: number): Promise<void> {
         // the terminal is already gone
       }
       stdin.pause();
-      resolve();
+      resolve(data !== undefined && String(data).includes("\x03"));
     };
     timer = setTimeout(done, ms);
     try {
@@ -608,7 +611,11 @@ async function runCodex(args: string[]): Promise<void> {
   const hintWait = CODEX_HINT_WAIT_MS();
   if (process.stdin.isTTY && !process.stdin.readableEnded && hintWait > 0) {
     process.stderr.write(markCommands([CODEX_WAIT_LINE], color));
-    await waitForKey(hintWait);
+    if (await waitForKey(hintWait)) {
+      // Ctrl-C is no, as it would be at any prompt: Codex is never started.
+      restoreTerminal(saved);
+      process.exit(128 + (signalNumber("SIGINT") ?? 2));
+    }
   }
 
   // Codex shares rk's process group and owns the terminal while it runs, so a

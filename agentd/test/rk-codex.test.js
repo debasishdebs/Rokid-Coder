@@ -263,6 +263,20 @@ test("rk_codex_hint_waits_for_key_or_3s_on_tty", async () => {
   });
 });
 
+// N7: Ctrl-C at the hint is the user saying no, not "any key".
+test("ctrl_c_at_the_codex_hint_aborts_with_130", async () => {
+  await withTempDir(async (dir) => {
+    const argvFile = path.join(dir, "argv.json");
+    const { env } = await rkEnv(dir, { ROKID_RK_CODEX_HINT_WAIT_MS: "3000", FAKE_ARGV_FILE: argvFile });
+    const run = inPty(process.execPath, [RK, "codex"], env);
+    await run.until("press any key to start it now");
+    run.write("\x03");
+    assert.deepEqual(await run.exited, { code: 128 + SIG.SIGINT, signal: null });
+    assert.equal(run.out.includes("fake-codex ready"), false, run.out);
+    assert.equal(fs.existsSync(argvFile), false, "Codex was never started");
+  });
+});
+
 test("rk_codex_fatal_error_ends_codex_and_restores_terminal", async () => {
   await withTempDir(async (dir) => {
     const events = path.join(dir, "events");
