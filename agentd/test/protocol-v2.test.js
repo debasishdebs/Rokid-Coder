@@ -8,8 +8,8 @@ const { SessionStore } = require("../dist/session-store.js");
 const { silentLogger } = require("../dist/logger.js");
 const { PhoneSettingsStore, DEFAULT_ALERT_TIMINGS } = require("../dist/phone-settings.js");
 const { authorize, classifyFrame, gateFrame } = require("../dist/protocol-v2.js");
-const { buildFrame, createFakePhone } = require("./fake-phone.js");
-const { withDaemon, postHook, settle } = require("./helpers/daemon.js");
+const { buildFrame } = require("./fake-phone.js");
+const { withDaemon, pinFakePhone, postHook, settle } = require("./helpers/daemon.js");
 
 const TRANSPORTS = ["phonelink", "wshub"];
 
@@ -183,16 +183,15 @@ test("a_rejected_frame_never_consumes_its_msgid_and_one_without_an_id_is_refused
 });
 
 test("a_frame_refused_before_apply_does_not_consume_its_msgid", async () => {
-  // Refused at the gate over plaintext, then the same id over a trusted link.
+  // Refused at the gate on a channel that is not trusted, then the same id over a trusted link.
   const msgId = "reused-1";
   const frame = { type: "mode_set", v: 2, sessionKey: "claude:s1", mode: "acceptEdits", confirmed: false, msgId };
   const seeded = { transport: "wshub", attached: [{ provider: "claude", id: "s1" }] };
-  await withDaemon({ ...seeded, tls: false }, async ({ phone, coderDir }) => {
-    phone.send(frame);
-    assert.equal((await ackFor(phone, msgId)).error, "monitor_only");
+  await withDaemon({ ...seeded, tls: true }, async ({ daemon, phone, coderDir }) => {
+    const acks = [];
+    assert.equal(gateFrame(frame, { transport: "wshub", trusted: false, send: (f) => acks.push(f) }), false);
+    assert.equal(acks[0].error, "monitor_only");
     assert.equal(await exists(path.join(coderDir, "applied-ids.json")), false);
-  });
-  await withDaemon({ ...seeded, tls: true }, async ({ daemon, phone }) => {
     // Refused by a check (nothing named "s2" is attached), id still free.
     const stranger = { ...frame, sessionKey: "claude:s2" };
     phone.send(stranger);
@@ -637,13 +636,12 @@ test("models_request_returns_codex_models", async () => {
   await withDaemon(
     {
       transport: "wshub",
-      tls: false,
       attached: [{ provider: "codex", id: "t1" }, { provider: "claude", id: "c1" }],
     },
     async ({ daemon, phone }) => {
       daemon.codex.listModels = async () => ["gpt-6-luna", "gpt-6"];
       daemon.codex.appliedSettings.set("t1", { model: "gpt-6-luna", effort: "low" });
-      // A monitor frame: fine over plaintext.
+      // A monitor frame: it needs no steering grant.
       phone.send({ type: "models_request", v: 2, sessionKey: "codex:t1" });
       const models = await phone.waitFor("models", (f) => f.sessionKey === "codex:t1");
       assert.deepEqual(models.models, ["gpt-6-luna", "gpt-6"]);
@@ -695,21 +693,22 @@ test("persisted_defaults_reach_sessions_attached_before_the_start", async () => 
   );
 });
 
-test("plaintext_defaults_set_rejected_and_not_persisted_on_both_transports", async () => {
-  for (const transport of TRANSPORTS) {
-    await withDaemon({ transport, tls: false }, async ({ daemon, phone, coderDir }) => {
+test("defaults_set_on_an_untrusted_channel_is_rejected_and_not_persisted", async () => {
+  // No accepted link is untrusted any more; the gate stays as defence in depth.
+  await withDaemon({ transport: "wshub" }, async ({ daemon, coderDir }) => {
+    for (const transport of TRANSPORTS) {
+      const acks = [];
       const frame = buildFrame("defaults_set", ["acceptEdits", "acceptEdits"]);
-      phone.send(frame);
-      const ack = await ackFor(phone, frame.msgId);
-      assert.deepEqual([ack.result, ack.error], ["rejected", "monitor_only"]);
+      const channel = { transport, trusted: false, send: (f) => acks.push(f) };
+      assert.equal(gateFrame(frame, channel) && daemon.phoneV2.handle(frame, channel), false);
+      assert.deepEqual([acks[0].msgId, acks[0].result, acks[0].error], [frame.msgId, "rejected", "monitor_only"]);
       assert.equal(await exists(path.join(coderDir, "settings.json")), false);
-
-      daemon.attachRegistry.attach("claude", "fresh", "plugin");
-      assert.equal(daemon.approvalPolicy.get("claude:fresh"), "ask");
-      daemon.attachRegistry.attach("codex", "t1", "plugin");
-      assert.equal(daemon.approvalPolicy.get("codex:t1"), "ask");
-    });
-  }
+    }
+    daemon.attachRegistry.attach("claude", "fresh", "plugin");
+    assert.equal(daemon.approvalPolicy.get("claude:fresh"), "ask");
+    daemon.attachRegistry.attach("codex", "t1", "plugin");
+    assert.equal(daemon.approvalPolicy.get("codex:t1"), "ask");
+  });
 });
 
 const STEERING_FRAMES = [
@@ -751,50 +750,43 @@ test("launcher_command_is_steering_and_rejected_not_launcher", async () => {
   );
 });
 
-test("every_steering_frame_rejected_over_plaintext_on_both_transports", async () => {
+test("every_steering_frame_is_rejected_by_the_gate_on_an_untrusted_channel", async () => {
+  // No accepted link is untrusted any more; the gate stays as defence in depth.
   for (const transport of TRANSPORTS) {
     await withDaemon(
-      {
-        transport,
-        tls: false,
-        attached: [{ provider: "claude", id: "s1" }, { provider: "codex", id: "t1" }],
-      },
-      async ({ daemon, phone, httpPort, wsPort, token, steer, agentFingerprint, coderDir }) => {
+      { transport, attached: [{ provider: "claude", id: "s1" }, { provider: "codex", id: "t1" }] },
+      async ({ daemon, httpPort, coderDir }) => {
         await postHook(httpPort, sessionStart("s1"));
-        // A monitor-only phone cannot answer a Stop, so nothing is held for it.
-        assert.deepEqual(await postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" }), {});
-        // A second, trusted phone (wss with the steering secret) can, so the Stop
-        // is held for it: a steerable state the plaintext phone must not be able to touch.
-        const trusted = createFakePhone({ transport: "wshub", tls: true, pin: agentFingerprint, steer });
-        await trusted.start({ port: wsPort, host: "127.0.0.1", token });
-        await trusted.waitFor("snapshot");
+        // The trusted phone can answer a Stop, so it is held: a steerable state
+        // an untrusted channel must not be able to touch.
         const held = postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" });
         await settle();
         assert.equal(daemon.stopWait.state("s1").waiting, true, "held for the trusted phone");
+        const sent = [];
+        const channel = { transport, trusted: false, send: (f) => sent.push(f) };
         for (const frame of STEERING_FRAMES) {
           assert.equal(classifyFrame(frame.type), "steering", frame.type);
           assert.deepEqual(authorize(frame, { trusted: false }), { ok: false, error: "monitor_only" });
-          phone.send(frame);
+          assert.equal(gateFrame(frame, channel), false, frame.type);
           const id = frame.msgId ?? frame.id ?? frame.requestId;
-          const ack = await ackFor(phone, id);
+          const ack = sent.find((f) => f.type === "ack" && f.msgId === id);
           assert.deepEqual([ack.result, ack.error, ack.v], ["rejected", "monitor_only", 2], frame.type);
         }
         // v1 frames that expect their own reply do not wait for one that never comes.
-        assert.equal((await phone.waitFor("session_input_result", (f) => f.id === "r-2")).ok, false);
-        assert.equal((await phone.waitFor("thread_started", (f) => f.id === "r-3")).ok, false);
+        assert.equal(sent.find((f) => f.type === "session_input_result" && f.id === "r-2").ok, false);
+        assert.equal(sent.find((f) => f.type === "thread_started" && f.id === "r-3").ok, false);
 
         // Nothing ran: no mode, no delivery, no recorded id.
         assert.equal(daemon.approvalPolicy.get("claude:s1"), "ask");
         assert.deepEqual(
           daemon.stopWait.state("s1"),
           { waiting: true, continuationsLeft: 8 },
-          "still held: no follow-up from the plaintext phone was delivered into it",
+          "still held: no follow-up from the untrusted channel was delivered into it",
         );
         assert.equal(await exists(path.join(coderDir, "applied-ids.json")), false);
         assert.equal(await exists(path.join(coderDir, "settings.json")), false);
         daemon.stopWait.releaseByLaptop("s1");
         assert.deepEqual(await held, {});
-        trusted.close();
       },
     );
   }
@@ -893,11 +885,13 @@ test("heading_is_read_from_a_transcript_attached_mid_conversation", async () => 
 test("fake_phone_cli_pairs_prints_frames_and_sends_a_frame_from_argv", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
-    async ({ daemon, httpPort, wsPort, token, steer, agentFingerprint }) => {
+    async ({ daemon, httpPort, wsPort, token, steer, agentFingerprint, coderDir }) => {
       await postHook(httpPort, sessionStart("s1"));
+      // The CLI phone makes its own cert, so it is admitted the way a new phone is: inside the window.
+      pinFakePhone({ coderDir }, { arm: true });
       const child = spawn(process.execPath, [
         path.join(__dirname, "fake-phone.js"),
-        "--transport", "wshub", "--port", String(wsPort), "--token", token, "--tls", "true",
+        "--transport", "wshub", "--port", String(wsPort), "--token", token,
         "--pin", agentFingerprint, "--wait", "1500",
         "mode_set", "claude:s1", "acceptEdits",
       ], { env: { ...process.env, FAKE_PHONE_STEER: steer } });

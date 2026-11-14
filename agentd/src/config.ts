@@ -64,17 +64,14 @@ function isWaitLimitSec(value: unknown): value is number {
 const TLS_TARGET_PREFIX = "tls://";
 
 /**
- * A phone to dial: `host`, `host:port`, or `tls://host[:port]` for a phone that
- * serves TLS. Without the prefix a target is dialled in plaintext (monitor-only)
- * unless agentd already holds a pin for the host.
+ * A phone to dial: `host` or `host:port`. Every phone link is TLS, so a target
+ * says nothing about it; the `tls://` prefix older configs wrote is still
+ * accepted and means nothing.
  */
-export function parsePhoneTarget(
-  value: string,
-): { host: string; port: number; tls?: true } | undefined {
-  const tls = value.startsWith(TLS_TARGET_PREFIX);
-  const target = tls ? value.slice(TLS_TARGET_PREFIX.length) : value;
-  const parsed = parsePlainTarget(target);
-  return parsed ? { ...parsed, ...(tls ? { tls: true as const } : {}) } : undefined;
+export function parsePhoneTarget(value: string): { host: string; port: number } | undefined {
+  return parsePlainTarget(
+    value.startsWith(TLS_TARGET_PREFIX) ? value.slice(TLS_TARGET_PREFIX.length) : value,
+  );
 }
 
 function parsePlainTarget(value: string): { host: string; port: number } | undefined {

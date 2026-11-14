@@ -38,8 +38,6 @@ test("non_command_prompt_is_undefined", () => {
 const ATTACH_TEXT =
   'Attached to Rokid-Coder (plugin mode). Works: progress, approvals, questions, context, voice follow-ups while waiting. Not available: compact, model change — use "rk claude" for those.';
 
-const UNPAIRED_HINT = "No phone paired yet — type /rokid:pair";
-
 for (const transport of ["phonelink", "wshub"]) {
   test(`attach_hook_blocks_prompt_and_attaches (${transport})`, async () => {
     await withDaemon({ transport }, async ({ daemon, phone, httpPort, coderDir }) => {
@@ -50,7 +48,7 @@ for (const transport of ["phonelink", "wshub"]) {
         prompt: "/rokid",
       });
       assert.equal(reply.decision, "block");
-      assert.equal(reply.reason, `${ATTACH_TEXT}\n${UNPAIRED_HINT}`, "no phone is paired in this setup");
+      assert.equal(reply.reason, ATTACH_TEXT, "the connected phone is paired: a link is only ever a pinned one");
       assert.match(reply.reason, /Not available: compact, model change/);
       assert.equal(daemon.attachRegistry.isAttached("claude", "s1"), true);
       assert.equal(daemon.attachRegistry.mode("claude", "s1"), "plugin");
@@ -93,7 +91,7 @@ for (const transport of ["phonelink", "wshub"]) {
       assert.equal(daemon.attachRegistry.isAttached("claude", "s2"), false);
 
       const attached = await postHook(httpPort, expansion("on"));
-      assert.deepEqual(attached, { decision: "block", reason: `${ATTACH_TEXT}\n${UNPAIRED_HINT}` });
+      assert.deepEqual(attached, { decision: "block", reason: ATTACH_TEXT });
       assert.equal(daemon.attachRegistry.isAttached("claude", "s2"), true);
       await phone.waitFor("session_upsert", (f) => f.session.id === "s2");
 
@@ -264,6 +262,8 @@ test("rokid_pair_reply_never_contains_token_steer_or_fingerprint", async () => {
 
 test("rokid_status_reports_mode_paired_agentd_next_step", async () => {
   await withDaemon({ transport: "wshub" }, async ({ httpPort, coderDir }) => {
+    // A connected phone is always a pinned one; forgetting it is how a setup is unpaired.
+    pinsOf(coderDir).forgetAll();
     const status = async () => (await postHook(httpPort, claudeCommand("s5", "status"))).reason;
     assert.equal(
       await status(),
@@ -286,6 +286,7 @@ test("rokid_status_reports_mode_paired_agentd_next_step", async () => {
 
 test("rokid_on_unpaired_adds_pair_hint", async () => {
   await withDaemon({ transport: "wshub" }, async ({ httpPort, coderDir }) => {
+    pinsOf(coderDir).forgetAll();
     const claude = (await postHook(httpPort, claudeCommand("s6", "on"))).reason;
     assert.ok(claude.endsWith("\nNo phone paired yet — type /rokid:pair"), claude);
     const codex = (await postHook(httpPort, codexPhrase("t6", "on"), CODEX)).reason;

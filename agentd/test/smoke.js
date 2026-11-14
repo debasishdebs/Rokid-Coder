@@ -6,6 +6,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const WebSocket = require("ws");
+const { PinStore } = require("../dist/tls.js");
+const { phoneCert } = require("./helpers/tls.js");
 
 const projectRoot = path.resolve(__dirname, "..");
 
@@ -109,6 +111,8 @@ async function main() {
     cwd: projectRoot,
     env: {
       ...process.env,
+      // The Rokid-Coder state dir defaults to ~/.rokid-coder: keep it, and its pins, in the temp dir.
+      HOME: tempDir,
       NEXUS_AGENTD_STATE_DIR: stateDir,
       NEXUS_AGENTD_CLAUDE_DIR: claudeDir,
     },
@@ -131,7 +135,12 @@ async function main() {
     };
     postWithCurl({ ...base, hook_event_name: "SessionStart", source: "startup" });
 
-    socket = new WebSocket("ws://127.0.0.1:8792");
+    // The phone port is wss only, and admits a pinned client cert with the steering secret.
+    const tlsDir = path.join(tempDir, ".rokid-coder", "tls");
+    const phone = await phoneCert("smoke-phone");
+    new PinStore(path.join(tlsDir, "phone-pins.json")).add(phone.fingerprint256);
+    const steer = fs.readFileSync(path.join(tlsDir, "steer.secret"), "utf8").trim();
+    socket = new WebSocket("wss://127.0.0.1:8792", { rejectUnauthorized: false, key: phone.key, cert: phone.cert });
     const frames = [];
     frames.waiters = [];
     socket.on("message", (data) => {
@@ -150,6 +159,7 @@ async function main() {
       type: "hello",
       v: 1,
       token: config.token,
+      steer,
       client: { name: "plugin-agents", version: "smoke" },
     }));
     const helloAck = await waitForFrame(frames, (frame) => frame.type === "hello_ack");
@@ -163,6 +173,7 @@ async function main() {
     const upsert = await waitForFrame(frames, (frame) => frame.type === "session_upsert");
 
     assert.equal(helloAck.v, 1);
+    assert.equal(helloAck.steering, true);
     assert.equal(snapshot.sessions.some((session) => session.id === "smoke-session"), true);
     assert.equal(upsert.session.status, "working");
     assert.equal(upsert.seq, snapshot.seq + 1);

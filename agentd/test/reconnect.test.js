@@ -24,8 +24,8 @@ const permission = (sessionId, command = "ls") => ({
 });
 
 /** A phone that connects to the daemon's WsHub after the first one went away. */
-async function reconnectPhone(wsPort, token, steer, tls = true) {
-  const phone = createFakePhone({ transport: "wshub", tls, steer, pin: (await agentCert()).fingerprint256 });
+async function reconnectPhone(wsPort, token, steer) {
+  const phone = createFakePhone({ transport: "wshub", steer, pin: (await agentCert()).fingerprint256 });
   await phone.start({ port: wsPort, host: "127.0.0.1", token });
   await phone.waitFor("snapshot");
   return phone;
@@ -402,7 +402,7 @@ test("one_done_per_stop", async () => {
   );
 });
 
-test("a_monitor_or_second_client_does_not_replay_approvals_to_the_trusted_phone", async () => {
+test("a_second_client_does_not_replay_approvals_to_the_trusted_phone", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
     async ({ daemon, phone, httpPort, wsPort, token, steer }) => {
@@ -413,7 +413,6 @@ test("a_monitor_or_second_client_does_not_replay_approvals_to_the_trusted_phone"
       const count = (type) => phone.frames.filter((f) => f.type === type).length;
       const before = { requests: count("approval_request"), alerts: count("alert") };
 
-      const monitor = await reconnectPhone(wsPort, token, undefined, false);
       const second = await reconnectPhone(wsPort, token, steer);
       try {
         await settle(150);
@@ -421,7 +420,6 @@ test("a_monitor_or_second_client_does_not_replay_approvals_to_the_trusted_phone"
         assert.equal(count("alert"), before.alerts, "the shown alert was not sent again");
         assert.equal(daemon.phoneV2.alerts.current().state, "shown");
       } finally {
-        monitor.close();
         second.close();
       }
       daemon.approvals.handleDecision([...daemon.approvals.pending.keys()][0], "deny");

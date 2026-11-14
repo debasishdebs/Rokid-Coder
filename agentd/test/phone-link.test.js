@@ -1,7 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fsp = require("node:fs/promises");
-const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const tls = require("node:tls");
@@ -169,7 +168,7 @@ test("phone target refresh picks up disk changes and keeps the last good list on
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "nexus-agentd-phone-link-"));
   const sockets = [];
   let connections = 0;
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     connections += 1;
     collectLines(socket);
@@ -221,7 +220,7 @@ test("static phone targets dial and complete the existing handshake", async () =
   const sockets = [];
   let acceptConnection;
   const accepted = new Promise((resolve) => { acceptConnection = resolve; });
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     acceptConnection({ socket, lines: collectLines(socket) });
   });
@@ -249,7 +248,7 @@ test("static phone targets dial and complete the existing handshake", async () =
 test("static phone refusal backoff prevents an immediate redial", async () => {
   const sockets = [];
   let connections = 0;
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     connections += 1;
     const lines = collectLines(socket);
@@ -303,7 +302,7 @@ test("TCP stays dialling until hello_ack, then sends data and accepts decisions"
   });
 
   try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone", tls: true });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone" });
     const { socket, lines } = await accepted;
     const hello = await lines.waitFor((frame) => frame.type === "hello");
     assert.equal(hello.token, config.token);
@@ -371,7 +370,7 @@ test("the TLS dial presents agentd's own cert as the client certificate (R114)",
   const { link, store } = createLink({ clientCert: { key: identity.key, cert: identity.cert } });
 
   try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone", tls: true });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone" });
     const { socket, lines } = await accepted;
     await lines.waitFor((frame) => frame.type === "hello");
     assert.equal(socket.getPeerCertificate().fingerprint256, identity.fingerprint256);
@@ -388,7 +387,7 @@ test("authenticated fs_list frames validate ids and return filesystem listings",
   const sockets = [];
   let acceptConnection;
   const accepted = new Promise((resolve) => { acceptConnection = resolve; });
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     acceptConnection({ socket, lines: collectLines(socket) });
   });
@@ -469,7 +468,7 @@ test("authenticated thread_start frames validate and round-trip with ids echoed"
   });
 
   try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone", tls: true });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone" });
     const { socket, lines } = await accepted;
     await lines.waitFor((frame) => frame.type === "hello");
     socket.write('{"type":"hello_ack","v":1}\n');
@@ -629,7 +628,7 @@ test("thread_start replies Timed out when the daemon callback hangs", async () =
   });
 
   try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone", tls: true });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone" });
     const { socket, lines } = await accepted;
     await lines.waitFor((frame) => frame.type === "hello");
     socket.write('{"type":"hello_ack","v":1}\n');
@@ -668,7 +667,7 @@ test("hello rejection prints actionable guidance once and backs off for 60 secon
   assert.equal(REFUSAL_RECONNECT_DELAY_MS, 60_000);
   const sockets = [];
   let connections = 0;
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     connections += 1;
     const attempt = connections;
@@ -729,7 +728,7 @@ test("hello rejection prints actionable guidance once and backs off for 60 secon
 
 test("bad_token rejection explains regenerated identity and Forget computers", async () => {
   const sockets = [];
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     const lines = collectLines(socket);
     void lines.waitFor((frame) => frame.type === "hello").then(() => {
@@ -757,7 +756,7 @@ test("bad_token rejection explains regenerated identity and Forget computers", a
 test("missing hello_ack closes after the handshake deadline and retries normally", async () => {
   const sockets = [];
   let connections = 0;
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     connections += 1;
     collectLines(socket);
@@ -800,7 +799,7 @@ test("snapshots and deltas publish at most 200 sessions per provider", async () 
   const sockets = [];
   let acceptConnection;
   const accepted = new Promise((resolve) => { acceptConnection = resolve; });
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     const lines = collectLines(socket);
     acceptConnection({ socket, lines });
@@ -866,7 +865,7 @@ test("open Codex details debounce upsert refreshes and serialize detail reads", 
   const sockets = [];
   let acceptConnection;
   const accepted = new Promise((resolve) => { acceptConnection = resolve; });
-  const server = net.createServer((socket) => {
+  const server = tls.createServer(await phoneCert("phone"), (socket) => {
     sockets.push(socket);
     acceptConnection({ socket, lines: collectLines(socket) });
   });

@@ -10,7 +10,8 @@ const { WsHub } = require("../dist/ws-server.js");
 const { silentLogger } = require("../dist/logger.js");
 const { classifyFrame, sessionKeyOf } = require("../dist/protocol-v2.js");
 const { createFakePhone } = require("./fake-phone.js");
-const { agentCert } = require("./helpers/tls.js");
+const { PinStore } = require("../dist/tls.js");
+const { agentCert, phoneCert } = require("./helpers/tls.js");
 
 const LEGACY = {
   token: "legacy-token",
@@ -140,15 +141,18 @@ test("fake_phone_receives_snapshot_on_both_transports", async () => {
   await t_wshub();
 
   async function t_phonelink() {
-    const phone = createFakePhone({ transport: "phonelink", tls: false });
+    const phone = createFakePhone({ transport: "phonelink" });
     const { port } = await phone.start({ token: config.token });
     const store = new SessionStore(config, silentLogger);
+    const pins = new PinStore();
+    pins.add(phone.fingerprint);
     const link = new PhoneLink({
       config: { ...config, phoneHosts: [`127.0.0.1:${port}`] },
       store,
       logger: silentLogger,
       detailProvider: async () => [],
       discoveryPort: 48793,
+      pins,
     });
     try {
       link.start();
@@ -156,7 +160,7 @@ test("fake_phone_receives_snapshot_on_both_transports", async () => {
       assert.equal(hello.token, config.token);
       const snapshot = await phone.waitFor("snapshot");
       assert.deepEqual(snapshot.sessions, []);
-      assert.equal(phone.tls, false);
+      assert.equal(phone.tls, true);
       // Frames flow phone -> agentd as well: ping is answered with pong.
       phone.send({ type: "ping", t: 1 });
       assert.equal((await phone.waitFor("pong", (frame) => frame.t === 1)).t, 1);
@@ -170,9 +174,12 @@ test("fake_phone_receives_snapshot_on_both_transports", async () => {
   async function t_wshub() {
     const store = new SessionStore(config, silentLogger);
     const agent = await agentCert();
-    const hub = new WsHub(config, store, silentLogger, { host: "127.0.0.1", tls: agent });
+    const phoneId = await phoneCert("phone");
+    const pins = new PinStore();
+    pins.add(phoneId.fingerprint256);
+    const hub = new WsHub(config, store, silentLogger, { host: "127.0.0.1", tls: agent, pins, steer: () => "fake-phone-steering-secret" });
     await hub.start();
-    const phone = createFakePhone({ transport: "wshub", tls: true, pin: agent.fingerprint256 });
+    const phone = createFakePhone({ transport: "wshub", pin: agent.fingerprint256, cert: phoneId, steer: "fake-phone-steering-secret" });
     try {
       await phone.start({ port: hub.port(), token: config.token });
       assert.equal((await phone.waitFor("hello_ack")).server.name, "nexus-agentd");

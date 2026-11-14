@@ -2,7 +2,7 @@ import { createSocket, type Socket as UdpSocket } from "node:dgram";
 import { existsSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir, networkInterfaces, platform } from "node:os";
-import { connect, type Socket as TcpSocket } from "node:net";
+import type { Socket as TcpSocket } from "node:net";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
 import type {
   ApprovalDecision,
@@ -112,12 +112,11 @@ interface PhoneAnnouncement {
   host: string;
   port: number;
   name: string;
-  /**
-   * Whether the phone serves TLS. A UDP announcement always says (`tls: true`,
-   * or false when the field is absent); a configured or tailnet target says
-   * only when it is written `tls://`, and otherwise leaves it undefined.
-   */
-  tls?: boolean;
+}
+
+/** A UDP announcement also says whether the phone serves TLS: false when the field is absent. */
+interface UdpAnnouncement extends PhoneAnnouncement {
+  tls: boolean;
 }
 
 interface RejectedPhone {
@@ -125,7 +124,7 @@ interface RejectedPhone {
   reportedReason: string;
 }
 
-function parseAnnouncement(raw: Buffer, host: string): PhoneAnnouncement | undefined {
+function parseAnnouncement(raw: Buffer, host: string): UdpAnnouncement | undefined {
   try {
     const value: unknown = JSON.parse(raw.toString("utf8"));
     if (!value || typeof value !== "object") {
@@ -226,6 +225,7 @@ export class PhoneLink {
   private stopped = false;
   private unsubscribe?: () => void;
   private readonly rejectedPhones = new Map<string, RejectedPhone>();
+  private readonly plaintextAnnouncers = new Set<string>();
   private readonly retryAt = new Map<string, number>();
   private readonly now: () => number;
   private readonly tailnetPeerSource: TailnetPeerSource;
@@ -261,9 +261,14 @@ export class PhoneLink {
         return;
       }
       const announcement = parseAnnouncement(message, remote.address);
-      if (announcement) {
-        this.connectToPhone(announcement);
+      if (!announcement) {
+        return;
       }
+      if (!announcement.tls) {
+        this.ignorePlaintextAnnouncement(`${announcement.host}:${announcement.port}`);
+        return;
+      }
+      this.connectToPhone(announcement);
     });
     socket.bind(() => {
       socket.setBroadcast(true);
@@ -353,7 +358,7 @@ export class PhoneLink {
     return this.connected && this.trusted;
   }
 
-  /** Approvals, alerts and their resolutions go to a trusted phone only: a monitor-only one cannot answer them. */
+  /** Approvals, alerts and their resolutions go to a trusted phone only: one losing its trust cannot answer them. */
   sendApprovalRequest(request: ApprovalRequest): boolean {
     return this.trusted && this.send({ ...request });
   }
@@ -493,36 +498,24 @@ export class PhoneLink {
     if ((this.retryAt.get(target) ?? 0) > now) {
       return;
     }
-    // Once setup has begun (a pin file exists, even if every phone was forgotten
-    // since), agentd speaks TLS only: a plaintext dial would
-    // put the token on the wire for whoever answered, and a plaintext announcer
-    // is not a phone we know. Announcements without `tls` are ignored for
-    // dialling; static and tailnet targets, which carry no such claim, are
-    // dialled with TLS. A failed TLS dial is never retried as plaintext.
-    let trustedPhones: boolean;
+    // With the trusted set unreadable no peer could be told from a stranger, so nothing is dialled.
     try {
-      trustedPhones = this.pins.everPinned();
+      this.pins.everPinned();
     } catch (error) {
       this.pinsUnreadable(error);
       return;
     }
-    if (trustedPhones && announcement.tls === false) {
-      this.refusePlaintext(target);
-      return;
-    }
-    const useTls = announcement.tls === true || trustedPhones;
-    const socket: TcpSocket = useTls
-      // The phone's cert is self-signed, so chain validation cannot pass; the
-      // pinned set (checked below) is the identity check. Node skips
-      // checkServerIdentity when validation failed, which is why it is not used.
-      ? tlsConnect({
-          host: announcement.host,
-          port: announcement.port,
-          rejectUnauthorized: false,
-          key: this.options.clientCert?.key,
-          cert: this.options.clientCert?.cert,
-        })
-      : connect({ host: announcement.host, port: announcement.port });
+    // Every dial is TLS: a plaintext one would put the token on the wire for
+    // whoever answered. The phone's cert is self-signed, so chain validation
+    // cannot pass; the pinned set (checked below) is the identity check. Node
+    // skips checkServerIdentity when validation failed, which is why it is not used.
+    const socket: TcpSocket = tlsConnect({
+      host: announcement.host,
+      port: announcement.port,
+      rejectUnauthorized: false,
+      key: this.options.clientCert?.key,
+      cert: this.options.clientCert?.cert,
+    });
     this.socket = socket;
     this.channel = this.channelFor(socket);
     this.connectedTo = target;
@@ -532,25 +525,17 @@ export class PhoneLink {
     this.peerFingerprint = undefined;
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 30_000);
-    const armHelloTimer = (): void => {
-      this.helloTimer = setTimeout(
-        () => this.onHelloTimeout(socket),
-        this.options.helloTimeoutMs ?? PHONE_HELLO_TIMEOUT_MS,
-      );
-      this.helloTimer.unref();
-    };
-    if (useTls) {
-      // A peer that accepts TCP and never finishes the handshake would hold
-      // this.socket, and with it every later dial, for good. The deadline runs
-      // from the dial, covering the handshake and then the hello.
-      armHelloTimer();
-    }
-    socket.on(useTls ? "secureConnect" : "connect", () => {
-      if (useTls && !this.verifyPeer(socket as TLSSocket, target)) {
+    // A peer that accepts TCP and never finishes the handshake would hold
+    // this.socket, and with it every later dial, for good. The deadline runs
+    // from the dial, covering the handshake and then the hello.
+    this.helloTimer = setTimeout(
+      () => this.onHelloTimeout(socket),
+      this.options.helloTimeoutMs ?? PHONE_HELLO_TIMEOUT_MS,
+    );
+    this.helloTimer.unref();
+    socket.on("secureConnect", () => {
+      if (!this.verifyPeer(socket as TLSSocket, target)) {
         return;
-      }
-      if (!useTls) {
-        armHelloTimer();
       }
       this.write({
         type: "hello",
@@ -573,19 +558,13 @@ export class PhoneLink {
     socket.on("close", () => this.onClose());
   }
 
-  private refusePlaintext(target: string): void {
-    const previous = this.rejectedPhones.get(target);
-    this.rejectedPhones.set(target, {
-      retryAt: this.now() + REFUSAL_RECONNECT_DELAY_MS,
-      reportedReason: "plaintext_after_pin",
-    });
-    if (previous?.reportedReason === "plaintext_after_pin") {
+  /** A phone that announces no TLS is not dialled at all; said once per announcer, as they repeat every few seconds. */
+  private ignorePlaintextAnnouncement(target: string): void {
+    if (this.plaintextAnnouncers.has(target)) {
       return;
     }
-    this.options.logger.warn("phone_link_plaintext_refused", { target });
-    this.tellOperator(
-      "A phone announced a plaintext link, but agentd has trusted a phone before and now only dials TLS, so it was ignored and no token was sent. If this is your phone, update it; list trusted phones with `agentd phones list`.",
-    );
+    this.plaintextAnnouncers.add(target);
+    this.options.logger.warn("phone_announcement_plaintext_ignored", { target });
   }
 
   private hasTrustedPhones(): boolean {
@@ -855,11 +834,11 @@ export class PhoneLink {
     if (this.authenticated || !this.socket || this.socket.destroyed) {
       return;
     }
-    if (this.peerFingerprint && !this.trustPeer()) {
-      // A TLS peer that cannot be trusted is not a link at all.
+    if (!this.trustPeer()) {
+      // A peer that cannot be trusted is not a link at all.
       this.options.logger.warn("phone_link_untrusted_peer", {
         target: this.connectedTo ?? "unknown",
-        fingerprint: shortFingerprint(this.peerFingerprint),
+        fingerprint: this.peerFingerprint ? shortFingerprint(this.peerFingerprint) : "none",
       });
       this.socket.destroy();
       return;
@@ -884,14 +863,12 @@ export class PhoneLink {
       this.send({ type: "ping", t: this.now() });
     }, LINK_PING_INTERVAL_MS);
     this.pingTimer.unref();
-    if (this.linkTrusted) {
-      const file = this.pins.filePath;
-      this.stopTrustWatch = watchFiles(
-        file ? [file] : [],
-        this.options.trustCheckIntervalMs ?? TRUST_CHECK_INTERVAL_MS,
-        () => this.recheckTrust(),
-      );
-    }
+    const file = this.pins.filePath;
+    this.stopTrustWatch = watchFiles(
+      file ? [file] : [],
+      this.options.trustCheckIntervalMs ?? TRUST_CHECK_INTERVAL_MS,
+      () => this.recheckTrust(),
+    );
     this.options.onConnected?.(this.linkTrusted);
   }
 

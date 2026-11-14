@@ -4,7 +4,8 @@ const WebSocket = require("ws");
 const { SessionStore } = require("../dist/session-store.js");
 const { WsHub } = require("../dist/ws-server.js");
 const { silentLogger } = require("../dist/logger.js");
-const { agentCert } = require("./helpers/tls.js");
+const { PinStore } = require("../dist/tls.js");
+const { agentCert, phoneCert } = require("./helpers/tls.js");
 
 const STEER = "ws-server-test-steering-secret";
 
@@ -54,6 +55,25 @@ function waitUntil(predicate, timeoutMs = 2000) {
   });
 }
 
+/** A wss-only hub with the test phone's cert already pinned. */
+async function newHub(store, options = {}) {
+  const pins = new PinStore();
+  pins.add((await phoneCert("phone")).fingerprint256);
+  return new WsHub(config, store, silentLogger, {
+    host: "127.0.0.1",
+    tls: await agentCert(),
+    steer: () => STEER,
+    pins,
+    ...options,
+  });
+}
+
+/** The phone side: wss, presenting the pinned phone cert. */
+async function dial(hub) {
+  const { key, cert } = await phoneCert("phone");
+  return new WebSocket(`wss://127.0.0.1:${hub.port()}`, { rejectUnauthorized: false, key, cert });
+}
+
 const config = {
   token: "correct-test-token",
   wsPort: 0,
@@ -64,9 +84,9 @@ const config = {
 
 test("authenticated fake client receives ordered snapshot, delta, refresh, and removal", async () => {
   const store = new SessionStore(config, silentLogger);
-  const hub = new WsHub(config, store, silentLogger, { host: "127.0.0.1" });
+  const hub = await newHub(store);
   await hub.start();
-  const socket = new WebSocket(`ws://127.0.0.1:${hub.port()}`);
+  const socket = await dial(hub);
   const messages = collect(socket);
   try {
     await opened(socket);
@@ -112,16 +132,18 @@ test("authenticated fake client receives ordered snapshot, delta, refresh, and r
   }
 });
 
-test("bad tokens are rejected with close code 4401", async () => {
+test("bad tokens are refused with hello_reject bad_token and close code 4403", async () => {
   const store = new SessionStore(config, silentLogger);
-  const hub = new WsHub(config, store, silentLogger, { host: "127.0.0.1" });
+  const hub = await newHub(store);
   await hub.start();
-  const socket = new WebSocket(`ws://127.0.0.1:${hub.port()}`);
+  const socket = await dial(hub);
+  const messages = collect(socket);
   try {
     await opened(socket);
     const closed = new Promise((resolve) => socket.once("close", resolve));
-    socket.send(JSON.stringify({ type: "hello", v: 1, token: "wrong" }));
-    assert.equal(await closed, 4401);
+    socket.send(JSON.stringify({ type: "hello", v: 1, token: "wrong", steer: STEER }));
+    assert.equal(await closed, 4403);
+    assert.deepEqual([...messages], [{ type: "hello_reject", v: 2, reason: "bad_token" }]);
   } finally {
     socket.terminate();
     await hub.stop();
@@ -131,12 +153,9 @@ test("bad tokens are rejected with close code 4401", async () => {
 
 test("missing hello is rejected with close code 4408", async () => {
   const store = new SessionStore(config, silentLogger);
-  const hub = new WsHub(config, store, silentLogger, {
-    host: "127.0.0.1",
-    helloTimeoutMs: 30,
-  });
+  const hub = await newHub(store, { helloTimeoutMs: 300 });
   await hub.start();
-  const socket = new WebSocket(`ws://127.0.0.1:${hub.port()}`);
+  const socket = await dial(hub);
   try {
     await opened(socket);
     const closed = new Promise((resolve) => socket.once("close", resolve));
@@ -150,17 +169,13 @@ test("missing hello is rejected with close code 4408", async () => {
 
 test("authenticated clients that do not answer app pings close with 4409", async () => {
   const store = new SessionStore(config, silentLogger);
-  const hub = new WsHub(config, store, silentLogger, {
-    host: "127.0.0.1",
-    keepaliveIntervalMs: 60_000,
-    pongTimeoutMs: 30,
-  });
+  const hub = await newHub(store, { keepaliveIntervalMs: 60_000, pongTimeoutMs: 30 });
   await hub.start();
-  const socket = new WebSocket(`ws://127.0.0.1:${hub.port()}`);
+  const socket = await dial(hub);
   try {
     await opened(socket);
     const closed = new Promise((resolve) => socket.once("close", resolve));
-    socket.send(JSON.stringify({ type: "hello", v: 1, token: config.token }));
+    socket.send(JSON.stringify({ type: "hello", v: 1, token: config.token, steer: STEER }));
     assert.equal(await closed, 4409);
   } finally {
     socket.terminate();
@@ -172,17 +187,11 @@ test("authenticated clients that do not answer app pings close with 4409", async
 test("a phone that dialled in can be held for approval and answer over the same socket", async () => {
   const store = new SessionStore(config, silentLogger);
   const decisions = [];
-  const hub = new WsHub(config, store, silentLogger, {
-    host: "127.0.0.1",
-    // The v1 decision itself is under test here, so the phone connects over
-    // wss: the gate that refuses it on a plaintext link is covered in
-    // protocol-v2.test.js and tls.test.js.
-    tls: await agentCert(),
-    steer: () => STEER,
+  const hub = await newHub(store, {
     onApprovalDecision: (requestId, decision) => decisions.push({ requestId, decision }),
   });
   await hub.start();
-  const socket = new WebSocket(`wss://127.0.0.1:${hub.port()}`, { rejectUnauthorized: false });
+  const socket = await dial(hub);
   const messages = collect(socket);
   try {
     await opened(socket);
@@ -230,17 +239,11 @@ test("a phone that dialled in can be held for approval and answer over the same 
 test("a malformed approval decision is ignored rather than forwarded", async () => {
   const store = new SessionStore(config, silentLogger);
   const decisions = [];
-  const hub = new WsHub(config, store, silentLogger, {
-    host: "127.0.0.1",
-    // The v1 decision itself is under test here, so the phone connects over
-    // wss: the gate that refuses it on a plaintext link is covered in
-    // protocol-v2.test.js and tls.test.js.
-    tls: await agentCert(),
-    steer: () => STEER,
+  const hub = await newHub(store, {
     onApprovalDecision: (requestId, decision) => decisions.push({ requestId, decision }),
   });
   await hub.start();
-  const socket = new WebSocket(`wss://127.0.0.1:${hub.port()}`, { rejectUnauthorized: false });
+  const socket = await dial(hub);
   const messages = collect(socket);
   try {
     await opened(socket);

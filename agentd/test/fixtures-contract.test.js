@@ -16,8 +16,10 @@ const fsp = require("node:fs/promises");
 const net = require("node:net");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { classifyFrame, FRAME_CLASS } = require("../dist/protocol-v2.js");
+const { classifyFrame, FRAME_CLASS, gateFrame } = require("../dist/protocol-v2.js");
+const { createFakePhone } = require("./fake-phone.js");
 const { withDaemon, postHook, settle } = require("./helpers/daemon.js");
+const { phoneCert } = require("./helpers/tls.js");
 
 const FIXTURES = JSON.parse(
   require("node:fs").readFileSync(path.join(__dirname, "../../contracts/rokid-coder-v2.fixtures.json"), "utf8"),
@@ -654,21 +656,24 @@ test("malformed_fixture_variants_are_rejected", async (t) => {
   }
 });
 
-test("steering_fixtures_rejected_monitor_only_over_plaintext", async (t) => {
+test("steering_fixtures_rejected_monitor_only_on_an_untrusted_channel", async (t) => {
+  // No accepted link is untrusted any more; the gate stays as defence in depth.
   for (const transport of TRANSPORTS) {
     await t.test(transport, async () => {
-      await inFixtureDaemon(transport, { tls: false }, async ({ phone, daemon, coderDir }) => {
+      await inFixtureDaemon(transport, {}, async ({ daemon, coderDir }) => {
+        const sent = [];
+        const channel = { transport, trusted: false, send: (frame) => sent.push(frame) };
         for (const [type, fixture] of Object.entries(TO_AGENT)) {
           if (EXPECTED_CLASSES[type] !== "steering") continue;
           const id = fixture.msgId ?? fixture.id ?? fixture.requestId;
-          phone.send(fixture);
-          const ack = await phone.waitFor("ack", (frame) => frame.msgId === id);
+          assert.equal(gateFrame(fixture, channel), false, type);
+          const ack = sent.find((frame) => frame.type === "ack" && frame.msgId === id);
           assert.deepEqual([ack.result, ack.error, ack.v], ["rejected", "monitor_only", 2], type);
         }
         // The v1 frames that expect their own reply get it, so the old plugin never waits on silence.
-        const input = await phone.waitFor("session_input_result", (frame) => frame.id === TO_AGENT.session_input.id);
+        const input = sent.find((frame) => frame.type === "session_input_result" && frame.id === TO_AGENT.session_input.id);
         assert.deepEqual([input.ok, input.error], [false, "monitor_only"]);
-        const started = await phone.waitFor("thread_started", (frame) => frame.id === TO_AGENT.thread_start.id);
+        const started = sent.find((frame) => frame.type === "thread_started" && frame.id === TO_AGENT.thread_start.id);
         assert.deepEqual([started.ok, started.error], [false, "monitor_only"]);
 
         // Nothing ran.
@@ -677,17 +682,32 @@ test("steering_fixtures_rejected_monitor_only_over_plaintext", async (t) => {
           assert.equal(await fsp.access(path.join(coderDir, file)).then(() => true, () => false), false, file);
         }
 
-        // The monitor frames are fine over a plaintext link.
-        daemon.codex.listModels = async () => FROM_AGENT.models.models;
-        phone.send(TO_AGENT.models_request);
-        assert.deepEqual((await phone.waitFor("models")).models, FROM_AGENT.models.models);
-        for (const type of ["alert_shown", "alert_dismissed"]) {
+        // The monitor frames pass the gate even there.
+        for (const type of ["models_request", "alert_shown", "alert_dismissed"]) {
           assert.equal(classifyFrame(type), "monitor");
-          phone.send(TO_AGENT[type]);
+          assert.equal(gateFrame(TO_AGENT[type], channel), true, type);
         }
-        await settle();
-        assert.equal(phone.frames.filter((frame) => frame.type === "ack" && frame.error !== "monitor_only").length, 0);
       });
     });
   }
+});
+
+test("hello_reject_fixtures_are_what_agentd_sends_a_refused_wss_phone", async () => {
+  await withDaemon({ transport: "wshub" }, async ({ wsPort, token, steer, agentFingerprint }) => {
+    for (const [reason, options, sentToken] of [
+      ["repair_needed", { cert: await phoneCert("never-paired") }, token],
+      ["bad_token", {}, "not-the-token"],
+    ]) {
+      const phone = createFakePhone({ transport: "wshub", pin: agentFingerprint, steer, ...options });
+      const closes = phone.closes;
+      try {
+        await phone.start({ port: wsPort, host: "127.0.0.1", token: sentToken });
+        assert.deepEqual(await phone.waitFor("hello_reject"), FIXTURES.hello_reject[reason], reason);
+        await phone.waitForClose(closes);
+        assert.equal(phone.closeCode, 4403, reason);
+      } finally {
+        phone.close();
+      }
+    }
+  });
 });

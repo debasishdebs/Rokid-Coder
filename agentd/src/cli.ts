@@ -67,7 +67,7 @@ function getHealth(port: number): Promise<Health | undefined> {
 async function run(): Promise<void> {
   const daemon = await startDaemon();
   process.stdout.write(
-    `nexus-agentd listening on 127.0.0.1:${daemon.config.httpPort} and 0.0.0.0:${daemon.config.wsPort}\n`,
+    `nexus-agentd listening on 127.0.0.1:${daemon.config.httpPort} and wss on 0.0.0.0:${daemon.config.wsPort}\n`,
   );
   const shutdown = () => {
     void daemon.stop().finally(() => process.exit(0));

@@ -120,9 +120,9 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     phoneV2?.onSessionEnded(provider, id);
   };
   // Either transport counts, as for approvals: a phone that dialled in is as
-  // good as one the daemon dialled. Read at hook time, after both exist. Only a
-  // TRUSTED phone (pinned TLS) can answer, so only one may hold an approval, a
-  // question or a Stop; a monitor-only phone is shown the board and nothing more.
+  // good as one the daemon dialled. Read at hook time, after both exist. Every
+  // accepted link is a trusted one (pinned TLS both ways); one that is losing
+  // its trust, its phone forgotten, no longer holds anything.
   const trustedPhoneConnected = (): boolean =>
     phoneLink?.trustedConnected === true || wsHub?.hasTrustedClient === true;
   const stopWait = new StopWait({
@@ -463,8 +463,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   // transcripts, since the tail only sees new lines. A link that is now where
   // frames go (the outlet prefers the dialled link) also gets what was waiting
   // for one: open approvals, the alert on the glasses, resets nobody has been
-  // told about. A monitor-only phone cannot answer any of those, and a second
-  // phone beside a trusted one must not make the first show it all again.
+  // told about. `trusted` is always true for an accepted link; a second phone
+  // beside a trusted one must not make the first show it all again.
   const onPhoneConnected = (transport: "phonelink" | "wshub", trusted: boolean): void => {
     const nowPreferred = transport === "phonelink"
       ? trusted
@@ -507,6 +507,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
     tls: { key: agentCert.key, cert: agentCert.cert },
+    // The same set the dialled link pins into, watched: `phones forget` cuts a wss phone off live.
+    pins,
     // Checked live, and the file watched: `pair --rotate-steer` cuts off connected phones without a restart.
     steer: () => readSteerSecret(tlsDir),
     steerFile: steerSecretFile(tlsDir),

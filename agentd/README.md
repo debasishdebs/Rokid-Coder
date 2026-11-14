@@ -62,7 +62,11 @@ node dist/cli.js run
 `npm link` or as a package, use `agentd` in place of `node dist/cli.js`.
 
 Claude Code hooks post only to `127.0.0.1:8791`; this listener never accepts remote
-connections. Plugin WebSockets listen on `0.0.0.0:8792` and require the pairing token.
+connections. The phone link on `0.0.0.0:8792` is wss only (TLS 1.2 or later): a client
+that opens with anything but a TLS handshake is dropped without a byte in reply. A phone
+gets in only with its pinned client certificate, the pairing token and the steering
+secret, and every link that gets in may steer; there is no monitor-only link. When agentd
+dials the phone instead, that link is TLS too, and agentd never dials plaintext.
 Allow inbound TCP 8792 through Windows Firewall:
 
 ```powershell
@@ -73,9 +77,14 @@ macOS needs no equivalent rule while its application firewall is off, which is t
 default. With it on, allow incoming connections for `node` the first time macOS
 asks, or add it under System Settings > Network > Firewall > Options.
 
-Port 8792 carries an authenticated but unencrypted WebSocket in Phase 1. Expose it only
-over the user's trusted Tailscale tailnet, not through router port forwarding or a public
-interface.
+Expose port 8792 only over the user's trusted Tailscale tailnet all the same, not through
+router port forwarding or a public interface.
+
+A phone paired before Plan 4 connected without a client certificate, or over plaintext,
+and is now refused with `repair_needed`. Pair it again: run `agentd pair` (or
+`agentd phones allow-next`) and link the phone within two minutes, so its certificate is
+pinned. A `tls://` prefix on a phone target in older configs is still accepted and changes
+nothing: every target is dialled over TLS.
 
 ## Pair the plugin
 

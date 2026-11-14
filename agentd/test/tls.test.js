@@ -325,28 +325,31 @@ test("a_version_1_host_keyed_pin_file_is_migrated_into_the_set", async () => {
   });
 });
 
-// ---- plaintext is monitor-only, TLS may steer, over both transports ----
+// ---- only TLS gets in, and it may steer, over both transports ----
+
+test("plaintext_phone_is_refused_before_any_frame (phonelink)", async () => {
+  await withDaemon(
+    { transport: "phonelink", tls: false, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ phone }) => {
+      // agentd dials TLS at a plaintext phone: the handshake is all it ever sends.
+      await settle(300);
+      assert.deepEqual(phone.frames, [], "no hello, so no token, and no board");
+    },
+  );
+});
+
+test("plaintext_phone_is_refused_before_any_frame (wshub)", async () => {
+  await withDaemon(
+    { transport: "wshub", attached: [{ provider: "claude", id: "s1" }] },
+    async ({ wsPort, token }) => {
+      const plain = fakePhone({ transport: "wshub", tls: false });
+      await assert.rejects(plain.start({ port: wsPort, host: "127.0.0.1", token }));
+      assert.deepEqual(plain.frames, [], "a ws:// client never gets a frame");
+    },
+  );
+});
 
 for (const transport of TRANSPORTS) {
-  test(`plaintext_link_rejects_steering_frames (${transport})`, async () => {
-    await withDaemon(
-      { transport, tls: false, attached: [{ provider: "claude", id: "s1" }] },
-      async ({ daemon, phone, httpPort }) => {
-        // Monitoring works: the board arrives and a read-only request is answered.
-        await phone.waitFor("snapshot");
-        phone.send({ type: "refresh" });
-        await phone.waitFor("snapshot", () => phone.frames.filter((f) => f.type === "snapshot").length === 2);
-
-        const steer = phone.sendFrame("mode_set", ["claude:s1", "acceptEdits"]);
-        const ack = await phone.waitFor("ack", (f) => f.msgId === steer.msgId);
-        assert.deepEqual([ack.result, ack.error], ["rejected", "monitor_only"]);
-        assert.equal(daemon.approvalPolicy.get("claude:s1"), "ask");
-        await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/w", prompt: "hi" });
-        await phone.waitFor("session_upsert", (f) => f.session.id === "s1");
-      },
-    );
-  });
-
   test(`tls_link_accepts_steering (${transport})`, async () => {
     await withDaemon(
       { transport, tls: true, attached: [{ provider: "claude", id: "s1" }] },
@@ -358,92 +361,14 @@ for (const transport of TRANSPORTS) {
       },
     );
   });
-
-  test(`plaintext_phone_does_not_hold_approvals_questions_or_stop_waits (${transport})`, async () => {
-    await withDaemon(
-      { transport, tls: false, attached: [{ provider: "claude", id: "s1" }] },
-      async ({ daemon, phone, httpPort }) => {
-        // The phone is connected, authenticated and receiving the board...
-        assert.ok(phone.frames.some((f) => f.type === "snapshot"));
-        // ...yet an approval is not held for it: the laptop prompt gets it at once.
-        const permission = await Promise.race([
-          postHook(httpPort, {
-            hook_event_name: "PermissionRequest",
-            session_id: "s1",
-            tool_name: "Bash",
-            tool_input: { command: "ls" },
-          }),
-          settle(1000).then(() => "held"),
-        ]);
-        assert.deepEqual(permission, {}, "falls back to the laptop prompt at once");
-        assert.deepEqual(
-          await postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" }),
-          {},
-          "a Stop is not held for a phone that cannot answer",
-        );
-        assert.deepEqual(
-          await postHook(httpPort, {
-            hook_event_name: "PreToolUse",
-            session_id: "s1",
-            tool_name: "AskUserQuestion",
-            tool_use_id: "tu-1",
-            tool_input: { questions: [{ question: "Pick", header: "Pick", options: [{ label: "A" }, { label: "B" }] }] },
-          }),
-          {},
-          "a question is left to the laptop",
-        );
-        assert.equal(daemon.stopWait.state("s1").waiting, false);
-        assert.equal(daemon.questionRelay.isWaiting("tu-1"), false);
-        await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/w", prompt: "hi" });
-        await phone.waitFor("session_upsert", (f) => f.session.id === "s1");
-        assert.equal(phone.frames.some((f) => f.type === "approval_request" || f.type === "alert"), false);
-      },
-    );
-  });
 }
-
-test("a_trusted_phone_is_asked_while_a_plaintext_one_beside_it_only_watches", async () => {
-  await withDaemon(
-    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
-    async ({ phone, httpPort, wsPort, token }) => {
-      const watcher = fakePhone({ transport: "wshub", tls: false });
-      try {
-        await watcher.start({ port: wsPort, host: "127.0.0.1", token });
-        await watcher.waitFor("snapshot");
-        const reply = postHook(httpPort, {
-          hook_event_name: "PermissionRequest",
-          session_id: "s1",
-          tool_name: "Bash",
-          tool_input: { command: "ls" },
-        });
-        const request = await phone.waitFor("approval_request");
-        phone.send({ type: "approval_decision", requestId: request.requestId, decision: "allow" });
-        assert.equal((await reply).hookSpecificOutput.decision.behavior, "allow");
-        await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/w", prompt: "hi" });
-        await watcher.waitFor("session_upsert", (f) => f.session.id === "s1");
-        assert.equal(
-          watcher.frames.some((f) => ["approval_request", "approval_resolved", "alert"].includes(f.type)),
-          false,
-          "the watcher never sees what only a trusted phone can answer",
-        );
-        // And what the watcher sends stays monitor-only even beside a trusted phone.
-        const decision = { type: "approval_decision", v: 1, requestId: "nope", decision: "allow" };
-        watcher.send(decision);
-        const ack = await watcher.waitFor("ack", (f) => f.msgId === "nope");
-        assert.equal(ack.error, "monitor_only");
-      } finally {
-        watcher.close();
-      }
-    },
-  );
-});
 
 // ---- PhoneLink: the daemon dials, the phone is the TLS server ----
 
 const short = (fp) => fp.replace(/:/g, "").slice(0, 12).toLowerCase();
 
 function dialTls(link, server, extra = {}) {
-  link.connectToPhone({ host: "127.0.0.1", port: server.port, name: "phone", tls: true, ...extra });
+  link.connectToPhone({ host: "127.0.0.1", port: server.port, name: "phone", ...extra });
 }
 
 test("first_authenticated_hello_pins_the_phone_and_trusts_the_link", async () => {
@@ -518,7 +443,7 @@ test("pinned_cert_at_new_ip_trusted", async () => {
   try {
     // Another name for the same machine stands in for a DHCP change: the set
     // knows the cert, not the address.
-    link.connectToPhone({ host: "localhost", port: server.port, name: "phone", tls: true });
+    link.connectToPhone({ host: "localhost", port: server.port, name: "phone" });
     await waitUntil(() => link.trustedConnected, "a pinned cert is trusted at any address");
     assert.deepEqual(pins.list(), [phoneId.fingerprint256], "and nothing was added");
   } finally {
@@ -527,32 +452,43 @@ test("pinned_cert_at_new_ip_trusted", async () => {
   }
 });
 
-test("plaintext_from_new_ip_after_pinning_refused_no_token_sent", async () => {
-  const wire = [];
-  let dials = 0;
-  const plain = netServer((socket) => {
-    dials += 1;
-    socket.on("data", (chunk) => wire.push(chunk.toString()));
-    socket.on("error", () => {});
-  });
-  const port = await new Promise((resolve) => plain.listen(0, "127.0.0.1", () => resolve(plain.address().port)));
+test("phone_link_never_dials_plaintext", async () => {
+  // A plaintext listener that would take a hello, and a TLS phone, both announcing over UDP.
+  let plainDials = 0;
+  const plain = netServer((socket) => { plainDials += 1; socket.on("error", () => {}); });
+  const plainPort = await new Promise((resolve) => plain.listen(0, "127.0.0.1", () => resolve(plain.address().port)));
+  const phoneId = await phoneCert("phone");
+  const server = await listenAsPhone(phoneId);
   const pins = new PinStore();
-  pins.add((await phoneCert("pinned")).fingerprint256);
-  const { link, logs, operator, stop } = newLink(pins);
-  try {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      link.connectToPhone({ host: "127.0.0.1", port, name: "phone", tls: false });
-    }
-    await settle(50);
-    assert.equal(dials, 0, "no plaintext socket was opened");
-    assert.deepEqual(wire, []);
-    assert.ok(logs.entries.some((e) => e.event === "phone_link_plaintext_refused"));
-    assert.equal(operator.length, 1, "told once, not on every announcement");
-    assert.equal(link.connected, false);
-  } finally {
-    stop();
-    plain.close();
+  pins.add(phoneId.fingerprint256);
+  const { link, logs, operator } = newLink(pins);
+  link.start();
+  const discoveryPort = () => { try { return link.discovery.address().port; } catch { return 0; } };
+  await waitUntil(() => discoveryPort() > 0, "the discovery socket never bound");
+  const udp = require("node:dgram").createSocket("udp4");
+  track(() => udp.close());
+  const announce = (fields) => new Promise((resolve) => udp.send(
+    Buffer.from(JSON.stringify({ nexus: "agents-phone", name: "phone", ...fields })),
+    discoveryPort(),
+    "127.0.0.1",
+    resolve,
+  ));
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await announce({ port: plainPort, tls: false });
+    await announce({ port: plainPort }); // no `tls` at all is plaintext too
   }
+  await waitUntil(
+    () => logs.entries.some((e) => e.event === "phone_announcement_plaintext_ignored"),
+    "the plaintext announcement was not logged",
+  );
+  await settle(100);
+  assert.equal(plainDials, 0, "no socket was opened to the plaintext announcer");
+  assert.equal(logs.entries.filter((e) => e.event === "phone_announcement_plaintext_ignored").length, 1, "said once");
+  assert.deepEqual(operator, []);
+  // The same path does dial a phone that announces TLS.
+  await announce({ port: server.port, tls: true });
+  await waitUntil(() => link.trustedConnected, "a TLS announcement was not dialled");
+  assert.equal(plainDials, 0);
 });
 
 test("an_unprefixed_target_is_dialled_over_tls_once_a_phone_is_trusted", async () => {
@@ -754,35 +690,6 @@ test("forget_all_then_allow_next_admits_one", async () => {
   });
 });
 
-test("plaintext_refused_after_forget_all", async () => {
-  await withTempDir(async (dir) => {
-    const file = path.join(dir, "tls", "phone-pins.json");
-    const wire = [];
-    let dials = 0;
-    const plain = netServer((socket) => {
-      dials += 1;
-      socket.on("data", (chunk) => wire.push(chunk.toString("latin1")));
-      socket.on("error", () => {});
-    });
-    const port = await new Promise((resolve) => plain.listen(0, "127.0.0.1", () => resolve(plain.address().port)));
-    const pins = new PinStore(file);
-    pins.add((await phoneCert("was-trusted")).fingerprint256);
-    new PinStore(file).forgetAll();
-    assert.equal(pins.isEmpty(), true);
-    const { link, logs, operator } = newLink(pins);
-    link.connectToPhone({ host: "127.0.0.1", port, name: "phone", tls: false });
-    await settle(60);
-    assert.equal(dials, 0, "a plaintext announcement opens no socket, though the set is empty");
-    assert.ok(logs.entries.some((e) => e.event === "phone_link_plaintext_refused"));
-    assert.equal(operator.length, 1);
-    // A static target carries no claim, and is dialled with TLS: still no plaintext hello.
-    link.connectToPhone({ host: "127.0.0.1", port, name: "phone" });
-    await settle(80);
-    assert.equal(wire.join("").includes(TOKEN), false, "the token never went out in the clear");
-    assert.equal(wire.join("").includes('"hello"'), false);
-  });
-});
-
 test("stalled_tls_handshake_times_out_and_redial_resumes", async () => {
   const sockets = [];
   const silent = netServer((socket) => { sockets.push(socket); socket.on("error", () => {}); });
@@ -793,7 +700,7 @@ test("stalled_tls_handshake_times_out_and_redial_resumes", async () => {
   pins.armAllowNext(Date.now());
   const { link, logs, stop } = newLink(pins, { helloTimeoutMs: 60 });
   try {
-    link.connectToPhone({ host: "127.0.0.1", port: silentPort, name: "stall", tls: true });
+    link.connectToPhone({ host: "127.0.0.1", port: silentPort, name: "stall" });
     await waitUntil(() => sockets.length === 1, "the stalled peer was not dialled");
     assert.ok(link.socket, "dialling");
     await waitUntil(() => link.socket === undefined, "the handshake never timed out");
@@ -821,7 +728,7 @@ test("a_hello_that_is_never_acknowledged_pins_nothing", async () => {
   pins.armAllowNext(Date.now());
   const { link, stop } = newLink(pins, { helloTimeoutMs: 60 });
   try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "phone", tls: true });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "phone" });
     await waitUntil(() => link.socket === undefined, "the hello deadline did not fire");
     assert.equal(pins.isEmpty(), true, "an unauthenticated peer is never pinned");
     assert.equal(link.trustedConnected, false);
@@ -906,29 +813,28 @@ test("an_unreadable_pins_file_refuses_every_dial", async () => {
   });
 });
 
-test("a_plaintext_phone_connects_while_the_set_is_empty_but_is_never_trusted_or_pinned", async () => {
+test("unprefixed_target_dials_tls", async () => {
+  // A fresh install, with nothing pinned, and a configured target with no prefix.
+  const wire = [];
   const plain = netServer((socket) => {
     socket.on("data", (chunk) => {
-      for (const line of chunk.toString().split("\n").filter(Boolean)) {
-        if (JSON.parse(line).type === "hello") socket.write('{"type":"hello_ack","v":1}\n');
-      }
+      wire.push(chunk);
+      socket.write('{"type":"hello_ack","v":1}\n');
     });
     socket.on("error", () => {});
   });
   const port = await new Promise((resolve) => plain.listen(0, "127.0.0.1", () => resolve(plain.address().port)));
   const pins = new PinStore();
-  const { link, stop } = newLink(pins);
-  try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "phone" });
-    await waitUntil(() => link.connected, "plaintext phone did not connect");
-    assert.equal(link.trustedConnected, false);
-    assert.equal(link.sendApprovalRequest({ type: "approval_request", requestId: "r" }), false);
-    assert.equal(link.sendFrame({ type: "alert" }), false);
-    assert.equal(pins.isEmpty(), true);
-  } finally {
-    stop();
-    plain.close();
-  }
+  const { link } = newLink(pins, { config: { ...config, phoneHosts: [`127.0.0.1:${port}`] } });
+  link.start();
+  await waitUntil(() => wire.length > 0, "the configured target was not dialled");
+  await settle(80);
+  const sent = Buffer.concat(wire);
+  assert.equal(sent[0], 0x16, "the first byte is a TLS handshake record");
+  assert.equal(sent.toString("latin1").includes(TOKEN), false, "the token never went out in the clear");
+  assert.equal(sent.toString("latin1").includes('"hello"'), false);
+  assert.equal(link.connected, false);
+  assert.equal(pins.isEmpty(), true);
 });
 
 test("phonelink_channel_is_bound_to_its_connection", async () => {
@@ -963,10 +869,10 @@ test("phonelink_channel_is_bound_to_its_connection", async () => {
   }
 });
 
-test("tls_phone_target_prefix_is_parsed_in_the_config", () => {
+test("tls_phone_target_prefix_is_still_accepted_and_means_nothing", () => {
   const { parsePhoneTarget } = require("../dist/config.js");
-  assert.deepEqual(parsePhoneTarget("tls://100.64.1.2:9000"), { host: "100.64.1.2", port: 9000, tls: true });
-  assert.deepEqual(parsePhoneTarget("tls://phone.local"), { host: "phone.local", port: 8792, tls: true });
+  assert.deepEqual(parsePhoneTarget("tls://100.64.1.2:9000"), { host: "100.64.1.2", port: 9000 });
+  assert.deepEqual(parsePhoneTarget("tls://phone.local"), { host: "phone.local", port: 8792 });
   assert.deepEqual(parsePhoneTarget("100.64.1.2:9000"), { host: "100.64.1.2", port: 9000 });
   assert.equal(parsePhoneTarget("tls://"), undefined);
 });
@@ -1081,10 +987,10 @@ test("a_stalling_tls_peer_is_backed_off_not_retried_in_seconds_while_a_phone_is_
   pins.add((await phoneCert("trusted")).fingerprint256);
   const { link, stop } = newLink(pins, { helloTimeoutMs: 40 });
   try {
-    link.connectToPhone({ host: "127.0.0.1", port, name: "stall", tls: true });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "stall" });
     await waitUntil(() => sockets.length === 1 && link.socket === undefined, "the stall did not time out");
     await settle(60); // far past reconnectDelayMs (20 ms) that would have allowed a redial
-    link.connectToPhone({ host: "127.0.0.1", port, name: "stall", tls: true });
+    link.connectToPhone({ host: "127.0.0.1", port, name: "stall" });
     await settle(60);
     assert.equal(sockets.length, 1, "refusal backoff, not the short reconnect delay");
   } finally {
@@ -1096,79 +1002,185 @@ test("a_stalling_tls_peer_is_backed_off_not_retried_in_seconds_while_a_phone_is_
 
 // ---- WsHub: the phone dials agentd, which is the TLS server ----
 
+/** A hub whose pin set already holds the default fake phone's cert, unless `pins` is given. */
 async function newHub(options = {}) {
   const agent = await agentCert();
   const logs = loggerHarness();
   const store = new SessionStore(config, logs.logger);
-  const hub = new WsHub(config, store, logs.logger, { host: "127.0.0.1", tls: agent, steer: () => STEER, ...options });
+  const pins = options.pins ?? new PinStore();
+  if (!options.pins) pins.add((await phoneCert("phone")).fingerprint256);
+  const hub = new WsHub(config, store, logs.logger, { host: "127.0.0.1", tls: agent, steer: () => STEER, ...options, pins });
   await hub.start();
   const stop = async () => { await hub.stop(); store.dispose(); };
   track(stop);
-  return { hub, logs, agent, stop };
+  return { hub, logs, agent, pins, stop };
 }
 
 async function connectPhone(hub, agent, options) {
-  const phone = fakePhone({ transport: "wshub", pin: agent.fingerprint256, ...options });
+  const phone = fakePhone({ transport: "wshub", pin: agent.fingerprint256, steer: STEER, ...options });
   await phone.start({ port: hub.port(), token: TOKEN });
   await phone.waitFor("hello_ack");
   return phone;
 }
 
-/** Sends a steering frame and says whether agentd refused it as monitor-only. */
+/** Dials, says hello and waits for agentd to refuse it: the reject frame, then the close. */
+async function refusedHello(hub, agent, options, token = TOKEN) {
+  const phone = fakePhone({ transport: "wshub", pin: agent.fingerprint256, steer: STEER, ...options });
+  const closes = phone.closes;
+  await phone.start({ port: hub.port(), token });
+  const reject = await phone.waitFor("hello_reject");
+  await phone.waitForClose(closes);
+  assert.equal(phone.frames.some((f) => f.type === "hello_ack" || f.type === "snapshot"), false, "nothing past the reject");
+  return { phone, reject, code: phone.closeCode };
+}
+
+const REPAIR_NEEDED = { type: "hello_reject", v: 2, reason: "repair_needed" };
+
+/** Sends a steering frame and says whether agentd refused it. */
 async function steeringRefused(phone) {
   const frame = phone.sendFrame("mode_set", ["claude:s1", "acceptEdits"]);
   const ack = await phone.waitFor("ack", (f) => f.msgId === frame.msgId);
   return ack.error === "monitor_only";
 }
 
-test("wss_with_token_but_no_steer_is_monitor_only", async () => {
-  const { hub, agent, stop } = await newHub();
-  const phone = await connectPhone(hub, agent, { tls: true });
+test("wshub_requires_a_cert", async () => {
+  const store = new SessionStore(config, loggerHarness().logger);
   try {
-    assert.equal(hub.hasAuthenticatedClient, true);
-    assert.equal(hub.hasTrustedClient, false);
-    assert.equal(await steeringRefused(phone), true);
-    assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r" }), false);
+    assert.throws(() => new WsHub(config, store, loggerHarness().logger, { host: "127.0.0.1", steer: () => STEER }), /TLS/);
   } finally {
-    phone.close();
-    await stop();
+    store.dispose();
   }
 });
 
-test("wss_with_wrong_steer_is_monitor_only", async () => {
-  const { hub, agent, stop } = await newHub();
-  const phones = [];
-  try {
-    for (const steer of ["wrong-secret", STEER.slice(0, -1), `${STEER}x`, ""]) {
-      const phone = await connectPhone(hub, agent, { tls: true, steer });
-      phones.push(phone);
-      assert.equal(await steeringRefused(phone), true, `steer ${JSON.stringify(steer)}`);
-    }
-    assert.equal(hub.hasTrustedClient, false);
-  } finally {
-    for (const phone of phones) phone.close();
-    await stop();
-  }
+test("plain_ws_on_8792_is_refused_and_logged", async () => {
+  const { hub, logs } = await newHub();
+  const received = [];
+  const socket = net.connect(hub.port(), "127.0.0.1");
+  track(() => socket.destroy());
+  socket.on("data", (chunk) => received.push(chunk));
+  socket.on("error", () => {});
+  await new Promise((resolve) => socket.once("connect", resolve));
+  const closed = new Promise((resolve) => socket.once("close", resolve));
+  socket.write(
+    "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+  );
+  await closed;
+  assert.deepEqual(received, [], "not one byte back: no 101, no 426, no TLS alert");
+  assert.equal(socket.destroyed, true);
+  await waitUntil(() => logs.entries.some((e) => e.event === "ws_plaintext_refused"), "the refusal was not logged");
+  assert.equal(hub.hasAuthenticatedClient, false);
 });
 
-test("hello_ack_reports_steering_false_for_wrong_or_missing_steer", async () => {
-  const { hub, agent, stop } = await newHub();
-  const phones = [];
-  try {
-    // R126: the phone binds steering from this flag, so every case it would get wrong says so.
-    for (const steer of [undefined, "wrong-secret", STEER.slice(0, -1), ""]) {
-      const phone = await connectPhone(hub, agent, { tls: true, ...(steer === undefined ? {} : { steer }) });
-      phones.push(phone);
-      const ack = phone.frames.find((f) => f.type === "hello_ack");
-      assert.equal(ack.steering, false, `steer ${JSON.stringify(steer)}`);
-    }
-    const good = await connectPhone(hub, agent, { tls: true, steer: STEER });
-    phones.push(good);
-    assert.equal(good.frames.find((f) => f.type === "hello_ack").steering, true);
-  } finally {
-    for (const phone of phones) phone.close();
-    await stop();
+test("bad_token_gets_hello_reject_bad_token_and_4403", async () => {
+  const { hub, logs, agent, pins } = await newHub();
+  const before = pins.list();
+  const { reject, code } = await refusedHello(hub, agent, {}, "not-the-token");
+  assert.deepEqual(reject, { type: "hello_reject", v: 2, reason: "bad_token" });
+  assert.equal(code, 4403);
+  assert.deepEqual(pins.list(), before);
+  assert.equal(JSON.stringify(logs.entries).includes("not-the-token"), false, "the token is never logged");
+});
+
+test("wss_without_client_cert_gets_repair_needed", async () => {
+  const { hub, logs, agent, pins } = await newHub();
+  const before = pins.list();
+  const { reject, code } = await refusedHello(hub, agent, { cert: null });
+  assert.deepEqual(reject, REPAIR_NEEDED);
+  assert.equal(code, 4403);
+  assert.deepEqual(pins.list(), before);
+  assert.ok(logs.entries.some((e) => e.event === "ws_auth_rejected" && e.meta.reason === "no_client_cert"));
+});
+
+test("wss_upgrade_without_any_client_cert_reaches_hello_and_gets_repair_needed", async () => {
+  const pins = new PinStore();
+  pins.armAllowNext(Date.now());
+  const { hub, agent } = await newHub({ pins });
+  // The handshake and the upgrade both succeed without a cert: the refusal is the hello's, where it can say why.
+  const socket = new WebSocket(`wss://127.0.0.1:${hub.port()}`, { rejectUnauthorized: false });
+  track(() => socket.terminate());
+  const frames = [];
+  socket.on("message", (data) => frames.push(JSON.parse(data.toString())));
+  const opened = await new Promise((resolve) => {
+    socket.once("open", () => resolve(true));
+    socket.once("error", () => resolve(false));
+  });
+  assert.equal(opened, true, "a cert-less client reaches the WebSocket");
+  assert.equal(socket._socket.getPeerCertificate().fingerprint256, agent.fingerprint256);
+  const code = new Promise((resolve) => socket.once("close", resolve));
+  socket.send(JSON.stringify({ type: "hello", v: 1, token: TOKEN, steer: STEER }));
+  assert.equal(await code, 4403);
+  assert.deepEqual(frames, [REPAIR_NEEDED]);
+  assert.equal(pins.allowNextOpen(Date.now()), true, "an open window is not spent on a phone with no cert");
+  assert.deepEqual(pins.list(), []);
+});
+
+test("wss_with_unpinned_cert_outside_window_gets_repair_needed", async () => {
+  const { hub, logs, agent, pins } = await newHub();
+  const stranger = await phoneCert("stranger");
+  const { reject, code } = await refusedHello(hub, agent, { cert: stranger });
+  assert.deepEqual(reject, REPAIR_NEEDED);
+  assert.equal(code, 4403);
+  assert.equal(pins.has(stranger.fingerprint256), false);
+  const refusal = logs.entries.find((e) => e.event === "ws_auth_rejected");
+  assert.deepEqual(refusal.meta, { reason: "unpinned_cert", fingerprint: short(stranger.fingerprint256) });
+  assert.equal(JSON.stringify(logs.entries).includes(stranger.fingerprint256), false, "never the full fingerprint");
+});
+
+test("wss_with_unpinned_cert_inside_window_is_pinned_and_steers", async () => {
+  const pins = new PinStore();
+  pins.add((await phoneCert("first")).fingerprint256);
+  pins.armAllowNext(Date.now());
+  const { hub, logs, agent } = await newHub({ pins });
+  const newcomer = await phoneCert("newcomer");
+  const phone = await connectPhone(hub, agent, { cert: newcomer });
+  assert.equal(phone.frames.find((f) => f.type === "hello_ack").steering, true);
+  assert.equal(pins.has(newcomer.fingerprint256), true, "pinned at its hello");
+  assert.equal(pins.allowNextOpen(Date.now()), false, "the window admitted exactly one");
+  assert.equal(hub.hasTrustedClient, true);
+  assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r" }), true);
+  await phone.waitFor("approval_request");
+  assert.ok(logs.entries.some((e) => e.event === "ws_phone_pinned" && e.meta.fingerprint === short(newcomer.fingerprint256)));
+  // A second stranger right after finds the window shut.
+  const { reject } = await refusedHello(hub, agent, { cert: await phoneCert("late") });
+  assert.deepEqual(reject, REPAIR_NEEDED);
+});
+
+test("wss_with_pinned_cert_but_wrong_steer_gets_repair_needed", async () => {
+  const { hub, agent } = await newHub();
+  for (const steer of [undefined, "wrong-secret", STEER.slice(0, -1), `${STEER}x`, ""]) {
+    const { reject, code } = await refusedHello(hub, agent, { steer });
+    assert.deepEqual(reject, REPAIR_NEEDED, `steer ${JSON.stringify(steer)}`);
+    assert.equal(code, 4403);
   }
+  assert.equal(hub.hasAuthenticatedClient, false);
+});
+
+test("failed_hello_inside_window_leaves_pins_and_window_unchanged", async () => {
+  const pins = new PinStore();
+  pins.add((await phoneCert("first")).fingerprint256);
+  pins.armAllowNext(Date.now());
+  const { hub, agent } = await newHub({ pins });
+  const before = pins.list();
+  const newcomer = await phoneCert("newcomer");
+  const wrongSteer = await refusedHello(hub, agent, { cert: newcomer, steer: "wrong-secret" });
+  assert.deepEqual(wrongSteer.reject, REPAIR_NEEDED);
+  assert.deepEqual(pins.list(), before, "a wrong steer pins nothing");
+  assert.equal(pins.allowNextOpen(Date.now()), true, "and leaves the window open");
+  const wrongToken = await refusedHello(hub, agent, { cert: newcomer }, "not-the-token");
+  assert.deepEqual(wrongToken.reject, { type: "hello_reject", v: 2, reason: "bad_token" });
+  assert.deepEqual(pins.list(), before, "a wrong token pins nothing");
+  assert.equal(pins.allowNextOpen(Date.now()), true, "and leaves the window open");
+  // The window is still good for the real phone.
+  await connectPhone(hub, agent, { cert: newcomer });
+  assert.equal(pins.has(newcomer.fingerprint256), true);
+});
+
+test("hello_ack_steering_is_always_true_for_an_accepted_wss_phone", async () => {
+  const { hub, agent } = await newHub();
+  const phone = await connectPhone(hub, agent);
+  // R126: the phone binds steering from this flag; a hello that would not steer gets no ack at all.
+  assert.equal(phone.frames.find((f) => f.type === "hello_ack").steering, true);
 });
 
 test("link_trust_frame_on_rotation", async () => {
@@ -1179,7 +1191,7 @@ test("link_trust_frame_on_rotation", async () => {
       steer: () => readSteerSecret(tlsDir),
       steerFile: path.join(tlsDir, "steer.secret"),
     });
-    const steering = await connectPhone(hub, agent, { tls: true, steer: first });
+    const steering = await connectPhone(hub, agent, { steer: first });
     try {
       const closesBefore = steering.closes;
       rotateSteerSecret(tlsDir);
@@ -1187,6 +1199,7 @@ test("link_trust_frame_on_rotation", async () => {
       const trust = steering.frames.filter((f) => f.type === "link_trust");
       assert.deepEqual(trust, [{ type: "link_trust", v: 2, steering: false }]);
       assert.deepEqual(trust[0], FIXTURES.agent_to_phone.link_trust, "the shared fixture is what agentd sends");
+      assert.equal(steering.closeCode, 4403);
     } finally {
       steering.close();
       await stop();
@@ -1196,7 +1209,7 @@ test("link_trust_frame_on_rotation", async () => {
 
 test("wss_with_steer_is_trusted", async () => {
   const { hub, agent, stop } = await newHub();
-  const phone = await connectPhone(hub, agent, { tls: true, steer: STEER });
+  const phone = await connectPhone(hub, agent);
   try {
     assert.equal(hub.hasTrustedClient, true);
     assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r" }), true);
@@ -1207,26 +1220,11 @@ test("wss_with_steer_is_trusted", async () => {
   }
 });
 
-test("plaintext_ws_with_steer_is_still_monitor_only", async () => {
-  const { hub, logs, agent, stop } = await newHub();
-  const phone = await connectPhone(hub, agent, { tls: false, steer: STEER });
-  try {
-    assert.equal(hub.hasAuthenticatedClient, true);
-    assert.equal(hub.hasTrustedClient, false);
-    assert.equal(await steeringRefused(phone), true);
-    assert.ok(logs.entries.some((e) => e.event === "ws_steer_over_plaintext"), "a leaked secret is noticed");
-    assert.equal(JSON.stringify(logs.entries).includes(STEER), false, "and never logged");
-  } finally {
-    phone.close();
-    await stop();
-  }
-});
-
-test("a_token_taken_over_plaintext_does_not_steer_over_wss", async () => {
-  // The attack: answer agentd's plaintext dial to learn the token, then use it on wss.
-  const stolen = [];
+test("a_dialled_plaintext_listener_never_learns_the_token_and_a_token_alone_gets_nobody_in", async () => {
+  // The old attack: answer agentd's dial to learn the token, then use it on wss.
+  const wire = [];
   const trap = netServer((socket) => {
-    socket.on("data", (chunk) => stolen.push(...chunk.toString().split("\n").filter(Boolean).map((l) => JSON.parse(l))));
+    socket.on("data", (chunk) => wire.push(chunk));
     socket.on("error", () => {});
   });
   const trapPort = await new Promise((resolve) => trap.listen(0, "127.0.0.1", () => resolve(trap.address().port)));
@@ -1234,17 +1232,13 @@ test("a_token_taken_over_plaintext_does_not_steer_over_wss", async () => {
   const { hub, agent, stop } = await newHub();
   try {
     link.connectToPhone({ host: "127.0.0.1", port: trapPort, name: "impostor" });
-    await waitUntil(() => stolen.some((f) => f.type === "hello"), "the plaintext dial never sent hello");
-    const token = stolen.find((f) => f.type === "hello").token;
-    assert.equal(token, TOKEN, "monitor-only is what a plaintext dial costs");
-    assert.equal(JSON.stringify(stolen).includes(STEER), false);
-
-    const attacker = fakePhone({ transport: "wshub", tls: true, pin: agent.fingerprint256 });
-    await attacker.start({ port: hub.port(), token });
-    await attacker.waitFor("hello_ack");
+    await waitUntil(() => wire.length > 0, "the dial never arrived");
+    await settle(50);
+    assert.equal(Buffer.concat(wire).toString("latin1").includes(TOKEN), false, "the dial is TLS: no token to take");
+    // Even holding the token and the secret, an unpinned cert is refused.
+    const { reject } = await refusedHello(hub, agent, { cert: await phoneCert("attacker") });
+    assert.deepEqual(reject, REPAIR_NEEDED);
     assert.equal(hub.hasTrustedClient, false);
-    assert.equal(await steeringRefused(attacker), true);
-    attacker.close();
   } finally {
     stopLink();
     await stop();
@@ -1256,23 +1250,21 @@ test("rotating_the_steer_secret_cuts_off_the_old_secret_everywhere", async () =>
   let current = STEER;
   // No file to watch and no timer worth waiting for: this is the gate alone.
   const { hub, agent, stop } = await newHub({ steer: () => current, trustCheckIntervalMs: 3_600_000 });
-  const before = await connectPhone(hub, agent, { tls: true, steer: STEER });
+  const before = await connectPhone(hub, agent);
   try {
     assert.equal(hub.hasTrustedClient, true);
     current = "a-freshly-rotated-secret";
-    // The phone that was steering is monitor-only from this moment, still connected.
+    // The phone that was steering is refused from this moment, before the re-check drops it.
     assert.equal(hub.hasTrustedClient, false);
     assert.equal(await steeringRefused(before), true, "its steering frames are refused");
     assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r0" }), false);
-    const stale = await connectPhone(hub, agent, { tls: true, steer: STEER });
-    assert.equal(await steeringRefused(stale), true, "the old secret no longer steers at the next hello either");
-    const fresh = await connectPhone(hub, agent, { tls: true, steer: current });
+    const { reject } = await refusedHello(hub, agent, { steer: STEER });
+    assert.deepEqual(reject, REPAIR_NEEDED, "the old secret no longer gets in at the next hello either");
+    const fresh = await connectPhone(hub, agent, { steer: current });
     assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r" }), true);
     await fresh.waitFor("approval_request");
     await settle(30);
-    assert.equal(stale.frames.some((f) => f.type === "approval_request"), false);
     assert.equal(before.frames.some((f) => f.type === "approval_request"), false);
-    stale.close();
     fresh.close();
   } finally {
     before.close();
@@ -1288,21 +1280,17 @@ test("rotate_steer_cuts_off_connected_wss_phone", async () => {
       steer: () => readSteerSecret(tlsDir),
       steerFile: path.join(tlsDir, "steer.secret"),
     });
-    const steering = await connectPhone(hub, agent, { tls: true, steer: first });
-    const monitor = await connectPhone(hub, agent, { tls: true, steer: "never-valid" });
+    const steering = await connectPhone(hub, agent, { steer: first });
     try {
       assert.equal(hub.hasTrustedClient, true);
       const closesBefore = steering.closes;
       rotateSteerSecret(tlsDir); // `agentd pair --rotate-steer`, from another process
       await steering.waitForClose(closesBefore, 3000);
       assert.equal(hub.hasTrustedClient, false);
-      assert.ok(logs.entries.some((e) => e.event === "ws_trust_revoked"));
+      assert.ok(logs.entries.some((e) => e.event === "ws_trust_revoked" && e.meta.reason === "steer_rotated"));
       assert.equal(JSON.stringify(logs.entries).includes(first), false);
-      await settle(50);
-      assert.equal(monitor.closes, 0, "a monitor never held steering, so it stays");
     } finally {
       steering.close();
-      monitor.close();
       await stop();
     }
   });
@@ -1317,7 +1305,7 @@ test("revocation_logged_once (wshub)", async () => {
       steerFile: path.join(tlsDir, "steer.secret"),
       trustCheckIntervalMs: 5,
     });
-    const phone = await connectPhone(hub, agent, { tls: true, steer: first });
+    const phone = await connectPhone(hub, agent, { steer: first });
     assert.equal(hub.hasTrustedClient, true);
     phone.stall(); // a hung phone never answers the close frame
     rotateSteerSecret(tlsDir);
@@ -1344,40 +1332,15 @@ test("revocation_logged_once (phonelink)", async () => {
   });
 });
 
-test("wss_without_a_configured_secret_trusts_nobody", async () => {
-  const { hub, agent, stop } = await newHub({ steer: () => undefined });
-  const phone = await connectPhone(hub, agent, { tls: true, steer: STEER });
-  try {
-    assert.equal(hub.hasTrustedClient, false);
-  } finally {
-    phone.close();
-    await stop();
-  }
-});
-
-test("wshub_serves_wss_and_plain_ws_on_one_port_and_only_a_steering_wss_phone_is_trusted", async () => {
-  const { hub, agent, stop } = await newHub();
-  const secure = await connectPhone(hub, agent, { tls: true, steer: STEER });
-  const plain = await connectPhone(hub, agent, { tls: false });
-  try {
-    assert.equal(hub.hasTrustedClient, true);
-    assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r1" }), true);
-    await secure.waitFor("approval_request");
-    await settle(50);
-    assert.equal(plain.frames.some((f) => f.type === "approval_request"), false);
-    secure.close();
-    await waitUntil(() => !hub.hasTrustedClient, "trusted client did not drop");
-    assert.equal(hub.hasAuthenticatedClient, true, "the plaintext phone is still watching");
-    assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r2" }), false);
-  } finally {
-    secure.close();
-    plain.close();
-    await stop();
-  }
+test("wss_without_a_configured_secret_admits_nobody", async () => {
+  const { hub, agent } = await newHub({ steer: () => undefined });
+  const { reject } = await refusedHello(hub, agent);
+  assert.deepEqual(reject, REPAIR_NEEDED);
+  assert.equal(hub.hasTrustedClient, false);
 });
 
 test("a_wss_phone_with_the_wrong_pin_never_sends_its_token", async () => {
-  const { hub, logs, agent, stop } = await newHub();
+  const { hub, logs, stop } = await newHub();
   const phone = fakePhone({
     transport: "wshub",
     tls: true,
@@ -1395,26 +1358,29 @@ test("a_wss_phone_with_the_wrong_pin_never_sends_its_token", async () => {
   }
 });
 
-test("wshub_without_a_cert_drops_a_tls_client_and_serves_plain_ws", async () => {
-  const logs = loggerHarness();
-  const store = new SessionStore(config, logs.logger);
-  const hub = new WsHub(config, store, logs.logger, { host: "127.0.0.1" });
-  await hub.start();
-  try {
-    const secure = new WebSocket(`wss://127.0.0.1:${hub.port()}`, { rejectUnauthorized: false });
-    await new Promise((resolve) => {
-      secure.once("error", resolve);
-      secure.once("open", () => resolve());
-    });
-    assert.notEqual(secure.readyState, WebSocket.OPEN);
-    const phone = fakePhone({ transport: "wshub", tls: false });
-    await phone.start({ port: hub.port(), token: TOKEN });
-    await phone.waitFor("hello_ack");
-    phone.close();
-  } finally {
-    await hub.stop();
-    store.dispose();
-  }
+test("forgetting_a_pin_closes_its_wss_peer_live", async () => {
+  await withDaemon(
+    { transport: "wshub", attached: [{ provider: "claude", id: "s1" }] },
+    async ({ phone, wsPort, token, steer, coderDir, agentFingerprint, pins }) => {
+      const otherId = await phoneCert("other");
+      pins.add(otherId.fingerprint256);
+      const other = fakePhone({ transport: "wshub", pin: agentFingerprint, cert: otherId, steer });
+      await other.start({ port: wsPort, host: "127.0.0.1", token });
+      await other.waitFor("hello_ack");
+      const seen = phone.frames.length;
+      const closesBefore = phone.closes;
+      const { stdout } = await runCli(coderDir, ["phones", "forget", phone.fingerprint.replace(/:/g, "").slice(0, 16)]);
+      assert.match(stdout, /^Forgot /);
+      await phone.waitForClose(closesBefore, 3000);
+      // R126: the phone heard the trust go before the link did.
+      assert.deepEqual(phone.frames.slice(seen).filter((f) => f.type === "link_trust"), [FIXTURES.agent_to_phone.link_trust]);
+      assert.equal(phone.closeCode, 4403);
+      await settle(100);
+      assert.equal(other.closes, 0, "the phone still pinned stays connected");
+      const frame = other.sendFrame("mode_set", ["claude:s1", "acceptEdits"]);
+      assert.equal((await other.waitFor("ack", (f) => f.msgId === frame.msgId)).result, "applied");
+    },
+  );
 });
 
 // ---- the steering secret is never sent ----
@@ -1423,7 +1389,7 @@ for (const transport of TRANSPORTS) {
   test(`steer_never_appears_in_any_frame_agentd_sends (${transport})`, async () => {
     await withDaemon(
       { transport, tls: true, attached: [{ provider: "claude", id: "s1" }] },
-      async ({ phone, httpPort, wsPort, token, steer }) => {
+      async ({ phone, httpPort, steer }) => {
         // A full session: board, detail, a held approval answered, steering, a refresh.
         await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: "/w", prompt: "hi" });
         await phone.waitFor("session_upsert", (f) => f.session.id === "s1");
@@ -1441,16 +1407,9 @@ for (const transport of TRANSPORTS) {
         const approval = await phone.waitFor("approval_request");
         phone.send({ type: "approval_decision", v: 1, requestId: approval.requestId, decision: "allow" });
         await reply;
-        // And a second, plaintext watcher on the same hub sees nothing of it either.
-        const watcher = fakePhone({ transport: "wshub", tls: false });
-        await watcher.start({ port: wsPort, host: "127.0.0.1", token });
-        await watcher.waitFor("snapshot");
         await settle(100);
-        for (const [who, frames] of [["trusted", phone.frames], ["watcher", watcher.frames]]) {
-          assert.ok(frames.length >= (who === "trusted" ? 6 : 2), who);
-          assert.equal(JSON.stringify(frames).includes(steer), false, `${who} phone received the steering secret`);
-        }
-        watcher.close();
+        assert.ok(phone.frames.length >= 6);
+        assert.equal(JSON.stringify(phone.frames).includes(steer), false, "the phone received the steering secret");
       },
     );
   });

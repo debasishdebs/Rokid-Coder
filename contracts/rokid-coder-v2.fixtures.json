@@ -172,6 +172,19 @@
       "current": { "model": "gpt-6-luna", "effort": "low" }
     }
   },
+  "hello_reject": {
+    "_comment": "What agentd sends a wss phone whose hello it refuses, just before it closes the socket with 4403. There is no monitor-only link: anything short of a pinned client cert, the token and the steering secret is refused here.",
+    "repair_needed": {
+      "type": "hello_reject",
+      "v": 2,
+      "reason": "repair_needed"
+    },
+    "bad_token": {
+      "type": "hello_reject",
+      "v": 2,
+      "reason": "bad_token"
+    }
+  },
   "agent_to_phone_variants": {
     "alert_approval": {
       "type": "alert",

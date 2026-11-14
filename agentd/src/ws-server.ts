@@ -1,14 +1,22 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
-import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import https from "node:https";
-import net, { type AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import path from "node:path";
 import type { TLSSocket } from "node:tls";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { NotAttachedError } from "./attach-registry";
 import { gateFrame, linkTrustFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
-import { digestMatchesSecret, secretDigest, secretMatches, watchFiles } from "./tls";
+import {
+  PinStore,
+  digestMatchesSecret,
+  normalizeFingerprint,
+  secretDigest,
+  secretMatches,
+  shortFingerprint,
+  watchFiles,
+} from "./tls";
 import { SessionStore } from "./session-store";
 import type {
   ApprovalDecision,
@@ -30,8 +38,21 @@ const SERVER_VERSION = (() => {
   return packageJson.version;
 })();
 
-/** The first byte of a TLS record carrying a handshake. */
-const TLS_HANDSHAKE_BYTE = 0x16;
+/** The close code after a `hello_reject`, and after a live link loses its trust. */
+const CLOSE_UNTRUSTED = 4403;
+/** How long a client losing its trust has to take the close frame before its socket is destroyed. */
+const REVOKED_CLOSE_GRACE_MS = 500;
+
+/** What OpenSSL says when the first bytes on the port are not a TLS record: a plaintext client. */
+const PLAINTEXT_ERRORS = new Set([
+  "ERR_SSL_HTTP_REQUEST",
+  "ERR_SSL_HTTPS_PROXY_REQUEST",
+  "ERR_SSL_WRONG_VERSION_NUMBER",
+  "ERR_SSL_PACKET_LENGTH_TOO_LONG",
+]);
+
+/** Why a hello was refused, as the phone is told: re-pair, or the token is wrong. */
+type HelloRejectReason = "repair_needed" | "bad_token";
 
 function refuseHttp(_request: IncomingMessage, response: ServerResponse): void {
   response.writeHead(426, { "content-type": "text/plain" });
@@ -41,13 +62,14 @@ function refuseHttp(_request: IncomingMessage, response: ServerResponse): void {
 interface ClientState {
   authenticated: boolean;
   /**
-   * Digest of the steering secret this TLS client presented at hello and that
-   * matched then; undefined for a monitor and once revoked. Trust is this digest still matching
-   * the current secret (`isTrusted`), so a rotation cuts the client off.
+   * Digest of the steering secret this client presented at hello; undefined
+   * before then and once revoked. Trust is this digest still matching the
+   * current secret and the peer cert still being pinned (`isTrusted`), so a
+   * rotation or a forget cuts the client off.
    */
   steerDigest?: Buffer;
-  /** The connection is TLS; trust needs this and the secret. */
-  encrypted: boolean;
+  /** The SHA-256 of the client cert the phone presented, or undefined when it presented none. */
+  peerFingerprint?: string;
   channel: PhoneChannel;
   lastPongAt: number;
   helloTimer: NodeJS.Timeout;
@@ -72,14 +94,19 @@ export interface WsHubOptions {
   /** Types the wearer's text into the session's terminal; see terminal-input. */
   onTerminalInput?: (sessionId: string, text: string) => Promise<TerminalInputOutcome>;
   /**
-   * agentd's TLS identity. With it the one port serves both wss and plain ws:
-   * the first byte of a connection says which. Plain ws is monitor-only.
+   * agentd's TLS identity. Required: the port speaks wss only, and a client
+   * that opens with anything but a TLS handshake is dropped.
    */
   tls?: { key: string; cert: string };
   /**
+   * The trusted phone certificates, shared with PhoneLink. A wss client gets in
+   * only with a pinned client cert, or inside the pairing window, where its
+   * hello pins it. Without a store the set lasts only as long as the process.
+   */
+  pins?: PinStore;
+  /**
    * The steering secret, read at each hello so a rotation takes effect at once.
-   * A wss client is trusted only if its hello carries it. It is never sent: the
-   * token alone, which any plaintext link can see, lets a client in as a monitor.
+   * A hello without it is refused. It is never sent.
    */
   steer?: () => string | undefined;
   /** The file behind `steer`, watched so a rotation drops the phones that held the old secret. */
@@ -87,14 +114,23 @@ export interface WsHubOptions {
   /** How often live clients are re-checked against the current secret (the file watch also triggers it). */
   trustCheckIntervalMs?: number;
   v2?: PhoneV2Hooks;
-  /** A client finished its handshake, after it has its snapshot. `trusted` is whether it may steer. */
+  /** A client finished its handshake, after it has its snapshot. `trusted` is whether it may steer: always, for an accepted client. */
   onClientConnected?: (trusted: boolean) => void;
   /** An authenticated client went away. */
   onClientDisconnected?: () => void;
-  /** A client lost its trust (the secret was rotated); it is being dropped. */
+  /** A client lost its trust (the secret was rotated or its phone forgotten); it is being dropped. */
   onTrustRevoked?: () => void;
 }
 
+
+/** The SHA-256 of the client cert the peer presented, or undefined when it presented none. */
+function clientCertFingerprint(socket: TLSSocket): string | undefined {
+  const cert = socket.getPeerCertificate(true);
+  if (!cert || !cert.raw || cert.raw.length === 0) {
+    return undefined;
+  }
+  return normalizeFingerprint(createHash("sha256").update(cert.raw).digest("hex"));
+}
 
 function tokenMatches(received: unknown, expected: string): boolean {
   if (typeof received !== "string") {
@@ -106,9 +142,7 @@ function tokenMatches(received: unknown, expected: string): boolean {
 }
 
 export class WsHub {
-  private server?: net.Server;
-  private plainServer?: http.Server;
-  private secureServer?: https.Server;
+  private server?: https.Server;
   private sockets?: WebSocketServer;
   private keepaliveTimer?: NodeJS.Timeout;
   private stopTrustWatch?: () => void;
@@ -116,6 +150,8 @@ export class WsHub {
   private sequence = 0;
   private readonly unsubscribeUpsert: () => void;
   private readonly unsubscribeRemoved: () => void;
+  private readonly pins: PinStore;
+  private readonly tls: { key: string; cert: string };
 
   constructor(
     private readonly config: AgentConfig,
@@ -123,6 +159,11 @@ export class WsHub {
     private readonly logger: Logger,
     private readonly options: WsHubOptions = {},
   ) {
+    if (!options.tls) {
+      throw new Error("WsHub needs agentd's TLS identity: the phone port is wss only");
+    }
+    this.tls = options.tls;
+    this.pins = options.pins ?? new PinStore();
     this.unsubscribeUpsert = store.onUpsert((session) => this.broadcastUpsert(session));
     this.unsubscribeRemoved = store.onRemoved((sessionId) => this.broadcastRemoved(sessionId));
   }
@@ -135,25 +176,33 @@ export class WsHub {
     if (this.server) {
       return Promise.resolve();
     }
-    // The HTTP servers never listen: the front server below hands each
-    // connection to one of them, which only exists to run the upgrade.
     const sockets = new WebSocketServer({ noServer: true });
-    const onUpgrade = (request: IncomingMessage, socket: net.Socket, head: Buffer): void => {
+    // The phone's cert is self-signed and may be missing altogether, so the
+    // handshake asks for it and admits either; the hello decides, where a
+    // refusal can say what to do next.
+    const server = https.createServer(
+      {
+        ...this.tls,
+        requestCert: true,
+        rejectUnauthorized: false,
+        minVersion: "TLSv1.2",
+        handshakeTimeout: this.options.helloTimeoutMs ?? 5000,
+      },
+      refuseHttp,
+    );
+    server.on("upgrade", (request: IncomingMessage, socket: Socket, head: Buffer) => {
       sockets.handleUpgrade(request, socket, head, (client) => this.accept(client, request));
-    };
-    const plain = http.createServer(refuseHttp);
-    plain.on("upgrade", onUpgrade);
-    const secure = this.options.tls
-      ? https.createServer({ ...this.options.tls, minVersion: "TLSv1.2" }, refuseHttp)
-      : undefined;
-    secure?.on("upgrade", onUpgrade);
-    secure?.on("tlsClientError", (error) => {
-      this.logger.warn("ws_tls_client_error", { reason: error.name });
     });
-    const server = net.createServer((socket) => this.route(socket, plain, secure));
+    // Node destroys the socket after this without writing a byte, so a
+    // plaintext client never gets an answer, let alone one to send a token to.
+    server.on("tlsClientError", (error: NodeJS.ErrnoException) => {
+      if (error.code !== undefined && PLAINTEXT_ERRORS.has(error.code)) {
+        this.logger.warn("ws_plaintext_refused");
+      } else {
+        this.logger.warn("ws_tls_client_error", { reason: error.name });
+      }
+    });
     this.server = server;
-    this.plainServer = plain;
-    this.secureServer = secure;
     this.sockets = sockets;
     server.on("error", (error) => {
       this.logger.error("ws_server_error", { reason: error.name });
@@ -171,7 +220,7 @@ export class WsHub {
         this.keepaliveTimer = setInterval(() => this.keepalive(), interval);
         this.keepaliveTimer.unref();
         this.stopTrustWatch = watchFiles(
-          this.options.steerFile ? [this.options.steerFile] : [],
+          [this.options.steerFile, this.pins.filePath].filter((file): file is string => file !== undefined),
           this.options.trustCheckIntervalMs ?? 1_000,
           () => this.recheckTrust(),
         );
@@ -180,25 +229,6 @@ export class WsHub {
       server.once("error", onError);
       server.once("listening", onListening);
       server.listen({ host: this.options.host ?? "0.0.0.0", port: this.config.wsPort });
-    });
-  }
-
-  /** Peeks at the first byte to tell a TLS handshake from an HTTP request. */
-  private route(socket: net.Socket, plain: http.Server, secure: https.Server | undefined): void {
-    socket.on("error", () => undefined);
-    const timer = setTimeout(() => socket.destroy(), this.options.helloTimeoutMs ?? 5000);
-    timer.unref();
-    socket.once("close", () => clearTimeout(timer));
-    socket.once("readable", () => {
-      clearTimeout(timer);
-      const first: Buffer | null = socket.read(1);
-      const target = first && first[0] === TLS_HANDSHAKE_BYTE ? secure : plain;
-      if (!first || !target) {
-        socket.destroy();
-        return;
-      }
-      socket.unshift(first);
-      target.emit("connection", socket);
     });
   }
 
@@ -227,20 +257,15 @@ export class WsHub {
     this.sockets?.close();
     this.sockets = undefined;
     if (server) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      server.closeAllConnections();
+      await closed;
     }
-    for (const inner of [this.plainServer, this.secureServer]) {
-      inner?.close();
-      inner?.closeAllConnections();
-    }
-    this.plainServer = undefined;
-    this.secureServer = undefined;
     this.unsubscribeUpsert();
     this.unsubscribeRemoved();
   }
 
   private accept(socket: WebSocket, request: IncomingMessage): void {
-    const encrypted = (request.socket as Partial<TLSSocket>).encrypted === true;
     const helloTimer = setTimeout(() => {
       if (!this.clients.get(socket)?.authenticated) {
         socket.close(4408, "hello timeout");
@@ -250,7 +275,7 @@ export class WsHub {
     const hub = this;
     const state: ClientState = {
       authenticated: false,
-      encrypted,
+      peerFingerprint: clientCertFingerprint(request.socket as TLSSocket),
       channel: {
         transport: "wshub",
         get trusted() {
@@ -314,45 +339,16 @@ export class WsHub {
     }
 
     if (!state.authenticated) {
-      if (
-        message.type !== "hello" ||
-        message.v !== PROTOCOL_VERSION ||
-        !tokenMatches(message.token, this.config.token)
-      ) {
-        // A phone treats 4401 as final and stops reconnecting, so this is the
-        // difference between a link that is retrying and one that has given up
-        // for good. Worth saying which of the three it was, without echoing the
-        // token itself.
+      if (message.type !== "hello" || message.v !== PROTOCOL_VERSION) {
+        // A phone treats 4401 as final and stops reconnecting: this is not a
+        // phone speaking this protocol at all.
         this.logger.warn("ws_auth_rejected", {
-          reason: message.type !== "hello"
-            ? "not_hello"
-            : message.v !== PROTOCOL_VERSION
-              ? "version"
-              : "token",
+          reason: message.type !== "hello" ? "not_hello" : "version",
         });
         socket.close(4401, "authentication failed");
         return;
       }
-      state.authenticated = true;
-      state.steerDigest = this.grantsSteering(state, message.steer);
-      state.lastPongAt = Date.now();
-      clearTimeout(state.helloTimer);
-      this.armPongDeadline(socket, state);
-      this.send(socket, {
-        type: "hello_ack",
-        v: PROTOCOL_VERSION,
-        // The grant, stated (R126): the phone binds steering from this, never from its own config,
-        // so a stale or missing steer reads as monitor-only on both sides.
-        steering: this.isTrusted(state),
-        server: {
-          name: "nexus-agentd",
-          version: SERVER_VERSION,
-          machineId: this.config.machineId,
-          machineName: this.config.machineName,
-        },
-      });
-      this.sendSnapshot(socket);
-      this.options.onClientConnected?.(this.isTrusted(state));
+      this.onHello(socket, state, message);
       return;
     }
 
@@ -408,50 +404,142 @@ export class WsHub {
   }
 
   /**
-   * Steering needs TLS and the steering secret together. The secret is checked
-   * in constant time and a length mismatch is just a mismatch. A plaintext
-   * client that sends one has put it on the wire, so that is logged.
+   * A hello is accepted only with the token, the steering secret and a client
+   * cert that is pinned or may be pinned now, checked in that order. Nothing
+   * about pins or the pairing window changes until all three have passed, so a
+   * failed hello leaves both as they were.
    */
-  private grantsSteering(state: ClientState, presented: unknown): Buffer | undefined {
-    if (typeof presented !== "string") {
-      return undefined;
+  private onHello(socket: WebSocket, state: ClientState, message: Record<string, unknown>): void {
+    const fingerprint = state.peerFingerprint;
+    const short = fingerprint ? shortFingerprint(fingerprint) : "none";
+    if (!tokenMatches(message.token, this.config.token)) {
+      this.rejectHello(socket, state, "bad_token", { reason: "token", fingerprint: short });
+      return;
     }
-    if (!state.encrypted) {
-      this.logger.warn("ws_steer_over_plaintext");
-      return undefined;
+    if (!this.steerMatches(message.steer)) {
+      this.rejectHello(socket, state, "repair_needed", { reason: "steer", fingerprint: short });
+      return;
     }
+    if (!fingerprint) {
+      this.rejectHello(socket, state, "repair_needed", { reason: "no_client_cert", fingerprint: short });
+      return;
+    }
+    let known: boolean;
+    try {
+      known = this.pins.has(fingerprint);
+      if (!known && !this.pins.allowNextOpen(Date.now())) {
+        this.rejectHello(socket, state, "repair_needed", { reason: "unpinned_cert", fingerprint: short });
+        return;
+      }
+      if (!known) {
+        // Adding also closes the allow-next window: one admission per arming.
+        this.pins.add(fingerprint);
+        this.logger.info("ws_phone_pinned", { fingerprint: short });
+      }
+    } catch (error) {
+      // Fail closed: with the set unreadable, or a pin it cannot keep, nobody can be told from a stranger.
+      this.logger.error("ws_pins_unavailable", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      this.rejectHello(socket, state, "repair_needed", { reason: "pins_unavailable", fingerprint: short });
+      return;
+    }
+    const digest = this.grantsSteering(state, message.steer);
+    if (!digest) {
+      // The secret was rotated, or the phone forgotten, since the checks above.
+      this.rejectHello(socket, state, "repair_needed", { reason: "trust_changed", fingerprint: short });
+      return;
+    }
+    state.authenticated = true;
+    state.steerDigest = digest;
+    state.lastPongAt = Date.now();
+    clearTimeout(state.helloTimer);
+    this.armPongDeadline(socket, state);
+    this.send(socket, {
+      type: "hello_ack",
+      v: PROTOCOL_VERSION,
+      // The grant, stated (R126): the phone binds steering from this. An
+      // accepted link always steers; the field stays for phones that read it.
+      steering: true,
+      server: {
+        name: "nexus-agentd",
+        version: SERVER_VERSION,
+        machineId: this.config.machineId,
+        machineName: this.config.machineName,
+      },
+    });
+    this.sendSnapshot(socket);
+    this.options.onClientConnected?.(this.isTrusted(state));
+  }
+
+  /** Tells the phone why, then closes; never echoes the token, the secret or the full fingerprint. */
+  private rejectHello(
+    socket: WebSocket,
+    state: ClientState,
+    reason: HelloRejectReason,
+    log: { reason: string; fingerprint: string },
+  ): void {
+    clearTimeout(state.helloTimer);
+    this.logger.warn("ws_auth_rejected", log);
+    this.send(socket, { type: "hello_reject", v: 2, reason });
+    socket.close(CLOSE_UNTRUSTED, reason);
+  }
+
+  /** Constant time, and a length mismatch is just a mismatch. */
+  private steerMatches(presented: unknown): boolean {
     const expected = this.options.steer?.();
-    return expected !== undefined && secretMatches(presented, expected)
+    return typeof presented === "string" && expected !== undefined && secretMatches(presented, expected);
+  }
+
+  /** The digest a steering client keeps: the secret matched and its cert is pinned. */
+  private grantsSteering(state: ClientState, presented: unknown): Buffer | undefined {
+    return typeof presented === "string" && this.steerMatches(presented) && this.isPinned(state)
       ? secretDigest(presented)
       : undefined;
   }
 
-  /** Live: the secret the client proved must still be the current one. */
+  private isPinned(state: ClientState): boolean {
+    if (!state.peerFingerprint) {
+      return false;
+    }
+    try {
+      return this.pins.has(state.peerFingerprint);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Live: the secret the client proved must still be the current one, and its cert still pinned. */
   private isTrusted(state: ClientState): boolean {
     return (
-      state.encrypted &&
       state.steerDigest !== undefined &&
-      digestMatchesSecret(state.steerDigest, this.options.steer?.())
+      digestMatchesSecret(state.steerDigest, this.options.steer?.()) &&
+      this.isPinned(state)
     );
   }
 
   /**
-   * Drops clients that proved a secret which has since been rotated away. The
-   * socket is destroyed at once: a client that never answers the close frame
-   * would otherwise stay listed for ws's 30 s close timeout, and with it what
-   * was held for it. Its digest is dropped, so it is revoked, and logged, once.
+   * Drops clients whose secret has been rotated away or whose phone has been
+   * forgotten. The close frame gets a moment to reach the phone, then the
+   * socket is destroyed: a client that never answers it would otherwise stay
+   * listed for ws's 30 s close timeout. Its digest is dropped at once, so it is
+   * untrusted from here, and revoked, and logged, once.
    */
   private recheckTrust(): void {
     let revoked = false;
     for (const [socket, state] of this.clients) {
       if (state.authenticated && state.steerDigest !== undefined && !this.isTrusted(state)) {
+        const reason = this.isPinned(state) ? "steer_rotated" : "pin_forgotten";
         state.steerDigest = undefined;
         revoked = true;
-        this.logger.warn("ws_trust_revoked", { reason: "steer_rotated" });
+        this.logger.warn("ws_trust_revoked", {
+          reason,
+          fingerprint: state.peerFingerprint ? shortFingerprint(state.peerFingerprint) : "none",
+        });
         // Said before the close, so the phone stops treating the link as steering (R126).
         this.send(socket, linkTrustFrame(false));
-        socket.close(4403, "steering secret rotated");
-        socket.terminate();
+        socket.close(CLOSE_UNTRUSTED, reason === "steer_rotated" ? "steering secret rotated" : "phone forgotten");
+        setTimeout(() => socket.terminate(), REVOKED_CLOSE_GRACE_MS).unref();
       }
     }
     if (revoked) {
@@ -551,7 +639,7 @@ export class WsHub {
     });
   }
 
-  /** Approvals, alerts and their resolutions go to trusted phones only: a monitor-only phone cannot answer them. */
+  /** Approvals, alerts and their resolutions go to trusted phones only: one losing its trust cannot answer them. */
   sendApprovalRequest(request: ApprovalRequest): boolean {
     return this.broadcastToTrusted({ ...request });
   }

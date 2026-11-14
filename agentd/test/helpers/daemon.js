@@ -7,7 +7,7 @@ const { ensureConfig, saveConfig } = require("../../dist/config.js");
 const { startDaemon } = require("../../dist/daemon.js");
 const { PinStore } = require("../../dist/tls.js");
 const { createFakePhone } = require("../fake-phone.js");
-const { agentCert, seedAgentCert } = require("./tls.js");
+const { agentCert, phoneCert, seedAgentCert } = require("./tls.js");
 
 async function withTempDir(body) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "rokid-coder-test-"));
@@ -65,14 +65,15 @@ function transcriptLine(sessionId) {
 /**
  * Boots the real daemon against temp state with a fake phone on `transport`.
  * `discovered` Claude sessions are written under a temp ~/.claude/projects.
- * `tls: true` makes the phone link real TLS: agentd pins the fake phone's cert
- * on its first hello inside a pairing window opened here, as `pair` would
- * (phonelink), or the fake pins agentd's cert (wshub). That
- * is what lets steering frames through; without it the link is monitor-only.
+ * The phone link is real TLS, pinned both ways: agentd pins the fake phone's
+ * cert on its first hello inside a pairing window opened here, as `pair` would
+ * (phonelink), or the fake phone's cert is pinned before it dials (wshub, see
+ * `pinFakePhone`), and the fake pins agentd's cert. `tls: false` is a
+ * plaintext phone, which agentd refuses, so no snapshot is waited for.
  * The daemon's agentd cert is the one shared test cert, copied into its tls dir. `coderFiles` pre-seeds files in
  * the Rokid-Coder state dir (name -> JSON value), such as settings.json.
  */
-async function withDaemon({ transport, tls = false, attached = [], discovered = [], coderFiles = {}, paired = false }, body) {
+async function withDaemon({ transport, tls = true, attached = [], discovered = [], coderFiles = {}, paired = false }, body) {
   await withTempDir(async (dir) => {
     const stateDir = path.join(dir, "nexus-agentd");
     const coderDir = path.join(dir, "rokid-coder");
@@ -100,11 +101,11 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
       // A phone paired earlier. The dialled link checks pins, so this suits wshub only.
       new PinStore(path.join(coderDir, "tls", "phone-pins.json")).add("CD".repeat(32));
     }
-    if (transport === "phonelink" && tls) {
-      new PinStore(path.join(coderDir, "tls", "phone-pins.json")).armAllowNext(Date.now());
-    }
     const agent = await agentCert();
-    const phone = createFakePhone({ transport, tls, pin: agent.fingerprint256 });
+    const phone = createFakePhone({ transport, tls, pin: agent.fingerprint256, cert: tls ? await phoneCert("phone") : undefined });
+    if (tls) {
+      pinFakePhone({ coderDir, phone }, { arm: transport === "phonelink" });
+    }
     const httpPort = await freePort();
     const wsPort = await freePort();
     const base = ensureConfig(stateDir);
@@ -116,7 +117,7 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
       ...base,
       httpPort,
       wsPort,
-      phoneHosts: transport === "phonelink" ? [`${tls ? "tls://" : ""}127.0.0.1:${phonePort}`] : [],
+      phoneHosts: transport === "phonelink" ? [`127.0.0.1:${phonePort}`] : [],
       tailnetDiscovery: false,
       rokidCoder: { stateDir: coderDir },
     }, stateDir);
@@ -133,8 +134,10 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
       if (transport === "wshub") {
         await phone.start({ port: wsPort, host: "127.0.0.1", token: base.token });
       }
-      await phone.waitFor("snapshot");
-      await body({ daemon, phone, httpPort, wsPort, token: base.token, coderDir, claudeDir, steer, agentFingerprint: agent.fingerprint256 });
+      if (tls) {
+        await phone.waitFor("snapshot");
+      }
+      await body({ daemon, phone, pins: new PinStore(path.join(coderDir, "tls", "phone-pins.json")), httpPort, wsPort, token: base.token, coderDir, claudeDir, steer, agentFingerprint: agent.fingerprint256 });
     } finally {
       phone.close();
       await daemon?.stop();
@@ -146,6 +149,20 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
   });
 }
 
+/**
+ * Makes the fake phone's cert one agentd trusts: pinned outright, as a phone
+ * paired earlier, or (`arm`) with the pairing window open, so its next hello
+ * pins it. `ctx` is withDaemon's context, or anything with `coderDir` and `phone`.
+ */
+function pinFakePhone({ coderDir, phone }, { arm = false } = {}) {
+  const pins = new PinStore(path.join(coderDir, "tls", "phone-pins.json"));
+  if (arm) {
+    pins.armAllowNext(Date.now());
+  } else {
+    pins.add(phone.fingerprint);
+  }
+}
+
 const settle = (ms = 80) => new Promise((resolve) => setTimeout(resolve, ms));
 
-module.exports = { withTempDir, withDaemon, postHook, freePort, settle };
+module.exports = { withTempDir, withDaemon, pinFakePhone, postHook, freePort, settle };
