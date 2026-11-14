@@ -392,6 +392,89 @@ class PinnedPairingTest {
         }
     }
 
+    // -------------------------------------------------- redial during a guided attempt
+
+    /** A client on virtual time: no test sleeps through the 5 s redial. */
+    private inner class RedialHarness(var windowOpen: Boolean) {
+        val test = kotlinx.coroutines.test.TestScope()
+        val pinned = FakeWebSocketClient()
+        val connected = CopyOnWriteArrayList<Pair<String, String>>()
+        val sessions = AgentSessionStore()
+        val client = AgentdClient(
+            OkHttpClient(), sessions, test, "test", identity,
+            pinnedClient = { pinned },
+            repairRedial = { windowOpen },
+            onSecureConnected = { id, name -> connected += id to name },
+        ) {}
+
+        fun settle() = test.testScheduler.runCurrent()
+        fun advance(ms: Long) {
+            test.testScheduler.advanceTimeBy(ms)
+            test.testScheduler.runCurrent()
+        }
+
+        fun refuseLatest() {
+            settle()
+            pinned.connections.last().apply { open(); message(HELLO_REJECT_REPAIR) }
+            settle()
+        }
+    }
+
+    @Test
+    fun guided_attempt_redials_refused_outbound_slot_every_5s_only_during_window() {
+        val harness = RedialHarness(windowOpen = true)
+        harness.client.start(config())
+        harness.refuseLatest()
+        assertEquals(1, harness.pinned.connections.size)
+        assertTrue(harness.client.needsRepair.value)
+
+        harness.advance(4_999L)
+        assertEquals(1, harness.pinned.connections.size)
+        harness.advance(1L)
+        assertEquals(2, harness.pinned.connections.size)
+
+        // Refused again, and the window closes before the next redial: nothing more is dialled.
+        harness.refuseLatest()
+        harness.windowOpen = false
+        harness.advance(60_000L)
+        assertEquals(2, harness.pinned.connections.size)
+        assertTrue(harness.client.needsRepair.value)
+        assertEquals(
+            ConnectionState.AUTH_FAILED,
+            harness.sessions.connections.value.getValue(AgentProvider.CLAUDE).state,
+        )
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun a_refused_slot_is_not_redialled_outside_an_attempt() {
+        val harness = RedialHarness(windowOpen = false)
+        harness.client.start(config())
+        harness.refuseLatest()
+        harness.advance(10 * 60_000L)
+        assertEquals(1, harness.pinned.connections.size)
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun a_redial_that_is_accepted_clears_needs_repair_and_announces_the_pin_with_the_announced_name() {
+        val harness = RedialHarness(windowOpen = true)
+        harness.client.start(config())
+        harness.refuseLatest()
+        harness.advance(5_000L)
+        harness.settle()
+        harness.pinned.connections.last().apply {
+            open()
+            message("""{"type":"hello_ack","v":1,"steering":true,"server":{"machineName":"desk.local"}}""")
+        }
+        harness.settle()
+
+        assertFalse(harness.client.needsRepair.value)
+        // The saved name is "Desk": the identity is the pin, and the name is only what is shown.
+        assertEquals(listOf(GuidedPairing.dialledId(FP) to "desk.local"), harness.connected.toList())
+        harness.client.stop(clearSessions = true)
+    }
+
     // ------------------------------------------------------------ harnesses
 
     private fun store() = AgentsConfigStore(prefs) { 0L }

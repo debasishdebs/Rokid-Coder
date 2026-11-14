@@ -77,8 +77,11 @@ class GuidedPairing(
     }
 
     companion object {
-        /** A computer this phone dials (the outbound slot) is known by name only; its id is made from it. */
-        fun dialledId(name: String): String = "dialled:$name"
+        /**
+         * A computer this phone dials (the outbound slot) is known by its pin, not its name: the
+         * wire gives no machine id, and the saved label and the name it announces can differ.
+         */
+        fun dialledId(fp: String): String = "dialled:$fp"
     }
 }
 
@@ -97,17 +100,36 @@ internal fun pairingSnapshot(
     needsRepair: Boolean,
 ): PairingSnapshot {
     val dialled = agentd?.takeIf { it.configured }
+    // A slot saved before pins existed has none, and is never dialled; a signed-out slot lost its pin.
+    // Neither is in the baseline, so a connection from either is a new one.
     val baseline = buildSet {
         machines.forEach { add(it.machineId) }
-        dialled?.let { add(GuidedPairing.dialledId(it.name)) }
+        dialled?.fp?.let { add(GuidedPairing.dialledId(it)) }
     }
     val repairing = buildSet {
-        signedOut.forEach { add(GuidedPairing.dialledId(it.name)) }
-        if (needsRepair) agentd?.let { add(GuidedPairing.dialledId(it.name)) }
+        if (needsRepair) dialled?.fp?.let { add(GuidedPairing.dialledId(it)) }
     }
     val needed = (machines.isEmpty() && dialled == null) || signedOut.isNotEmpty() || needsRepair
     return PairingSnapshot(baseline, repairing, needed)
 }
+
+/**
+ * Opens the door for a guided attempt, from the phone or the glasses: adding a computer is an
+ * explicit request to monitor, so monitoring is turned on; the window is armed; and [reconcile]
+ * makes the monitor listen for it.
+ */
+internal fun openGuidedDoor(store: AgentsConfigStore, reconcile: () -> Unit) {
+    if (!store.load().agentdEnabled) store.setAgentdEnabled(true)
+    store.armLinkWindow()
+    reconcile()
+}
+
+/**
+ * Whether the inbound link server runs. Normally it listens when nothing is dialled; while the
+ * window is open it listens even beside an outbound slot, so the door always has a listener.
+ */
+internal fun inboundListenerWanted(agentdEnabled: Boolean, outboundSlot: Boolean, windowOpen: Boolean): Boolean =
+    agentdEnabled && (!outboundSlot || windowOpen)
 
 /** The words of guided pairing, one place for the phone and the glasses. */
 internal object GuidedPairingCopy {

@@ -117,9 +117,8 @@ class AddComputerActivity : Activity() {
         doorOpen = NexusUi.pillButton(this, if (guided) GuidedPairingCopy.STEP_TWO else "Open the door for two minutes").apply {
             setOnClickListener {
                 val snapshot = currentPairing()
-                configStore.armLinkWindow()
-                AgentsMonitorService.reconcile(applicationContext)
                 pairing.start(snapshot.baseline, snapshot.repairing)
+                openGuidedDoor(configStore) { AgentsMonitorService.reconcile(applicationContext) }
             }
         }
         doorArmed = LinearLayout(this).apply {
@@ -132,6 +131,8 @@ class AddComputerActivity : Activity() {
                     setOnClickListener {
                         configStore.cancelLinkWindow()
                         pairing.cancel()
+                        // Back to the normal rule: the listener beside a dialled slot goes.
+                        AgentsMonitorService.reconcile(applicationContext)
                     }
                 },
                 NexusUi.block(),

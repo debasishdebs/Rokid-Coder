@@ -106,15 +106,25 @@ class AgentdLinkServer internal constructor(
     /** Whether this transport may carry steering frames right now. */
     val linkSecure: StateFlow<Boolean> get() = wire.secure
 
-    fun start() {
+    /**
+     * True while a dialled link (the outbound slot) is the one the store describes: this listener
+     * is then only a door held open for a guided attempt, and must not repaint that link's state.
+     */
+    @Volatile private var besideDialled = false
+
+    /** [besideDialled] says an outbound slot is dialled alongside, so the store's state is left to it. */
+    fun start(besideDialled: Boolean = false) {
+        this.besideDialled = besideDialled
         if (acceptJob != null) return
         synchronized(clientLock) { stopped = false }
-        store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING, "waiting for a computer")
+        if (!besideDialled) {
+            store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING, "waiting for a computer")
+        }
         acceptJob = scope.launch(Dispatchers.IO) { acceptLoop() }
         discoveryJob = scope.launch(Dispatchers.IO) { discoveryLoop() }
     }
 
-    fun stop(clearSessions: Boolean) {
+    fun stop(clearSessions: Boolean, besideDialled: Boolean = false) {
         acceptJob?.cancel()
         acceptJob = null
         discoveryJob?.cancel()
@@ -130,7 +140,10 @@ class AgentdLinkServer internal constructor(
             connections.toList().also { connections.clear() }
         }
         open.forEach(LinkConnection::close)
+        this.besideDialled = false
         store.setLinkMachine(null)
+        // Beside a dialled link the door shuts and nothing else: its connection, approvals and sessions are the slot's.
+        if (besideDialled) return
         store.setConnection(AgentProvider.CLAUDE, ConnectionState.DISCONNECTED)
         store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
         if (clearSessions) store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
@@ -236,7 +249,7 @@ class AgentdLinkServer internal constructor(
                         // Anyone on the network can knock on this door, so a
                         // stranger being turned away must not repaint the state
                         // of a link that is working.
-                        if (client == null) {
+                        if (client == null && !besideDialled) {
                             store.setConnection(
                                 AgentProvider.CLAUDE,
                                 ConnectionState.AUTH_FAILED,

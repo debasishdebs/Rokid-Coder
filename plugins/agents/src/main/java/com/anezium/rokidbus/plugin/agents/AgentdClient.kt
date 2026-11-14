@@ -37,8 +37,14 @@ class AgentdClient(
     private val dialAllowed: () -> Boolean = { true },
     /** The pairing was just used: a secure hello_ack, or a link still up. */
     private val touchUsed: () -> Unit = {},
-    /** A secure hello_ack bound the link: the computer's name, as it announced it. */
-    private val onSecureConnected: (machineName: String) -> Unit = {},
+    /**
+     * True while a guided attempt's window is open: a pairing refused (AUTH_FAILED) is then dialled
+     * again every [REPAIR_REDIAL_MS], so agentd's own allow-next window can pin this phone on it.
+     * Outside an attempt, AUTH_FAILED stays final.
+     */
+    private val repairRedial: () -> Boolean = { false },
+    /** A secure hello_ack bound the link: the pairing's stable id ([GuidedPairing.dialledId]) and the name shown. */
+    private val onSecureConnected: (machineId: String, machineName: String) -> Unit = { _, _ -> },
     onEvent: (AgentdEvent) -> Unit = AgentsRuntime::emitEvent,
 ) {
     private var loopJob: Job? = null
@@ -136,10 +142,13 @@ class AgentdClient(
         val steer = config.steer ?: return authFailed(generation, PairingCopy.OLDER_AGENTD)
         val http = pinnedClient(pin)
         val backoff = ReconnectBackoff()
+        var redialing = false
         while (scope.isActive && sockets.isCurrent(generation)) {
             // Every dial, redials included: a pairing that went stale since the last one is not dialled.
             if (!dialAllowed()) return authFailed(generation, PairingCopy.SIGNED_OUT)
-            store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING)
+            // A refused pairing being tried again keeps saying so, rather than flickering to Connecting.
+            if (!redialing) store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING)
+            redialing = false
             val result = try {
                 connectOnce(config, steer, http, generation, backoff)
             } catch (cancelled: CancellationException) {
@@ -152,7 +161,15 @@ class AgentdClient(
             if (!sockets.isCurrent(generation)) return
             when (result) {
                 // Final: no backoff, no redial, until a new pairing restarts the client.
-                is ConnectionOutcome.AuthFailed -> return authFailed(generation, result.detail)
+                is ConnectionOutcome.AuthFailed -> {
+                    authFailed(generation, result.detail)
+                    // Final, except inside a guided attempt: agentd's pair window pins this phone on a redial.
+                    if (!repairRedial()) return
+                    delay(REPAIR_REDIAL_MS)
+                    if (!repairRedial() || !sockets.isCurrent(generation)) return
+                    redialing = true
+                    continue
+                }
                 is ConnectionOutcome.RetryWithDetail -> {
                     store.setConnection(
                         AgentProvider.CLAUDE,
@@ -240,7 +257,11 @@ class AgentdClient(
                         if (!connected.compareAndSet(false, true)) return
                         link.up(owner, secure = true, stillLive = ::isLive) ?: return
                         touchUsed()
-                        onSecureConnected(action.machineName?.takeIf(String::isNotBlank) ?: config.name)
+                        _needsRepair.value = false
+                        onSecureConnected(
+                            GuidedPairing.dialledId(config.fp.orEmpty()),
+                            action.machineName?.takeIf(String::isNotBlank) ?: config.name,
+                        )
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()
@@ -376,6 +397,9 @@ class AgentdClient(
     companion object {
         /** agentd refused or dropped this phone's pairing: its pin, token or secret is no longer trusted. */
         const val REPAIR_TO_STEER = PairingCopy.REPAIR_TO_STEER
+
+        /** The pause between redials of a refused pairing while a guided attempt's window is open. */
+        const val REPAIR_REDIAL_MS = 5_000L
         private const val BAD_TOKEN_CLOSE_CODE = 4401
 
         /** agentd's close after a `hello_reject`, and after a live link loses its trust. */

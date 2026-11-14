@@ -133,16 +133,57 @@ class GuidedPairingTest {
     @Test
     fun snapshot_baseline_holds_every_paired_computer_and_repairing_holds_the_ones_to_redo() {
         val desk = TrustedMachine("m1", "Desk", 1L)
-        val slot = AgentdConfig("host", 1, "t", "Home", fp = "fp", steer = "s")
+        val slot = AgentdConfig("host", 1, "t", "Home", fp = "fp-home", steer = "s")
 
         val healthy = pairingSnapshot(listOf(desk), slot, emptyList(), needsRepair = false)
-        assertEquals(setOf("m1", GuidedPairing.dialledId("Home")), healthy.baseline)
+        assertEquals(setOf("m1", GuidedPairing.dialledId("fp-home")), healthy.baseline)
         assertEquals(emptySet<String>(), healthy.repairing)
 
+        // A refused slot is redone by connecting again; its identity is its pin, never its name.
         val refused = pairingSnapshot(listOf(desk), slot, emptyList(), needsRepair = true)
-        assertEquals(setOf(GuidedPairing.dialledId("Home")), refused.repairing)
+        assertEquals(setOf(GuidedPairing.dialledId("fp-home")), refused.repairing)
 
+        // A signed-out slot holds no pin and is not in the baseline: any connection it makes is new.
         val signedOut = pairingSnapshot(listOf(desk), null, listOf(SignedOut("Laptop", 1L, 14)), needsRepair = false)
-        assertEquals(setOf(GuidedPairing.dialledId("Laptop")), signedOut.repairing)
+        assertEquals(setOf("m1"), signedOut.baseline)
+        assertEquals(emptySet<String>(), signedOut.repairing)
+    }
+
+    @Test
+    fun saved_and_announced_names_differ_bystander_does_not_complete() {
+        // The slot is saved as "Home"; the computer announces itself as its hostname.
+        val slot = AgentdConfig("host", 1, "t", "Home", fp = "fp-home", steer = "s")
+        val snapshot = pairingSnapshot(emptyList(), slot, emptyList(), needsRepair = false)
+        pairing.start(snapshot.baseline, snapshot.repairing)
+
+        pairing.onSecureConnected(GuidedPairing.dialledId(slot.fp!!), "desk.local", atMs = now)
+        assertTrue(state is GuidedPairing.State.DoorOpen)
+
+        // Another computer's pin is a stranger, whatever it is called.
+        pairing.onSecureConnected(GuidedPairing.dialledId("fp-other"), "Home", atMs = now)
+        assertEquals(GuidedPairing.State.Paired("Home"), state)
+    }
+
+    @Test
+    fun guided_attempt_runs_inbound_listener_despite_outbound_slot() {
+        // The door needs a listener behind it: an outbound slot no longer rules it out while the window is open.
+        assertFalse(inboundListenerWanted(agentdEnabled = true, outboundSlot = true, windowOpen = false))
+        assertTrue(inboundListenerWanted(agentdEnabled = true, outboundSlot = true, windowOpen = true))
+        // The normal rule otherwise: listen when nothing is dialled; monitoring off listens for nothing.
+        assertTrue(inboundListenerWanted(agentdEnabled = true, outboundSlot = false, windowOpen = false))
+        assertFalse(inboundListenerWanted(agentdEnabled = false, outboundSlot = false, windowOpen = true))
+    }
+
+    @Test
+    fun guided_attempt_turns_monitoring_on() {
+        val store = AgentsConfigStore(MemoryPrefs()) { 0L }
+        assertFalse(store.load().agentdEnabled)
+        var reconciles = 0
+
+        openGuidedDoor(store) { reconciles++ }
+
+        assertTrue(store.load().agentdEnabled)
+        assertTrue(store.isLinkWindowOpen())
+        assertEquals(1, reconciles)
     }
 }

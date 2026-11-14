@@ -127,11 +127,13 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             clock = SystemClock::elapsedRealtime,
             host = object : GlassesPairingCard.Host {
                 override fun snapshot() = currentPairing()
-                override fun armWindow() {
-                    configStore.armLinkWindow()
+                override fun armWindow() = openGuidedDoor(configStore) {
                     AgentsMonitorService.reconcile(applicationContext)
                 }
-                override fun cancelWindow() = configStore.cancelLinkWindow()
+                override fun cancelWindow() {
+                    configStore.cancelLinkWindow()
+                    AgentsMonitorService.reconcile(applicationContext)
+                }
                 override fun openCard() = screen.openPairing()
                 override fun closeCard() = screen.close(ActiveCard.Kind.PAIRING)
                 override fun onScreen() = screen.kind == ActiveCard.Kind.PAIRING

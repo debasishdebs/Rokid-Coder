@@ -54,9 +54,9 @@ class AgentsMonitorService : Service() {
                 configStore.outboundAdmitted().also { admitted -> if (!admitted) alertScope.launch { reconcile() } }
             },
             touchUsed = configStore::touchAgentdUsed,
-            onSecureConnected = { name ->
-                AgentsRuntime.announceSecureConnection(GuidedPairing.dialledId(name), name)
-            },
+            // A refused slot is dialled again while a guided attempt's window is open (R198).
+            repairRedial = configStore::isLinkWindowOpen,
+            onSecureConnected = AgentsRuntime::announceSecureConnection,
         )
     }
     private val openClawClient by lazy {
@@ -71,6 +71,8 @@ class AgentsMonitorService : Service() {
     }
     private var runningAgentd: AgentdConfig? = null
     private var runningOpenClaw: OpenClawConfig? = null
+    private var listeningBesideDialled = false
+    private var windowWatch: Job? = null
     private var temporaryAgentd: Job? = null
     private var temporaryOpenClaw: Job? = null
 
@@ -340,11 +342,15 @@ class AgentsMonitorService : Service() {
             }
             runningAgentd = wantedAgentd
         }
-        if (config.agentdEnabled && wantedAgentd == null) {
-            linkServer.start()
-        } else {
-            linkServer.stop(clearSessions = wantedAgentd == null)
+        // The door always has a listener: while a window is open the inbound server runs beside a dialled slot too.
+        val windowOpen = configStore.isLinkWindowOpen()
+        if (inboundListenerWanted(config.agentdEnabled, outboundSlot = wantedAgentd != null, windowOpen = windowOpen)) {
+            linkServer.start(besideDialled = wantedAgentd != null)
+        } else if (wantedAgentd == null || listeningBesideDialled) {
+            linkServer.stop(clearSessions = wantedAgentd == null, besideDialled = wantedAgentd != null)
         }
+        listeningBesideDialled = windowOpen && config.agentdEnabled && wantedAgentd != null
+        watchWindow(windowOpen)
         if (config.openClawEnabled) {
             temporaryOpenClaw?.cancel()
             temporaryOpenClaw = null
@@ -357,6 +363,18 @@ class AgentsMonitorService : Service() {
                 openClawClient.start(wantedOpenClaw)
             }
             runningOpenClaw = wantedOpenClaw
+        }
+    }
+
+    /** The window's end is a change nobody else announces: reconcile again then, and the listener goes back to the normal rule. */
+    private fun watchWindow(open: Boolean) {
+        windowWatch?.cancel()
+        windowWatch = null
+        if (!open) return
+        val left = configStore.linkWindowRemainingMs()
+        windowWatch = alertScope.launch {
+            delay(left + WINDOW_END_SLACK_MS)
+            reconcile()
         }
     }
 
@@ -408,6 +426,9 @@ class AgentsMonitorService : Service() {
 
     private fun stopMonitoring() {
         monitoring = false
+        windowWatch?.cancel()
+        windowWatch = null
+        listeningBesideDialled = false
         agentdClient.stop(clearSessions = true)
         linkServer.stop(clearSessions = true)
         openClawClient.stop(clearSessions = true)
@@ -465,6 +486,7 @@ class AgentsMonitorService : Service() {
         const val EXTRA_TEXT = "text"
         const val EXTRA_FRAME = "frame"
         private const val TEST_WINDOW_MS = 15_000L
+        private const val WINDOW_END_SLACK_MS = 250L
         private const val PRUNE_INTERVAL_MS = 60_000L
 
         fun reconcile(context: Context) {
