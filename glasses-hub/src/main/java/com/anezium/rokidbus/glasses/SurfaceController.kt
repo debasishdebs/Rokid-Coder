@@ -490,6 +490,7 @@ object SurfaceController {
                 context,
                 assistantEpisodeSurfacePresentedSignal(surface.ownerPluginId),
             )
+            AgentsDisplayEpisode.accept(context, agentsEpisodeSurfacePresentedSignal())
             // Lyrics and Media push updates to the same surfaceId continuously;
             // only a genuinely new surface taking over the screen counts as a
             // handoff worth stepping the launcher and any stale activity aside for.
@@ -556,6 +557,7 @@ object SurfaceController {
                     context,
                     assistantEpisodeSurfacePresentedSignal(surface.ownerPluginId),
                 )
+                AgentsDisplayEpisode.accept(context, agentsEpisodeSurfacePresentedSignal())
                 val isHandoff = active?.surfaceId != surface.surfaceId
                 active = surface
                 RingFocusBroadcastCoordinator.setSurfaceActive(
@@ -607,6 +609,7 @@ object SurfaceController {
                                 context,
                                 assistantEpisodeSurfacePresentedSignal(published.ownerPluginId),
                             )
+                            AgentsDisplayEpisode.accept(context, agentsEpisodeSurfacePresentedSignal())
                             val isHandoff = current?.surfaceId != published.surfaceId
                             active = published
                             RingFocusBroadcastCoordinator.setSurfaceActive(

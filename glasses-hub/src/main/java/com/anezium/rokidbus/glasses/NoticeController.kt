@@ -1048,13 +1048,23 @@ internal object NoticeController {
         when (decision) {
             is NoticeStateDecision.Shown -> {
                 resetRingInput()
-                AssistantDisplayEpisode.accept(
-                    serviceContext,
-                    assistantEpisodeNoticeShownSignal(
+                decision.replacedNotice?.let { replaced ->
+                    AgentsDisplayEpisode.accept(
+                        serviceContext,
+                        agentsEpisodeNoticeClosedSignal(replaced.surfaceId, NoticeCloseReason.REPLACED),
+                    )
+                }
+                acceptEpisodeSignals(
+                    assistant = assistantEpisodeNoticeShownSignal(
                         surfaceId = decision.notice.surfaceId,
                         ownerPluginId = decision.notice.ownerPluginId,
                         seq = decision.notice.seq,
                         engaged = decision.notice.content.interactive,
+                    ),
+                    agents = agentsEpisodeNoticeShownSignal(
+                        surfaceId = decision.notice.surfaceId,
+                        actionCount = decision.notice.content.actions.size,
+                        seq = decision.notice.seq,
                     ),
                 )
                 log(
@@ -1083,17 +1093,30 @@ internal object NoticeController {
                         reason = DisplayHoldRenewReason.BAND_UPDATE,
                     )
                 }
-                AssistantDisplayEpisode.accept(serviceContext, signal)
+                acceptEpisodeSignals(
+                    assistant = signal,
+                    agents = agentsEpisodeNoticeRedrawSignal(
+                        surfaceId = decision.notice.surfaceId,
+                        actionCount = decision.notice.content.actions.size,
+                        seq = decision.notice.seq,
+                        reason = DisplayHoldRenewReason.BAND_UPDATE,
+                    ),
+                )
                 scheduleExpiry(decision.notice)
                 notifyChanged()
             }
             is NoticeStateDecision.Answered -> {
-                AssistantDisplayEpisode.accept(
-                    serviceContext,
-                    assistantEpisodeNoticeRedrawSignal(
+                acceptEpisodeSignals(
+                    assistant = assistantEpisodeNoticeRedrawSignal(
                         surfaceId = decision.notice.surfaceId,
                         seq = decision.notice.seq,
                         engaged = decision.notice.content.interactive,
+                        reason = DisplayHoldRenewReason.BAND_ANSWER,
+                    ),
+                    agents = agentsEpisodeNoticeRedrawSignal(
+                        surfaceId = decision.notice.surfaceId,
+                        actionCount = decision.notice.content.actions.size,
+                        seq = decision.notice.seq,
                         reason = DisplayHoldRenewReason.BAND_ANSWER,
                     ),
                 )
@@ -1121,6 +1144,10 @@ internal object NoticeController {
                         preserveOwnerClose = preserveOwnerClose,
                     ),
                 )
+                AgentsDisplayEpisode.accept(
+                    serviceContext,
+                    agentsEpisodeNoticeClosedSignal(decision.surfaceId, decision.reason),
+                )
                 clearPendingNoticeWake()
                 cancelExpiry()
                 resetRingInput()
@@ -1138,6 +1165,16 @@ internal object NoticeController {
             NoticeStateDecision.DroppedStale -> log("notice dropped stale")
             NoticeStateDecision.Ignored -> Unit
         }
+    }
+
+    private fun acceptEpisodeSignals(
+        assistant: AssistantEpisodeSignal,
+        agents: AssistantEpisodeSignal,
+    ) {
+        AssistantDisplayEpisode.accept(serviceContext, displayEpisodeTakeoverSignal(agents))
+        AgentsDisplayEpisode.accept(serviceContext, displayEpisodeTakeoverSignal(assistant))
+        AssistantDisplayEpisode.accept(serviceContext, assistant)
+        AgentsDisplayEpisode.accept(serviceContext, agents)
     }
 
     /** Tells the phone the slot is free, and why, so it can tell the owner. */
