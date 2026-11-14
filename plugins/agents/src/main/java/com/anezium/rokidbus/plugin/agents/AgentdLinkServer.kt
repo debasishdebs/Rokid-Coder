@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.plugin.agents
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -66,16 +67,12 @@ class AgentdLinkServer internal constructor(
     @Volatile private var client: LinkConnection? = null
 
     /**
-     * Callers are UI/service threads; Android forbids socket writes there. The
-     * wire holds its lock across this call, and the client is only swapped after
-     * the old generation is unbound, so a line always reaches the connection the
-     * wire was bound to.
+     * Callers are UI/service threads; Android forbids socket writes there, so the
+     * line joins the connection's single writer. The wire holds its lock across
+     * this call, and the client is only swapped after the old connection's link
+     * ends, so a line always reaches the connection the wire was bound to.
      */
-    private val wire = AgentdWire { line ->
-        val connection = client ?: return@AgentdWire false
-        scope.launch(Dispatchers.IO) { connection.send(line) }
-        true
-    }
+    private val wire = AgentdWire { line -> client?.enqueue(line) ?: false }
     private val link = AgentdLinkBinding(wire, onEvent)
 
     /** Whether this transport may carry steering frames right now. */
@@ -98,7 +95,7 @@ class AgentdLinkServer internal constructor(
         runCatching { discoverySocket?.close() }
         discoverySocket = null
         synchronized(clientLock) {
-            link.downCurrent()
+            client?.let { link.end(it.linkOwner) }
             client.also { client = null }
         }?.close()
         store.setLinkMachine(null)
@@ -158,6 +155,7 @@ class AgentdLinkServer internal constructor(
         val codec = AgentdProtocolCodec()
         val gate = AgentdInboundGate(authorizeMachine)
         codec.reset()
+        connection.startWriter(scope)
         try {
             connection.lines { line ->
                 when (val decision = gate.receive(codec.parse(line))) {
@@ -211,16 +209,17 @@ class AgentdLinkServer internal constructor(
         } catch (_: Throwable) {
             // Fall through: the connection is finished either way.
         } finally {
-            connection.close()
+            // The link ends before the socket closes, so no write is reported Sent onto it.
             val wasActive = synchronized(clientLock) {
+                link.end(connection.linkOwner)
                 if (client !== connection) {
                     false
                 } else {
-                    connection.generation?.let(link::down)
                     client = null
                     true
                 }
             }
+            connection.close()
             if (wasActive) {
                 connection.machineId?.let(touchMachineSeen)
                 store.setLinkMachine(null)
@@ -238,7 +237,7 @@ class AgentdLinkServer internal constructor(
     /** The previous connection's trust ends before this one becomes the client. */
     private fun activate(connection: LinkConnection) {
         val previous = synchronized(clientLock) {
-            client?.generation?.let(link::down)
+            client?.let { link.end(it.linkOwner) }
             client.also { client = connection }
         }
         if (previous !== connection) previous?.close()
@@ -252,8 +251,7 @@ class AgentdLinkServer internal constructor(
     private fun bind(connection: LinkConnection): Boolean = synchronized(clientLock) {
         if (client !== connection) return@synchronized false
         // Plaintext TCP: monitor-only until the link is TLS with a verified pin.
-        connection.generation = link.up(secure = false)
-        true
+        link.up(connection.linkOwner, secure = false) != null
     }
 
     private fun isActive(connection: LinkConnection): Boolean =
@@ -291,7 +289,7 @@ class AgentdLinkServer internal constructor(
             is AgentdAction.ModeReset,
             is AgentdAction.Models,
             is AgentdAction.DetailRejected,
-            -> link.deliver(connection.generation, action)
+            -> link.deliver(connection.linkOwner, action)
             is AgentdAction.Hello,
             is AgentdAction.HelloAcknowledged,
             AgentdAction.Ignore,
@@ -412,8 +410,11 @@ internal class LinkConnection(private val socket: Socket) {
     /** Set once hello is accepted; identifies who holds this connection. */
     @Volatile var machineId: String? = null
 
-    /** The wire generation, set once hello_ack is out and the link is bound. */
-    @Volatile var generation: Long? = null
+    /** This connection's claim on the link binding. */
+    val linkOwner = LinkOwner()
+
+    /** Every line after the handshake, written in order by one coroutine. */
+    private val outbound = Channel<String>(Channel.UNLIMITED)
 
     val remoteAddress: String? get() = socket.inetAddress?.hostAddress
 
@@ -444,7 +445,24 @@ internal class LinkConnection(private val socket: Socket) {
         true
     }.getOrElse { false }
 
+    /** Queues [line] for the writer; false once the connection is closed. */
+    fun enqueue(line: String): Boolean = outbound.trySend(line).isSuccess
+
+    fun startWriter(scope: CoroutineScope) {
+        scope.launch(Dispatchers.IO) {
+            for (line in outbound) {
+                // A failed write ends the connection, so its link goes down rather
+                // than reporting later lines Sent into a dead socket.
+                if (!send(line)) {
+                    close()
+                    break
+                }
+            }
+        }
+    }
+
     fun close() {
+        outbound.close()
         runCatching { socket.close() }
     }
 }

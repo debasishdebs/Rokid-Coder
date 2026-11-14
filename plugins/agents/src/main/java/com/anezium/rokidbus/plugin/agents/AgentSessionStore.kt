@@ -1,5 +1,9 @@
 package com.anezium.rokidbus.plugin.agents
 
+import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -7,6 +11,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 data class LinkMachine(
     val machineId: String,
@@ -319,16 +324,39 @@ object AgentsRuntime {
     }
 
     /**
-     * Link changes and inbound v2 actions, emitted from the transport thread in
-     * arrival order. `LinkUp` comes after hello_ack and before the first frame
-     * that follows it. Not replayed: a late collector starts from the next link.
+     * Link changes and inbound v2 actions, in arrival order. `LinkUp` comes after
+     * hello_ack and before the first frame that follows it. Not replayed: a late
+     * collector starts from the next link, and reads [link] for the current one.
+     *
+     * Fed through [eventQueue], so the transport thread never suspends and a slow
+     * collector can lose old actions but never a `LinkUp` or `LinkDown`.
      */
     val events: MutableSharedFlow<AgentdEvent> = MutableSharedFlow(
         replay = 0,
         extraBufferCapacity = 256,
     )
 
+    private val _link = MutableStateFlow<AgentdLinkState?>(null)
+
+    /** The live link's generation and trust, or null while no transport holds one. */
+    val link: StateFlow<AgentdLinkState?> = _link.asStateFlow()
+
+    private val eventQueue = AgentdEventQueue(
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+        maxActions = 256,
+        sink = { event -> events.emit(event) },
+        onDropped = { total -> Log.w(LOG_TAG, "agentd events: dropped $total old actions") },
+    )
+
+    /** Called from the transport thread, under its link binding's lock. */
     internal fun emitEvent(event: AgentdEvent) {
-        events.tryEmit(event)
+        when (event) {
+            is AgentdEvent.LinkUp -> _link.value = AgentdLinkState(event.generation, event.secure)
+            is AgentdEvent.LinkDown -> _link.update { if (it?.generation == event.generation) null else it }
+            is AgentdEvent.Action -> Unit
+        }
+        eventQueue.offer(event)
     }
+
+    private const val LOG_TAG = "AgentsRuntime"
 }

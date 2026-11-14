@@ -146,7 +146,10 @@ class AgentsMonitorService : Service() {
                 }
             }
             ACTION_SEND_V2 -> {
-                intent.getStringExtra(EXTRA_FRAME)?.let(::writeToAgentd)
+                // A line that is not one JSON object is refused by the wire, unsent.
+                intent.getStringExtra(EXTRA_FRAME)?.let { frame ->
+                    runCatching { writeToAgentd(frame) }
+                }
             }
             else -> reconcile()
         }

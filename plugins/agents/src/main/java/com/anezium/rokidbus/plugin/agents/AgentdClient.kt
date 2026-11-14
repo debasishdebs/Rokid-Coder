@@ -16,7 +16,6 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 class AgentdClient(
     private val httpClient: OkHttpClient,
@@ -145,14 +144,21 @@ class AgentdClient(
         val codec = AgentdProtocolCodec().also(AgentdProtocolCodec::reset)
         val ended = CompletableDeferred<ConnectionOutcome>()
         val connected = AtomicBoolean(false)
-        val linkGeneration = AtomicReference<Long?>(null)
+        val owner = LinkOwner()
         lateinit var deadlines: ConnectionDeadlines
 
         fun isLive(): Boolean = sockets.isCurrent(generation) && !ended.isCompleted
 
+        // Every end of this connection ends its link at once, by owner: whether
+        // or not a hello_ack is binding on another thread right now.
+        fun finish(outcome: ConnectionOutcome) {
+            ended.complete(outcome)
+            link.end(owner)
+        }
+
         deadlines = ConnectionDeadlines(this) { detail ->
             if (sockets.isCurrent(generation)) {
-                ended.complete(ConnectionOutcome.RetryWithDetail(detail))
+                finish(ConnectionOutcome.RetryWithDetail(detail))
             }
         }
         val request = Request.Builder()
@@ -167,7 +173,7 @@ class AgentdClient(
                 // The handshake precedes the binding, so it is written to this
                 // socket directly; every later line goes through the wire.
                 if (!webSocket.send(codec.hello(config.token, versionName))) {
-                    ended.complete(ConnectionOutcome.Retry)
+                    finish(ConnectionOutcome.Retry)
                     return
                 }
                 deadlines.arm(DEADLINE_HELLO, "Daemon hello timed out")
@@ -179,7 +185,7 @@ class AgentdClient(
                     is AgentdAction.HelloAcknowledged -> {
                         if (!connected.compareAndSet(false, true)) return
                         // Plaintext WebSocket: monitor-only until the link is TLS with a verified pin.
-                        linkGeneration.set(link.up(secure = false, stillLive = ::isLive) ?: return)
+                        link.up(owner, secure = false, stillLive = ::isLive) ?: return
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()
@@ -247,7 +253,7 @@ class AgentdClient(
                             deadlines.arm(DEADLINE_SNAPSHOT, "Daemon refresh timed out")
                         }
                         if (write(action.text) != AgentdWire.Result.Sent) {
-                            ended.complete(ConnectionOutcome.Retry)
+                            finish(ConnectionOutcome.Retry)
                         }
                     }
                     is AgentdAction.Alert,
@@ -257,7 +263,7 @@ class AgentdClient(
                     is AgentdAction.ModeReset,
                     is AgentdAction.Models,
                     is AgentdAction.DetailRejected,
-                    -> link.deliver(linkGeneration.get(), action)
+                    -> link.deliver(owner, action)
                     // Only the LAN link sees a daemon hello: here we are the client.
                     is AgentdAction.Hello,
                     AgentdAction.Ignore,
@@ -268,9 +274,9 @@ class AgentdClient(
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 if (!sockets.isCurrent(generation)) return
                 if (code == BAD_TOKEN_CLOSE_CODE) {
-                    ended.complete(ConnectionOutcome.AuthFailed("Pairing invalid"))
+                    finish(ConnectionOutcome.AuthFailed("Pairing invalid"))
                 } else {
-                    ended.complete(ConnectionOutcome.Retry)
+                    finish(ConnectionOutcome.Retry)
                 }
                 webSocket.close(code, "")
             }
@@ -278,9 +284,9 @@ class AgentdClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (!sockets.isCurrent(generation)) return
                 if (code == BAD_TOKEN_CLOSE_CODE) {
-                    ended.complete(ConnectionOutcome.AuthFailed("Pairing invalid"))
+                    finish(ConnectionOutcome.AuthFailed("Pairing invalid"))
                 } else {
-                    ended.complete(
+                    finish(
                         if (connected.get()) ConnectionOutcome.Retry
                         else ConnectionOutcome.RetryWithDetail("Connection closed"),
                     )
@@ -289,20 +295,22 @@ class AgentdClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (sockets.isCurrent(generation)) {
-                    ended.complete(ConnectionOutcome.Retry)
+                    finish(ConnectionOutcome.Retry)
+                } else {
+                    link.end(owner)
                 }
             }
         }
         val candidate = httpClient.newWebSocket(request, listener)
         if (!sockets.install(generation, candidate)) {
             candidate.cancel()
-            ended.complete(ConnectionOutcome.Retry)
+            finish(ConnectionOutcome.Retry)
         }
         try {
             ended.await()
         } finally {
             // Unbound before the slot is cleared, so no write outlives this connection's trust.
-            linkGeneration.get()?.let(link::down)
+            link.end(owner)
             deadlines.clearAll()
         }
     }
