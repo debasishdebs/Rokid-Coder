@@ -312,6 +312,14 @@ object AgentsRuntime {
             _alertDirector.value = value
         }
 
+    /**
+     * A monitor service going away clears the director only if it is still its
+     * own (R99): an old instance being destroyed after a newer one started must
+     * not wipe the newer one's director.
+     */
+    internal fun clearAlertDirector(director: AlertDirector): Boolean =
+        _alertDirector.compareAndSet(director, null)
+
     @Volatile
     internal var alertGlasses: AlertGlasses? = null
 

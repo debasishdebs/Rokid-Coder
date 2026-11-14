@@ -50,6 +50,14 @@ sealed interface MenuItem {
 object ControlMenu {
     const val MONITOR_ONLY = AlertNotices.MONITOR_ONLY_BODY
     const val NEEDS_LAUNCHER = "needs rk claude"
+    const val NOT_AVAILABLE = "not available"
+    const val MODELS_UNAVAILABLE = "Models unavailable"
+
+    /** How long a Codex chooser waits for agentd's `models` frame (R98). */
+    const val MODELS_TIMEOUT_MS = 10_000L
+
+    /** Long enough to swallow a double tap, short enough never to be felt. */
+    const val GUARD_MS = 600L
     const val FOLLOWUP_CAP_REACHED = "continue on laptop or rk claude"
     const val FOLLOWUP_UNAVAILABLE = "session not waiting"
     const val MODEL_WARNING = "This also changes the default for new sessions"
@@ -77,8 +85,10 @@ object ControlMenu {
         val v2 = session.v2 ?: return listOf(MenuItem.ReadOutput())
         fun steer(sub: String?, enabled: Boolean = true): Pair<String?, Boolean> =
             if (!secure) MONITOR_ONLY to false else sub to enabled
+        // `needs rk claude` is the way out for a Claude session only (R95).
+        val missing = if (session.provider == AgentProvider.CLAUDE) NEEDS_LAUNCHER else NOT_AVAILABLE
         fun capability(can: Boolean, pending: String?): Pair<String?, Boolean> =
-            steer(if (can) pending?.let { "pending" } else NEEDS_LAUNCHER, can)
+            steer(if (can) pending?.let { "pending" } else missing, can)
 
         val reply = steer(
             when (v2.followup) {
@@ -161,16 +171,41 @@ object ControlMenu {
 
     /**
      * [index] counts the selectable rows of the current screen only. [models] is
-     * the last `models` frame for this session, and [modelsAsked] says the
-     * request is out, so the list shows "loading" rather than "empty".
+     * the last `models` frame for this session, and [modelsAskedAt] is when the
+     * request went out, so the list shows "loading", then "unavailable", rather
+     * than "empty". [guardUntil] is when ENTER starts to count again after a
+     * screen change, and [rearm] says the menu was covered and the guard must
+     * start over from the moment it is drawn again.
      */
     data class MenuState(
         val sessionKey: String,
         val screen: Screen = Screen.Main,
         val index: Int = 0,
         val models: AgentdAction.Models? = null,
-        val modelsAsked: Boolean = false,
+        val modelsAskedAt: Long? = null,
+        val guardUntil: Long = 0L,
+        val rearm: Boolean = false,
     )
+
+    /** The state a screen change leaves: ENTER is ignored for [GUARD_MS]. */
+    fun guarded(state: MenuState, now: Long): MenuState = state.copy(guardUntil = now + GUARD_MS, rearm = false)
+
+    fun accepts(state: MenuState, now: Long): Boolean = now >= state.guardUntil
+
+    /**
+     * Another card or an alert took the screen (R96): whatever confirm was open
+     * is gone, and the menu starts again on Main with its guard re-armed when it
+     * is next drawn, so a tap meant for the other card can never land on it.
+     */
+    fun covered(state: MenuState): MenuState =
+        if (state.screen == Screen.Main) {
+            state.copy(rearm = true)
+        } else {
+            state.copy(screen = Screen.Main, index = 0, modelsAskedAt = null, rearm = true)
+        }
+
+    /** Called as the menu is drawn: a covered menu's guard starts now. */
+    fun shown(state: MenuState, now: Long): MenuState = if (state.rearm) guarded(state, now) else state
 
     sealed interface Step {
         /** Show [state]; nothing leaves the phone. */
@@ -216,8 +251,13 @@ object ControlMenu {
 
     private class Entry(val row: Row, val act: (() -> Step)?)
 
-    fun page(state: MenuState, session: AgentSession, secure: Boolean): Page {
-        val entries = entries(state, session, secure)
+    fun page(
+        state: MenuState,
+        session: AgentSession,
+        secure: Boolean,
+        now: Long = System.currentTimeMillis(),
+    ): Page {
+        val entries = entries(state, session, secure, now)
         val selectable = entries.indices.filter { entries[it].act != null }
         val selected = selectable.getOrNull(state.index.coerceIn(0, (selectable.size - 1).coerceAtLeast(0))) ?: -1
         val heading = headingOf(session)
@@ -239,8 +279,14 @@ object ControlMenu {
         )
     }
 
-    fun move(state: MenuState, delta: Int, session: AgentSession, secure: Boolean): MenuState {
-        val count = entries(state, session, secure).count { it.act != null }
+    fun move(
+        state: MenuState,
+        delta: Int,
+        session: AgentSession,
+        secure: Boolean,
+        now: Long = System.currentTimeMillis(),
+    ): MenuState {
+        val count = entries(state, session, secure, now).count { it.act != null }
         if (count == 0) return state
         return state.copy(index = ((state.index + delta) % count + count) % count)
     }
@@ -257,24 +303,29 @@ object ControlMenu {
      * steering sends the wearer back to the main menu, which says why, instead
      * of leaving a confirm card that would send nothing.
      */
-    fun pick(state: MenuState, session: AgentSession, secure: Boolean): Step {
+    fun pick(
+        state: MenuState,
+        session: AgentSession,
+        secure: Boolean,
+        now: Long = System.currentTimeMillis(),
+    ): Step {
         if (!secure && state.screen != Screen.Main) return Step.Go(state.copy(screen = Screen.Main, index = 0))
-        val entries = entries(state, session, secure).filter { it.act != null }
+        val entries = entries(state, session, secure, now).filter { it.act != null }
         val entry = entries.getOrNull(state.index.coerceIn(0, (entries.size - 1).coerceAtLeast(0)))
         return entry?.act?.invoke() ?: Step.Close
     }
 
     // ---------------------------------------------------------------- screens
 
-    private fun entries(state: MenuState, session: AgentSession, secure: Boolean): List<Entry> =
+    private fun entries(state: MenuState, session: AgentSession, secure: Boolean, now: Long): List<Entry> =
         when (val screen = state.screen) {
-            Screen.Main -> mainEntries(state, session, secure)
+            Screen.Main -> mainEntries(state, session, secure, now)
             Screen.Modes -> modeEntries(state, session)
-            is Screen.Choose -> chooseEntries(state, session, screen.setting)
+            is Screen.Choose -> chooseEntries(state, session, screen.setting, now)
             is Screen.Confirm -> confirmEntries(state, screen)
         }
 
-    private fun mainEntries(state: MenuState, session: AgentSession, secure: Boolean): List<Entry> {
+    private fun mainEntries(state: MenuState, session: AgentSession, secure: Boolean, now: Long): List<Entry> {
         val codex = session.provider == AgentProvider.CODEX
         return items(session, secure).map { item ->
             val tone = if (item.enabled) NexusRowTone.NORMAL else NexusRowTone.DIM
@@ -295,10 +346,10 @@ object ControlMenu {
                     { Step.Go(state.copy(screen = Screen.Modes, index = 0)) }
                 }
                 item is MenuItem.Model -> {
-                    { chooseStep(state, Setting.MODEL, codex) }
+                    { chooseStep(state, Setting.MODEL, codex, now) }
                 }
                 item is MenuItem.Effort -> {
-                    { chooseStep(state, Setting.EFFORT, codex) }
+                    { chooseStep(state, Setting.EFFORT, codex, now) }
                 }
                 item is MenuItem.Compact -> {
                     {
@@ -328,8 +379,14 @@ object ControlMenu {
     }
 
     /** Claude's list is fixed; Codex's comes from agentd, so asking for it is the first step. */
-    private fun chooseStep(state: MenuState, setting: Setting, codex: Boolean): Step {
-        val next = state.copy(screen = Screen.Choose(setting), index = 0, modelsAsked = codex)
+    private fun chooseStep(state: MenuState, setting: Setting, codex: Boolean, now: Long): Step {
+        // A list from an earlier request is stale: the new answer replaces it.
+        val next = state.copy(
+            screen = Screen.Choose(setting),
+            index = 0,
+            models = if (codex) null else state.models,
+            modelsAskedAt = if (codex) now else null,
+        )
         return if (codex) Step.Send(Command.ModelsRequest, next) else Step.Go(next)
     }
 
@@ -385,7 +442,7 @@ object ControlMenu {
         TempMode.APPROVE_ALL -> "Approve all"
     }
 
-    private fun chooseEntries(state: MenuState, session: AgentSession, setting: Setting): List<Entry> {
+    private fun chooseEntries(state: MenuState, session: AgentSession, setting: Setting, now: Long): List<Entry> {
         val codex = session.provider == AgentProvider.CODEX
         val frame = state.models
         val options = when {
@@ -395,7 +452,12 @@ object ControlMenu {
             else -> frame.efforts
         }
         if (options == null) {
-            val text = if (state.modelsAsked) "Loading…" else "No list yet"
+            val asked = state.modelsAskedAt
+            val text = when {
+                asked == null -> "No list yet"
+                now - asked >= MODELS_TIMEOUT_MS -> MODELS_UNAVAILABLE
+                else -> "Loading…"
+            }
             return listOf(Entry(Row(text, tone = NexusRowTone.DIM, selectable = false), null))
         }
         if (options.isEmpty()) {

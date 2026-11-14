@@ -225,7 +225,7 @@ class AgentsMonitorService : Service() {
         releasePluginService()
         httpClient.dispatcher.executorService.shutdown()
         serviceScope.cancel()
-        AgentsRuntime.alertDirector = null
+        AgentsRuntime.clearAlertDirector(alertDirector)
         alertScope.cancel()
         alertWork.close()
         AgentsRuntime.setLinkSecure(false)

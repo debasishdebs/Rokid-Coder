@@ -108,13 +108,13 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     /**
      * The per-session control menu behind ENTER on a board row. It is a card of
-     * its own, so [menuOpenedAt] guards the screen it just opened against the
-     * second tap of a double tap, and [menuReading] is the reader a long row
+     * its own, so its state carries a guard against the second tap of a double
+     * tap on the screen it just opened, and [menuReading] is the reader a long row
      * opens. [controlMsgIds] are the steering frames this menu sent, so an ack
      * is only reported for what the wearer asked here.
      */
     private var menu: ControlMenu.MenuState? = null
-    private var menuOpenedAt = 0L
+    private var modelsTimeout: Job? = null
     private var menuReading: Pair<String, String>? = null
     private val controlMsgIds = ArrayDeque<String>()
 
@@ -436,7 +436,11 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         val client = nexusClient ?: return false
         if (!client.supportsNoticeSurface) return false
         val taken = client.showNotice(notice) == NexusSdkResult.SENT
-        if (taken) v2BandUp = true
+        if (taken) {
+            v2BandUp = true
+            // An alert took the screen's attention: no confirm survives it (R96).
+            coverMenu()
+        }
         return taken
     }
 
@@ -465,6 +469,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     override fun openDecision(alert: AgentdAction.Alert) {
+        coverMenu()
         decidingAlert = alert
         decisionChoice = ApprovalDecision.ALLOW
         decisionOpenedAt = System.currentTimeMillis()
@@ -547,6 +552,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     private fun openDecision(approval: AgentApproval) {
+        coverMenu()
         decidingRequestId = approval.requestId
         decisionChoice = ApprovalDecision.ALLOW
         decisionOpenedAt = System.currentTimeMillis()
@@ -613,6 +619,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             return
         }
         val activeSurface = surface ?: return
+        coverMenu()
         replyTargetKey = session.key
         replySessionId = session.id
         replyViaFollowup = viaFollowup
@@ -671,9 +678,19 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     private fun openMenu(session: AgentSession) {
         selectedKey = session.key
-        menu = ControlMenu.open(session.key)
-        menuOpenedAt = System.currentTimeMillis()
+        menu = ControlMenu.guarded(ControlMenu.open(session.key), System.currentTimeMillis())
         render(show = false)
+    }
+
+    /**
+     * A decision, reply, question or reader card, or an alert, takes the screen
+     * (R96): the menu forgets any confirm and any reader, and its guard starts
+     * over when it is drawn again.
+     */
+    private fun coverMenu() {
+        menuReading = null
+        modelsTimeout?.cancel()
+        menu = menu?.let(ControlMenu::covered)
     }
 
     /** The menu as a card, or null (and no menu) when its session has left the board. */
@@ -683,7 +700,11 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             menu = null
             return null
         }
-        val page = ControlMenu.page(state, session, secure = AgentsRuntime.link.value?.secure == true)
+        val now = System.currentTimeMillis()
+        // A menu that was covered starts its tap guard now that it is on screen again.
+        val shown = ControlMenu.shown(state, now)
+        if (shown !== state) menu = shown
+        val page = ControlMenu.page(shown, session, secure = AgentsRuntime.link.value?.secure == true, now = now)
         val rows = windowedRows(page.rows, page.selected) { row, selected ->
             NexusCardLine(
                 text = row.text.take(MENU_LINE_CHARS),
@@ -724,12 +745,11 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER
             -> {
                 // The second tap of the double tap that opened this screen must not pick on it.
-                if (System.currentTimeMillis() - menuOpenedAt < DECISION_GUARD_MS) return
+                if (!ControlMenu.accepts(state, System.currentTimeMillis())) return
                 onMenuPick(state, session, secure)
             }
             event.keyCode == KeyEvent.KEYCODE_BACK -> {
-                menu = ControlMenu.back(state)
-                menuOpenedAt = System.currentTimeMillis()
+                menu = ControlMenu.back(state)?.let { ControlMenu.guarded(it, System.currentTimeMillis()) }
                 render(show = false)
             }
         }
@@ -757,8 +777,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     private fun showMenu(state: ControlMenu.MenuState) {
-        menu = state
-        menuOpenedAt = System.currentTimeMillis()
+        menu = ControlMenu.guarded(state, System.currentTimeMillis())
         render(show = false)
     }
 
@@ -776,7 +795,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             showBriefNotice(ControlMenu.NOTICE_TITLE, "Not sent")
             return
         }
-        if (ControlMenu.steers(command)) rememberControlMsgId(msgId)
+        if (ControlMenu.steers(command)) rememberControlMsgId(msgId) else scheduleModelsTimeout()
         AgentsMonitorService.sendV2(applicationContext, frame)
     }
 
@@ -795,6 +814,15 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
         rememberControlMsgId(msgId)
         AgentsMonitorService.sendV2(applicationContext, frame)
+    }
+
+    /** The chooser says "Models unavailable" once agentd has been silent that long (R98). */
+    private fun scheduleModelsTimeout() {
+        modelsTimeout?.cancel()
+        modelsTimeout = serviceScope.launch {
+            delay(ControlMenu.MODELS_TIMEOUT_MS + 50L)
+            if (surfaceShown && menu?.screen is ControlMenu.Screen.Choose) render(show = false)
+        }
     }
 
     private fun rememberControlMsgId(msgId: String) {
@@ -831,7 +859,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == action.sessionKey }
                 val heading = session?.v2?.heading?.takeIf(String::isNotBlank)
                     ?: session?.displayTitle
-                    ?: action.sessionKey.substringAfter(':')
+                    ?: "session"
                 showBriefNotice(
                     ControlMenu.NOTICE_TITLE,
                     ControlMenu.modeResetNotice(action.from, heading, action.reason),

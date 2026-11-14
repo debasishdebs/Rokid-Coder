@@ -48,6 +48,13 @@ class ControlMenuTest {
 
     private fun items(session: AgentSession, secure: Boolean = true) = ControlMenu.items(session, secure)
 
+    /** The index of [label] among the main menu's rows, so a new row cannot silently shift a test. */
+    private fun at(session: AgentSession, label: String): Int =
+        ControlMenu.items(session, secure = true).indexOfFirst { it.label == label }.also { check(it >= 0) }
+
+    private fun main(session: AgentSession, label: String) =
+        ControlMenu.open("${session.provider.wireValue}:s1").copy(index = at(session, label))
+
     private inline fun <reified T : MenuItem> List<MenuItem>.one(): T = filterIsInstance<T>().single()
 
     @Test
@@ -84,8 +91,7 @@ class ControlMenuTest {
     @Test
     fun approve_all_requires_confirm_and_sends_confirmed_true() {
         val session = session()
-        var state = ControlMenu.open("claude:s1")
-        state = (ControlMenu.pick(state.copy(index = 1), session, secure = true) as ControlMenu.Step.Go).state
+        var state = (ControlMenu.pick(main(session, "Approval mode"), session, secure = true) as ControlMenu.Step.Go).state
         assertEquals(ControlMenu.Screen.Modes, state.screen)
 
         // Modes: Ask, Accept edits, Approve all. Ask is the current one, so it sends nothing.
@@ -152,7 +158,7 @@ class ControlMenuTest {
         assertTrue(list.one<MenuItem.ReadOutput>().enabled)
 
         // A greyed row says why and sends nothing.
-        val pick = ControlMenu.pick(ControlMenu.open("codex:s1").copy(index = 1), codex(), secure = false)
+        val pick = ControlMenu.pick(main(codex(), "Approval mode"), codex(), secure = false)
         assertEquals(ControlMenu.Step.Say(ControlMenu.NOTICE_TITLE, "Monitor only — approve on laptop"), pick)
     }
 
@@ -180,7 +186,7 @@ class ControlMenuTest {
 
         assertEquals("42% · 84k/200k", sub(84_000, 200_000))
         assertEquals("0% · 0/200k", sub(0, 200_000))
-        assertEquals("100% · 1M/1M".replace("1M", "1000k"), sub(1_000_000, 1_000_000))
+        assertEquals("100% · 1000k/1000k", sub(1_000_000, 1_000_000))
         assertEquals("50% · 500/1k", sub(500, 1_000))
         assertEquals("unknown", sub(null, null))
         assertEquals("unknown", sub(100, null))
@@ -205,6 +211,11 @@ class ControlMenuTest {
         assertEquals("Approve-all off — Fix login: helper restarted", notice("helper_restarted"))
         assertEquals("Approve-all off — Fix login: revoked", notice("revoked"))
         assertTrue(notice("x".repeat(500)).length <= 240)
+        // The notice names the mode that was reset (R97).
+        assertEquals(
+            "Accept edits off — Fix login: revoked",
+            ControlMenu.modeResetNotice(TempMode.ACCEPT_EDITS, "Fix login", "revoked"),
+        )
     }
 
     @Test
@@ -235,7 +246,7 @@ class ControlMenuTest {
         assertTrue(list.one<MenuItem.Compact>().enabled)
 
         // Compact: a confirm first, then launcher_command compact.
-        val compactAsk = ControlMenu.pick(ControlMenu.open("claude:s1").copy(index = 3), launcher, secure = true)
+        val compactAsk = ControlMenu.pick(main(launcher, "Compact"), launcher, secure = true)
         val confirm = (compactAsk as ControlMenu.Step.Go).state
         val yes = ControlMenu.pick(confirm.copy(index = 0), launcher, secure = true) as ControlMenu.Step.Send
         assertEquals(ControlMenu.Command.LauncherCompact, yes.command)
@@ -248,7 +259,7 @@ class ControlMenuTest {
     @Test
     fun launcher_model_shows_default_change_warning() {
         val launcher = session(v2 = v2(mode = "launcher", canModel = true))
-        val choose = (ControlMenu.pick(ControlMenu.open("claude:s1").copy(index = 2), launcher, secure = true)
+        val choose = (ControlMenu.pick(main(launcher, "Model"), launcher, secure = true)
             as ControlMenu.Step.Go).state
         val chooser = ControlMenu.page(choose, launcher, secure = true)
         assertEquals(listOf("opus", "sonnet", "haiku"), chooser.rows.map { it.text })
@@ -282,7 +293,7 @@ class ControlMenuTest {
     @Test
     fun codex_model_asks_agentd_for_the_list_then_sends_codex_settings() {
         val session = codex()
-        val ask = ControlMenu.pick(ControlMenu.open("codex:s1").copy(index = 2), session, secure = true)
+        val ask = ControlMenu.pick(main(session, "Model"), session, secure = true)
             as ControlMenu.Step.Send
         assertEquals(ControlMenu.Command.ModelsRequest, ask.command)
         assertFalse(ControlMenu.steers(ask.command))
@@ -312,7 +323,7 @@ class ControlMenuTest {
     @Test
     fun codex_effort_uses_the_efforts_of_the_same_frame_and_compact_confirms() {
         val session = codex()
-        val effort = ControlMenu.pick(ControlMenu.open("codex:s1").copy(index = 3), session, secure = true)
+        val effort = ControlMenu.pick(main(session, "Effort"), session, secure = true)
             as ControlMenu.Step.Send
         val ready = ControlMenu.withModels(
             effort.state,
@@ -321,7 +332,7 @@ class ControlMenuTest {
         val pick = ControlMenu.pick(ready.copy(index = 1), session, secure = true) as ControlMenu.Step.Send
         assertEquals(ControlMenu.Command.CodexSettings(model = null, effort = "high"), pick.command)
 
-        val ask = ControlMenu.pick(ControlMenu.open("codex:s1").copy(index = 4), session, secure = true)
+        val ask = ControlMenu.pick(main(session, "Compact"), session, secure = true)
             as ControlMenu.Step.Go
         val yes = ControlMenu.pick(ask.state.copy(index = 0), session, secure = true) as ControlMenu.Step.Send
         assertEquals(ControlMenu.Command.CodexCompact, yes.command)
@@ -348,7 +359,7 @@ class ControlMenuTest {
         assertEquals(main, ControlMenu.back(main.copy(screen = ControlMenu.Screen.Modes, index = 2)))
         assertEquals(
             ControlMenu.Step.Read,
-            ControlMenu.pick(main.copy(index = 5), session(), secure = true),
+            ControlMenu.pick(main(session(), "Read output"), session(), secure = true),
         )
         assertEquals(ControlMenu.Step.Reply, ControlMenu.pick(main, session(), secure = true))
     }
@@ -357,7 +368,105 @@ class ControlMenuTest {
     fun move_wraps_over_selectable_rows_only() {
         val session = session()
         val main = ControlMenu.open("claude:s1")
-        assertEquals(5, ControlMenu.move(main, -1, session, secure = true).index)
-        assertEquals(0, ControlMenu.move(main.copy(index = 5), 1, session, secure = true).index)
+        val last = items(session).lastIndex
+        assertEquals(last, ControlMenu.move(main, -1, session, secure = true).index)
+        assertEquals(0, ControlMenu.move(main.copy(index = last), 1, session, secure = true).index)
+    }
+
+    // ------------------------------------------------------- fix round 1
+
+    private fun confirmAllState(session: AgentSession): ControlMenu.MenuState {
+        val modes = (ControlMenu.pick(main(session, "Approval mode"), session, secure = true) as ControlMenu.Step.Go).state
+        val confirm = (ControlMenu.pick(modes.copy(index = 2), session, secure = true) as ControlMenu.Step.Go).state
+        // The wearer moved onto "Yes, approve all".
+        return confirm.copy(index = 0)
+    }
+
+    @Test
+    fun alert_preempting_confirm_resets_menu_to_main() {
+        val session = session()
+        val confirm = confirmAllState(session)
+        assertTrue(confirm.screen is ControlMenu.Screen.Confirm)
+
+        val covered = ControlMenu.covered(confirm)
+        assertEquals(ControlMenu.Screen.Main, covered.screen)
+        assertEquals(0, covered.index)
+        assertTrue(covered.rearm)
+        assertEquals(
+            "Reply by voice",
+            ControlMenu.page(covered, session, secure = true).let { it.rows[it.selected].text },
+        )
+    }
+
+    @Test
+    fun stray_tap_after_alert_never_sends_approve_all() {
+        val session = session()
+        val covered = ControlMenu.covered(confirmAllState(session))
+
+        // The menu comes back long after it was opened: the guard starts when it is drawn.
+        val drawnAt = 100_000L
+        val shown = ControlMenu.shown(covered, drawnAt)
+        assertFalse(ControlMenu.accepts(shown, drawnAt + 50))
+        assertFalse(ControlMenu.accepts(shown, drawnAt + 599))
+        assertTrue(ControlMenu.accepts(shown, drawnAt + 600))
+
+        // Even past the guard, no row of the main menu sends approve-all.
+        for (index in items(session).indices) {
+            val step = ControlMenu.pick(shown.copy(index = index), session, secure = true)
+            val sent = (step as? ControlMenu.Step.Send)?.command
+            assertFalse("row $index", sent == ControlMenu.Command.ModeSet(TempMode.APPROVE_ALL, confirmed = true))
+        }
+        // A menu that was not covered keeps its guard as it was.
+        val plain = ControlMenu.open("claude:s1")
+        assertTrue(ControlMenu.shown(plain, drawnAt) === plain)
+    }
+
+    @Test
+    fun covering_the_main_screen_keeps_its_place() {
+        val state = ControlMenu.open("claude:s1").copy(index = 3)
+        val covered = ControlMenu.covered(state)
+        assertEquals(3, covered.index)
+        assertTrue(covered.rearm)
+    }
+
+    @Test
+    fun codex_missing_capability_says_not_available() {
+        val list = items(codex(v2(canModel = false, canCompact = false)))
+        for (item in listOf(list.one<MenuItem.Model>(), list.one<MenuItem.Effort>(), list.one<MenuItem.Compact>())) {
+            assertFalse(item.label, item.enabled)
+            assertEquals(item.label, "not available", item.sub)
+        }
+        // Claude keeps the launcher copy.
+        assertEquals("needs rk claude", items(session()).one<MenuItem.Model>().sub)
+    }
+
+    @Test
+    fun models_request_timeout_shows_unavailable() {
+        val session = codex()
+        val ask = ControlMenu.pick(main(session, "Model"), session, secure = true, now = 1_000L)
+            as ControlMenu.Step.Send
+
+        fun rows(now: Long) = ControlMenu.page(ask.state, session, secure = true, now = now).rows.map { it.text }
+        assertEquals(listOf("Loading…"), rows(1_000L))
+        assertEquals(listOf("Loading…"), rows(10_999L))
+        assertEquals(listOf("Models unavailable"), rows(11_000L))
+
+        // A late frame still fills the list.
+        val late = ControlMenu.withModels(ask.state, AgentdAction.Models("codex:s1", listOf("gpt-5"), emptyList(), null, null))
+        assertEquals(
+            listOf("gpt-5"),
+            ControlMenu.page(late, session, secure = true, now = 99_000L).rows.map { it.text },
+        )
+    }
+
+    @Test
+    fun a_new_models_request_drops_the_list_of_the_last_one() {
+        val session = codex()
+        val old = ControlMenu.withModels(
+            main(session, "Model"),
+            AgentdAction.Models("codex:s1", listOf("stale"), emptyList(), null, null),
+        )
+        val ask = ControlMenu.pick(old, session, secure = true, now = 5L) as ControlMenu.Step.Send
+        assertNull(ask.state.models)
     }
 }

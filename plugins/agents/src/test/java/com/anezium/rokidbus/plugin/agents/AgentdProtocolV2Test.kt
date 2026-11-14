@@ -359,6 +359,23 @@ class AgentdProtocolV2Test {
     }
 
     @Test
+    fun session_upsert_v2_fields_parse_whatever_the_link_and_the_menu_opens_greyed() {
+        // The codec knows nothing of link trust, and agentd decorates every session_upsert,
+        // so a monitor-only (plaintext) link carries the same v2 fields as a secure one.
+        val frame = JSONObject(fixture("session_upsert").toString()).put("seq", 7)
+        frame.getJSONObject("session").put("provider", "claude").put("mode", "plugin")
+        val session = (syncedCodec().parse(frame.toString()) as AgentdAction.Upsert).session
+        assertNotNull(session.v2)
+
+        // ENTER opens the menu for it, and with no steering link every steering row is greyed.
+        val items = ControlMenu.items(session, secure = false)
+        val steering = items.filter { it.label != "Context" && it.label != "Read output" }
+        assertTrue(steering.isNotEmpty())
+        assertTrue(steering.all { !it.enabled && it.sub == "Monitor only — approve on laptop" })
+        assertTrue(items.first { it.label == "Read output" }.enabled)
+    }
+
+    @Test
     fun session_v2_edge_values_are_made_safe() {
         val codec = syncedCodec()
         fun upsertWith(seq: Long, patch: JSONObject.() -> Unit): AgentSession {

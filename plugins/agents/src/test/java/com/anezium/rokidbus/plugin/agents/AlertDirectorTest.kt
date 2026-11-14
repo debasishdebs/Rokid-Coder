@@ -295,4 +295,26 @@ class AlertDirectorTest {
 
         assertEquals(emptyList<String>(), types())
     }
+
+    @Test
+    fun an_old_service_destroyed_late_never_clears_the_newer_directors_slot() {
+        fun fresh() = AlertDirector(
+            coordinator = AlertCoordinator(clock = { now }),
+            write = { },
+            secure = { true },
+            glasses = { glasses },
+            post = { it() },
+        )
+        val older = fresh()
+        val newer = fresh()
+        AgentsRuntime.alertDirector = older
+        AgentsRuntime.alertDirector = newer
+
+        // The older service's onDestroy runs after the newer one started.
+        assertFalse(AgentsRuntime.clearAlertDirector(older))
+        assertTrue(AgentsRuntime.alertDirector === newer)
+
+        assertTrue(AgentsRuntime.clearAlertDirector(newer))
+        assertEquals(null, AgentsRuntime.alertDirector)
+    }
 }
