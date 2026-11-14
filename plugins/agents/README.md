@@ -9,9 +9,10 @@ Nexus card plus alert bands on the glasses.
 With protocol v2 the glasses do more than watch. A session that needs you wakes
 the display with an approval, question, Done or error band; you can allow or deny,
 answer a question, reply by voice, and switch a session's approval mode, all from
-the glasses. That control only runs over a TLS-pinned link. See
-[Protocol v2](#protocol-v2), [Linking a computer](#linking-a-computer) and
-[Voice](#voice).
+the glasses. Every link to a computer is TLS, pinned on both sides; there is no
+plaintext and no monitor-only link. See [Protocol v2](#protocol-v2),
+[Linking a computer](#linking-a-computer), [Sounds](#sounds-and-the-question-deck)
+and [Voice](#voice).
 
 ## Quick start
 
@@ -31,32 +32,22 @@ End to end, computer to phone to glasses:
 
 3. **Pair the phone with the computer.** Both sides must agree: the phone
    decides which computers it lets in, and agentd decides which phones it
-   trusts. A fresh agentd trusts no phone, so it only trusts one **inside a
-   two-minute window opened on the computer** by `agentd pair` (which also
-   prints the pairing line) or `agentd phones allow-next` (`node dist/cli.js
-   ...` from the source tree). Run one of them before the phone connects.
-   Then, whichever applies:
-   - Same Wi-Fi: turn on **Monitor sessions** in Settings, then **Add a
-     computer → Open the door** on the phone. The computer finds the phone on
-     its own, with no line to paste, but only while that two-minute window is
-     open. This holds for the first computer too: the phone never trusts a
-     computer on first use (agentd's window above is still needed).
-   - Anything else (different networks, automatic discovery failing): run
-     `agentd pair` on the computer, then **Add a computer → paste pairing
-     line** on the phone.
-   - **What turns on steering** (allow, deny, answer, reply) depends on who
-     dials:
-     - *Phone dials the computer (outbound `wss`, the pairing line):* the line
-       must carry the computer's certificate fingerprint (`fp`) and the
-       steering secret (`steer`). Without them the link is monitor-only.
-     - *Computer dials the phone (inbound):* no pairing line is needed. The
-       link is mutual TLS: agentd must have trusted the phone inside its
-       window, and the phone must have pinned agentd's certificate. A plain
-       (non-TLS) link is monitor-only.
-
+   trusts. The app walks you through it (see [Guided pairing](#guided-pairing)):
+   - On the computer, run `rk claude` or `rk codex` (each offers to pair when
+     no phone is paired yet), type `/rokid:pair` in Claude, or run `agentd pair`.
+     Each opens agentd's two-minute window for one new phone.
+   - On the phone, tap **Add your first computer** in Settings, then **Open the
+     door for two minutes**. The screen says "Waiting for your computer…", then
+     "Paired with <name> ✓". The phone and computer need the same Wi-Fi or
+     Tailscale. On the glasses, the **Pair a computer** row does the same.
+   - No automatic discovery (different networks)? Run `agentd pair` and use
+     **Add a computer → paste pairing line** on the phone.
+   - Every link is TLS, pinned both ways, and always steers (allow, deny,
+     answer, reply). There is nothing to turn on, and no monitor-only mode.
      See [Linking a computer](#linking-a-computer).
+   - A computer or phone paired before Plan 4 is asked to pair again, once.
    - Away from home: install Tailscale on both ends and sign in with the same
-     account — no re-pairing needed afterward.
+     account. No re-pairing is needed afterward.
 
 4. **Settings the phone needs to actually keep running:**
    - **Let Agents keep running** — the standard Android battery exemption
@@ -86,7 +77,20 @@ The settings screen reads top to bottom: Monitoring (one switch for the
 that counts the watched sessions) and Computers (every linked machine with
 its state). Each computer has its own screen with its anchored projects and
 its Forget; the OpenClaw gateway is configured at the bottom of the Add a
-computer screen.
+computer screen. With no computer yet, the Computers card shows **Add your first
+computer** and "Pairing takes two minutes — tap Add your first computer."
+Further down are Security (the pairing TTL), Alert history and the alert
+choices, including the voice reply length.
+
+| Setting | Default | Choices |
+|---|---|---|
+| Sign out unused computers (`security.pairing_ttl_days`) | 14 days | 3 / 7 / 14 / 30 / 90 |
+| Voice reply length shown (`voice.word_limit`) | 250 words | 100 / 150 / 250 / 500 |
+| Keep alerts after the session closes (`history.keep_after_session`) | off | on / off |
+| Keep alerts for (`history.window_hours`) | 24 hours | 1 / 4 / 12 / 24 |
+
+The pairing TTL is sent to agentd with the other settings (`settings_sync`);
+the other three live only on the phone.
 
 ### Projects
 
@@ -111,19 +115,21 @@ then flows through the ordinary monitoring to the board.
   The pairing line is the single JSON line `agentd pair` prints; the
   plugin validates `v:1` and `kind:"nexus-agentd"` and stores one
   host/port/token/name slot, plus the `fp` and `steer` values described under
-  [Linking a computer](#linking-a-computer). The command is `agentd` (the
+  [Linking a computer](#linking-a-computer). A line without `fp` or `steer` is
+  refused: "This pairing line is from an older agentd — run agentd pair again".
+  The command is `agentd` (the
   `bin` of the daemon package), not `nexus-agentd`, which is only the
   protocol and service name.
 - OpenClaw: enter the Gateway host, port (default `18789`), and token. A host
   may include `ws://` or `wss://`; a plain host uses `ws://`.
 - **Agents posts no alert on the phone, with one exception.** See
   [The monitoring notification](#the-monitoring-notification).
-- **A spoken cue, off by Do Not Disturb or the quiet toggle.** A fresh approval,
-  question, Done or error alert says a short generic line ("Claude needs
-  approval") through the glasses' text to speech. It stays silent while the phone
-  is in Do Not Disturb (or that cannot be read), while the Quiet row at the top of
-  the glasses board is on, while the glasses are muted, and while they are known
-  to be off the head. The quiet setting is the `alerts.quiet` preference.
+- **A sound per alert kind, off by Do Not Disturb or the quiet toggle.** See
+  [Sounds and the question deck](#sounds-and-the-question-deck). It stays silent
+  while the phone is in Do Not Disturb (or that cannot be read), while the Quiet
+  row at the top of the glasses board is on, while the glasses are muted, and
+  while they are known to be off the head. The quiet setting is the
+  `alerts.quiet` preference.
 
 Settings, auth tokens, the OpenClaw device seed, alert fingerprints, and the
 Gateway-issued device token use the plugin's private `nexus_plugin_agents`
@@ -132,7 +138,8 @@ pattern; no token or pairing payload is logged.
 
 ### Linking a computer
 
-The daemon dials the phone, so the phone decides who is allowed in:
+The daemon dials the phone, or the phone dials the daemon. Either way the phone
+decides who is allowed in:
 
 - Every computer the phone does not know yet, **the first one included**, must
   arrive while the wearer holds the door open: *Open the door* on the Add a
@@ -147,46 +154,107 @@ The daemon dials the phone, so the phone decides who is allowed in:
   its live connection on the spot.
 - A new link is announced on the glasses, never on the phone.
 
+#### Guided pairing
+
+Pairing is part of the app, not a separate step (U6). When no computer is
+trusted, or one is signed out or needs to pair again, Add a computer opens on a
+guided section at the top:
+
+1. "1 · On your computer: run rk claude (it offers to pair), or type /rokid:pair
+   in Claude, or run agentd pair."
+2. A button, "2 · Open the door for two minutes". It shows `DOOR OPEN · m:ss`
+   and a Cancel.
+3. A status line: "Waiting for your computer…", then "Paired with <name> ✓", or
+   "Time's up — tap 2 to try again".
+
+The Wi-Fi, Tailscale and paste-line cards stay below, under "Other ways".
+
+"Paired" appears only for a connection this attempt caused: a computer the phone
+did not hold when you started, or one that was signed out or refused and now
+connects securely. A computer that was already trusted and reconnects during the
+window does not finish it.
+
+The glasses offer the same flow. When monitoring is on and no computer is
+trusted, or one is signed out or needs to pair again, the board shows a **Pair a
+computer** row ("tap to start"). Tapping it opens the phone's door and shows a
+card, "Pairing · m:ss", saying "On your computer: type /rokid:pair in Claude, or
+run agentd pair". It ends with "Paired with <name> ✓" or "Time's up — try
+again"; BACK cancels and closes the door. With monitoring off, the empty board
+says "Set up a provider in the phone app" instead.
+
+`rk claude` and `rk codex` also ask "Pair now? [Y/n]" at every start until a
+phone is paired. `/rokid:pair` works in Claude; in Codex it is
+`rokid:pair`.
+
+#### Pairing expiry
+
+A pairing that goes unused is signed out, so a lost or forgotten phone does not
+stay trusted forever (U7). The default is 14 days, set in Settings under "Sign
+out unused computers" (3, 7, 14, 30 or 90 days).
+
+- **It counts use, not age.** Every secure connection renews the clock, and a
+  computer that stays connected is never signed out.
+- **Both ends apply it.** agentd forgets a phone it has not seen for the TTL,
+  on every path, and `agentd phones list` shows "last used <n> days ago ·
+  signs out in <m> days". The phone signs itself out of an unused computer the
+  same way.
+- **An expired pairing cannot renew itself.** A reconnect after the TTL is
+  refused, not accepted and refreshed.
+- **You are told.** Settings shows "Signed out of <name> — not used for <n>
+  days. Add it again.", and the board shows a "Signed out of <name>" row with
+  "pair again: Add a computer". A signed-out computer keeps its host and name,
+  so the hint is specific. Nothing paired before the upgrade is signed out at
+  once: those pairings start their clock at the first run.
+- A clock that jumps backwards cannot expire a pairing early or keep it alive
+  forever: a last-use time in the future counts as now.
+
 #### TLS pairing (v2)
 
 Steering a session (allow, deny, answer, reply, mode switches) needs a link
-the phone can prove is the right computer. Pairing sets that up:
+the phone can prove is the right computer, and agentd can prove is the right
+phone. Both directions are TLS (1.2 or later), pinned both ways:
 
 - **The pairing line carries two extra fields.** `fp` is the SHA-256
   fingerprint of the computer's own certificate, and `steer` is a steering
   secret. The phone pins `fp` before it trusts `wss`, and it sends `steer`
   only in the `wss` hello, after the pin check. agentd never sends `steer` on
   any socket. Treat the pairing line like a password.
-- **Outbound, phone to computer (`wss`).** The phone dials with the pin. A
-  pin mismatch is final and says "Computer's certificate changed — re-pair";
-  it never falls back to plain `ws`. A line with no `fp` is a legacy
-  **monitor-only** pairing (you see sessions, you cannot steer). A line with
-  `fp` but no `steer` is monitor-only too. A malformed `fp` or `steer` is
-  refused, not silently downgraded. The phone steers only when agentd's
-  `hello_ack` says `steering: true`: a `steer` agentd no longer accepts (after
-  `agentd pair --rotate-steer`) leaves the link monitor-only, with "Re-pair to
-  allow approvals" in Settings and the v1 status band on the glasses.
+- **Outbound, phone to computer (`wss`).** The phone dials with the pin and
+  presents its own certificate (the one in the Android keystore) as a client
+  certificate. agentd needs that certificate pinned, the token and `steer`. A
+  pin mismatch is final and says "Computer's certificate changed — re-pair"; it
+  never falls back to plain `ws`. A line with no `fp` or no `steer` is refused,
+  not downgraded, and a malformed one is refused too.
+- **Pair again.** If agentd turns the phone away at hello (`hello_reject` with
+  `repair_needed`, or a `hello_ack` that does not steer), the phone stops
+  retrying in a loop and shows "Pair again — this computer no longer trusts this
+  phone". Settings reads "Not connected — pair again". This is what a phone
+  paired before Plan 4, or after `agentd pair --rotate-steer` or `agentd phones
+  forget`, sees.
 - **Inbound, computer dials the phone.** The phone advertises `tls:true` in
   its discovery reply and serves TLS with a self-signed certificate held in
   the Android keystore. **The inbound link is mutual TLS**: agentd presents
   its own certificate as a client certificate, and the phone requires one and
   pins it per computer. A later mismatch is refused before the hello is
-  answered, with "Computer's certificate changed — re-pair". The link counts
-  as secure only with the matching pinned certificate.
+  answered, with "Computer's certificate changed — re-pair". agentd never dials
+  the phone in plaintext.
 - **The phone's fingerprint** is shown in Settings as "This phone's
   fingerprint". agentd logs `phone_link_pinned` with the same digits when it
   trusts the phone; compare them.
 - **agentd decides which phones it trusts.** `agentd pair` prints the line
-  and opens a two-minute window for one new phone. `agentd phones allow-next`
-  opens the same window without printing a line. Outside a window a phone
-  whose certificate is not already trusted is refused, and once any phone is
-  trusted plain-text dials are refused. `agentd phones list` shows the trusted
-  fingerprints and `agentd phones forget <fp>|--all` removes them. Rotate the
-  steering secret with `agentd pair --rotate-steer`; every phone must then pair
-  again.
+  and opens a two-minute window for one new phone, on either path. `agentd
+  phones allow-next` opens the same window without printing a line. Outside a
+  window a phone whose certificate is not already pinned is refused.
+  `agentd phones list` shows the trusted fingerprints and when each signs out,
+  and `agentd phones forget <fp>|--all` removes them and closes their links at
+  once. Rotate the steering secret with `agentd pair --rotate-steer`; every
+  phone must then pair again.
+- **Out of scope.** The computer's loopback hook port (127.0.0.1:8791), the
+  launcher's unix socket, OpenClaw's own link and the Nexus phone-to-glasses
+  link are not part of this and are unchanged. Anything on `ws://` today is
+  OpenClaw's.
 - **Older daemons.** An agentd that predates the client certificate cannot
-  link inbound at all. It fails closed, so update the daemon and the phone
-  together.
+  link at all. It fails closed, so update the daemon and the phone together.
 
 ### Away from home
 
@@ -322,18 +390,15 @@ open the microphone itself and logs no spoken text.
 
 - **Reply by voice.** From a session's menu, "Reply by voice" starts one
   listening session. The result appears on a card to confirm: Send, Speak again
-  or Cancel. Nothing is sent until you press Send, and Send always sends the
-  whole transcript. A long reply is shown condensed (its start, a slice of its
-  middle and its end) under "Showing 250 of 600 words · the full reply is
-  sent"; "Read all" opens what the card shows in a paged reader. How many words
-  are shown is "Voice reply length shown" in settings (100, 150, 250 or 500).
-  It works while the session
-  waits and, in launcher mode, at any time (see the table above).
-- **Question answers.** A question band opens one card per question with the
-  options, an "Answer box (voice)" row when free text is allowed, and a
-  last page with Send answer. The answer box shows the answer condensed in the
-  same way, and keeps all of it up to 4000 characters; a longer one says "Answer
-  too long — answer on laptop". Answers carry the question and option text exactly
+  or Cancel. Nothing is sent until you press Send. What Send sends is always the
+  full transcript you confirmed. A long one is shown condensed (see
+  [Long replies](#long-replies-shown-condensed)), never refused and never
+  silently cut. It works while the session waits and, in launcher mode, at any
+  time (see the table above).
+- **Question answers.** A question band opens a deck with one card per question;
+  see [Sounds and the question deck](#sounds-and-the-question-deck). The answer
+  box accepts up to 4,000 characters; a longer answer is refused with "Answer too
+  long — answer on laptop". Answers carry the question and option text exactly
   as agentd sent it; a question too large for the glasses to answer exactly
   says "Question too long — answer on laptop" on its band and offers no Answer.
 - **Voice approval.** The decision card has a "Say allow or deny" row. Only a
@@ -345,16 +410,108 @@ open the microphone itself and logs no spoken text.
   try again" (another plugin holds speech, or the last session is still
   stopping), "Glasses link lost" and "Didn't catch that". A final result that
   comes back empty falls back to the last words heard.
-- **The spoken alert cue** is separate: a short generic line through text to
-  speech, silent under Do Not Disturb, the Quiet row, a muted glasses volume,
-  or glasses known to be off the head.
+- **The alert sound** is separate: a short line or a chime (see
+  [Sounds](#sounds-and-the-question-deck)), silent under Do Not Disturb, the
+  Quiet row, a muted glasses volume, or glasses known to be off the head.
+
+#### Long replies shown condensed
+
+A voice reply can be long. Agents never refuses one and never cuts it without
+saying so (U4). The Heard card shows a condensed view, and the confirm card's
+first line says so: "Showing <shown> of <total> words · the full reply is sent".
+The view is the start, the middle and the end, joined by visible ellipses
+(`start … middle … end`), so you can see what the reply holds.
+
+- **The limit is in words.** Settings, "Voice reply length shown": 100, 150, 250
+  or 500 words (default 250, never more than 500). A reply at or under the limit
+  is shown whole.
+- **Send sends the full text.** Condensing is display only; what you confirmed is
+  what the session receives.
+- A single huge "word" (a URL, or text with no spaces) is cut to 40 characters
+  with `…` in the display only, so the card stays readable.
+- If the glasses card cannot hold the whole condensed view, a "Read all" row
+  opens it in the paged output reader.
+- The same view is used when you review a long free-text answer to a question.
+  The follow-up itself is still capped at 16 KiB.
 
 **Re-approve the grant after updating.** The plugin's manifest now declares the
 `stt` and `tts` capabilities (`CAPABILITIES=surfaces,stt,tts`). Nexus resets a
 plugin's grant when its capabilities change, so open the Nexus app, go to
 **Plugin access** and allow **Agents** for Speech to text and Text to speech.
-Until you do, voice features say "Voice unavailable" and the spoken cue stays
+Until you do, voice features say "Voice unavailable" and the alert sounds stay
 silent; the bands and board still work.
+
+### Sounds and the question deck
+
+**A sound per alert kind** (U3). The sound follows what the alert is, and the
+same gates apply to all of them: Do Not Disturb, the Quiet row, a muted glasses
+volume, and glasses known to be off the head.
+
+| Alert | Sound |
+|---|---|
+| Approval | Spoken: "<Name> needs approval" |
+| Question | Spoken: "<Name> has a question" |
+| Error | Spoken: "<Name> hit an error" |
+| Done | A short chime, not speech |
+| Notice | None |
+| **Any reminder or retry** | **None** |
+
+**Reminders are silent** (U1). A waiting alert may be shown again on the display,
+repeatedly, but it never makes a sound, because sound distracts when you are
+busy. The re-shown band's footer says "Reminder", or "Reminder · +N waiting".
+
+**The chime never plays on the phone speaker.** It plays only when the audio is
+routed to a Bluetooth output (the glasses). Agents checks the route before the
+chime starts, keeps it muted until Android reports the Bluetooth route, and
+stops it at once if the route changes or Android warns the audio is about to
+move to the speaker. With no Bluetooth output, on Android older than 13, or when
+the route is unsure, the chime is dropped and Done is display-only. The whole
+chime is under 0.2 seconds; a Bluetooth drop inside that is a device check, not
+something a unit test can prove.
+
+**One card per question** (U3). A question with several items opens a deck:
+
+- Each question is its own card, `Q<n>/<N> · <heading>`. The rows are the
+  options, then "Answer box (voice)" when free text is allowed, then "Next
+  question ›" (always available, answered or not), and "‹ Previous question"
+  from Q2 on.
+- After the last question comes a "Review answers" card: one row per question,
+  "Q<n> <heading>: <answer or — not answered>". A tap opens that question. "Send
+  answers" is enabled only when every question is answered.
+- BACK goes to the previous card, and closes the deck from Q1.
+- One question only: no review card, and the existing "Send answer" row stays.
+- If the session closes the alert while you are on a card, the deck closes with
+  the "No longer waiting" brief.
+
+Answers keep the exact wire strings agentd sent (R124).
+
+### Alert history
+
+The phone keeps a list of every alert and how it ended, so you can look back
+over it (U1). Open Settings, **Alert history**. It is newest first. Each row is
+`<PROVIDER> · <kind> · <session heading>`, with a line below it, `<outcome> ·
+<relative time>`, and ` · shown N×` when the alert was shown more than once.
+
+| Outcome shown | Meaning |
+|---|---|
+| Allowed, Denied, Answered, Replied | You acted from the phone or glasses. "Handled" when it was acted on elsewhere. |
+| Waiting | Still pending. A refused answer keeps it here as "Not sent: <error>". |
+| Dismissed, Read | You dismissed it (Done and error alerts end here). |
+| Ignored — timed out | Nobody answered before it expired. |
+| Handled on laptop | The laptop answered it, or the session ended while it waited. |
+
+- An attempt never closes an entry. It ends only when agentd confirms the alert
+  closed, so "Allowed" means agentd took it. Dismissing an approval or question
+  only counts a re-show; the entry stays Waiting.
+- Pressing a control with no secure link records nothing; the glasses say "Not
+  sent" / "Computer not connected".
+- **How long it is kept.** The history lives in memory, so a restart of the
+  Agents process clears it. By default an alert leaves the list when its session
+  closes; turn on "Keep after the session closes" to keep it. Either way,
+  nothing is kept past "Keep alerts for" (1, 4, 12 or 24 hours, default 24). At
+  most 200 entries are held. **Clear history** empties it.
+- Empty state: "No alerts yet — they'll appear here as your agents ask for
+  things."
 
 ### Typing a reply into a session
 
@@ -410,19 +567,22 @@ and the fixtures in `contracts/`.
   repeat is acknowledged but not run twice. `followup.text` is at most 16 KiB.
 - **Phone to agent, monitor:** `alert_shown`, `alert_dismissed`,
   `models_request` and the v1 monitor frames. These are allowed on any link.
-- **Steering needs a secure link.** One gate (`AgentdWire`) classifies every
-  outgoing frame. Steering frames are refused on a link that is not secure
-  (plain `ws`, no pinned certificate, or no `steer`), and the board and
-  menus say "Monitor only — approve on laptop" instead of offering a button
-  that cannot work.
+- **Steering needs a secure link, and every link is one.** One gate
+  (`AgentdWire`) classifies every outgoing frame. There is no plaintext or
+  monitor-only link to agentd: the phone dials `wss` only, with its client
+  certificate, and a link that is not secure does not exist. If you press
+  Allow, Deny or a reply with no secure link, the glasses say "Not sent" /
+  "Computer not connected". Allow and Deny are never hidden for link reasons
+  (only for a command agentd cut, as above). agentd's refusal at hello is
+  `hello_reject` with `repair_needed` or `bad_token`, then a 4403 close.
 - **The phone is the configuration owner.** On every secure link it sends
-  `settings_sync` (the alert timings and the wait limit *Y*), which
-  overwrites the computer's copy. Edit these in the Settings screen, not on
+  `settings_sync` (the alert timings, the wait limit *Y* and the pairing TTL),
+  which overwrites the computer's copy. Edit these in the Settings screen, not on
   the laptop.
 - **Alerts come from the v2 frames.** Once a computer has spoken v2, the older
   v1 approval and status attention for that computer's Claude and Codex
   sessions stays off, even while the link is down, so nothing alerts twice.
-  OpenClaw sessions keep the v1 path.
+  The v1 status alert is for OpenClaw sessions only.
 
 ### OpenClaw Gateway v4
 
@@ -533,8 +693,9 @@ JSON choice as Transit, plus the repository’s existing OkHttp `4.12.0`.
   related event.
 - `sessions.list` is capped at 200 rows per refresh. The HUD can show 63 session
   rows because a Nexus card is limited to 64 rows including the header.
-- Plain `ws://` sends credentials over an unencrypted tailnet connection.
-  Configure `wss://` when the Gateway has TLS; the plugin does not weaken TLS or
+- Plain `ws://` is still possible for **OpenClaw's** Gateway (an upstream Nexus
+  link, not Rokid-Coder's). It sends credentials over an unencrypted tailnet
+  connection. Configure `wss://` when the Gateway has TLS; the plugin does not weaken TLS or
   install a custom trust manager.
 - No boot receiver is present. Monitoring starts after configuration, an
   explicit connection test, or a Nexus HUD open, as required for Phase 1.

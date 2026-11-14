@@ -7,7 +7,7 @@ plugin.
 
 The daemon can hold Claude Code `PreToolUse` hooks while the linked phone asks the wearer
 to allow or deny a tool call. It does not auto-approve requests, accept voice commands,
-provide TLS, or install itself as a Windows service.
+or install itself as a Windows service. The phone link is TLS only (see below).
 
 ## Requirements and setup
 
@@ -80,6 +80,13 @@ asks, or add it under System Settings > Network > Firewall > Options.
 Expose port 8792 only over the user's trusted Tailscale tailnet all the same, not through
 router port forwarding or a public interface.
 
+When agentd turns a phone away at hello it sends `{type:"hello_reject", v:2, reason}` first,
+where `reason` is `repair_needed` (no client certificate, a certificate that is not pinned
+while no pairing window is open, or a missing or wrong steering secret) or `bad_token`, and
+then closes with 4403. A refused hello changes nothing: no pin is added and no window is
+used up. Logs show only a short fingerprint, never the token, the secret or a full
+fingerprint.
+
 A phone paired before Plan 4 connected without a client certificate, or over plaintext,
 and is now refused with `repair_needed`. Pair it again: run `agentd pair` (or
 `agentd phones allow-next`) and link the phone within two minutes, so its certificate is
@@ -95,6 +102,26 @@ node dist/cli.js pair
 The command prints a one-line JSON pairing payload and a terminal QR code. It prefers the
 first IPv4 address on an interface whose name contains `Tailscale`. The Android plugin can
 scan the QR code or accept the printed JSON pasted directly.
+
+The window stays open for two minutes and trusts the first new phone to connect and
+authenticate, on either path (the phone dialling in over `wss`, or agentd dialling the
+phone). `agentd phones allow-next` opens the same window without printing the line. From
+Claude, `/rokid:pair` does the same, and `rk claude` / `rk codex` offer it at start when no
+phone is paired. The phone's own app walks the other side of it (Add a computer).
+
+### Pairings that go unused expire
+
+A phone that has not connected for N days is signed out and has to pair again. The default
+is 14 days; the phone sets it (3, 7, 14, 30 or 90) and sends it with its settings (agentd
+accepts whole numbers from 1 to 365 and answers `bad_settings` to anything else), and it is
+kept in `settings.json` in agentd's state directory. Any accepted connection, over `wss` or dialled, counts as use and
+renews the clock, at most once an hour, so a phone that stays connected never expires. An
+expired phone cannot renew itself by reconnecting: it is forgotten, refused, and its live
+link is closed. agentd checks hourly and at startup. `agentd phones list` shows each phone
+as `last used <n> days ago · signs out in <m> days`, and `agentd phones forget <fp>|--all`
+removes one or all at once. A last-use time in the future (a clock that moved back) counts
+as now. Pins from an older agentd are carried over with the migration time as their first
+use, so nothing is signed out the moment you update.
 
 The token, stable machine ID, ports, and machine name live in
 `~/.nexus-agentd/config.json`. Treat this file and pairing payload as credentials.

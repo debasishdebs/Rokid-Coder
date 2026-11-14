@@ -3,6 +3,10 @@
 Date: 2026-11-14 · Status: draft for approval · Source: brainstorm on 2026-11-13/14
 (spike evidence: `../brainstorm/2026-11-14-spike-results.md`)
 
+**Amended 2026-11-14 (morning) by the user decisions U1–U14** (Plan 4), recorded in
+`.superpowers/sdd/MASTER-HANDOFF.md` under "USER DECISIONS". Where a U-decision and this
+document disagree, the U-decision wins. The changes are marked in §6.1, §6.2 and §12.1.
+
 Legend: **[user]** = decided by Debasish. **[call]** = Claude's call, open to override.
 **[spike]** = confirmed by a test on this Mac.
 
@@ -243,21 +247,35 @@ Glasses/phone (Nexus code reading; devices are attached over adb but nothing was
 ### 6.1 Glasses HUD **[user, layout = call]**
 - **Board**: one row per session — `CLAUDE` / `CODEX` badge, heading, current file,
   step, state (working / waiting on you / done / error).
-- **Wake events**: approval, question, done, error → wake HUD, show the item,
-  sound unless DND.
+- **Wake events**: approval, question, done, error → wake HUD, show the item.
+  **Sound depends on the kind, and never on a reminder (U1, U3):** approval, question
+  and error are spoken ("<Name> needs approval", "<Name> has a question", "<Name> hit an
+  error"); Done is a short chime, not speech; a notice has no sound. All of it is off
+  under DND, the quiet toggle, a muted glasses volume, or glasses off the head. The chime
+  plays only when audio is routed to Bluetooth (the glasses), never on the phone speaker.
 - **Digest**: otherwise update once a minute (or live, per setting).
 - **Lists** (approval options, modes, models, question options): swipe to move, tap
   to pick, expand to read the full text.
-- **Answer box**: navigate to it, push-to-talk, see transcript, confirm to send.
+- **Questions are one card per question (U3).** The user swipes between them and never
+  sees all the questions on one card. A review card lists every answer before Send.
+- **Answer box**: navigate to it, push-to-talk, see transcript, confirm to send. **A long
+  reply is shown condensed (U4):** start … middle … end with visible ellipses, over a
+  word limit set on the phone (default 250, max 500). Nothing is silently cut or refused,
+  and what is sent is the full text the user confirmed.
 - **Output reader**: summary page, then paged full output.
-- **Reminder loop**: while waiting on the user, re-alert every *X* until *Y*.
+- **Reminder loop**: while waiting on the user, re-show the alert every *X* until *Y*.
+  **A reminder is silent (U1):** it may wake and re-show the display, but it never makes a
+  sound, because sound distracts a busy user. The phone keeps a history of every alert and
+  its outcome (acted, dismissed, ignored, withdrawn) so the user can look back.
 - Display is green monochrome; keep it to a few short lines (`rokid-platform-notes.md`).
 
 ### 6.2 Phone app (Agents plugin settings) **[user]**
 - Update cadence (digest 1 min default / live).
 - Wait limit *Y* and reminder interval *X*.
 - Default approval mode per tool.
-- Pairing / computers (exists in Nexus).
+- Pairing / computers (exists in Nexus), now guided in the app and from the glasses (U6),
+  and signed out after a period of non-use (U7, default 14 days, set here).
+- Alert history, with how long it is kept (U1), and the voice reply length (U4).
 - Sound behaviour follows **phone** DND (glasses have no readable DND), plus a manual
   "quiet" toggle in the phone app and on the glasses. If DND state can't be read,
   treat as quiet (display only). **[call]**
@@ -368,7 +386,21 @@ the code or the evidence and accepted. All items here are **[call]** unless mark
   Steering (approvals, prompts, mode changes) must not run over that.
 - v1 adds **TLS on the phone link**, with agentd's self-signed certificate fingerprint carried in
   the pairing QR and pinned by the phone. Tailscale stays optional.
-- With no TLS (old pairing), the link is monitor-only.
+- **TLS only, and mutual, on both paths (U8, Plan 4).** There is no unencrypted phone link: no
+  `ws://` and no plaintext TCP PhoneLink. On the phone-dials path (wss) the phone presents its
+  own certificate, which agentd pins, plus the token and the steering secret. On the
+  agentd-dials path both sides present and pin certificates, plus the token. Anything else is
+  refused at hello (`hello_reject`, `repair_needed` or `bad_token`).
+- **No monitor-only mode.** The earlier rule "with no TLS, the link is monitor-only" is
+  withdrawn. A phone paired before Plan 4 (no client certificate pinned at agentd) is refused
+  and shown "Pair again", once; it does not retry in a loop.
+- **Pairing is guided and expires with non-use (U6, U7).** The two-minute window stays, but it
+  is part of the flow: `rk`, `/rokid:pair`, the phone's Add a computer screen and a glasses row
+  all lead to it. A pairing unused for N days (default 14, configurable) is signed out on both
+  ends and needs a re-pair. A re-pair after a certificate reset or expiry is accepted.
+- **Out of scope, unchanged:** the loopback hook port 127.0.0.1:8791 (same-user trust is
+  accepted, U9, so no hook secret), the 0600 launcher socket, OpenClaw's own link and the Nexus
+  phone-to-glasses link.
 - **Approve-all** is per session and needs an explicit confirm on the glasses. It resets to the
   default mode when the session ends or agentd restarts. The phone can revoke it for all sessions.
 - **The user is told whenever approve-all resets [user]:** a glasses alert ("Approve-all off —
