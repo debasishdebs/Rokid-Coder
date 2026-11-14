@@ -55,15 +55,48 @@ async function rkEnv(dir, extra = {}) {
   };
 }
 
+// Everything a test started that has not exited yet. killLive() runs after each
+// test, so a failed assertion cannot leave an rk, a fake or a grandchild behind.
+const live = new Set();
+
+/** Registers a process for killLive(). `kill` ends it; `env` may name a FAKE_PIDFILE. */
+function track(kill, env) {
+  const entry = { kill, env };
+  live.add(entry);
+  return () => live.delete(entry);
+}
+
+function killLive() {
+  for (const { kill, env } of live) {
+    try {
+      kill();
+    } catch {
+      // already gone
+    }
+    // The fake runs in its own session, so killing rk's group does not reach it.
+    const pids = env && env.FAKE_PIDFILE ? readJson(env.FAKE_PIDFILE) : undefined;
+    for (const target of pids ? [-pids.pid, pids.pid, pids.grandchild] : []) {
+      try {
+        if (target) process.kill(target, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  }
+  live.clear();
+}
+
 /** Runs a command on a fresh pty and collects its output. */
 function inPty(file, args, env, size = { cols: 100, rows: 40 }) {
   const child = spawnPty(file, args, { cwd: process.cwd(), env, ...size });
+  const untrack = track(() => child.kill("SIGKILL"), env);
   const run = { child, out: "", exit: undefined };
   child.onData((chunk) => {
     run.out += chunk;
   });
   run.exited = new Promise((resolve) =>
     child.onExit((code, signal) => {
+      untrack();
       run.exit = { code, signal };
       resolve(run.exit);
     }),
@@ -94,4 +127,18 @@ function sttyState(text) {
     .replace(/lflag=([0-9a-f]+)/, (_all, hex) => `lflag=${(parseInt(hex, 16) & ~0x20000000).toString(16)}`);
 }
 
-module.exports = { sttyState, FAKE_CLAUDE, FAKE_CODEX, RK, until, alive, waitDead, rkEnv, inPty, readJson };
+/**
+ * Replays the cursor and bracketed-paste sequences in `text` in order, as a
+ * terminal would, and returns the state they leave behind.
+ */
+function terminalModes(text) {
+  const modes = { cursorHidden: false, bracketedPaste: false };
+  for (const match of String(text).matchAll(/\x1b\[\?(25|2004)([hl])/g)) {
+    const on = match[2] === "h";
+    if (match[1] === "25") modes.cursorHidden = !on;
+    else modes.bracketedPaste = on;
+  }
+  return modes;
+}
+
+module.exports = { track, killLive, sttyState, terminalModes, FAKE_CLAUDE, FAKE_CODEX, RK, until, alive, waitDead, rkEnv, inPty, readJson };

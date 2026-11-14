@@ -1,11 +1,14 @@
 // rk codex on Path B (R133): plain codex with inherited stdio and the attach hint.
 const test = require("node:test");
+const { afterEach } = test;
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { withTempDir } = require("./helpers/daemon.js");
-const { RK, until, waitDead, rkEnv, inPty, readJson, sttyState } = require("./helpers/rk.js");
+const { RK, until, waitDead, rkEnv, inPty, killLive, readJson, sttyState } = require("./helpers/rk.js");
+
+afterEach(killLive);
 
 const HINT = "Type rokid:on in Codex to attach this session.";
 const SIG = os.constants.signals;

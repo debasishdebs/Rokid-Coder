@@ -21,7 +21,6 @@ const CODEX_REFUSAL =
 const CODEX_HINT = "Type rokid:on in Codex to attach this session.";
 
 const SESSION_POLL_FAST_MS = 500;
-const SESSION_POLL_GIVE_UP_MS = 30_000;
 const SESSION_POLL_SLOW_MS = 2000;
 const RECONNECT_MS = 2000;
 const MAX_FRAME_BYTES = 64 * 1024;
@@ -35,6 +34,10 @@ function envMs(name: string, fallback: number): number {
 // The brief's windows. The environment overrides exist only so tests need not wait them out.
 const EOF_WAIT_MS = (): number => envMs("ROKID_RK_EOF_WAIT_MS", 10_000);
 const KILL_AFTER_MS = (): number => envMs("ROKID_RK_KILL_AFTER_MS", 3000);
+const SESSION_POLL_GIVE_UP_MS = (): number => envMs("ROKID_RK_BIND_GIVE_UP_MS", 30_000);
+
+/** Set once the child is running: what a crash outside the exit machinery must still do. */
+let emergencyCleanup: (() => void) | undefined;
 
 function signalNumber(name: string | null): number | undefined {
   return name ? (os.constants.signals as Record<string, number>)[name] : undefined;
@@ -220,7 +223,17 @@ async function runClaude(args: string[]): Promise<void> {
     process.exit(127);
   }
 
+  emergencyCleanup = () => {
+    child.kill("SIGKILL");
+    restoreTerminal(saved);
+  };
+
   // ---- exit handling (R53) ----
+  // R140: the process group is swept only when rk itself ends the child by a
+  // signal (TERM, HUP, INT, QUIT or an uncaught error). When Claude exits on its
+  // own, including after stdin EOF, nothing is swept: plain `claude` leaves a
+  // background job the user started on purpose (`npm run dev &`) running, and rk
+  // must behave the same.
   let shutdown: { code: number; note?: string } | undefined;
   let sweepGroup = false;
   let finished = false;
@@ -301,6 +314,12 @@ async function runClaude(args: string[]): Promise<void> {
         boundId = undefined;
         requestedId = undefined;
         client.onLinkUp();
+        if (gaveUp && !finished) {
+          // A late-started agentd gets a fresh window to find the session.
+          gaveUp = false;
+          startedAt = Date.now();
+          pollTimer = setTimeout(pollSession, SESSION_POLL_FAST_MS);
+        }
       },
       onDown: () => client.onLinkDown(),
       onFrame: (frame) => {
@@ -333,14 +352,11 @@ async function runClaude(args: string[]): Promise<void> {
       },
     },
   );
-  if (probe) {
-    link.attach(probe);
-  } else {
-    link.scheduleReconnect();
-  }
-
-  const startedAt = Date.now();
+  // Polling for the owned session. It is declared before the first attach so the
+  // link's onUp can restart it.
+  let startedAt = Date.now();
   let everFound = false;
+  let gaveUp = false;
   const pollSession = (): void => {
     pollTimer = undefined;
     if (finished) {
@@ -357,12 +373,20 @@ async function runClaude(args: string[]): Promise<void> {
         }
       }
     }
-    if (!everFound && Date.now() - startedAt >= SESSION_POLL_GIVE_UP_MS) {
-      return; // give up and stay unattached
+    if (!everFound && Date.now() - startedAt >= SESSION_POLL_GIVE_UP_MS()) {
+      gaveUp = true; // stay unattached until agentd (re)connects
+      return;
     }
     pollTimer = setTimeout(pollSession, everFound ? SESSION_POLL_SLOW_MS : SESSION_POLL_FAST_MS);
   };
   pollTimer = setTimeout(pollSession, SESSION_POLL_FAST_MS);
+
+  if (probe) {
+    link.attach(probe);
+  } else {
+    link.scheduleReconnect();
+  }
+
 
   // ---- wiring: data and exit are subscribed in the same tick as the spawn ----
   child.onData((chunk) => {
@@ -380,7 +404,6 @@ async function runClaude(args: string[]): Promise<void> {
     eofStarted = true;
     child.endInput();
     eofTimer = setTimeout(() => {
-      sweepGroup = true;
       child.kill("SIGHUP");
       armKill();
     }, EOF_WAIT_MS());
@@ -464,6 +487,7 @@ function main(argv: string[]): void {
   const [command, ...args] = argv;
   if (command === "claude") {
     runClaude(args).catch((error: unknown) => {
+      emergencyCleanup?.();
       process.stderr.write(`rk: ${errorMessage(error)}\n`);
       process.exit(1);
     });

@@ -1,11 +1,14 @@
 // The contract of the fake claude CLI that the launcher tests (Tasks 2 to 4) rely on.
 const test = require("node:test");
+const { afterEach } = test;
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { withTempDir } = require("./helpers/daemon.js");
-const { FAKE_CLAUDE, until, rkEnv, inPty, readJson } = require("./helpers/rk.js");
+const { FAKE_CLAUDE, until, rkEnv, inPty, killLive, readJson } = require("./helpers/rk.js");
+
+afterEach(killLive);
 
 async function startFake(dir, extra = {}) {
   const { env, sessionsDir } = await rkEnv(dir, {

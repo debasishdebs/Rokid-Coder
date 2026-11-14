@@ -1,4 +1,5 @@
 const test = require("node:test");
+const { afterEach } = test;
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -8,12 +9,14 @@ const { LauncherHub } = require("../dist/launcher/launcher-hub.js");
 const { AttachRegistry } = require("../dist/attach-registry.js");
 const { silentLogger } = require("../dist/logger.js");
 const { withTempDir } = require("./helpers/daemon.js");
-const { FAKE_CLAUDE, RK, until, alive, waitDead, rkEnv, inPty, readJson, sttyState } = require("./helpers/rk.js");
+const { FAKE_CLAUDE, RK, until, alive, waitDead, rkEnv, inPty, readJson, sttyState, terminalModes, track, killLive } = require("./helpers/rk.js");
 
 const BANNER =
   "Rokid-Coder launcher: attached. From the glasses you can reply at any time, compact, and change model (changing model also sets your default for new sessions).";
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
 const SIG = os.constants.signals;
+
+afterEach(killLive);
 
 const readPids = (file) => until(() => readJson(file), 5000, "the fake's pid file");
 
@@ -77,15 +80,17 @@ test("rk_codex_refuses_dash_c", async () => {
 });
 
 /** A real hub over `dir`, for the tests that need agentd's side of the socket. */
-async function withHub(dir, body) {
-  const { env, sessionsDir, configDir } = await rkEnv(dir);
+async function withHub(dir, body, { logger = silentLogger, autostart = true, extraEnv = {} } = {}) {
+  const { env, sessionsDir, configDir } = await rkEnv(dir, extraEnv);
   const file = path.join(configDir, "attached.json");
   const make = () => {
     const registry = new AttachRegistry({ file, logger: silentLogger });
-    return { registry, hub: new LauncherHub({ configDir, claudeSessionsDir: sessionsDir, logger: silentLogger, registry }) };
+    return { registry, hub: new LauncherHub({ configDir, claudeSessionsDir: sessionsDir, logger, registry }) };
   };
   let current = make();
-  await current.hub.start();
+  if (autostart) {
+    await current.hub.start();
+  }
   try {
     await body({
       env,
@@ -96,6 +101,7 @@ async function withHub(dir, body) {
       get registry() {
         return current.registry;
       },
+      startHub: () => current.hub.start(),
       restart: async () => {
         await current.hub.stop();
         current = make();
@@ -169,6 +175,86 @@ test("rebinds_after_agentd_restart", async () => {
   });
 });
 
+function capturingLogger() {
+  const events = [];
+  const record = (level) => (event, meta) => events.push({ level, event, meta });
+  return { events, logger: { info: record("info"), warn: record("warn"), error: record("error") } };
+}
+
+test("unprompted_bind_rejected_detached_marks_unbound", async () => {
+  await withTempDir(async (dir) => {
+    const { events, logger } = capturingLogger();
+    await withHub(
+      dir,
+      async (ctx) => {
+        const { run } = await startRkOn(ctx.env, dir, { FAKE_SESSION_ID: "sess-detach" });
+        try {
+          await until(() => ctx.hub.binding("claude:sess-detach"), 5000, "the bind");
+          const rejectedBefore = events.filter((e) => e.event === "launcher_bind_rejected" && e.meta.reason === "detached").length;
+          // /rokid:off: agentd unbinds and tells the launcher with an unprompted bind_rejected.
+          ctx.registry.detach("claude", "sess-detach");
+          assert.equal(ctx.hub.binding("claude:sess-detach"), undefined);
+          // Marked unbound, rk asks again at its next poll, and the hub refuses while the opt-out stands.
+          // Had rk kept thinking it was bound, it would never send another bind.
+          await until(
+            () => events.filter((e) => e.event === "launcher_bind_rejected" && e.meta.reason === "detached").length > rejectedBefore,
+            6000,
+            "a fresh bind attempt that the hub refuses as detached",
+          );
+          assert.equal(ctx.hub.binding("claude:sess-detach"), undefined, "the opt-out holds");
+        } finally {
+          run.child.kill("SIGKILL");
+        }
+      },
+      { logger },
+    );
+  });
+});
+
+test("rebind_sent_after_rokid_on", async () => {
+  await withTempDir(async (dir) => {
+    await withHub(dir, async (ctx) => {
+      const { run } = await startRkOn(ctx.env, dir, { FAKE_SESSION_ID: "sess-on" });
+      try {
+        await until(() => ctx.hub.binding("claude:sess-on"), 5000, "the bind");
+        ctx.registry.detach("claude", "sess-on");
+        assert.equal(ctx.hub.binding("claude:sess-on"), undefined);
+        await new Promise((resolve) => setTimeout(resolve, 2500)); // rk has tried and been refused
+        assert.equal(ctx.hub.binding("claude:sess-on"), undefined, "no rebind while the opt-out stands");
+        // /rokid:on is a plugin-mode attach; it ends the explicit detach.
+        ctx.registry.attach("claude", "sess-on", "plugin");
+        const rebound = await until(() => ctx.hub.binding("claude:sess-on"), 6000, "the rebind after /rokid:on");
+        assert.equal(rebound.childPid, (await readPids(path.join(dir, "pids.json"))).pid);
+        assert.equal(ctx.registry.mode("claude", "sess-on"), "launcher");
+      } finally {
+        run.child.kill("SIGKILL");
+      }
+    });
+  });
+});
+
+test("late_agentd_start_still_binds", async () => {
+  await withTempDir(async (dir) => {
+    await withHub(
+      dir,
+      async (ctx) => {
+        const { run } = await startRkOn(ctx.env, dir, { FAKE_SESSION_ID: "sess-late" });
+        try {
+          assert.ok(run.out.includes(UNREACHABLE), "started with no agentd");
+          // Long enough for the (shortened) bind window to close with no agentd.
+          await new Promise((resolve) => setTimeout(resolve, 1800));
+          await ctx.startHub();
+          await until(() => ctx.hub.binding("claude:sess-late"), 8000, "the bind after agentd came up");
+          await run.until(BANNER);
+        } finally {
+          run.child.kill("SIGKILL");
+        }
+      },
+      { autostart: false, extraEnv: { ROKID_RK_BIND_GIVE_UP_MS: "600" } },
+    );
+  });
+});
+
 test("unreachable_agentd_prints_line_and_still_runs", async () => {
   await withTempDir(async (dir) => {
     const { run } = await startRk(dir);
@@ -196,10 +282,11 @@ async function sttyScenario(dir, { rkArgs = ["claude"], preload, extra = {}, dri
   const run = inPty("/bin/sh", ["-c", script], env);
   await until(() => fs.existsSync(path.join(dir, "mid")), 8000, "the mid-run terminal sample");
   const pids = readJson(path.join(dir, "pids.json"));
+  const outAtMid = run.out;
   await drive(run, pids);
   await run.exited;
   const read = (name) => fs.readFileSync(path.join(dir, name), "utf8").trim();
-  return { before: read("before"), mid: read("mid"), after: read("after"), rc: Number(read("rc")), run, pids };
+  return { before: read("before"), mid: read("mid"), after: read("after"), rc: Number(read("rc")), run, pids, outAtMid };
 }
 
 test("terminal_state_identical_after_exit_sigterm_sighup_and_throw", async () => {
@@ -220,7 +307,19 @@ test("terminal_state_identical_after_exit_sigterm_sighup_and_throw", async () =>
       assert.notEqual(result.mid, result.before, `${name}: rk changes the terminal while it runs`);
       assert.equal(sttyState(result.after), sttyState(result.before), `${name}: stty -g is identical afterwards`);
       assert.equal(result.rc, scenario.rc, `${name}: exit status`);
-      assert.ok(await waitDead(result.pids.pid).then(() => true), `${name}: the child is gone`);
+      // The fake hid the cursor and enabled bracketed paste. Only rk's own restore
+      // can undo that: the shell prints nothing after rk, and the fake is dead.
+      assert.deepEqual(
+        terminalModes(result.outAtMid),
+        { cursorHidden: true, bracketedPaste: true },
+        `${name}: the TUI changed both modes while it ran`,
+      );
+      assert.deepEqual(
+        terminalModes(result.run.out),
+        { cursorHidden: false, bracketedPaste: false },
+        `${name}: cursor shown and bracketed paste off after rk exits`,
+      );
+      await waitDead(result.pids.pid);
       if (scenario.throws) {
         assert.ok(result.run.out.includes("rk: unexpected error: boom"), result.run.out);
       }
@@ -241,10 +340,33 @@ test("no_child_or_grandchild_left_after_sigterm", async () => {
       assert.ok(alive(pids.pid) && alive(pids.grandchild), "both run before the signal");
       process.kill(pids.ppid, "SIGTERM");
       assert.deepEqual(await run.exited, { code: 143, signal: null });
-      assert.ok(await waitDead(pids.pid).then(() => true), `${name}: child gone`);
-      assert.ok(await waitDead(pids.grandchild).then(() => true), `${name}: grandchild gone`);
+      await waitDead(pids.pid);
+      await waitDead(pids.grandchild);
     });
   }
+});
+
+test("normal_exit_leaves_background_jobs_like_plain_claude", async () => {
+  // R140: rk sweeps the process group only when it ends the child by a signal. A job the
+  // user started through Claude on purpose (`npm run dev &`) outlives Claude, as with plain claude.
+  await withTempDir(async (dir) => {
+    const { run, pids } = await startRk(dir, { extra: { FAKE_GRANDCHILD: "stubborn" } });
+    try {
+      run.write("/exit 0\r");
+      assert.deepEqual(await run.exited, { code: 0, signal: null });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.ok(alive(pids.grandchild), "the background job is still running");
+    } finally {
+      for (const target of [-pids.grandchild, pids.grandchild]) {
+        try {
+          process.kill(target, "SIGKILL");
+        } catch {
+          // gone
+        }
+      }
+    }
+    await waitDead(pids.grandchild);
+  });
 });
 
 test("spawn_failure_exit_127_and_terminal_restored", async () => {
@@ -262,6 +384,8 @@ test("spawn_failure_exit_127_and_terminal_restored", async () => {
     assert.equal(read("rc"), "127");
     assert.equal(sttyState(read("after")), sttyState(read("before")));
     assert.ok(run.out.includes("rk: could not start claude: "), run.out);
+    assert.ok(run.out.includes("\x1b[?25h\x1b[?2004l"), "the restore sequences are written");
+    assert.deepEqual(terminalModes(run.out), { cursorHidden: false, bracketedPaste: false });
   });
 });
 
@@ -269,6 +393,8 @@ test("spawn_failure_exit_127_and_terminal_restored", async () => {
 function rkOnPipes(env) {
   const child = spawn(process.execPath, [RK, "claude"], { env, stdio: ["pipe", "pipe", "pipe"] });
   const run = { child, out: "" };
+  const untrack = track(() => child.kill("SIGKILL"), env);
+  child.once("exit", untrack);
   child.stdout.on("data", (chunk) => (run.out += chunk));
   child.stderr.on("data", (chunk) => (run.out += chunk));
   run.exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
@@ -298,8 +424,8 @@ test("stdin_eof_ends_child_and_reaps", async () => {
       const pids = await readPids(path.join(dir, "pids.json"));
       run.child.stdin.end();
       assert.deepEqual(await run.exited, c.expect, c.name);
-      assert.ok(await waitDead(pids.pid).then(() => true), `${c.name}: child reaped`);
-      assert.ok(await waitDead(pids.grandchild).then(() => true), `${c.name}: grandchild gone`);
+      await waitDead(pids.pid);
+      await waitDead(pids.grandchild);
     });
   }
 });
