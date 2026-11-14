@@ -13,7 +13,8 @@
 //   - /model X: prints "Switch model?" and waits; \r prints "Set model to X" and
 //     goes idle; Esc cancels. FAKE_NO_DIALOG=1 prints nothing for /model.
 //   - FAKE_BUSY_MS: how long a submitted line keeps the session busy, silently
-//   - at start it hides the cursor (\x1b[?25l) and enables bracketed paste (\x1b[?2004h)
+//   - at start it hides the cursor (\x1b[?25l) and enables bracketed paste (\x1b[?2004h);
+//     FAKE_TUI_MODES=1 also enters the alternate screen, mouse and focus reporting and a kitty push
 //   - SIGUSR2: writes {line, dialogOpen, model, status, sessionId} to FAKE_STATE_FILE
 // Other test hooks: /exit [n], /signal NAME, /clear (new session id), and the env
 // FAKE_SESSION_ID, FAKE_SESSION_DELAY_MS, FAKE_ARGV_FILE, FAKE_PIDFILE,
@@ -258,5 +259,7 @@ setTimeout(() => {
   // What a TUI does on start: hide the cursor and turn bracketed paste on. rk must
   // undo both on every exit path, whatever state the child dies in.
   out("\x1b[?25l\x1b[?2004h");
+  // FAKE_TUI_MODES=1: the rest a full-screen TUI turns on, as real Claude does (R162).
+  if (env.FAKE_TUI_MODES === "1") out("\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[>1u");
   out("fake-claude ready\r\n");
 }, Number(env.FAKE_SESSION_DELAY_MS) || 0);

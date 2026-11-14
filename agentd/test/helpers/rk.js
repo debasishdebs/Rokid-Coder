@@ -63,6 +63,8 @@ async function rkEnv(dir, extra = {}, { unpaired = false } = {}) {
       ROKID_CLAUDE_SESSIONS_DIR: sessionsDir,
       NEXUS_AGENTD_STATE_DIR: stateDir,
       NEXUS_AGENTD_HTTP_PORT: String(await freePort()),
+      // R158's wait is tested on its own; every other rk codex run starts at once.
+      ROKID_RK_CODEX_HINT_WAIT_MS: "0",
       ...extra,
     },
   };
@@ -154,4 +156,28 @@ function terminalModes(text) {
   return modes;
 }
 
-module.exports = { pairPhone, track, killLive, sttyState, terminalModes, FAKE_CLAUDE, FAKE_CODEX, RK, until, alive, waitDead, rkEnv, inPty, readJson };
+/**
+ * R162: what the modes a TUI may own are left as by the end of `text`: the
+ * alternate screen, any mouse or focus reporting, and the kitty keyboard stack.
+ */
+function tuiModes(text) {
+  const modes = { altScreen: false, mouse: [], focus: false, kittyDepth: 0 };
+  for (const match of String(text).matchAll(/\x1b\[(?:\?(\d+)([hl])|([<>])(\d*)u)/g)) {
+    if (match[3] === ">") {
+      modes.kittyDepth += 1;
+    } else if (match[3] === "<") {
+      modes.kittyDepth = Math.max(0, modes.kittyDepth - (Number(match[4]) || 1));
+    } else {
+      const mode = Number(match[1]);
+      const on = match[2] === "h";
+      if (mode === 1049) modes.altScreen = on;
+      else if (mode === 1004) modes.focus = on;
+      else if ([1000, 1002, 1003, 1006, 1015].includes(mode)) {
+        modes.mouse = on ? [...new Set([...modes.mouse, mode])].sort() : modes.mouse.filter((m) => m !== mode);
+      }
+    }
+  }
+  return modes;
+}
+
+module.exports = { pairPhone, track, killLive, sttyState, terminalModes, tuiModes, FAKE_CLAUDE, FAKE_CODEX, RK, until, alive, waitDead, rkEnv, inPty, readJson };

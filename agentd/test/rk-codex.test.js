@@ -226,3 +226,56 @@ test("sigterm_forwarded_and_terminal_restored", async () => {
     });
   }
 });
+
+test("rk_codex_hint_waits_for_key_or_3s_on_tty", async () => {
+  // A key starts Codex at once, and is not passed to it.
+  await withTempDir(async (dir) => {
+    const { env } = await rkEnv(dir, { ROKID_RK_CODEX_HINT_WAIT_MS: "3000" });
+    const run = inPty(process.execPath, [RK, "codex"], env);
+    await run.until("press any key to start it now");
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.equal(run.out.includes("fake-codex ready"), false, "the hint stays up");
+    const pressed = Date.now();
+    run.write("x");
+    await run.until("fake-codex ready");
+    assert.ok(Date.now() - pressed < 1500, "started on the key");
+    assert.deepEqual(await run.exited, { code: 0, signal: null });
+    assert.ok(plain(run.out).includes("Rokid-Coder: type rokid:on inside Codex to show a session on the glasses."), run.out);
+  });
+  // No key: Codex starts after 3 s.
+  await withTempDir(async (dir) => {
+    const { env } = await rkEnv(dir, { ROKID_RK_CODEX_HINT_WAIT_MS: "3000" });
+    const run = inPty(process.execPath, [RK, "codex"], env);
+    await run.until("press any key to start it now");
+    const shown = Date.now();
+    await until(() => run.out.includes("fake-codex ready"), 6000, "Codex after the wait");
+    assert.ok(Date.now() - shown >= 2500, "the full wait");
+    await run.exited;
+  });
+  // Not a terminal: no wait.
+  await withTempDir(async (dir) => {
+    const { env } = await rkEnv(dir, { ROKID_RK_CODEX_HINT_WAIT_MS: "3000" });
+    const started = Date.now();
+    const result = await runPiped(env);
+    assert.equal(result.code, 0);
+    assert.ok(Date.now() - started < 2500, "a pipe never waits");
+    assert.equal(result.stderr.includes("press any key"), false);
+  });
+});
+
+test("rk_codex_fatal_error_ends_codex_and_restores_terminal", async () => {
+  await withTempDir(async (dir) => {
+    const events = path.join(dir, "events");
+    const preload = path.join(dir, "throw.js");
+    fs.writeFileSync(preload, `setTimeout(() => { throw new Error("boom"); }, 2000);`);
+    const { env } = await rkEnv(dir, { FAKE_CODEX_HOLD: "1", FAKE_EVENT_FILE: events, FAKE_PIDFILE: path.join(dir, "pids.json") });
+    const run = inPty(process.execPath, ["--require", preload, RK, "codex"], env);
+    await run.until("fake-codex ready");
+    const pids = await until(() => readJson(path.join(dir, "pids.json")), 3000, "pid file");
+    assert.deepEqual(await run.exited, { code: 128 + SIG.SIGTERM, signal: null });
+    assert.ok(run.out.includes("rk: unexpected error: boom"), run.out);
+    assert.equal(fs.readFileSync(events, "utf8"), "SIGTERM\n", "Codex was told to end");
+    assert.ok(run.out.includes("\x1b[?1049l"), "the terminal is given back");
+    await waitDead(pids.pid);
+  });
+});

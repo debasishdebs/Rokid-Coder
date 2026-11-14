@@ -10,7 +10,7 @@ import { LauncherClient } from "./launcher/launcher-client";
 import { offerPairing } from "./launcher/pair-prompt";
 import { spawnPty, type PtyChild } from "./launcher/pty";
 import { launcherSocketPath, probeStatus, type StatusProbe } from "./launcher/status-probe";
-import { restoreTerminal, saveTerminal } from "./launcher/terminal";
+import { KittyKeyboardTracker, restoreTerminal, saveTerminal } from "./launcher/terminal";
 
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
 // R155: printed before the bind, so it says attaching; only the phone shows the bind itself.
@@ -34,6 +34,9 @@ const CODEX_HINT_LINES = [
   "  Next step: type {rokid:on} inside Codex to show this session on the glasses ({rokid:off} detaches, {rokid:status} checks).",
   "  rokid:on works only once the Rokid-Coder plugin (plugins/codex) is installed in Codex.",
 ];
+// R158: on a terminal the hint stays readable until a key or 3 s, and is recalled after Codex.
+const CODEX_WAIT_LINE = "  Codex starts in 3 s, or press any key to start it now.";
+const CODEX_REMINDER_LINE = "Rokid-Coder: type {rokid:on} inside Codex to show a session on the glasses.";
 const CODEX_UNREACHABLE_LINE = "  agentd isn't running, so nothing can attach yet. Start it in another terminal: {agentd run}";
 
 const SESSION_POLL_FAST_MS = 500;
@@ -51,6 +54,7 @@ function envMs(name: string, fallback: number): number {
 const EOF_WAIT_MS = (): number => envMs("ROKID_RK_EOF_WAIT_MS", 10_000);
 const KILL_AFTER_MS = (): number => envMs("ROKID_RK_KILL_AFTER_MS", 3000);
 const SESSION_POLL_GIVE_UP_MS = (): number => envMs("ROKID_RK_BIND_GIVE_UP_MS", 30_000);
+const CODEX_HINT_WAIT_MS = (): number => envMs("ROKID_RK_CODEX_HINT_WAIT_MS", 3000);
 
 /** Set once the child is running: what a crash outside the exit machinery must still do. */
 let emergencyCleanup: (() => void) | undefined;
@@ -103,6 +107,31 @@ function tryConnect(socketPath: string): Promise<net.Socket | undefined> {
 
 type Frame = Record<string, unknown>;
 
+const AGENTD_FRAMES: ReadonlySet<string> = new Set([
+  "bind_accepted",
+  "bind_rejected",
+  "binding_state",
+  "type_command",
+  "cancel_command",
+  "compact_done",
+  "prompt_submitted",
+]);
+
+/** One line from agentd as a frame of a known type, or undefined. */
+function parseFrame(line: string): Frame | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const frame = parsed as Frame;
+  return typeof frame.type === "string" && AGENTD_FRAMES.has(frame.type) ? frame : undefined;
+}
+
 /**
  * The newline-JSON connection to agentd's launcher socket. After a loss it
  * reconnects every 2 s and says hello again with the same launcherId.
@@ -122,23 +151,32 @@ class LauncherLink {
   attach(socket: net.Socket): void {
     this.socket = socket;
     this.up = true;
-    let buffer = "";
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk: string) => {
-      buffer += chunk;
-      let newline: number;
-      while ((newline = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        try {
-          const parsed: unknown = JSON.parse(line);
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            this.handlers.onFrame(parsed as Frame);
-          }
-        } catch {
-          // a malformed frame from agentd is ignored
+    let buffer: Buffer = Buffer.alloc(0);
+    // The hub's own framing: a line over 64 KiB, bad JSON or an unknown frame closes the link.
+    socket.on("data", (chunk: Buffer) => {
+      buffer = buffer.length > 0 ? Buffer.concat([buffer, chunk]) : chunk;
+      let start = 0;
+      for (;;) {
+        const newline = buffer.indexOf(0x0a, start);
+        if (newline < 0) {
+          break;
+        }
+        if (newline - start > MAX_FRAME_BYTES) {
+          socket.destroy();
+          return;
+        }
+        const frame = parseFrame(buffer.toString("utf8", start, newline));
+        start = newline + 1;
+        if (!frame) {
+          socket.destroy();
+          return;
+        }
+        this.handlers.onFrame(frame);
+        if (socket.destroyed) {
+          return;
         }
       }
+      buffer = Buffer.from(buffer.subarray(start));
       if (buffer.length > MAX_FRAME_BYTES) {
         socket.destroy();
       }
@@ -201,13 +239,18 @@ async function runClaude(args: string[]): Promise<void> {
   const probe = await tryConnect(socketPath);
 
   const saved = saveTerminal();
+  if (saved === "failed") {
+    // Raw mode that cannot be undone exactly is worse than a cooked terminal.
+    process.stderr.write("rk: could not save the terminal settings (stty -g failed); running without raw mode.\n");
+  }
+  const kitty = new KittyKeyboardTracker();
   let child: PtyChild;
   try {
     const file = resolveExecutable(bin);
     if (!file) {
       throw new Error(`${bin}: command not found`);
     }
-    if (process.stdin.isTTY) {
+    if (process.stdin.isTTY && saved !== "failed") {
       process.stdin.setRawMode(true);
     }
     child = spawnPty(file, args, {
@@ -225,7 +268,7 @@ async function runClaude(args: string[]): Promise<void> {
 
   emergencyCleanup = () => {
     child.kill("SIGKILL");
-    restoreTerminal(saved);
+    restoreTerminal(saved, kitty.depth);
   };
 
   // ---- exit handling (R53) ----
@@ -264,7 +307,7 @@ async function runClaude(args: string[]): Promise<void> {
     const status = shutdown?.code ?? exitStatus(code, signal);
     const done = (): void => {
       try {
-        restoreTerminal(saved);
+        restoreTerminal(saved, kitty.depth);
         if (keysDropped) {
           fs.writeSync(2, `${KEYS_DROPPED}\n`);
         }
@@ -402,6 +445,7 @@ async function runClaude(args: string[]): Promise<void> {
 
   // ---- wiring: data and exit are subscribed in the same tick as the spawn ----
   child.onData((chunk) => {
+    kitty.push(chunk);
     process.stdout.write(chunk);
   });
   child.onExit((code, signal) => finish(code, signal));
@@ -474,6 +518,35 @@ function claudeBanner(status: StatusProbe, color: boolean): string {
     : markCommands([UNREACHABLE, CLAUDE_LIMITS_LINE, CLAUDE_START_LINE], color);
 }
 
+/** Resolves at the first key on the terminal, or after `ms`; the key is consumed. */
+function waitForKey(ms: number): Promise<void> {
+  const stdin = process.stdin;
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout | undefined;
+    const done = (): void => {
+      clearTimeout(timer);
+      stdin.off("data", done);
+      stdin.off("end", done);
+      try {
+        stdin.setRawMode(false);
+      } catch {
+        // the terminal is already gone
+      }
+      stdin.pause();
+      resolve();
+    };
+    timer = setTimeout(done, ms);
+    try {
+      stdin.setRawMode(true);
+    } catch {
+      // still waits out the time
+    }
+    stdin.on("data", done);
+    stdin.on("end", done);
+    stdin.resume();
+  });
+}
+
 /** The block `rk codex` prints before Codex starts. */
 function codexHint(status: StatusProbe, color: boolean): string {
   return markCommands([...CODEX_HINT_LINES, ...(status.agentd === "up" ? [] : [CODEX_UNREACHABLE_LINE])], color);
@@ -496,6 +569,12 @@ async function runCodex(args: string[]): Promise<void> {
   if (status.agentd === "up" && !status.paired) {
     await offerPairing();
   }
+  const color = Boolean(process.stderr.isTTY);
+  const hintWait = CODEX_HINT_WAIT_MS();
+  if (process.stdin.isTTY && !process.stdin.readableEnded && hintWait > 0) {
+    process.stderr.write(markCommands([CODEX_WAIT_LINE], color));
+    await waitForKey(hintWait);
+  }
 
   // Codex shares rk's process group and owns the terminal while it runs, so a
   // terminal Ctrl-C or Ctrl-\ must reach Codex and not take rk down with it.
@@ -505,14 +584,35 @@ async function runCodex(args: string[]): Promise<void> {
 
   const child: ChildProcess = spawnChild(file, args, { stdio: "inherit" });
   let shutdownCode: number | undefined;
+  let fatalNote: string | undefined;
   let killTimer: NodeJS.Timeout | undefined;
+  let hardTimer: NodeJS.Timeout | undefined;
+  const leave = (status: number): never => {
+    try {
+      // Codex restores its own terminal state; this is the safety net.
+      restoreTerminal(saved);
+      fs.writeSync(2, fatalNote ?? markCommands([CODEX_REMINDER_LINE], color));
+    } finally {
+      process.exit(status);
+    }
+  };
   const forward = (signal: NodeJS.Signals): void => {
     shutdownCode ??= 128 + (signalNumber(signal) ?? 15);
     child.kill(signal);
-    killTimer ??= setTimeout(() => child.kill("SIGKILL"), KILL_AFTER_MS());
+    killTimer ??= setTimeout(() => {
+      child.kill("SIGKILL");
+      hardTimer = setTimeout(() => leave(shutdownCode ?? 128 + 9), HARD_EXIT_AFTER_KILL_MS);
+    }, KILL_AFTER_MS());
   };
   process.on("SIGTERM", () => forward("SIGTERM"));
   process.on("SIGHUP", () => forward("SIGHUP"));
+  // As for rk claude: an error of rk's own still ends Codex and gives the terminal back.
+  const onFatal = (error: unknown): void => {
+    fatalNote ??= `rk: unexpected error: ${errorMessage(error)}\n`;
+    forward("SIGTERM");
+  };
+  process.on("uncaughtException", onFatal);
+  process.on("unhandledRejection", onFatal);
 
   child.once("error", (error) => {
     if (child.pid === undefined) {
@@ -523,9 +623,8 @@ async function runCodex(args: string[]): Promise<void> {
   });
   child.once("exit", (code, signal) => {
     clearTimeout(killTimer);
-    // Codex restores its own terminal state; this is the safety net.
-    restoreTerminal(saved);
-    process.exit(shutdownCode ?? exitStatus(code, signal));
+    clearTimeout(hardTimer);
+    leave(shutdownCode ?? exitStatus(code, signal));
   });
 }
 

@@ -2,6 +2,7 @@ const test = require("node:test");
 const { afterEach } = test;
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
@@ -9,7 +10,7 @@ const { LauncherHub } = require("../dist/launcher/launcher-hub.js");
 const { AttachRegistry } = require("../dist/attach-registry.js");
 const { silentLogger } = require("../dist/logger.js");
 const { withTempDir } = require("./helpers/daemon.js");
-const { FAKE_CLAUDE, RK, until, alive, waitDead, rkEnv, inPty, readJson, sttyState, terminalModes, track, killLive, pairPhone } = require("./helpers/rk.js");
+const { FAKE_CLAUDE, RK, until, alive, waitDead, rkEnv, inPty, readJson, sttyState, terminalModes, tuiModes, track, killLive, pairPhone } = require("./helpers/rk.js");
 const { PinStore } = require("../dist/tls.js");
 
 // R155: rk prints this before the bind; once bound, only the phone says attached.
@@ -279,14 +280,14 @@ test("unreachable_agentd_prints_line_and_still_runs", async () => {
 });
 
 /** Runs `body` with rk under a shell, so `stty -g` can be compared on the same pty. */
-async function sttyScenario(dir, { rkArgs = ["claude"], preload, extra = {}, drive }) {
+async function sttyScenario(dir, { rkArgs = ["claude"], preload, extra = {}, prefix = "", drive }) {
   const { env } = await rkEnv(dir, { FAKE_PIDFILE: path.join(dir, "pids.json"), ...extra });
   const flags = preload ? `--require "${preload}"` : "";
   const script = [
     `stty -g > "${dir}/before"`,
     // The terminal as rk leaves it while running: sampled mid-run to prove rk really changed it.
     `(sleep 0.7; stty -g < /dev/tty > "${dir}/mid") &`,
-    `"${process.execPath}" ${flags} "${RK}" ${rkArgs.join(" ")}`,
+    `${prefix}"${process.execPath}" ${flags} "${RK}" ${rkArgs.join(" ")}`,
     `echo $? > "${dir}/rc"`,
     `stty -g > "${dir}/after"`,
   ].join("\n");
@@ -306,6 +307,12 @@ test("terminal_state_identical_after_exit_sigterm_sighup_and_throw", async () =>
     sigterm: { drive: (_run, pids) => process.kill(pids.ppid, "SIGTERM"), rc: 143 },
     sighup: { drive: (_run, pids) => process.kill(pids.ppid, "SIGHUP"), rc: 129 },
     throw: { throws: true, drive: () => {}, rc: 143 },
+    // The child ignores TERM and dies of rk's KILL, with every mode still on.
+    sigkill: {
+      extra: { FAKE_IGNORE_SIGNALS: "1", ROKID_RK_KILL_AFTER_MS: "300" },
+      drive: (_run, pids) => process.kill(pids.ppid, "SIGTERM"),
+      rc: 143,
+    },
   };
   for (const [name, scenario] of Object.entries(scenarios)) {
     await withTempDir(async (dir) => {
@@ -314,7 +321,7 @@ test("terminal_state_identical_after_exit_sigterm_sighup_and_throw", async () =>
         preload = path.join(dir, "throw.js");
         fs.writeFileSync(preload, `setTimeout(() => { throw new Error("boom"); }, 1500);`);
       }
-      const result = await sttyScenario(dir, { preload, drive: scenario.drive });
+      const result = await sttyScenario(dir, { preload, drive: scenario.drive, extra: { FAKE_TUI_MODES: "1", ...scenario.extra } });
       assert.notEqual(result.mid, result.before, `${name}: rk changes the terminal while it runs`);
       assert.equal(sttyState(result.after), sttyState(result.before), `${name}: stty -g is identical afterwards`);
       assert.equal(result.rc, scenario.rc, `${name}: exit status`);
@@ -330,12 +337,41 @@ test("terminal_state_identical_after_exit_sigterm_sighup_and_throw", async () =>
         { cursorHidden: false, bracketedPaste: false },
         `${name}: cursor shown and bracketed paste off after rk exits`,
       );
+      // R162: and the alternate screen, mouse, focus and the kitty push.
+      assert.deepEqual(
+        tuiModes(result.outAtMid),
+        { altScreen: true, mouse: [1000, 1002, 1006], focus: true, kittyDepth: 1 },
+        `${name}: the TUI turned them on`,
+      );
+      assert.deepEqual(
+        tuiModes(result.run.out),
+        { altScreen: false, mouse: [], focus: false, kittyDepth: 0 },
+        `${name}: all off after rk exits`,
+      );
       await waitDead(result.pids.pid);
       if (scenario.throws) {
         assert.ok(result.run.out.includes("rk: unexpected error: boom"), result.run.out);
       }
     });
   }
+});
+
+test("failed_stty_save_runs_cooked_and_warns", async () => {
+  await withTempDir(async (dir) => {
+    // A stty that fails, for rk only: the shell around it samples the real terminal.
+    const shim = path.join(dir, "shim");
+    fs.mkdirSync(shim);
+    fs.writeFileSync(path.join(shim, "stty"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const result = await sttyScenario(dir, {
+      prefix: `PATH="${shim}:$PATH" `,
+      drive: (_run, pids) => process.kill(pids.ppid, "SIGTERM"),
+    });
+    assert.ok(result.run.out.includes("rk: could not save the terminal settings (stty -g failed); running without raw mode."), result.run.out);
+    assert.equal(sttyState(result.mid), sttyState(result.before), "raw mode was never entered");
+    assert.equal(sttyState(result.after), sttyState(result.before));
+    assert.equal(result.rc, 143);
+    await waitDead(result.pids.pid);
+  });
 });
 
 test("no_child_or_grandchild_left_after_sigterm", async () => {
@@ -501,7 +537,7 @@ test("restore_terminal_resets_stty_and_escapes_and_is_idempotent", async () => {
        restoreTerminal(saved);
        const once = read();
        restoreTerminal(saved);
-       restoreTerminal(undefined);
+       restoreTerminal("none");
        require("node:fs").writeFileSync(${JSON.stringify(path.join(dir, "result.json"))},
          JSON.stringify({ saved, before, raw, once, twice: read() }));`,
     );
@@ -517,8 +553,8 @@ test("restore_terminal_resets_stty_and_escapes_and_is_idempotent", async () => {
   // Not a TTY: nothing to save, and restoring undefined writes no stty.
   const { saveTerminal, restoreTerminal } = require("../dist/launcher/terminal.js");
   if (!process.stdin.isTTY) {
-    assert.equal(saveTerminal(), undefined);
-    assert.doesNotThrow(() => restoreTerminal(undefined));
+    assert.equal(saveTerminal(), "none");
+    assert.doesNotThrow(() => restoreTerminal("none"));
   }
 });
 
@@ -702,4 +738,45 @@ test("pair_prompt_window_expiry_starts_claude", async () => {
       { unpaired: true },
     );
   });
+});
+
+// Codex #7: the launcher frames agentd's lines as the hub frames the launcher's.
+test("launcher_link_closes_on_oversize_line_bad_json_or_unknown_frame", async () => {
+  const bad = {
+    oversize: `{"type":"compact_done","cmdId":"${"x".repeat(64 * 1024)}"}\n`,
+    badJson: "{nope\n",
+    notAnObject: "[1]\n",
+    unknownType: '{"type":"surprise"}\n',
+  };
+  for (const [name, line] of Object.entries(bad)) {
+    await withTempDir(async (dir) => {
+      const { env, configDir } = await rkEnv(dir, { FAKE_PIDFILE: path.join(dir, "pids.json") });
+      fs.chmodSync(configDir, 0o700);
+      const connections = [];
+      const server = net.createServer((socket) => {
+        const connection = { socket, data: "", closed: false };
+        socket.setEncoding("utf8");
+        socket.on("data", (chunk) => (connection.data += chunk));
+        socket.on("close", () => (connection.closed = true));
+        socket.on("error", () => {});
+        connections.push(connection);
+      });
+      await new Promise((resolve) => server.listen(path.join(configDir, "launcher.sock"), resolve));
+      try {
+        const run = inPty(process.execPath, [RK, "claude"], env);
+        await run.until("fake-claude ready");
+        const first = await until(() => connections.find((c) => c.data.includes("launcher_hello")), 5000, "the hello");
+        first.socket.write('{"type":"binding_state","gen":1,"uncertain":false}\n');
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.equal(first.closed, false, `${name}: a good frame keeps the link`);
+        first.socket.write(line);
+        await until(() => first.closed, 3000, `${name}: the link to close`);
+        run.child.kill("SIGKILL");
+        await run.exited;
+      } finally {
+        for (const connection of connections) connection.socket.destroy();
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
+  }
 });

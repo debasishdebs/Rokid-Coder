@@ -135,8 +135,10 @@ Limits to know about:
 - One launcher holds a session. A second launcher for the same session is refused.
 - If agentd is not running or has its launcher socket off, `rk claude` still starts Claude, says so in
   its banner, and attaches by itself if agentd comes up later. Nothing is lost except the glasses.
-- When `rk` ends Claude by a signal it also ends the processes left in Claude's process group. When
-  Claude exits on its own, background jobs you started stay running, as with plain `claude`.
+- When `rk` itself is stopped by a signal (TERM, HUP, INT, QUIT) or hits an unexpected error, it ends
+  Claude and every process left in Claude's process group. When Claude exits on its own, including after
+  `rk`'s stdin closes (even when `rk` has to hang Claude up 10 s later), background jobs you started
+  through Claude stay running, as with plain `claude`.
 
 The banner is printed before Claude draws, so it is never mixed into the TUI. It reads "attaching…"
 because the phone confirms the bind afterwards. In Claude, `/rokid:status` shows the session's state and
@@ -166,8 +168,9 @@ Limits:
 
 - It adds no compact or model control of its own; those work after `rokid:on` attaches the thread through
   the plugin, because Codex shares its daemon.
-- Codex draws on the terminal's alternate screen. The hint is on the normal screen, so it is visible for
-  a moment before Codex starts and again after Codex exits, not while Codex runs.
+- Codex draws on the terminal's alternate screen, which covers the hint. On a terminal `rk codex` keeps
+  the hint up until you press a key or 3 s pass, and prints a one-line reminder after Codex exits. From
+  a script or pipe it starts Codex at once.
 - `-c`/`--config` and `--dangerously-bypass-hook-trust` are refused (exit 2), because they move Codex off
   the shared daemon. Run plain `codex` for those.
 - Without agentd running the hint adds a line telling you to start `agentd run`.
