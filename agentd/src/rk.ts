@@ -117,6 +117,7 @@ type Frame = Record<string, unknown>;
 const AGENTD_FRAMES: ReadonlySet<string> = new Set([
   "bind_accepted",
   "bind_rejected",
+  "bind_retry",
   "binding_state",
   "type_command",
   "cancel_command",
@@ -405,6 +406,15 @@ async function runClaude(args: string[]): Promise<void> {
             if (frame.reason === "detached") {
               boundId = undefined;
               client.onBound(undefined);
+            }
+            break;
+          case "bind_retry":
+            // /rokid:on ended the refusal: ask again now, with the uncertainty as it is now (N2).
+            refused = undefined;
+            requestedId = undefined;
+            if (!finished) {
+              clearTimeout(pollTimer);
+              pollSession();
             }
             break;
           case "binding_state":

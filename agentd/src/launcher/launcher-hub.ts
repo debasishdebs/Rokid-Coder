@@ -124,8 +124,10 @@ interface Connection {
   lastCmdId?: string;
   /** R165: the command agentd last cancelled here; the launcher's own result for it still counts. */
   cancelledCmdId?: string;
-  /** The launcher's last `launcher_bind`, so a refused one can be retried here when the refusal ends. */
-  lastBind?: { sessionId: string; uncertain: boolean };
+  /** The session of the launcher's last `launcher_bind`, so it can be asked again when a refusal ends. */
+  lastBind?: { sessionId: string };
+  /** N2: the session this launcher was asked to bind again, and who waits for its answer. */
+  asked?: { key: SessionKey; waiters: Array<(bound: boolean) => void> };
   draft: boolean;
   closed: boolean;
 }
@@ -549,8 +551,9 @@ export class LauncherHub {
         ) {
           return "bad_frame";
         }
-        connection.lastBind = { sessionId: frame.sessionId, uncertain: frame.uncertain === true };
+        connection.lastBind = { sessionId: frame.sessionId };
         this.onBind(connection, frame.sessionId, frame.uncertain === true);
+        this.answerAsked(connection);
         return undefined;
       case "command_result": {
         if (
@@ -759,7 +762,9 @@ export class LauncherHub {
 
   /**
    * `/rokid:on` ended an explicit detach: a launcher still asking for that
-   * session is bound now, with the full proof, rather than at its next retry.
+   * session is asked to bind now rather than at its next retry. N2: it binds
+   * with a fresh `launcher_bind`, since only the launcher knows whether it is
+   * still uncertain; its refused ask may be 30 s old.
    */
   private retryRefusedBinds(key: SessionKey): void {
     if (this.bindRunning || this.byKey.has(key)) {
@@ -768,9 +773,43 @@ export class LauncherHub {
     for (const connection of [...this.connections]) {
       const last = connection.lastBind;
       if (!connection.closed && !connection.binding && connection.hello && last && sessionKeyOf("claude", last.sessionId) === key) {
-        this.onBind(connection, last.sessionId, last.uncertain);
+        connection.asked ??= { key, waiters: [] };
+        this.write(connection, { type: "bind_retry" });
         return;
       }
+    }
+  }
+
+  /**
+   * M9 with N2: when a launcher was just asked to bind `key` again, resolves
+   * once it has answered, true when that bound it, or false after `ms`.
+   * Undefined when no launcher was asked.
+   */
+  rebound(key: SessionKey, ms: number): Promise<boolean> | undefined {
+    const connection = [...this.connections].find((c) => !c.closed && c.asked?.key === key);
+    const asked = connection?.asked;
+    if (!asked) {
+      return undefined;
+    }
+    return new Promise((resolve) => {
+      const done = (bound: boolean): void => {
+        clearTimeout(timer);
+        resolve(bound);
+      };
+      const timer = setTimeout(() => done(false), ms);
+      asked.waiters.push(done);
+    });
+  }
+
+  private answerAsked(connection: Connection): void {
+    const asked = connection.asked;
+    if (!asked) {
+      return;
+    }
+    connection.asked = undefined;
+    const bound = connection.binding?.key === asked.key;
+    for (const done of asked.waiters) {
+      done(bound);
     }
   }
 
@@ -853,6 +892,7 @@ export class LauncherHub {
       this.byLauncherId.delete(connection.hello.launcherId);
     }
     this.unbind(connection, { error: "exited", notify: false, demote: true });
+    this.answerAsked(connection);
   }
 
   private write(connection: Connection, frame: object): void {

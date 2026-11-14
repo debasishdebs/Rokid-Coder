@@ -116,6 +116,8 @@ export interface AttachCommandContext {
   onAttached(payload: HookPayload, sessionId: string): void;
   /** A live `rk claude` binding holds this Claude session (R135). */
   isLauncherBound?(sessionId: string): boolean;
+  /** N2: once a launcher asked to bind this session again has answered, whether it did; undefined when none was asked. */
+  launcherRebound?(sessionId: string): Promise<boolean> | undefined;
   /** agentd's phone pin store: whether a phone is paired (undefined when unreadable). */
   phones?: {
     paired(): boolean | undefined;
@@ -152,7 +154,7 @@ function statusReply(provider: AgentProvider, attached: boolean, launcher: boole
 export function handleAttachCommand(
   payload: HookPayload,
   context: AttachCommandContext,
-): HookResponse | undefined {
+): HookResponse | Promise<HookResponse> | undefined {
   const provider = hookProvider(payload);
   const action = requestedAction(payload, provider);
   if (!action) {
@@ -187,12 +189,18 @@ export function handleAttachCommand(
       if (provider === "claude") {
         context.onAttached(payload, sessionId);
       }
+      const reply = (launcher: boolean): HookResponse => {
+        const text = provider === "codex" ? CODEX_ATTACH_TEXT : launcher ? LAUNCHER_ATTACH_TEXT : ATTACH_TEXT;
+        const unpaired = context.phones?.paired() === false;
+        return block(unpaired ? `${text}\nNo phone paired yet — type ${pairCommand(provider)}` : text);
+      };
       // M9: in a session `/rokid:off` had detached from its launcher, the opt-in
-      // rebinds the launcher at once, so the reply is the launcher's.
-      const launcher = bound || (provider === "claude" && context.isLauncherBound?.(sessionId) === true);
-      const text = provider === "codex" ? CODEX_ATTACH_TEXT : launcher ? LAUNCHER_ATTACH_TEXT : ATTACH_TEXT;
-      const unpaired = context.phones?.paired() === false;
-      return block(unpaired ? `${text}\nNo phone paired yet — type ${pairCommand(provider)}` : text);
+      // has the launcher bind again at once, so the reply is the launcher's.
+      const rebinding = provider === "claude" && !bound ? context.launcherRebound?.(sessionId) : undefined;
+      if (rebinding) {
+        return rebinding.then(reply);
+      }
+      return reply(bound || (provider === "claude" && context.isLauncherBound?.(sessionId) === true));
     }
     case "detach":
       registry.detach(provider, sessionId);

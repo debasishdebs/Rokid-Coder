@@ -81,6 +81,8 @@ export interface DaemonOptions {
 const APPLIED_ID_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_QUEUED_RESET_NOTICES = 64;
 const PAIRING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+/** How long `/rokid:on` waits for a launcher it asked to bind again before it answers. */
+const REBIND_REPLY_WAIT_MS = 1000;
 
 function envMs(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
@@ -329,6 +331,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
         }
       },
       isLauncherBound: (id) => launchers.binding(sessionKeyOf("claude", id)) !== undefined,
+      launcherRebound: (id) => launchers.rebound(sessionKeyOf("claude", id), REBIND_REPLY_WAIT_MS),
       phones: {
         paired: () => {
           try {

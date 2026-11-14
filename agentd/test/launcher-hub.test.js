@@ -576,6 +576,34 @@ test("off_while_no_launcher_connected_blocks_rebind_after_restart", async (t) =>
   });
 });
 
+// N2: the hub never binds on a launcher's old word; it asks for a fresh one.
+test("rokid_on_asks_the_launcher_again_rather_than_replaying_its_last_uncertainty", async (t) => {
+  await withHub(async ({ hub, registry, sessionsDir }) => {
+    const child = sleeper(t);
+    sessionFile(sessionsDir, child.pid, "s1");
+    const client = await launcher(hub, { launcherId: "L1", childPid: child.pid });
+    assert.equal((await bind(client, "s1")).type, "bind_accepted");
+    registry.detach("claude", "s1");
+    await client.waitFor("bind_rejected", (f) => f.reason === "detached");
+    // Refused while it was uncertain.
+    const before = client.frames.length;
+    client.send({ type: "launcher_bind", sessionId: "s1", uncertain: true });
+    await until(() => client.frames.slice(before).find((f) => f.type === "bind_rejected"), 3000, "the refusal");
+
+    // /rokid:on: the launcher is asked, and nothing is bound until it answers.
+    const asked = client.frames.length;
+    registry.attach("claude", "s1", "plugin");
+    await client.waitFor("bind_retry");
+    await settle();
+    assert.equal(hub.binding(KEY("s1")), undefined, "no bind on the stale uncertain: true");
+    assert.deepEqual(client.frames.slice(asked), [{ type: "bind_retry" }]);
+    // It has since seen Claude idle, so its fresh ask is certain.
+    client.send({ type: "launcher_bind", sessionId: "s1", uncertain: false });
+    await client.waitFor("bind_accepted", (f) => f.gen === 2);
+    assert.equal(hub.binding(KEY("s1")).uncertain, false);
+  });
+});
+
 test("startup_rewrites_launcher_mode_to_plugin", async (t) => {
   const deadPid = spawnSync("true").pid;
   // A live Claude still runs "offlive"; nothing runs "offgone".

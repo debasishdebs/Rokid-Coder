@@ -787,13 +787,17 @@ test("rebind_does_not_reset_an_existing_session_record", async () => {
 
 // M9 and M5: /rokid:on in an rk claude session /rokid:off detached rebinds it
 // there and then, so the reply is the launcher's and no retry is waited for.
+// N2: the launcher is asked, and binds with its uncertainty as it is now.
 test("rokid_on_after_off_rebinds_at_once_with_the_launcher_text", async () => {
   await withBound(async ({ daemon, httpPort, launcher }) => {
     await postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "rokid:off", session_id: ID });
     await launcher.waitFor("bind_rejected", (f) => f.reason === "detached");
     assert.equal(daemon.launchers.binding(KEY), undefined);
     const accepted = launcher.of("bind_accepted").length;
-    const reply = await postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "rokid:on", session_id: ID });
+    const pending = postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "rokid:on", session_id: ID });
+    await launcher.waitFor("bind_retry");
+    launcher.send({ type: "launcher_bind", sessionId: ID, uncertain: false });
+    const reply = await pending;
     assert.deepEqual(reply, { decision: "block", reason: LAUNCHER_ATTACH_TEXT });
     assert.ok(daemon.launchers.binding(KEY), "bound before the reply");
     assert.equal(daemon.attachRegistry.mode("claude", ID), "launcher");
