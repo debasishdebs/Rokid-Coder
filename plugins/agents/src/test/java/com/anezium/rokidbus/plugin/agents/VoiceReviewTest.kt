@@ -250,4 +250,31 @@ class VoiceReviewTest {
         wiring.onQuestionInput(flow, key(KeyEvent.KEYCODE_ENTER))
         assertNull(screen.questionFlow)
     }
+
+    @Test
+    fun read_all_offered_when_body_rows_exceed_viewport_even_below_old_threshold() {
+        // 100 words, about 600 characters: under the old 960-character budget, and no condensing at 250 words.
+        val said = words(100)
+        assertTrue(said.length < 720)
+        val run = heard(said)
+        val view = VoiceCard.view(VoiceKind.FOLLOWUP, run.capture.state)
+        assertNull(view.lead)
+
+        // Wrapped as the HUD draws BODY rows, at most three lines each, it needs more rows than the card shows at once.
+        val needed = VoiceCard.bodyRows(said)
+        assertTrue(needed.size > VoiceCard.BODY_ROWS)
+        assertTrue(view.rows.any { it.act == VoiceAct.READ_ALL })
+        assertEquals(said, view.readAll)
+
+        // What the card draws stays within its rows, each one within three HUD lines; the reader has the rest.
+        val body = bodyText(run)
+        assertTrue(body.size <= VoiceCard.BODY_ROWS)
+        assertTrue(body.all { VoiceCard.bodyRows(it).size == 1 })
+        assertTrue(body.last().endsWith("…"))
+
+        // A reply the card shows whole has no reader to open.
+        val short = VoiceCard.view(VoiceKind.FOLLOWUP, VoiceCapture.State.Heard(words(10)))
+        assertNull(short.readAll)
+        assertTrue(short.rows.none { it.act == VoiceAct.READ_ALL })
+    }
 }

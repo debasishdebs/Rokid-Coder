@@ -209,19 +209,64 @@ data class VoiceView(
  * and that card opens on `Cancel`.
  */
 object VoiceCard {
-    /** The heard card draws its reply in at most this many BODY rows of [ROW_CHARS] each, its lead row included. */
-    const val BODY_ROWS = 4
+    /**
+     * The BODY rows, its lead row included, the heard card is sure to show at once over its selected
+     * row. The HUD windows a card's rows around the selection, by height, so more may fit; a reply
+     * needing more rows than this offers `Read all`.
+     */
+    const val BODY_ROWS = 3
     const val ROW_CHARS = 240
 
-    /** [body] as the card's rows, each within the SDK's line cap; together they are all of it. */
-    fun bodyRows(body: String): List<String> = body.chunked(ROW_CHARS)
+    /** The HUD wraps a BODY row to at most this many lines and ellipsizes the rest (SurfaceHudView). */
+    const val BODY_MAX_LINES = 3
+
+    /** The columns a HUD line is sure to hold (PLUGIN_SDK.md: twenty-six monospace columns); a wider line only shows more. */
+    const val LINE_COLUMNS = 26
+
+    private val WHITESPACE = Regex("\\s+")
+
+    /**
+     * [body] as the card's rows, each one wrapped as the HUD wraps it into at most [BODY_MAX_LINES]
+     * lines of [LINE_COLUMNS], so no row is ellipsized; together they are all of it.
+     */
+    fun bodyRows(body: String): List<String> {
+        val rows = mutableListOf<String>()
+        val row = StringBuilder()
+        var lines = 0
+        var column = 0
+        for (word in body.trim().split(WHITESPACE).filter(String::isNotEmpty)) {
+            var nextLines = lines
+            var nextColumn: Int
+            if (row.isNotEmpty() && column + 1 + word.length <= LINE_COLUMNS) {
+                nextColumn = column + 1 + word.length
+            } else {
+                if (row.isNotEmpty()) nextLines++
+                // A word wider than a line is broken across lines, as the HUD breaks it.
+                nextLines += (word.length - 1) / LINE_COLUMNS
+                nextColumn = word.length - (word.length - 1) / LINE_COLUMNS * LINE_COLUMNS
+            }
+            if (row.isNotEmpty() && nextLines >= BODY_MAX_LINES) {
+                rows += row.toString()
+                row.clear()
+                nextLines = (word.length - 1) / LINE_COLUMNS
+                nextColumn = word.length - nextLines * LINE_COLUMNS
+            }
+            if (row.isNotEmpty()) row.append(' ')
+            row.append(word)
+            lines = nextLines
+            column = nextColumn
+        }
+        if (row.isNotEmpty()) rows += row.toString()
+        return rows.flatMap { it.chunked(ROW_CHARS) }
+    }
 
     /** A heard reply as the card draws it: [lead] if it was condensed, [body] to fit the rows, [readAll] if [body] is not all of it. */
     data class Review(val lead: String?, val body: String, val readAll: String?)
 
     /**
      * What the card shows of [text] (U4/U13): the condensed display of it, under a lead row saying so. A display
-     * that the card's rows cannot hold is cut to a preview, and the whole display is offered to the reader.
+     * needing more [bodyRows] than the card is sure to show at once is cut to a preview that fits them, and the
+     * whole display is offered to the reader.
      */
     fun review(text: String, wordLimit: Int): Review {
         val shown = VoiceCondense.condense(text, wordLimit)
@@ -230,11 +275,22 @@ object VoiceCard {
         } else {
             null
         }
-        val room = (BODY_ROWS - if (lead != null) 1 else 0) * ROW_CHARS
-        if (shown.display.length <= room) return Review(lead, shown.display, readAll = null)
-        val cut = shown.display.take(room - 1)
-        val preview = cut.substringBeforeLast(' ', cut).trimEnd() + "…"
-        return Review(lead, preview, readAll = shown.display)
+        val room = BODY_ROWS - (lead?.let { bodyRows(it).size } ?: 0)
+        if (bodyRows(shown.display).size <= room) return Review(lead, shown.display, readAll = null)
+        return Review(lead, preview(shown.display, room), readAll = shown.display)
+    }
+
+    /** The most words of [display] that, with a closing `…`, still fit in [rows] rows. */
+    private fun preview(display: String, rows: Int): String {
+        val words = display.split(' ')
+        fun cut(count: Int) = words.take(count).joinToString(" ") + "…"
+        var fits = 0
+        var over = words.size
+        while (over - fits > 1) {
+            val mid = (fits + over) / 2
+            if (bodyRows(cut(mid)).size <= rows) fits = mid else over = mid
+        }
+        return cut(fits)
     }
 
     /**
