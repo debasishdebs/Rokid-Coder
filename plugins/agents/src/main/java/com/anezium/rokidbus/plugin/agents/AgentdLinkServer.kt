@@ -237,19 +237,7 @@ class AgentdLinkServer internal constructor(
                         bound = true
                         touchMachineSeen(decision.hello.machineId)
                         onSecureConnected(decision.hello.machineId, decision.hello.machineName)
-                        store.setLinkMachine(
-                            LinkMachine(
-                                machineId = decision.hello.machineId,
-                                machineName = decision.hello.machineName,
-                                overTailnet = isTailnetAddress(connection.remoteAddress),
-                            ),
-                        )
-                        store.setConnection(
-                            AgentProvider.CLAUDE,
-                            ConnectionState.CONNECTED,
-                            decision.hello.machineName,
-                        )
-                        true
+                        announce(connection, decision.hello)
                     }
                     is AgentdInboundDecision.AuthRejected -> {
                         connection.send(AgentdProtocolCodec.helloReject(decision.reason))
@@ -337,6 +325,24 @@ class AgentdLinkServer internal constructor(
     private fun bind(connection: LinkConnection): Boolean = synchronized(clientLock) {
         if (client !== connection || !steers(connection)) return@synchronized false
         link.up(connection.linkOwner, secure = true) != null
+    }
+
+    /**
+     * Publishes the bound link while [connection] is still the client, checked and written under
+     * [clientLock]: a [stop] that ended it after [bind] has cleared the client first and publishes
+     * its own state after, so that state is never repainted CONNECTED.
+     */
+    private fun announce(connection: LinkConnection, hello: AgentdAction.Hello): Boolean = synchronized(clientLock) {
+        if (client !== connection) return@synchronized false
+        store.setLinkMachine(
+            LinkMachine(
+                machineId = hello.machineId,
+                machineName = hello.machineName,
+                overTailnet = isTailnetAddress(connection.remoteAddress),
+            ),
+        )
+        store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTED, hello.machineName)
+        true
     }
 
     private fun isActive(connection: LinkConnection): Boolean =

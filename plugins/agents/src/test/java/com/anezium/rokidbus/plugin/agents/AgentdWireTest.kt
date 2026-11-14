@@ -437,6 +437,7 @@ class AgentdWireTest {
         val linkEnds: AtomicInteger = AtomicInteger(),
         besideDialled: Boolean = false,
         onLinkEnded: () -> Unit = {},
+        onSecureConnected: (String, String) -> Unit = { _, _ -> },
     ) {
         val events = CopyOnWriteArrayList<AgentdEvent>()
         val server = AgentdLinkServer(
@@ -447,6 +448,7 @@ class AgentdWireTest {
             scope = scope,
             onMachineTrusted = {},
             tlsIdentity = FixturePhoneTlsIdentity(),
+            onSecureConnected = onSecureConnected,
             onLinkEnded = {
                 onLinkEnded()
                 linkEnds.incrementAndGet()
@@ -459,11 +461,16 @@ class AgentdWireTest {
         val fromPhone = BufferedReader(InputStreamReader(dialer.getInputStream(), Charsets.UTF_8))
         private val toPhone: OutputStream = dialer.getOutputStream()
 
-        fun handshake(pipelined: String? = null) {
+        /** Hello sent and hello_ack read; the link may not be bound yet. */
+        fun hello(pipelined: String? = null) {
             val hello = """{"type":"hello","v":1,"machineId":"pc-1","machineName":"Desk","token":"secret"}"""
             toPhone.write((listOfNotNull(hello, pipelined).joinToString("\n") + "\n").toByteArray(Charsets.UTF_8))
             toPhone.flush()
             assertEquals("hello_ack", JSONObject(fromPhone.readLine()).getString("type"))
+        }
+
+        fun handshake(pipelined: String? = null) {
+            hello(pipelined)
             awaitCondition { events.isNotEmpty() }
         }
 
@@ -479,10 +486,11 @@ class AgentdWireTest {
         linkEnds: AtomicInteger = AtomicInteger(),
         besideDialled: Boolean = false,
         onLinkEnded: () -> Unit = {},
+        onSecureConnected: (String, String) -> Unit = { _, _ -> },
         block: (LanLink) -> Unit,
     ) {
         tlsServerSocket(FixturePhoneTlsIdentity(), 0).use { listener ->
-            val lan = LanLink(listener, store, linkEnds, besideDialled, onLinkEnded)
+            val lan = LanLink(listener, store, linkEnds, besideDialled, onLinkEnded, onSecureConnected)
             try {
                 block(lan)
             } finally {
@@ -670,6 +678,38 @@ class AgentdWireTest {
 
             assertEquals(ConnectionState.DISCONNECTED, store.connections.value.getValue(AgentProvider.CLAUDE).state)
             assertFalse(lan.server.linkSecure.value)
+        }
+    }
+
+    @Test
+    fun stop_right_after_bind_is_never_followed_by_the_bound_state() {
+        val store = AgentSessionStore()
+        val bound = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        // The serving thread is held after its bind, before it announces the link.
+        val gate: (String, String) -> Unit = { _, _ ->
+            bound.countDown()
+            release.await(5, TimeUnit.SECONDS)
+        }
+        lanLink(store, onSecureConnected = gate) { lan ->
+            lan.hello()
+            assertTrue(bound.await(5, TimeUnit.SECONDS))
+            // agentd hangs up on the phone's close_notify, which the stop's TLS close waits for.
+            val agentd = thread {
+                runCatching { while (lan.fromPhone.readLine() != null) Unit }
+                lan.dialer.close()
+            }
+
+            lan.server.stop(clearSessions = false)
+            agentd.join(5_000)
+            release.countDown()
+            lan.hangUp()
+
+            assertEquals(
+                ProviderConnectionState(ConnectionState.DISCONNECTED),
+                store.connections.value.getValue(AgentProvider.CLAUDE),
+            )
+            assertNull(store.linkMachine.value)
         }
     }
 
