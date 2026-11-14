@@ -11,8 +11,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.UUID
@@ -53,14 +56,26 @@ class AgentsMonitorService : Service() {
     private var temporaryAgentd: Job? = null
     private var temporaryOpenClaw: Job? = null
 
-    // Hook point (Task 4): the AlertCoordinator lives here, in this service, so no
-    // alert depends on the plugin service being alive. It collects
-    // AgentsRuntime.events and writes through writeToAgentd.
+    // The one AlertCoordinator lives here, behind the director, so no alert depends
+    // on the plugin service being alive. The glasses side and the notice callbacks
+    // run on the main thread, so the director's work does too, one piece at a time.
+    private val alertScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val alertWork = Channel<() -> Unit>(Channel.UNLIMITED)
+    private val alertDirector by lazy {
+        AlertDirector(
+            coordinator = AlertCoordinator(System::currentTimeMillis),
+            write = { line -> writeToAgentd(line) },
+            secure = { AgentsRuntime.link.value?.secure == true },
+            glasses = { AgentsRuntime.alertGlasses },
+            post = { work -> alertWork.trySend(work) },
+        )
+    }
 
     override fun onCreate() {
         super.onCreate()
         notifications.createChannels()
         startForeground(MONITOR_NOTIFICATION_ID, notifications.monitorNotification())
+        startAlerts()
         serviceScope.launch {
             combine(agentdClient.linkSecure, linkServer.linkSecure) { dialled, listened ->
                 dialled || listened
@@ -156,6 +171,19 @@ class AgentsMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun startAlerts() {
+        AgentsRuntime.alertDirector = alertDirector
+        alertScope.launch { for (work in alertWork) work() }
+        // Launched on Main.immediate, so each collector is subscribed before this returns.
+        alertScope.launch { AgentsRuntime.events.collect(alertDirector::onEvent) }
+        alertScope.launch {
+            AgentsRuntime.store.sessions
+                .map { sessions -> sessions.mapTo(HashSet()) { it.key } as Set<String> }
+                .distinctUntilChanged()
+                .collect(alertDirector::onBoard)
+        }
+    }
+
     /**
      * A prebuilt frame line to whichever transport holds the link. The wire of
      * each one classifies it; a steering frame over plaintext is MonitorOnly.
@@ -179,6 +207,9 @@ class AgentsMonitorService : Service() {
         releasePluginService()
         httpClient.dispatcher.executorService.shutdown()
         serviceScope.cancel()
+        AgentsRuntime.alertDirector = null
+        alertScope.cancel()
+        alertWork.close()
         AgentsRuntime.setLinkSecure(false)
         super.onDestroy()
     }

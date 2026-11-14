@@ -296,6 +296,17 @@ object AgentsRuntime {
     @Volatile
     var hudOpen: Boolean = false
 
+    /**
+     * The two halves of the alert path meet here. The monitor service owns the
+     * [AlertDirector] (R72) and the plugin service owns the bus client, so each
+     * registers itself for the other while it is alive.
+     */
+    @Volatile
+    internal var alertDirector: AlertDirector? = null
+
+    @Volatile
+    internal var alertGlasses: AlertGlasses? = null
+
     private val _linkedMachines = MutableSharedFlow<String>(
         replay = 1,
         extraBufferCapacity = 4,

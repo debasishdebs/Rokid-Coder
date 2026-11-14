@@ -5,6 +5,9 @@ import android.view.KeyEvent
 import com.anezium.rokidbus.client.plugin.NexusCard
 import com.anezium.rokidbus.client.plugin.NexusCardLine
 import com.anezium.rokidbus.client.plugin.NexusNotice
+import com.anezium.rokidbus.client.plugin.NexusNoticeCloseReason
+import com.anezium.rokidbus.client.plugin.NexusNoticeUpdate
+import com.anezium.rokidbus.client.plugin.NexusPluginClient
 import com.anezium.rokidbus.client.plugin.NexusPluginService
 import com.anezium.rokidbus.client.plugin.NexusReader
 import com.anezium.rokidbus.client.plugin.NexusReaderSegment
@@ -27,7 +30,7 @@ import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.util.UUID
 
-class AgentsPluginService : NexusPluginService() {
+class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val configStore by lazy { AgentsConfigStore(applicationContext) }
     private val attention by lazy {
@@ -51,6 +54,18 @@ class AgentsPluginService : NexusPluginService() {
 
     private var ageTicker: Job? = null
 
+    /**
+     * True while the band this plugin last put up is a v2 alert's. The notice
+     * callbacks carry no identity, so a band of any other kind (the v1 status
+     * band, a brief) clears it, and the callbacks then mean what they always did.
+     */
+    private var v2BandUp = false
+
+    /** The alert whose decision card is open, bound by id so a late confirm cannot answer another. */
+    private var decidingAlert: AgentdAction.Alert? = null
+
+    /** The Done or error alert whose summary heads the open conversation. */
+    private var outputAlert: AgentdAction.Alert? = null
 
     /** The held tool call the wearer is answering, if they are answering one. */
     private var decidingRequestId: String? = null
@@ -109,6 +124,7 @@ class AgentsPluginService : NexusPluginService() {
 
     override fun onCreate() {
         super.onCreate()
+        AgentsRuntime.alertGlasses = this
         serviceScope.launch {
             combine(
                 AgentsRuntime.store.sessions,
@@ -162,7 +178,8 @@ class AgentsPluginService : NexusPluginService() {
             AgentsRuntime.linkedMachines.collect { machineName ->
                 val client = nexusClient ?: return@collect
                 if (!client.supportsNoticeSurface) return@collect
-                client.showNotice(
+                showOtherNotice(
+                    client,
                     NexusNotice(
                         title = "Computer linked",
                         body = "$machineName · its sessions appear here".singleLine(
@@ -200,6 +217,7 @@ class AgentsPluginService : NexusPluginService() {
         awaitingReplyForKey = null
         surfaceShown = false
         AgentsRuntime.hudOpen = false
+        decidingAlert = null
         leaveConversation()
         launch = null
         launchNote = null
@@ -209,7 +227,7 @@ class AgentsPluginService : NexusPluginService() {
 
     override fun onNexusInput(event: NexusInputEvent) {
         if (event.action != KeyEvent.ACTION_DOWN) return
-        if (decidingRequestId != null) {
+        if (decidingRequestId != null || decidingAlert != null) {
             onDecisionInput(event)
             return
         }
@@ -252,6 +270,7 @@ class AgentsPluginService : NexusPluginService() {
             -> confirmDecision()
             event.keyCode == KeyEvent.KEYCODE_BACK -> {
                 decidingRequestId = null
+                decidingAlert = null
                 render(show = false)
             }
         }
@@ -265,11 +284,29 @@ class AgentsPluginService : NexusPluginService() {
         ) {
             return
         }
+        if (v2BandUp) {
+            AgentsRuntime.alertDirector?.onBandInput()
+            return
+        }
         noticeTargetKey?.let { selectedKey = it }
         if (!surfaceShown) attemptAdoption()
     }
 
+    override fun onNexusNoticeAction(id: String) {
+        if (v2BandUp) AgentsRuntime.alertDirector?.onBandAction(id)
+    }
+
+    override fun onNexusNoticeClosed(reason: NexusNoticeCloseReason) {
+        if (!v2BandUp) return
+        AgentsRuntime.alertDirector?.onBandClosed(reason)
+        // A close of a band this plugin replaced says nothing about the band now up.
+        if (reason != NexusNoticeCloseReason.OWNER && reason != NexusNoticeCloseReason.REPLACED) {
+            v2BandUp = false
+        }
+    }
+
     override fun onDestroy() {
+        if (AgentsRuntime.alertGlasses === this) AgentsRuntime.alertGlasses = null
         serviceScope.cancel()
         surfaceShown = false
         AgentsRuntime.hudOpen = false
@@ -290,31 +327,34 @@ class AgentsPluginService : NexusPluginService() {
     private fun raiseAttention() {
         val client = nexusClient ?: return
         if (!client.supportsNoticeSurface) return
+        // On a secure link agentd's own alerts speak for its providers (R40); the
+        // status path stays for OpenClaw, and for a link that cannot steer.
+        val steering = AgentsRuntime.link.value?.secure == true
         val pending = attention.pending(AgentsRuntime.store.sessions.value)
+            .filter { !steering || it.session.provider !in AgentProvider.AGENTD_PROVIDERS }
         if (pending.isEmpty()) return
         val notice = if (pending.size == 1) singleNotice(pending.single()) else groupNotice(pending)
-        if (client.showNotice(notice) != NexusSdkResult.SENT) return
+        if (showOtherNotice(client, notice) != NexusSdkResult.SENT) return
         noticeTargetKey = pending.first().session.key
         pending.forEach(attention::commit)
     }
 
     private fun singleNotice(item: AgentAttention): NexusNotice {
         val session = item.session
-        return NexusNotice(
-            title = session.displayTitle.singleLine(NOTICE_TITLE_CHARS),
-            body = when (session.status) {
-                AgentStatus.ERROR ->
-                    (session.statusDetail ?: "stopped with an error").singleLine(NOTICE_BODY_CHARS)
-                else -> pendingSummary(session).singleLine(NOTICE_BODY_CHARS)
-            },
-            footer = "TAP open",
-            interactive = true,
-            ttlMs = if (session.status == AgentStatus.NEEDS_YOU) {
-                ATTENTION_TTL_MS
-            } else {
-                SHORT_TTL_MS
-            },
+        // Only a secure link steers, and this path runs for agentd's providers
+        // only when the link is not secure: the wearer decides on the laptop.
+        return AlertNotices.statusNotice(
+            session,
+            summary = pendingSummary(session),
+            monitorOnly = session.provider in AgentProvider.AGENTD_PROVIDERS,
         )
+    }
+
+    /** Every band that is not a v2 alert's goes through here, so the callbacks know whose band is up. */
+    private fun showOtherNotice(client: NexusPluginClient, notice: NexusNotice): NexusSdkResult {
+        val result = client.showNotice(notice)
+        if (result == NexusSdkResult.SENT) v2BandUp = false
+        return result
     }
 
     private fun groupNotice(items: List<AgentAttention>): NexusNotice {
@@ -331,6 +371,76 @@ class AgentsPluginService : NexusPluginService() {
             interactive = true,
             ttlMs = ATTENTION_TTL_MS,
         )
+    }
+
+    // ------------------------------------------------------- alert glasses
+
+    override fun showBand(notice: NexusNotice): Boolean {
+        val client = nexusClient ?: return false
+        if (!client.supportsNoticeSurface) return false
+        val taken = client.showNotice(notice) == NexusSdkResult.SENT
+        if (taken) v2BandUp = true
+        return taken
+    }
+
+    override fun updateBand(update: NexusNoticeUpdate): Boolean {
+        val client = nexusClient ?: return false
+        // A brief or status band took the slot since: the update would rewrite that one.
+        return v2BandUp && client.updateNotice(update) == NexusSdkResult.SENT
+    }
+
+    override fun hideBand() {
+        if (!v2BandUp) return
+        v2BandUp = false
+        nexusClient?.hideNotice()
+    }
+
+    override fun brief(title: String, body: String) = showBriefNotice(title, body)
+
+    override fun openOutput(alert: AgentdAction.Alert) {
+        val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
+        if (session == null) {
+            showBriefNotice(AlertCoordinator.NO_LONGER_WAITING, "that session is gone")
+            return
+        }
+        outputAlert = alert
+        showConversation(session)
+    }
+
+    override fun openDecision(alert: AgentdAction.Alert) {
+        decidingAlert = alert
+        decisionChoice = ApprovalDecision.ALLOW
+        decisionOpenedAt = System.currentTimeMillis()
+        showBoard()
+    }
+
+    /** Until the question card exists (Task 7), Answer opens the session's conversation. */
+    override fun openQuestion(alert: AgentdAction.Alert) {
+        val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
+        if (session == null) {
+            showBriefNotice(AlertCoordinator.NO_LONGER_WAITING, AlertCoordinator.NO_LONGER_WAITING_BODY)
+            return
+        }
+        showConversation(session)
+    }
+
+    override fun invalidate(alertId: String) {
+        if (decidingAlert?.id != alertId) return
+        decidingAlert = null
+        showBriefNotice(AlertCoordinator.NO_LONGER_WAITING, AlertCoordinator.NO_LONGER_WAITING_BODY)
+        if (surfaceShown) render(show = false)
+    }
+
+    private fun showConversation(session: AgentSession) {
+        selectedKey = session.key
+        AgentsRuntime.store.openConversation(session)
+        AgentsMonitorService.openDetail(applicationContext, session)
+        showBoard()
+    }
+
+    /** Draws the board's current state, adopting the HUD first when it is idle. */
+    private fun showBoard() {
+        if (surfaceShown) render(show = false) else attemptAdoption()
     }
 
     // -------------------------------------------------------------- selection
@@ -388,6 +498,17 @@ class AgentsPluginService : NexusPluginService() {
      * an agent asked for gets approved by a gesture aimed at opening it.
      */
     private fun confirmDecision() {
+        decidingAlert?.let { alert ->
+            if (System.currentTimeMillis() - decisionOpenedAt < DECISION_GUARD_MS) return
+            decidingAlert = null
+            render(show = false)
+            // The coordinator only lets a card that is still bound answer.
+            AgentsRuntime.alertDirector?.onCardConfirm(
+                alert.id,
+                if (decisionChoice == ApprovalDecision.ALLOW) AlertCoordinator.ALLOW else AlertCoordinator.DENY,
+            )
+            return
+        }
         val requestId = decidingRequestId ?: return
         if (System.currentTimeMillis() - decisionOpenedAt < DECISION_GUARD_MS) return
         if (AgentsRuntime.store.approvals.value.none { it.requestId == requestId }) return
@@ -397,6 +518,7 @@ class AgentsPluginService : NexusPluginService() {
     }
 
     private fun leaveConversation() {
+        outputAlert = null
         if (AgentsRuntime.store.conversation.value == null) return
         AgentsRuntime.store.closeConversation()
         AgentsMonitorService.closeDetail(applicationContext)
@@ -503,13 +625,7 @@ class AgentsPluginService : NexusPluginService() {
     private fun showBriefNotice(title: String, body: String) {
         val client = nexusClient ?: return
         if (!client.supportsNoticeSurface) return
-        client.showNotice(
-            NexusNotice(
-                title = title.singleLine(NOTICE_TITLE_CHARS),
-                body = body.singleLine(NOTICE_BODY_CHARS),
-                ttlMs = SHORT_TTL_MS,
-            ),
-        )
+        showOtherNotice(client, AlertNotices.brief(title, body))
     }
 
     private fun attemptAdoption() {
@@ -529,13 +645,18 @@ class AgentsPluginService : NexusPluginService() {
 
     /** An open conversation with something to read is the one reader screen. */
     private fun activeReader(): NexusReader? {
-        if (decidingRequestId != null || replyTargetKey != null) return null
+        if (decidingRequestId != null || decidingAlert != null || replyTargetKey != null) return null
         val conversation = AgentsRuntime.store.conversation.value ?: return null
+        // A Done or error tap reads summary first, and shows what it has while the rest loads.
+        outputAlert?.takeIf { it.sessionKey == conversation.sessionKey }?.let { alert ->
+            return outputReader(alert, conversation)
+        }
         if (conversation.loading || conversation.messages.isEmpty()) return null
         return conversationReader(conversation)
     }
 
     private fun buildCard(): NexusCard {
+        decidingAlert?.let { return alertDecisionCard(it) }
         decidingRequestId?.let { return decisionCard(it) }
         replyTargetKey?.let { key ->
             val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == key }
@@ -587,6 +708,38 @@ class AgentsPluginService : NexusPluginService() {
             rows = rows,
             footer = "swipe choose · tap confirm · 2-tap later",
         )
+    }
+
+    /** The card behind a band's More: the same two answers, bound to the alert it was opened for. */
+    private fun alertDecisionCard(alert: AgentdAction.Alert): NexusCard {
+        val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
+        val rows = buildList {
+            add(
+                NexusCardLine(
+                    text = alert.body.ifBlank { alert.title }.singleLine(238),
+                    badge = AlertNotices.providerLabel(alert).take(6),
+                    tone = NexusRowTone.BODY,
+                ),
+            )
+            add(choiceRow("Allow", "let it run", ApprovalDecision.ALLOW))
+            add(choiceRow("Deny", "tell the agent no", ApprovalDecision.DENY))
+        }
+        return card(
+            title = session?.displayTitle?.singleLine(110) ?: alert.title.singleLine(110).ifEmpty { "Permission" },
+            subtitle = listOfNotNull(
+                session?.project?.takeIf(String::isNotBlank),
+                "waiting for you",
+            ).joinToString(" · ").take(120),
+            rows = rows,
+            footer = "swipe choose · tap confirm · 2-tap later",
+        )
+    }
+
+    private fun outputReader(alert: AgentdAction.Alert, conversation: AgentConversation): NexusReader {
+        val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
+        val working = session?.status == AgentStatus.WORKING
+        val segments = if (conversation.loading) emptyList() else readerSegments(conversation, working)
+        return AlertNotices.outputReader(alert, session, segments)
     }
 
     private fun choiceRow(label: String, sub: String, choice: ApprovalDecision): NexusCardLine {
