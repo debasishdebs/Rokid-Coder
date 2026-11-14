@@ -89,7 +89,7 @@ const SHORT_WINDOWS = {
  */
 async function withBound(body, { attached = [], sessionStart = true } = {}) {
   await withEnv(SHORT_WINDOWS, () =>
-    withDaemon({ transport: "wshub", tls: true, attached }, async (ctx) => {
+    withDaemon({ transport: "wshub", tls: true, attached, paired: true }, async (ctx) => {
       const sessionsDir = path.join(ctx.claudeDir, "sessions");
       await fsp.mkdir(sessionsDir, { recursive: true });
       const child = spawn("sleep", ["60"], { stdio: "ignore" });
@@ -599,7 +599,8 @@ test("rokid_on_keeps_a_bound_session_in_launcher_mode", async () => {
     assert.equal(daemon.attachRegistry.mode("claude", ID), "launcher");
     assert.equal(daemon.phoneV2.decorate(daemon.sessions.get(ID)).mode, "launcher");
     const status = await postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "rokid:status", session_id: ID });
-    assert.deepEqual(status, { decision: "block", reason: LAUNCHER_STATUS_TEXT });
+    assert.equal(status.decision, "block");
+    assert.ok(status.reason.startsWith(`${LAUNCHER_STATUS_TEXT}\nMode: LAUNCHER · Phone: paired`), status.reason);
   });
 });
 
@@ -626,7 +627,7 @@ test("session_end_while_waiting_rejects_cancelled", async () => {
 
 test("rk_claude_compact_and_model_from_the_glasses_end_to_end", async () => {
   await withEnv(SHORT_WINDOWS, () =>
-    withDaemon({ transport: "wshub", tls: true }, async ({ daemon, phone, httpPort, claudeDir, coderDir }) => {
+    withDaemon({ transport: "wshub", tls: true, paired: true }, async ({ daemon, phone, httpPort, claudeDir, coderDir }) => {
       const dir = path.dirname(coderDir);
       const sessionsDir = path.join(claudeDir, "sessions");
       await fsp.mkdir(sessionsDir, { recursive: true });

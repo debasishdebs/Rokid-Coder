@@ -303,6 +303,18 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
         }
       },
       isLauncherBound: (id) => launchers.binding(sessionKeyOf("claude", id)) !== undefined,
+      phones: {
+        paired: () => {
+          try {
+            return !pins.isEmpty();
+          } catch {
+            return undefined;
+          }
+        },
+        openPairingWindow: () => {
+          pins.armAllowNext(Date.now());
+        },
+      },
     });
     if (attachReply) {
       return attachReply;

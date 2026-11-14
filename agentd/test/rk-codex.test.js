@@ -9,7 +9,7 @@ const http = require("node:http");
 const { execFile } = require("node:child_process");
 const { PinStore } = require("../dist/tls.js");
 const { withTempDir } = require("./helpers/daemon.js");
-const { RK, until, waitDead, rkEnv, inPty, killLive, readJson, sttyState } = require("./helpers/rk.js");
+const { RK, until, waitDead, rkEnv, inPty, killLive, readJson, sttyState, pairPhone } = require("./helpers/rk.js");
 
 afterEach(killLive);
 
@@ -27,10 +27,7 @@ async function fakeAgentd(env) {
   return { close: () => new Promise((resolve) => server.close(resolve)) };
 }
 
-/** Records one trusted phone in the pin file rk reads. */
-function pairPhone(configDir) {
-  new PinStore(path.join(configDir, "tls", "phone-pins.json")).add("AB".repeat(32));
-}
+const PAIR_LATER = 'Pair later: run "agentd pair" or type /rokid:pair in Claude (rokid:pair in Codex).';
 
 /** rk codex with stderr on a pipe, so the hint is seen the way a script or log would see it. */
 function runPiped(env) {
@@ -90,14 +87,51 @@ test("rk_codex_hint_mentions_agentd_run_when_unreachable", async () => {
 
 test("rk_codex_hint_mentions_pair_when_unpaired", async () => {
   await withTempDir(async (dir) => {
-    const { env } = await rkEnv(dir); // no pin file under the config dir
+    const { env } = await rkEnv(dir, {}, { unpaired: true }); // no pin file under the config dir
     const agentd = await fakeAgentd(env);
     try {
       const result = await runPiped(env);
       assert.equal(result.code, 0, "Codex still starts");
-      assert.ok(/No phone is paired[^\n]*agentd pair/.test(result.stderr), result.stderr);
+      assert.ok(result.stderr.includes(PAIR_LATER), result.stderr);
+      assert.equal(result.stderr.includes("Pair now?"), false, "a pipe is never asked");
       assert.equal(result.stderr.includes("agentd run"), false);
       assert.ok(result.stderr.trimEnd().split("\n").length <= 6, result.stderr);
+    } finally {
+      await agentd.close();
+    }
+  });
+});
+
+test("rk_codex_hint_mentions_plugin_install", async () => {
+  await withTempDir(async (dir) => {
+    const { env } = await rkEnv(dir);
+    const agentd = await fakeAgentd(env);
+    try {
+      const result = await runPiped(env);
+      assert.ok(/rokid:on works only once the Rokid-Coder plugin[^\n]*installed in Codex/.test(result.stderr), result.stderr);
+      assert.ok(result.stderr.trimEnd().split("\n").length <= 6, result.stderr);
+    } finally {
+      await agentd.close();
+    }
+  });
+});
+
+test("rk_codex_pair_prompt_opens_window_then_starts_codex", async () => {
+  await withTempDir(async (dir) => {
+    const { env, configDir } = await rkEnv(dir, {}, { unpaired: true });
+    const agentd = await fakeAgentd(env);
+    try {
+      const run = inPty(process.execPath, [RK, "codex"], env);
+      await run.until("No phone paired yet. Pair now? [Y/n]");
+      run.write("y\r");
+      await run.until("Open Agents on your phone → Add a computer (2:00 left)");
+      const pins = new PinStore(path.join(configDir, "tls", "phone-pins.json"));
+      assert.equal(pins.allowNextOpen(Date.now()), true);
+      assert.equal(run.out.includes("fake-codex ready"), false, "Codex waits for the pairing");
+      pairPhone(configDir);
+      await run.until("Paired ✓", 3000);
+      assert.deepEqual(await run.exited, { code: 0, signal: null });
+      assert.ok(run.out.indexOf("Paired ✓") < run.out.indexOf("fake-codex ready"), run.out);
     } finally {
       await agentd.close();
     }

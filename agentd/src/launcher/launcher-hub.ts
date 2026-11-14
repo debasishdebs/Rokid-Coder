@@ -6,8 +6,9 @@ import type { AttachChange, AttachRegistry } from "../attach-registry";
 import { sessionKeyOf, type SessionKey } from "../protocol-v2";
 import type { AgentProvider, Logger } from "../types";
 import { findOwnedClaudeSession, isPidAlive } from "./claude-sessions";
+import { LAUNCHER_SOCKET_NAME } from "./status-probe";
 
-export const LAUNCHER_SOCKET_NAME = "launcher.sock";
+export { LAUNCHER_SOCKET_NAME };
 export const HELLO_DEADLINE_MS = 5000;
 /** Per line, excluding the newline. */
 export const MAX_FRAME_BYTES = 64 * 1024;

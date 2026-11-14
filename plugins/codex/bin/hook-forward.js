@@ -25,6 +25,26 @@ const HTTP_PORT = (() => {
     const parsed = Number(process.env.NEXUS_AGENTD_HTTP_PORT);
     return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 65_535 ? parsed : 8791;
 })();
+// With agentd down nothing intercepts the plugin's commands. These two still get
+// a plain answer rather than reaching the model as a prompt.
+const OFFLINE_REPLIES = {
+    "rokid:pair": 'agentd isn\'t running — run "agentd run" in a terminal',
+    "rokid:status": 'Not attached to Rokid-Coder: agentd isn\'t running.\nNext step: run "agentd run" in a terminal.',
+};
+function offlineReply(body) {
+    try {
+        const hook = JSON.parse(body.toString("utf8"));
+        const command = PROVIDER === "codex"
+            ? hook.hook_event_name === "UserPromptSubmit" && typeof hook.prompt === "string" ? hook.prompt.trim() : undefined
+            : hook.hook_event_name === "UserPromptExpansion" ? hook.command_name : undefined;
+        return typeof command === "string" && Object.hasOwn(OFFLINE_REPLIES, command)
+            ? JSON.stringify({ decision: "block", reason: OFFLINE_REPLIES[command] })
+            : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
 const chunks = [];
 let finished = false;
 function finish(output) {
@@ -82,7 +102,7 @@ process.stdin.on("end", () => {
                 }
             });
         });
-        outgoing.once("error", () => finish());
+        outgoing.once("error", (error) => finish(error.code === "ECONNREFUSED" ? offlineReply(body) : undefined));
         outgoing.end(body);
     }
     catch {

@@ -9,11 +9,17 @@ const { LauncherHub } = require("../dist/launcher/launcher-hub.js");
 const { AttachRegistry } = require("../dist/attach-registry.js");
 const { silentLogger } = require("../dist/logger.js");
 const { withTempDir } = require("./helpers/daemon.js");
-const { FAKE_CLAUDE, RK, until, alive, waitDead, rkEnv, inPty, readJson, sttyState, terminalModes, track, killLive } = require("./helpers/rk.js");
+const { FAKE_CLAUDE, RK, until, alive, waitDead, rkEnv, inPty, readJson, sttyState, terminalModes, track, killLive, pairPhone } = require("./helpers/rk.js");
+const { PinStore } = require("../dist/tls.js");
 
 const BANNER =
   "Rokid-Coder launcher: attached. From the glasses you can reply at any time, compact, and change model (changing model also sets your default for new sessions).";
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
+const GLASSES_STEP = "On your glasses: open Agents to see this session.";
+const PAIR_QUESTION = "No phone paired yet. Pair now? [Y/n]";
+const PHONE_STEP = "Open Agents on your phone → Add a computer";
+const PAIR_LATER = 'Pair later: run "agentd pair" or type /rokid:pair in Claude (rokid:pair in Codex).';
+const plain = (text) => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 const SIG = os.constants.signals;
 
 afterEach(killLive);
@@ -80,8 +86,8 @@ test("rk_codex_refuses_dash_c", async () => {
 });
 
 /** A real hub over `dir`, for the tests that need agentd's side of the socket. */
-async function withHub(dir, body, { logger = silentLogger, autostart = true, extraEnv = {} } = {}) {
-  const { env, sessionsDir, configDir } = await rkEnv(dir, extraEnv);
+async function withHub(dir, body, { logger = silentLogger, autostart = true, extraEnv = {}, unpaired = false } = {}) {
+  const { env, sessionsDir, configDir } = await rkEnv(dir, extraEnv, { unpaired });
   const file = path.join(configDir, "attached.json");
   const make = () => {
     const registry = new AttachRegistry({ file, logger: silentLogger });
@@ -95,6 +101,7 @@ async function withHub(dir, body, { logger = silentLogger, autostart = true, ext
     await body({
       env,
       sessionsDir,
+      configDir,
       get hub() {
         return current.hub;
       },
@@ -245,7 +252,8 @@ test("late_agentd_start_still_binds", async () => {
           await new Promise((resolve) => setTimeout(resolve, 1800));
           await ctx.startHub();
           await until(() => ctx.hub.binding("claude:sess-late"), 8000, "the bind after agentd came up");
-          await run.until(BANNER);
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          assert.equal(run.out.includes(BANNER), false, "a late bind writes nothing into the running TUI");
         } finally {
           run.child.kill("SIGKILL");
         }
@@ -509,4 +517,164 @@ test("restore_terminal_resets_stty_and_escapes_and_is_idempotent", async () => {
     assert.equal(saveTerminal(), undefined);
     assert.doesNotThrow(() => restoreTerminal(undefined));
   }
+});
+
+test("rk_claude_banner_printed_before_spawn_not_into_tui", async () => {
+  await withTempDir(async (dir) => {
+    await withHub(dir, async (ctx) => {
+      const { run } = await startRkOn(ctx.env, dir, { FAKE_SESSION_ID: "sess-early" });
+      await until(() => ctx.hub.binding("claude:sess-early"), 5000, "the bind");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const out = plain(run.out);
+      assert.ok(out.indexOf(BANNER) >= 0 && out.indexOf(BANNER) < out.indexOf("fake-claude ready"), out);
+      assert.equal(out.split(BANNER).length - 1, 1, "the bind adds no second copy into the TUI");
+      const lines = out.slice(0, out.indexOf("fake-claude ready")).split(/\r?\n/).filter(Boolean);
+      assert.ok(lines.length >= 3 && lines.length <= 6, JSON.stringify(lines));
+      run.write("/exit 0\r");
+      await run.exited;
+    });
+  });
+});
+
+test("rk_claude_banner_next_step_by_state", async () => {
+  // agentd down: start it.
+  await withTempDir(async (dir) => {
+    const { run } = await startRk(dir);
+    const out = plain(run.out);
+    assert.ok(/Next step:[^\n]*agentd run/.test(out), out);
+    assert.ok(out.includes("changing model also sets your default"), "the mode limits are in the banner");
+    assert.equal(out.includes(GLASSES_STEP), false);
+    run.write("/exit 0\r");
+    await run.exited;
+  });
+  // Paired and reachable: look at the glasses. Commands are bold on a terminal.
+  await withTempDir(async (dir) => {
+    await withHub(dir, async (ctx) => {
+      const { run } = await startRkOn(ctx.env, dir, {});
+      assert.ok(run.out.includes(GLASSES_STEP), run.out);
+      assert.ok(run.out.includes("\x1b[1m/rokid:status\x1b[22m"), JSON.stringify(run.out));
+      assert.equal(run.out.includes("agentd run"), false);
+      assert.equal(run.out.includes(PAIR_QUESTION), false, "a paired phone is never asked about");
+      run.write("/exit 0\r");
+      await run.exited;
+    });
+  });
+  // Unpaired and reachable: the next step is pairing.
+  await withTempDir(async (dir) => {
+    await withHub(
+      dir,
+      async (ctx) => {
+        const run = rkOnPipes({ ...ctx.env, FAKE_PIDFILE: path.join(dir, "pids.json") });
+        await run.until("fake-claude ready");
+        assert.ok(run.out.includes(PAIR_LATER), run.out);
+        assert.equal(run.out.includes(GLASSES_STEP), false);
+        assert.equal(/\x1b\[1m/.test(run.out.slice(0, run.out.indexOf("fake-claude ready"))), false, "plain text on a pipe");
+        run.child.kill("SIGTERM");
+        await run.exited;
+      },
+      { unpaired: true },
+    );
+  });
+});
+
+/** rk claude on a terminal with no phone paired, stopped at the pairing question. */
+async function atPairQuestion(ctx, dir) {
+  const run = inPty(process.execPath, [RK, "claude"], { ...ctx.env, FAKE_PIDFILE: path.join(dir, "pids.json") });
+  await run.until(PAIR_QUESTION);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(run.out.includes("fake-claude ready"), false, "Claude waits for the answer");
+  return run;
+}
+
+const pins = (ctx) => new PinStore(path.join(ctx.configDir, "tls", "phone-pins.json"));
+
+test("pair_prompt_yes_opens_window_and_waits_until_pinned", async () => {
+  await withTempDir(async (dir) => {
+    await withHub(
+      dir,
+      async (ctx) => {
+        const run = await atPairQuestion(ctx, dir);
+        run.write("y\r");
+        await run.until(`${PHONE_STEP} (2:00 left)`);
+        assert.equal(pins(ctx).allowNextOpen(Date.now()), true, "agentd's allow-next window is open");
+        // The countdown is redrawn in place while it waits.
+        await run.until(`\r\x1b[2K${PHONE_STEP} (1:59 left)`, 3000);
+        assert.equal(run.out.includes("fake-claude ready"), false, "still waiting for the phone");
+        pairPhone(ctx.configDir);
+        await run.until("Paired ✓", 3000);
+        await run.until("fake-claude ready");
+        assert.ok(run.out.indexOf("Paired ✓") < run.out.indexOf("fake-claude ready"));
+        assert.equal(run.out.includes(PAIR_LATER), false);
+        run.write("/exit 0\r");
+        assert.deepEqual(await run.exited, { code: 0, signal: null });
+      },
+      { unpaired: true },
+    );
+  });
+});
+
+test("pair_prompt_enter_skips", async () => {
+  await withTempDir(async (dir) => {
+    await withHub(
+      dir,
+      async (ctx) => {
+        const run = await atPairQuestion(ctx, dir);
+        run.write("\r"); // the default is yes
+        await run.until(PHONE_STEP);
+        run.write("\r"); // Enter while waiting skips
+        await run.until("fake-claude ready");
+        assert.ok(run.out.indexOf(PAIR_LATER) < run.out.indexOf("fake-claude ready"), run.out);
+        assert.equal(run.out.includes("Paired ✓"), false);
+        // Typing reaches Claude as before.
+        run.write("hi\r");
+        await run.until("reply: hi");
+        run.write("/exit 0\r");
+        await run.exited;
+      },
+      { unpaired: true },
+    );
+  });
+});
+
+test("pair_prompt_no_prints_pair_later_line", async () => {
+  await withTempDir(async (dir) => {
+    await withHub(
+      dir,
+      async (ctx) => {
+        const run = await atPairQuestion(ctx, dir);
+        run.write("n\r");
+        await run.until("fake-claude ready");
+        assert.ok(run.out.indexOf(PAIR_LATER) < run.out.indexOf("fake-claude ready"), run.out);
+        assert.equal(run.out.includes(PHONE_STEP), false);
+        assert.equal(pins(ctx).allowNextOpen(Date.now()), false, "no window was opened");
+        run.write("/exit 0\r");
+        await run.exited;
+        // Every start asks again until a phone is paired.
+        const again = await atPairQuestion(ctx, dir);
+        again.write("n\r");
+        await again.until("fake-claude ready");
+        again.write("/exit 0\r");
+        await again.exited;
+      },
+      { unpaired: true },
+    );
+  });
+});
+
+test("non_tty_never_prompts", async () => {
+  await withTempDir(async (dir) => {
+    await withHub(
+      dir,
+      async (ctx) => {
+        const run = rkOnPipes({ ...ctx.env, FAKE_PIDFILE: path.join(dir, "pids.json") });
+        await run.until("fake-claude ready");
+        assert.equal(run.out.includes(PAIR_QUESTION), false, run.out);
+        assert.equal(run.out.split(PAIR_LATER).length - 1, 1, run.out);
+        assert.equal(fs.existsSync(path.join(ctx.configDir, "tls", "phone-pins.json")), false, "nothing was armed");
+        run.child.kill("SIGTERM");
+        await run.exited;
+      },
+      { unpaired: true },
+    );
+  });
 });

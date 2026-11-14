@@ -72,7 +72,7 @@ for (const transport of ["phonelink", "wshub"]) {
     await withDaemon({ transport }, async ({ daemon, httpPort }) => {
       const before = await postHook(httpPort, prompt("t2", "rokid:status"), CODEX);
       assert.equal(before.decision, "block");
-      assert.match(before.reason, /Not attached.*rokid:on/);
+      assert.match(before.reason, /Not attached.*rokid:on/s);
       assert.equal(daemon.attachRegistry.isAttached("codex", "t2"), false);
 
       await postHook(httpPort, prompt("t2", "rokid:on"), CODEX);

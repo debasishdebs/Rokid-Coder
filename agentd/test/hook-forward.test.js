@@ -167,3 +167,24 @@ function bashPayload() {
     tool_input: { command: "npm test" },
   };
 }
+
+test("rokid_pair_and_status_with_agentd_down_say_start_it", async () => {
+  // A port nothing listens on: agentd is down.
+  const server = http.createServer();
+  const port = await listen(server);
+  await close(server);
+  const expansion = (name) => ({ hook_event_name: "UserPromptExpansion", command_name: `rokid:${name}`, session_id: "s" });
+  const codex = (prompt) => ({ hook_event_name: "UserPromptSubmit", prompt, session_id: "t" });
+  const claudeEnv = { env: { ROKID_CODER_PROVIDER: "claude" } };
+  const codexEnv = { env: { ROKID_CODER_PROVIDER: "codex" } };
+  const pair = await runForwarder(port, expansion("pair"), "500", claudeEnv);
+  assert.deepEqual(JSON.parse(pair.stdout), { decision: "block", reason: 'agentd isn\'t running — run "agentd run" in a terminal' });
+  const codexPair = await runForwarder(port, codex(" rokid:pair\n"), "500", codexEnv);
+  assert.deepEqual(JSON.parse(codexPair.stdout), JSON.parse(pair.stdout));
+  const status = JSON.parse((await runForwarder(port, expansion("status"), "500", claudeEnv)).stdout);
+  assert.match(status.reason, /agentd isn't running[\s\S]*agentd run/);
+  // Anything else stays silent, as before.
+  assert.equal((await runForwarder(port, expansion("on"), "500", claudeEnv)).stdout, "");
+  assert.equal((await runForwarder(port, codex("please rokid:pair"), "500", codexEnv)).stdout, "");
+  assert.equal((await runForwarder(port, expansion("pair"), "500", codexEnv)).stdout, "", "a Codex hook is read as Codex");
+});

@@ -2,33 +2,35 @@
 import { spawn as spawnChild, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { LAUNCHER_ATTACH_TEXT } from "./attach-command";
-import { defaultStateDir } from "./config";
 import { claudeSessionsDir, findOwnedClaudeSession } from "./launcher/claude-sessions";
 import { LauncherClient } from "./launcher/launcher-client";
-import { LAUNCHER_SOCKET_NAME } from "./launcher/launcher-hub";
+import { offerPairing } from "./launcher/pair-prompt";
 import { spawnPty, type PtyChild } from "./launcher/pty";
+import { launcherSocketPath, probeStatus, type StatusProbe } from "./launcher/status-probe";
 import { restoreTerminal, saveTerminal } from "./launcher/terminal";
-import { PinStore } from "./tls";
 
-const CLAUDE_BANNER = LAUNCHER_ATTACH_TEXT;
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
+const SOCKET_OFF = "Rokid-Coder: agentd is running but its launcher socket is off — this session is not attached.";
+// U5: everything the banner needs is said before the TUI takes the screen.
+const CLAUDE_COMMANDS_LINE = "  In Claude, {/rokid:status} shows this session's state and {/rokid:off} stops sending it to the glasses.";
+const CLAUDE_LIMITS_LINE =
+  "  Launcher mode: once attached, the glasses can reply at any time, compact, and change model (changing model also sets your default for new sessions).";
+const CLAUDE_GLASSES_LINE = "  On your glasses: open Agents to see this session.";
+const CLAUDE_START_LINE = "  Next step: start it in another terminal with {agentd run}; this session attaches by itself once it is up.";
+const CLAUDE_SOCKET_LINE = '  Next step: look for "launcher socket disabled" in agentd\'s log, fix it, then restart {agentd run}.';
 const CODEX_REFUSAL =
   "rk codex: -c and --dangerously-bypass-hook-trust move Codex off the shared daemon; run plain codex for those.";
 // R133: rk codex cannot bind a thread it owns, so it runs plain codex and points at the plugin attach (U5).
 const CODEX_HINT_LINES = [
   "Rokid-Coder: starting Codex, ready to attach.",
-  "  Next step: type {rokid:on} inside Codex to show this session on the glasses.",
-  "  {rokid:off} detaches it again; {rokid:status} shows whether it is attached.",
+  "  Next step: type {rokid:on} inside Codex to show this session on the glasses ({rokid:off} detaches, {rokid:status} checks).",
+  "  rokid:on works only once the Rokid-Coder plugin (plugins/codex) is installed in Codex.",
 ];
 const CODEX_UNREACHABLE_LINE = "  agentd isn't running, so nothing can attach yet. Start it in another terminal: {agentd run}";
-const CODEX_UNPAIRED_LINE = "  No phone is paired yet. Pair one with: {agentd pair}";
-const DEFAULT_HTTP_PORT = 8791;
-const HEALTH_PROBE_MS = 700;
 
 const SESSION_POLL_FAST_MS = 500;
 const SESSION_POLL_SLOW_MS = 2000;
@@ -78,25 +80,6 @@ function resolveExecutable(bin: string): string | undefined {
     }
   }
   return undefined;
-}
-
-/** The directory holding launcher.sock: the test override, agentd's configured state dir, or ~/.rokid-coder. */
-function launcherConfigDir(): string {
-  if (process.env.ROKID_RK_CONFIG_DIR) {
-    return process.env.ROKID_RK_CONFIG_DIR;
-  }
-  try {
-    const config = JSON.parse(fs.readFileSync(path.join(defaultStateDir(), "config.json"), "utf8")) as {
-      rokidCoder?: { stateDir?: unknown };
-    };
-    const configured = config.rokidCoder?.stateDir;
-    if (typeof configured === "string" && configured.length > 0) {
-      return configured === "~" || configured.startsWith("~/") ? path.join(os.homedir(), configured.slice(1)) : configured;
-    }
-  } catch {
-    // no readable config: the default applies. rk never creates agentd's files.
-  }
-  return path.join(os.homedir(), ".rokid-coder");
 }
 
 function tryConnect(socketPath: string): Promise<net.Socket | undefined> {
@@ -202,13 +185,16 @@ class LauncherLink {
 
 async function runClaude(args: string[]): Promise<void> {
   const bin = process.env.ROKID_RK_CLAUDE_BIN || "claude";
-  const socketPath = path.join(launcherConfigDir(), LAUNCHER_SOCKET_NAME);
+  const socketPath = launcherSocketPath();
 
-  // Probe before the TUI starts, so the unattached notice cannot land in the middle of it.
-  const probe = await tryConnect(socketPath);
-  if (!probe) {
-    process.stderr.write(`${UNREACHABLE}\n`);
+  // Everything is said before the TUI starts, so nothing lands in the middle of it.
+  const status = await probeStatus();
+  const color = Boolean(process.stderr.isTTY);
+  process.stderr.write(claudeBanner(status, color));
+  if ((status.launcherSocket || status.agentd === "up") && !status.paired) {
+    await offerPairing();
   }
+  const probe = await tryConnect(socketPath);
 
   const saved = saveTerminal();
   let child: PtyChild;
@@ -313,7 +299,6 @@ async function runClaude(args: string[]): Promise<void> {
   const binding = { gen: 0, uncertain: false };
   let boundId: string | undefined;
   let requestedId: string | undefined;
-  let announced = false;
   const client = new LauncherClient({ child, send: (frame) => link.send(frame), binding, sessionsDir });
 
   const link: LauncherLink = new LauncherLink(
@@ -339,10 +324,6 @@ async function runClaude(args: string[]): Promise<void> {
             boundId = requestedId ?? boundId;
             client.onBound(boundId);
             binding.gen = typeof frame.gen === "number" ? frame.gen : binding.gen;
-            if (!announced) {
-              announced = true;
-              process.stdout.write(`\r\n${CLAUDE_BANNER}\r\n`);
-            }
             break;
           case "bind_rejected":
             requestedId = undefined;
@@ -410,7 +391,7 @@ async function runClaude(args: string[]): Promise<void> {
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (data: string) => client.onStdin(data));
   process.stdin.on("error", () => {});
-  process.stdin.on("end", () => {
+  const onStdinEnd = (): void => {
     if (shutdown || eofStarted) {
       return;
     }
@@ -420,8 +401,13 @@ async function runClaude(args: string[]): Promise<void> {
       child.kill("SIGHUP");
       armKill();
     }, EOF_WAIT_MS());
-  });
+  };
+  process.stdin.on("end", onStdinEnd);
   process.stdin.resume();
+  // A Ctrl-D at the pairing prompt already ended stdin; it never ends twice.
+  if (process.stdin.readableEnded) {
+    onStdinEnd();
+  }
 
   process.stdout.on("resize", () => child.resize(process.stdout.columns || 80, process.stdout.rows || 24));
 
@@ -450,60 +436,29 @@ function refusesCodexArgs(args: string[]): boolean {
   );
 }
 
-/** agentd's hook port: the same override the hooks use, then its config.json, then the default. */
-function agentdHttpPort(): number {
-  const fromEnv = Number(process.env.NEXUS_AGENTD_HTTP_PORT);
-  if (Number.isSafeInteger(fromEnv) && fromEnv > 0 && fromEnv <= 65_535) {
-    return fromEnv;
-  }
-  try {
-    const config = JSON.parse(fs.readFileSync(path.join(defaultStateDir(), "config.json"), "utf8")) as {
-      httpPort?: unknown;
-    };
-    if (typeof config.httpPort === "number" && Number.isSafeInteger(config.httpPort) && config.httpPort > 0) {
-      return config.httpPort;
-    }
-  } catch {
-    // no readable config: the default port applies
-  }
-  return DEFAULT_HTTP_PORT;
-}
-
-function agentdReachable(): Promise<boolean> {
-  return new Promise((resolve) => {
-    const request = http.get({ host: "127.0.0.1", port: agentdHttpPort(), path: "/health", timeout: HEALTH_PROBE_MS }, (response) => {
-      response.resume();
-      resolve(response.statusCode === 200);
-    });
-    request.once("timeout", () => {
-      request.destroy();
-      resolve(false);
-    });
-    request.once("error", () => resolve(false));
-  });
-}
-
-/** False only when the pin file can be read and holds no phone (or is absent): never guesses on an unreadable one. */
-function noPhonePaired(): boolean {
-  try {
-    return new PinStore(path.join(launcherConfigDir(), "tls", "phone-pins.json")).isEmpty();
-  } catch {
-    return false;
-  }
-}
-
-/** The block `rk codex` prints before Codex starts. Bold only on a terminal. */
-function codexHint(reachable: boolean, unpaired: boolean, color: boolean): string {
-  const lines = [...CODEX_HINT_LINES];
-  if (!reachable) {
-    lines.push(CODEX_UNREACHABLE_LINE);
-  }
-  if (unpaired) {
-    lines.push(CODEX_UNPAIRED_LINE);
-  }
+/** `{word}` is a command: bold on a terminal, plain on a pipe. */
+function markCommands(lines: string[], color: boolean): string {
   const mark = (text: string): string =>
     text.replace(/\{([^}]+)\}/g, (_, word: string) => (color ? `\x1b[1m${word}\x1b[22m` : word));
   return `${lines.map(mark).join("\n")}\n`;
+}
+
+/** What `rk claude` prints before Claude starts; an unpaired phone's next step is the pairing prompt after it. */
+function claudeBanner(status: StatusProbe, color: boolean): string {
+  if (status.launcherSocket) {
+    return markCommands(
+      [LAUNCHER_ATTACH_TEXT, CLAUDE_COMMANDS_LINE, ...(status.paired ? [CLAUDE_GLASSES_LINE] : [])],
+      color,
+    );
+  }
+  return status.agentd === "up"
+    ? markCommands([SOCKET_OFF, CLAUDE_LIMITS_LINE, CLAUDE_SOCKET_LINE], color)
+    : markCommands([UNREACHABLE, CLAUDE_LIMITS_LINE, CLAUDE_START_LINE], color);
+}
+
+/** The block `rk codex` prints before Codex starts. */
+function codexHint(status: StatusProbe, color: boolean): string {
+  return markCommands([...CODEX_HINT_LINES, ...(status.agentd === "up" ? [] : [CODEX_UNREACHABLE_LINE])], color);
 }
 
 async function runCodex(args: string[]): Promise<void> {
@@ -518,7 +473,11 @@ async function runCodex(args: string[]): Promise<void> {
     process.exit(127);
   }
   const saved = saveTerminal();
-  process.stderr.write(codexHint(await agentdReachable(), noPhonePaired(), Boolean(process.stderr.isTTY)));
+  const status = await probeStatus();
+  process.stderr.write(codexHint(status, Boolean(process.stderr.isTTY)));
+  if (status.agentd === "up" && !status.paired) {
+    await offerPairing();
+  }
 
   // Codex shares rk's process group and owns the terminal while it runs, so a
   // terminal Ctrl-C or Ctrl-\ must reach Codex and not take rk down with it.

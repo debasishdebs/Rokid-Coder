@@ -2,7 +2,7 @@ import type { HookResponse } from "./approval-manager";
 import type { AttachRegistry } from "./attach-registry";
 import type { AgentProvider, HookPayload, Logger } from "./types";
 
-export type AttachAction = "attach" | "detach" | "status";
+export type AttachAction = "attach" | "detach" | "status" | "pair";
 
 const COMMAND = /^\s*\/rokid(?:\s+(off|status))?\s*$/;
 
@@ -22,11 +22,11 @@ export function parseAttachCommand(prompt: unknown): { action: AttachAction } | 
   return { action: match[1] === "off" ? "detach" : match[1] === "status" ? "status" : "attach" };
 }
 
-const CODEX_PHRASE = /^\s*rokid:(on|off|status)\s*$/;
+const CODEX_PHRASE = /^\s*rokid:(on|off|status|pair)\s*$/;
 
 /**
  * Recognises the opt-in phrase in a Codex prompt: `rokid:on`, `rokid:off`,
- * `rokid:status`, on the same terms as parseAttachCommand. The Codex TUI
+ * `rokid:status`, `rokid:pair`, on the same terms as parseAttachCommand. The Codex TUI
  * rejects an unknown slash command ("Unrecognized command '/rokid:on'")
  * before any hook runs, so the phrase is plain text rather than a command.
  */
@@ -38,7 +38,8 @@ export function parseCodexAttachPhrase(prompt: unknown): { action: AttachAction 
   if (!match) {
     return undefined;
   }
-  return { action: match[1] === "off" ? "detach" : match[1] === "status" ? "status" : "attach" };
+  const word = match[1];
+  return { action: word === "off" ? "detach" : word === "status" ? "status" : word === "pair" ? "pair" : "attach" };
 }
 
 export const ATTACH_TEXT =
@@ -51,8 +52,16 @@ export const LAUNCHER_ATTACH_TEXT =
 const DETACH_TEXT = "Detached from Rokid-Coder. This session no longer sends anything to the phone.";
 const STATUS_ATTACHED_TEXT = "Attached to Rokid-Coder (plugin mode).";
 export const LAUNCHER_STATUS_TEXT = "Attached to Rokid-Coder (launcher mode, through rk claude).";
-const STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder. Type /rokid:on to attach.";
-const CODEX_STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder. Type rokid:on to attach.";
+const STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder.";
+/**
+ * U6: in a session, pairing only opens the allow-next window. The pairing line
+ * and its secrets never go into a reply: a reply is model context and lands in
+ * the transcript.
+ */
+export const PAIR_TEXT =
+  "Pairing window open: Open Agents on your phone → Add a computer within 2 minutes.";
+const PAIR_FAILED_TEXT =
+  'Rokid-Coder could not open the pairing window. Run "agentd phones allow-next" in a terminal instead.';
 const NO_SESSION_TEXT = "Rokid-Coder could not tell which session this is, so nothing was changed.";
 const ATTACH_FAILED_TEXT = "Rokid-Coder could not save the attach list, so this session was not attached.";
 
@@ -65,6 +74,7 @@ const PLUGIN_COMMANDS: Record<string, AttachAction> = {
   "rokid:on": "attach",
   "rokid:off": "detach",
   "rokid:status": "status",
+  "rokid:pair": "pair",
 };
 
 /**
@@ -105,6 +115,27 @@ export interface AttachCommandContext {
   onAttached(payload: HookPayload, sessionId: string): void;
   /** A live `rk claude` binding holds this Claude session (R135). */
   isLauncherBound?(sessionId: string): boolean;
+  /** agentd's phone pin store: whether a phone is paired (undefined when unreadable), and the allow-next window. */
+  phones?: {
+    paired(): boolean | undefined;
+    openPairingWindow(): void;
+  };
+}
+
+/** How the pair command is typed in this agent. */
+function pairCommand(provider: AgentProvider): string {
+  return provider === "codex" ? "rokid:pair" : "/rokid:pair";
+}
+
+function statusReply(provider: AgentProvider, attached: boolean, launcher: boolean, paired: boolean | undefined): string {
+  const head = attached ? (launcher ? LAUNCHER_STATUS_TEXT : STATUS_ATTACHED_TEXT) : STATUS_DETACHED_TEXT;
+  const phone = paired === undefined ? "unknown (agentd cannot read its pin file)" : paired ? "paired" : "not paired";
+  const attach = `type ${provider === "codex" ? "rokid:on" : "/rokid:on"} to attach`;
+  const pair = `type ${pairCommand(provider)} to pair your phone`;
+  const next = !attached
+    ? paired === false ? `${attach}, and ${pair}.` : `${attach}.`
+    : paired === false ? `${pair}.` : "on your glasses, open Agents to see this session.";
+  return `${head}\nMode: ${launcher ? "LAUNCHER" : "PLUGIN"} · Phone: ${phone} · agentd: reachable\nNext step: ${next}`;
 }
 
 /**
@@ -121,6 +152,16 @@ export function handleAttachCommand(
   const action = requestedAction(payload, provider);
   if (!action) {
     return undefined;
+  }
+  // Pairing is about this computer, not this session, so it needs no session id.
+  if (action === "pair") {
+    try {
+      context.phones?.openPairingWindow();
+    } catch (error) {
+      context.logger.error("pair_command_failed", { reason: error instanceof Error ? error.name : "unknown" });
+      return block(PAIR_FAILED_TEXT);
+    }
+    return block(context.phones ? PAIR_TEXT : PAIR_FAILED_TEXT);
   }
   const sessionId = typeof payload.session_id === "string" && payload.session_id.length > 0
     ? payload.session_id
@@ -146,20 +187,16 @@ export function handleAttachCommand(
       if (provider === "claude") {
         context.onAttached(payload, sessionId);
       }
-      return block(provider === "codex" ? CODEX_ATTACH_TEXT : bound ? LAUNCHER_ATTACH_TEXT : ATTACH_TEXT);
+      const text = provider === "codex" ? CODEX_ATTACH_TEXT : bound ? LAUNCHER_ATTACH_TEXT : ATTACH_TEXT;
+      const unpaired = context.phones?.paired() === false;
+      return block(unpaired ? `${text}\nNo phone paired yet — type ${pairCommand(provider)}` : text);
     }
     case "detach":
       registry.detach(provider, sessionId);
       return block(DETACH_TEXT);
-    case "status":
-      return block(
-        registry.isAttached(provider, sessionId)
-          ? provider === "claude" && context.isLauncherBound?.(sessionId) === true
-            ? LAUNCHER_STATUS_TEXT
-            : STATUS_ATTACHED_TEXT
-          : provider === "codex"
-            ? CODEX_STATUS_DETACHED_TEXT
-            : STATUS_DETACHED_TEXT,
-      );
+    case "status": {
+      const launcher = provider === "claude" && context.isLauncherBound?.(sessionId) === true;
+      return block(statusReply(provider, registry.isAttached(provider, sessionId), launcher, context.phones?.paired()));
+    }
   }
 }

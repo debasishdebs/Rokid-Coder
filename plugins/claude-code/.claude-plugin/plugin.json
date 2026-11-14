@@ -2,7 +2,7 @@
   "name": "rokid",
   "displayName": "Rokid-Coder",
   "version": "0.1.0",
-  "description": "Opt this Claude Code session into Rokid-Coder so Rokid glasses can follow it, answer its approvals and steer it. Commands: /rokid:on, /rokid:off, /rokid:status.",
+  "description": "Opt this Claude Code session into Rokid-Coder so Rokid glasses can follow it, answer its approvals and steer it. Commands: /rokid:on, /rokid:off, /rokid:status, /rokid:pair.",
   "author": {
     "name": "Rokid-Coder"
   },

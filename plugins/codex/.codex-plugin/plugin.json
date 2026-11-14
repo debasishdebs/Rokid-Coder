@@ -1,7 +1,7 @@
 {
   "name": "rokid",
   "version": "0.1.0",
-  "description": "Opt this Codex session into Rokid-Coder so Rokid glasses can follow it, answer its approvals and steer it. Type rokid:on, rokid:off or rokid:status.",
+  "description": "Opt this Codex session into Rokid-Coder so Rokid glasses can follow it, answer its approvals and steer it. Type rokid:on, rokid:off, rokid:status or rokid:pair.",
   "author": {
     "name": "Rokid-Coder"
   },

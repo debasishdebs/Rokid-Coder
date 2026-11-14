@@ -3,6 +3,7 @@ const fsp = require("node:fs/promises");
 const path = require("node:path");
 const { spawnPty } = require("../../dist/launcher/pty.js");
 const { freePort } = require("./daemon.js");
+const { PinStore } = require("../../dist/tls.js");
 
 const FAKE_CLAUDE = path.join(__dirname, "..", "fixtures", "fake-claude.js");
 const FAKE_CODEX = path.join(__dirname, "..", "fixtures", "fake-codex.js");
@@ -29,24 +30,36 @@ function alive(pid) {
 
 const waitDead = (pid, ms = 4000) => until(() => !alive(pid), ms, `pid ${pid} to die`);
 
+/** Records one trusted phone in the pin file rk reads. */
+function pairPhone(configDir) {
+  new PinStore(path.join(configDir, "tls", "phone-pins.json")).add("AB".repeat(32));
+}
+
 /**
  * An environment that cannot reach the user's real agentd, sessions or config:
- * every path is inside `dir`, and the hook port is one nothing listens on.
+ * every path is inside `dir`, and the hook port is one nothing listens on. A
+ * phone is paired unless `unpaired`, so a terminal run is not held at the
+ * pairing prompt.
  */
-async function rkEnv(dir, extra = {}) {
+async function rkEnv(dir, extra = {}, { unpaired = false } = {}) {
   const sessionsDir = path.join(dir, "sessions");
   const stateDir = path.join(dir, "state");
+  // Not "rc": the terminal tests write the exit status to `${dir}/rc`.
+  const configDir = path.join(dir, "rokid-coder");
   await fsp.mkdir(sessionsDir, { recursive: true });
   await fsp.mkdir(stateDir, { recursive: true });
+  if (!unpaired) {
+    pairPhone(configDir);
+  }
   return {
     sessionsDir,
-    configDir: path.join(dir, "rc"),
+    configDir,
     env: {
       ...process.env,
       TERM: "xterm",
       ROKID_RK_CLAUDE_BIN: FAKE_CLAUDE,
       ROKID_RK_CODEX_BIN: FAKE_CODEX,
-      ROKID_RK_CONFIG_DIR: path.join(dir, "rc"),
+      ROKID_RK_CONFIG_DIR: configDir,
       ROKID_CLAUDE_SESSIONS_DIR: sessionsDir,
       NEXUS_AGENTD_STATE_DIR: stateDir,
       NEXUS_AGENTD_HTTP_PORT: String(await freePort()),
@@ -141,4 +154,4 @@ function terminalModes(text) {
   return modes;
 }
 
-module.exports = { track, killLive, sttyState, terminalModes, FAKE_CLAUDE, FAKE_CODEX, RK, until, alive, waitDead, rkEnv, inPty, readJson };
+module.exports = { pairPhone, track, killLive, sttyState, terminalModes, FAKE_CLAUDE, FAKE_CODEX, RK, until, alive, waitDead, rkEnv, inPty, readJson };

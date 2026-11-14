@@ -72,7 +72,7 @@ function transcriptLine(sessionId) {
  * The daemon's agentd cert is the one shared test cert, copied into its tls dir. `coderFiles` pre-seeds files in
  * the Rokid-Coder state dir (name -> JSON value), such as settings.json.
  */
-async function withDaemon({ transport, tls = false, attached = [], discovered = [], coderFiles = {} }, body) {
+async function withDaemon({ transport, tls = false, attached = [], discovered = [], coderFiles = {}, paired = false }, body) {
   await withTempDir(async (dir) => {
     const stateDir = path.join(dir, "nexus-agentd");
     const coderDir = path.join(dir, "rokid-coder");
@@ -96,6 +96,10 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
     }
 
     await seedAgentCert(path.join(coderDir, "tls"));
+    if (paired) {
+      // A phone paired earlier. The dialled link checks pins, so this suits wshub only.
+      new PinStore(path.join(coderDir, "tls", "phone-pins.json")).add("CD".repeat(32));
+    }
     if (transport === "phonelink" && tls) {
       new PinStore(path.join(coderDir, "tls", "phone-pins.json")).armAllowNext(Date.now());
     }
