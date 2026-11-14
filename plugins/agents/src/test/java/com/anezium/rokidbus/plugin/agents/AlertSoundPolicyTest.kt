@@ -67,6 +67,96 @@ class AlertSoundPolicyTest {
         }
     }
 
+    private fun soundWith(
+        kind: AlertKind,
+        prefs: SoundPrefs,
+        reason: AlertReason = AlertReason.NEW,
+        provider: AgentProvider = AgentProvider.CLAUDE,
+    ) = AlertSoundPolicy.sound(kind, provider, reason, prefs)
+
+    @Test
+    fun each_kind_follows_its_setting() {
+        val kinds = mapOf(
+            AlertKind.APPROVAL to (SoundSlot.APPROVAL to "Claude needs approval"),
+            AlertKind.QUESTION to (SoundSlot.QUESTION to "Claude has a question"),
+            AlertKind.ERROR to (SoundSlot.ERROR to "Claude hit an error"),
+            AlertKind.DONE to (SoundSlot.DONE to "Claude is done"),
+        )
+        for ((kind, slotAndText) in kinds) {
+            val (slot, text) = slotAndText
+            val base = SoundPrefs()
+            assertEquals("$kind speak", AlertSound.Speak(text), soundWith(kind, base.with(slot, SoundChoice.SPEAK)))
+            assertEquals("$kind chime", AlertSound.Chime, soundWith(kind, base.with(slot, SoundChoice.CHIME)))
+            assertEquals("$kind silent", AlertSound.None, soundWith(kind, base.with(slot, SoundChoice.SILENT)))
+        }
+        // The wording follows the tool.
+        assertEquals(
+            AlertSound.Speak("Codex needs approval"),
+            soundWith(AlertKind.APPROVAL, SoundPrefs(), provider = AgentProvider.CODEX),
+        )
+        // A notice has no setting and never sounds.
+        val loud = SoundPrefs(SoundChoice.SPEAK, SoundChoice.SPEAK, SoundChoice.SPEAK, SoundChoice.SPEAK, SoundChoice.SPEAK)
+        assertEquals(AlertSound.None, soundWith(AlertKind.NOTICE, loud))
+        assertEquals(AlertSound.None, soundWith(AlertKind.NOTICE, loud, reason = AlertReason.REMINDER))
+    }
+
+    @Test
+    fun defaults_match_u3() {
+        val prefs = SoundPrefs()
+        assertEquals(SoundChoice.SPEAK, prefs.approval)
+        assertEquals(SoundChoice.SPEAK, prefs.question)
+        assertEquals(SoundChoice.SPEAK, prefs.error)
+        assertEquals(SoundChoice.CHIME, prefs.done)
+        assertEquals(SoundChoice.SILENT, prefs.reminder)
+        assertEquals(
+            listOf("sound.approval", "sound.question", "sound.error", "sound.done", "sound.reminder"),
+            SoundSlot.values().map { it.key },
+        )
+        // Untouched settings sound exactly as the policy did before there was a setting.
+        assertEquals(AlertSound.Speak("Claude needs approval"), sound(AlertKind.APPROVAL))
+        assertEquals(AlertSound.Speak("Claude hit an error"), sound(AlertKind.ERROR))
+        assertEquals(AlertSound.Chime, sound(AlertKind.DONE))
+        assertEquals(AlertSound.None, sound(AlertKind.APPROVAL, reason = AlertReason.REMINDER))
+    }
+
+    @Test
+    fun reminder_setting_applies_only_to_reminders() {
+        val reminderLoud = SoundPrefs(reminder = SoundChoice.CHIME)
+        for (kind in listOf(AlertKind.APPROVAL, AlertKind.QUESTION, AlertKind.ERROR, AlertKind.DONE)) {
+            assertEquals("$kind reminder", AlertSound.Chime, soundWith(kind, reminderLoud, AlertReason.REMINDER))
+        }
+        // A fresh alert ignores it ...
+        assertEquals(AlertSound.Speak("Claude needs approval"), soundWith(AlertKind.APPROVAL, reminderLoud))
+        // ... and a reminder ignores the kind's own setting.
+        val kindLoud = SoundPrefs(approval = SoundChoice.CHIME, done = SoundChoice.SPEAK)
+        assertEquals(AlertSound.None, soundWith(AlertKind.APPROVAL, kindLoud, AlertReason.REMINDER))
+        assertEquals(AlertSound.None, soundWith(AlertKind.DONE, kindLoud, AlertReason.REMINDER))
+        assertEquals(
+            AlertSound.Speak("Claude is still waiting"),
+            soundWith(AlertKind.APPROVAL, SoundPrefs(reminder = SoundChoice.SPEAK), AlertReason.REMINDER),
+        )
+    }
+
+    @Test
+    fun retry_resume_update_always_silent() {
+        val loud = SoundPrefs(SoundChoice.SPEAK, SoundChoice.CHIME, SoundChoice.SPEAK, SoundChoice.CHIME, SoundChoice.SPEAK)
+        for (kind in AlertKind.values()) {
+            for (reason in listOf(AlertReason.RETRY, AlertReason.RESUME, AlertReason.UPDATE)) {
+                assertEquals("$kind $reason", AlertSound.None, soundWith(kind, loud, reason))
+            }
+        }
+    }
+
+    @Test
+    fun a_chosen_sound_still_obeys_the_gates() {
+        val chosen = soundWith(AlertKind.APPROVAL, SoundPrefs(approval = SoundChoice.CHIME))
+        assertEquals(AlertSound.Chime, AlertSoundPolicy.allowed(chosen, DndState.OFF, false, 8, true))
+        assertEquals(AlertSound.None, AlertSoundPolicy.allowed(chosen, DndState.ON, false, 8, true))
+        assertEquals(AlertSound.None, AlertSoundPolicy.allowed(chosen, DndState.OFF, true, 8, true))
+        assertEquals(AlertSound.None, AlertSoundPolicy.allowed(chosen, DndState.OFF, false, 0, true))
+        assertEquals(AlertSound.None, AlertSoundPolicy.allowed(chosen, DndState.OFF, false, 8, false))
+    }
+
     @Test
     fun chime_obeys_dnd_quiet_volume_worn() {
         fun gated(

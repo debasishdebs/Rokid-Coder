@@ -110,6 +110,7 @@ class AgentsMonitorService : Service() {
             history = AgentsRuntime.history,
             historyPolicy = { configStore.historyPolicy() },
             headingOf = { key -> AgentsRuntime.store.sessions.value.firstOrNull { it.key == key }?.historyHeading() },
+            soundPrefs = { configStore.alertSettings().sounds },
         )
     }
 

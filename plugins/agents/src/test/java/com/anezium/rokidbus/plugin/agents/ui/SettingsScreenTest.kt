@@ -5,6 +5,8 @@ import com.anezium.rokidbus.plugin.agents.AgentSession
 import com.anezium.rokidbus.plugin.agents.AlertKind
 import com.anezium.rokidbus.plugin.agents.HistoryEntry
 import com.anezium.rokidbus.plugin.agents.Outcome
+import com.anezium.rokidbus.plugin.agents.SoundChoice
+import com.anezium.rokidbus.plugin.agents.SoundSlot
 import com.anezium.rokidbus.plugin.agents.AgentStatus
 import com.anezium.rokidbus.plugin.agents.ConnectionState
 import com.anezium.rokidbus.plugin.agents.ProviderConnectionState
@@ -36,6 +38,24 @@ class SettingsScreenTest {
         assertNull(trustLabel(connected = false, secure = false))
         // A stale secure flag on a dropped link says nothing.
         assertNull(trustLabel(connected = false, secure = true))
+    }
+
+    @Test
+    fun sound_rows_say_what_each_choice_means() {
+        assertEquals(
+            listOf("Approval", "Question", "Error", "Done", "Reminder"),
+            SoundSlot.values().map { it.label },
+        )
+        assertEquals("says '<Name> needs approval'", SettingsCopy.soundHint(SoundSlot.APPROVAL, SoundChoice.SPEAK))
+        assertEquals("says '<Name> has a question'", SettingsCopy.soundHint(SoundSlot.QUESTION, SoundChoice.SPEAK))
+        assertEquals("says '<Name> hit an error'", SettingsCopy.soundHint(SoundSlot.ERROR, SoundChoice.SPEAK))
+        assertEquals("says '<Name> is done'", SettingsCopy.soundHint(SoundSlot.DONE, SoundChoice.SPEAK))
+        assertEquals("says '<Name> is still waiting'", SettingsCopy.soundHint(SoundSlot.REMINDER, SoundChoice.SPEAK))
+        for (slot in SoundSlot.values()) {
+            assertEquals("short tone, glasses only", SettingsCopy.soundHint(slot, SoundChoice.CHIME))
+            assertEquals("display only", SettingsCopy.soundHint(slot, SoundChoice.SILENT))
+        }
+        assertEquals(listOf("Speak", "Chime", "Silent"), SettingsCopy.SOUND_CHOICES)
     }
 
     @Test

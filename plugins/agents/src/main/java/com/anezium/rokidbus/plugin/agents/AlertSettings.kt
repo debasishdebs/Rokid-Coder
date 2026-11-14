@@ -26,6 +26,8 @@ data class AlertSettings(
     val defaultClaude: TempMode = TempMode.ASK,
     val defaultCodex: TempMode = TempMode.ASK,
     val quiet: Boolean = false,
+    /** What each alert state sounds like on the phone (U19). Kept on the phone: never sent to agentd. */
+    val sounds: SoundPrefs = SoundPrefs(),
 ) {
     /**
      * The floors agentd applies, applied here first so the screen shows what the
@@ -67,7 +69,7 @@ data class AlertSettings(
     /** The persisted form. [quiet] is not in it (R74). */
     fun toJson(): String {
         val v = validated()
-        return JSONObject()
+        val json = JSONObject()
             .put("digestPeriodMs", v.digestPeriodMs)
             .put("waitLimitMs", v.waitLimitMs)
             .put("reminderMs", v.reminderMs)
@@ -77,7 +79,8 @@ data class AlertSettings(
             .put("retryBackoffMs", JSONArray(v.retryBackoffMs))
             .put("defaultClaude", v.defaultClaude.wire)
             .put("defaultCodex", v.defaultCodex.wire)
-            .toString()
+        for (slot in SoundSlot.values()) json.put(slot.key, v.sounds[slot].wire)
+        return json.toString()
     }
 
     companion object {
@@ -100,6 +103,9 @@ data class AlertSettings(
             val json = raw?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return defaults
             fun long(key: String, fallback: Long) = if (json.has(key)) json.optLong(key, fallback) else fallback
             fun mode(key: String) = TempMode.fromWire(json.optString(key, "")) ?: TempMode.ASK
+            val sounds = SoundSlot.values().fold(SoundPrefs()) { prefs, slot ->
+                prefs.with(slot, SoundChoice.fromWire(json.optString(slot.key, "")) ?: slot.default)
+            }
             val backoff = json.optJSONArray("retryBackoffMs")?.let { array ->
                 List(array.length()) { array.optLong(it, 0L) }
             } ?: defaults.retryBackoffMs
@@ -114,6 +120,7 @@ data class AlertSettings(
                 defaultClaude = mode("defaultClaude"),
                 defaultCodex = mode("defaultCodex"),
                 quiet = quiet,
+                sounds = sounds,
             ).validated()
         }
 

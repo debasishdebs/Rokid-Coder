@@ -122,6 +122,32 @@ class AlertSettingsTest {
     }
 
     @Test
+    fun sound_choices_are_stored_under_their_keys_and_read_back() {
+        assertEquals(SoundPrefs(), AlertSettings().sounds)
+        val s = AlertSettings(
+            sounds = SoundPrefs(
+                approval = SoundChoice.CHIME, question = SoundChoice.SILENT, error = SoundChoice.CHIME,
+                done = SoundChoice.SPEAK, reminder = SoundChoice.SPEAK,
+            ),
+        )
+        val json = JSONObject(s.toJson())
+        assertEquals("chime", json.getString("sound.approval"))
+        assertEquals("silent", json.getString("sound.question"))
+        assertEquals("chime", json.getString("sound.error"))
+        assertEquals("speak", json.getString("sound.done"))
+        assertEquals("speak", json.getString("sound.reminder"))
+        assertEquals(s, AlertSettings.fromJson(s.toJson()))
+        // Missing or unreadable falls back to that kind's default, not to another kind's.
+        val partial = AlertSettings.fromJson("""{"sound.done":"silent","sound.error":"loud","sound.reminder":7}""")
+        assertEquals(SoundChoice.SILENT, partial.sounds.done)
+        assertEquals(SoundChoice.SPEAK, partial.sounds.error)
+        assertEquals(SoundChoice.SILENT, partial.sounds.reminder)
+        assertEquals(SoundChoice.SPEAK, partial.sounds.approval)
+        // Sounds never reach the computer.
+        assertFalse(AlertSettings(sounds = SoundPrefs(approval = SoundChoice.SILENT)).syncFrames { "m" }.any { it.contains("sound") })
+    }
+
+    @Test
     fun settings_sync_frame_from_settings_matches_fixture() {
         val sync = fixtures.getJSONObject("settings_sync")
         val timings = sync.getJSONObject("timings")

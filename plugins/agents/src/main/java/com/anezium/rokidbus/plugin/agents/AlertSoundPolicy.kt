@@ -30,24 +30,44 @@ object AlertSoundPolicy {
         dnd == DndState.OFF && !quiet && glassesVolume != 0 && worn != false
 
     /**
-     * What an alert of [kind] from [provider] sounds like. A frame that only
-     * repeats or refreshes an alert ([reason] other than a new one) is never heard
-     * again; Done is a chime, the kinds that wait on the wearer are spoken.
+     * What an alert of [kind] from [provider] sounds like, as the wearer set it in
+     * [prefs] (U19). A new alert follows its kind's setting and a reminder follows
+     * the reminder setting; a frame that only retries, resumes or refreshes an
+     * alert is never heard again. A notice has no sound.
      */
-    fun sound(kind: AlertKind, provider: AgentProvider, reason: AlertReason): AlertSound {
-        if (reason != AlertReason.NEW) return AlertSound.None
-        val name = when (provider) {
-            AgentProvider.CLAUDE -> "Claude"
-            AgentProvider.CODEX -> "Codex"
-            AgentProvider.OPENCLAW -> "OpenClaw"
+    fun sound(kind: AlertKind, provider: AgentProvider, reason: AlertReason, prefs: SoundPrefs = SoundPrefs()): AlertSound {
+        if (kind == AlertKind.NOTICE) return AlertSound.None
+        val slot = when (reason) {
+            AlertReason.NEW -> when (kind) {
+                AlertKind.APPROVAL -> SoundSlot.APPROVAL
+                AlertKind.QUESTION -> SoundSlot.QUESTION
+                AlertKind.ERROR -> SoundSlot.ERROR
+                AlertKind.DONE -> SoundSlot.DONE
+                AlertKind.NOTICE -> return AlertSound.None
+            }
+            AlertReason.REMINDER -> SoundSlot.REMINDER
+            AlertReason.RETRY, AlertReason.RESUME, AlertReason.UPDATE -> return AlertSound.None
         }
-        return when (kind) {
-            AlertKind.APPROVAL -> AlertSound.Speak("$name needs approval")
-            AlertKind.QUESTION -> AlertSound.Speak("$name has a question")
-            AlertKind.ERROR -> AlertSound.Speak("$name hit an error")
-            AlertKind.DONE -> AlertSound.Chime
-            AlertKind.NOTICE -> AlertSound.None
+        return when (prefs[slot]) {
+            SoundChoice.SILENT -> AlertSound.None
+            SoundChoice.CHIME -> AlertSound.Chime
+            SoundChoice.SPEAK -> AlertSound.Speak("${toolName(provider)} ${phrase(slot)}")
         }
+    }
+
+    private fun toolName(provider: AgentProvider): String = when (provider) {
+        AgentProvider.CLAUDE -> "Claude"
+        AgentProvider.CODEX -> "Codex"
+        AgentProvider.OPENCLAW -> "OpenClaw"
+    }
+
+    /** What follows the tool's name in the spoken line; the settings screen shows the same words. */
+    fun phrase(slot: SoundSlot): String = when (slot) {
+        SoundSlot.APPROVAL -> "needs approval"
+        SoundSlot.QUESTION -> "has a question"
+        SoundSlot.ERROR -> "hit an error"
+        SoundSlot.DONE -> "is done"
+        SoundSlot.REMINDER -> "is still waiting"
     }
 
     /** [sound] if the phone, the wearer and the glasses allow a sound right now (the [shouldSpeak] gates), else nothing. */

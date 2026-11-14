@@ -52,6 +52,7 @@ class AlertDirectorTest {
     private var writeResult: AgentdWire.Result = AgentdWire.Result.Sent
     private val history = AlertHistory(clock = { now })
     private var keepAfterSession = true
+    private var soundPrefs = SoundPrefs()
 
     private class Timer(val delayMs: Long, val work: () -> Unit) {
         var cancelled = false
@@ -80,6 +81,7 @@ class AlertDirectorTest {
         history = history,
         historyPolicy = { HistoryPolicy(windowMs = 24 * 3_600_000L, keepAfterSession = keepAfterSession) },
         headingOf = { "my-repo" },
+        soundPrefs = { soundPrefs },
     )
 
     private fun alert(
@@ -167,6 +169,19 @@ class AlertDirectorTest {
         // The refused update re-shows A without a sound; a reminder wakes but never sounds.
         // A fresh approval speaks, a fresh Done chimes.
         assertEquals(listOf(AlertSound.Speak("Claude needs approval"), AlertSound.Chime), glasses.sounds)
+    }
+
+    @Test
+    fun the_sound_follows_the_setting_read_when_the_band_goes_up() {
+        up()
+        soundPrefs = SoundPrefs(approval = SoundChoice.CHIME, question = SoundChoice.SILENT, reminder = SoundChoice.SPEAK)
+        feed(alert(id = "A"))
+        feed(alert(id = "Q", kind = "question"))
+        // A reminder sounds only because the wearer chose it, and says it is still waiting.
+        feed(alert(id = "A", reason = "reminder"))
+        feed(alert(id = "A", reason = "retry"))
+
+        assertEquals(listOf(AlertSound.Chime, AlertSound.Speak("Claude is still waiting")), glasses.sounds)
     }
 
     @Test

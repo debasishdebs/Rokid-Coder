@@ -60,6 +60,8 @@ class AlertDirector(
     private val historyPolicy: () -> HistoryPolicy = { HistoryPolicy.DEFAULT },
     /** A session's heading for the history; null when the board has none. */
     private val headingOf: (String) -> String? = { null },
+    /** The wearer's sound choice for each alert state, read as each band goes up (U19). */
+    private val soundPrefs: () -> SoundPrefs = { SoundPrefs() },
 ) {
     /** The alert whose band the director put up and has not seen end. Only [post]ed work touches it. */
     private var bandId: String? = null
@@ -362,10 +364,12 @@ class AlertDirector(
         goneId = null
         // The alert took the slot from whatever brief was on it.
         briefDone()
-        // The coordinator marks only a NEW band as a sound, never a retry or a reminder.
-        if (sound) {
+        // The coordinator marks only a NEW band as a sound, never a retry. A reminder is asked
+        // too: the policy keeps it silent unless the wearer chose a sound for reminders.
+        if (sound || alert.reason == AlertReason.REMINDER) {
             val provider = AgentProvider.fromWire(alert.sessionKey.substringBefore(':'))
-            if (provider != null) glasses()?.playSound(AlertSoundPolicy.sound(alert.kind, provider, alert.reason))
+            val heard = provider?.let { AlertSoundPolicy.sound(alert.kind, it, alert.reason, soundPrefs()) }
+            if (heard != null && heard != AlertSound.None) glasses()?.playSound(heard)
         }
     }
 

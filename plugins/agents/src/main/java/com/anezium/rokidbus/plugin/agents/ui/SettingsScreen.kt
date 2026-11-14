@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.anezium.rokidbus.plugin.agents.AgentSession
+import com.anezium.rokidbus.plugin.agents.AlertSoundPolicy
 import com.anezium.rokidbus.plugin.agents.AgentStatus
 import com.anezium.rokidbus.plugin.agents.AgentProvider
 import com.anezium.rokidbus.plugin.agents.AlertSettings
@@ -37,6 +38,8 @@ import com.anezium.rokidbus.plugin.agents.SignedOut
 import com.anezium.rokidbus.plugin.agents.VOICE_WORD_LIMIT_CHOICES
 import com.anezium.rokidbus.plugin.agents.VoiceCondense
 import com.anezium.rokidbus.plugin.agents.ProviderConnectionState
+import com.anezium.rokidbus.plugin.agents.SoundChoice
+import com.anezium.rokidbus.plugin.agents.SoundSlot
 import com.anezium.rokidbus.plugin.agents.TempMode
 import com.anezium.rokidbus.plugin.agents.displayText
 import com.anezium.rokidbus.plugin.agents.ui.theme.AgentsColors
@@ -59,6 +62,16 @@ internal object SettingsCopy {
 
     const val TTL_HINT =
         "A computer this phone has not used for this long is signed out, and has to be added again."
+
+    /** U19: the choices of a sound row, in [SoundChoice] order. */
+    val SOUND_CHOICES = listOf("Speak", "Chime", "Silent")
+
+    /** The sub-line under a sound row: what the chosen [choice] does for [slot]. */
+    fun soundHint(slot: SoundSlot, choice: SoundChoice): String = when (choice) {
+        SoundChoice.SPEAK -> "says '<Name> ${AlertSoundPolicy.phrase(slot)}'"
+        SoundChoice.CHIME -> "short tone, glasses only"
+        SoundChoice.SILENT -> "display only"
+    }
 
     /** U7: the phone signed out of [name], and says what to do next. */
     fun signedOut(name: String, days: Int) = "Signed out of $name — not used for $days days. Add it again."
@@ -333,6 +346,15 @@ private fun AlertsCard(alerts: AlertSettings, voiceWordLimit: Int, actions: Sett
             tag = "voice_word_limit",
         )
         NoticeText("A long reply you dictate is shown shortened on the glasses. It is always sent in full.")
+        for (slot in SoundSlot.values()) {
+            val choice = alerts.sounds[slot]
+            ChoiceRow(
+                "${slot.label} sound", SettingsCopy.SOUND_CHOICES, choice.ordinal,
+                { actions.onAlerts { copy(sounds = sounds.with(slot, SoundChoice.values()[it])) } },
+                tag = slot.key.replace('.', '_'),
+            )
+            NoticeText(SettingsCopy.soundHint(slot, choice), tag = "${slot.key.replace('.', '_')}_hint")
+        }
         SecondaryAction(if (advanced) "Advanced ▴" else "Advanced ▾", { advanced = !advanced }, tag = "advanced_toggle")
         if (advanced) AdvancedTimings(alerts, actions)
     }
