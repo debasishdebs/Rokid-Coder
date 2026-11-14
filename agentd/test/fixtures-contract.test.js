@@ -443,6 +443,7 @@ const HANDLERS = {
     const saved = JSON.parse(await fsp.readFile(path.join(coderDir, "settings.json"), "utf8"));
     assert.deepEqual(saved.timings, fixture.timings);
     assert.equal(saved.waitLimitMs, fixture.waitLimitMs);
+    assert.equal(saved.pairingTtlDays, fixture.pairingTtlDays);
     assert.equal("expireMs" in saved.timings, false, "agentd derives expire from the wait limit");
   },
 

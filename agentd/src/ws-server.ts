@@ -9,6 +9,8 @@ import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { NotAttachedError } from "./attach-registry";
 import { gateFrame, linkTrustFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
 import {
+  DAY_MS,
+  DEFAULT_PAIRING_TTL_DAYS,
   PinStore,
   digestMatchesSecret,
   normalizeFingerprint,
@@ -109,6 +111,10 @@ export interface WsHubOptions {
    * hello pins it. Without a store the set lasts only as long as the process.
    */
   pins?: PinStore;
+  /** How long a pairing may go unused before the phone must pair again; read live, since the phone can change it. */
+  pairingTtlMs?: () => number;
+  /** Test seam: the clock the pairing TTL is judged by. */
+  now?: () => number;
   /**
    * The steering secret, read at each hello so a rotation takes effect at once.
    * A hello without it is refused. It is never sent.
@@ -156,6 +162,7 @@ export class WsHub {
   private readonly unsubscribeUpsert: () => void;
   private readonly unsubscribeRemoved: () => void;
   private readonly pins: PinStore;
+  private readonly now: () => number;
   private readonly tls: { key: string; cert: string };
 
   constructor(
@@ -169,6 +176,7 @@ export class WsHub {
     }
     this.tls = options.tls;
     this.pins = options.pins ?? new PinStore();
+    this.now = options.now ?? Date.now;
     this.unsubscribeUpsert = store.onUpsert((session) => this.broadcastUpsert(session));
     this.unsubscribeRemoved = store.onRemoved((sessionId) => this.broadcastRemoved(sessionId));
   }
@@ -428,7 +436,7 @@ export class WsHub {
       if (verdict.ok && !verdict.pinned && fingerprint) {
         // Adding also closes the allow-next window: one admission per arming.
         // A failed write keeps nothing, so a refusal here changes nothing either.
-        this.pins.add(fingerprint);
+        this.pins.add(fingerprint, this.now());
         this.logger.info("ws_phone_pinned", { fingerprint: short });
       }
     } catch (error) {
@@ -465,6 +473,28 @@ export class WsHub {
     });
     this.sendSnapshot(socket);
     this.options.onClientConnected?.(this.isTrusted(state));
+    // Admitted: this is a use of the pairing.
+    this.touchPairing(state);
+  }
+
+  /**
+   * Records a use of the phone's pairing, for a client that is trusted right
+   * now (a stale pairing is forgotten, not renewed). The store writes at most
+   * once an hour per phone; a failed write only costs the record, never the link.
+   */
+  private touchPairing(state: ClientState): void {
+    if (!state.peerFingerprint) {
+      return;
+    }
+    try {
+      if (this.isTrusted(state)) {
+        this.pins.touch(state.peerFingerprint, this.now());
+      }
+    } catch (error) {
+      this.logger.warn("ws_pairing_touch_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /** Tells the phone why, then closes; never echoes the token, the secret or the full fingerprint. */
@@ -491,11 +521,16 @@ export class WsHub {
     if (!fingerprint) {
       return { ok: false, reason: "repair_needed", log: "no_client_cert" };
     }
-    const pinned = this.pins.has(fingerprint);
-    if (!pinned && !this.pins.allowNextOpen(Date.now())) {
+    // Stale counts as unpinned (and is forgotten on the spot): an expired phone cannot renew itself by reconnecting.
+    const pinned = this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs());
+    if (!pinned && !this.pins.allowNextOpen(this.now())) {
       return { ok: false, reason: "repair_needed", log: "unpinned_cert" };
     }
     return { ok: true, pinned };
+  }
+
+  private pairingTtlMs(): number {
+    return this.options.pairingTtlMs?.() ?? DEFAULT_PAIRING_TTL_DAYS * DAY_MS;
   }
 
   /** Constant time, and a length mismatch is just a mismatch. */
@@ -509,7 +544,7 @@ export class WsHub {
       return false;
     }
     try {
-      return this.pins.has(state.peerFingerprint);
+      return this.pins.isTrusted(state.peerFingerprint, this.now(), this.pairingTtlMs());
     } catch {
       return false;
     }
@@ -754,6 +789,8 @@ export class WsHub {
       }
       this.send(socket, { type: "ping", t: now });
       socket.ping();
+      // A link that stays up keeps its pairing in use.
+      this.touchPairing(state);
     }
   }
 

@@ -3,6 +3,7 @@ import path from "node:path";
 import { DEFAULT_WAIT_LIMIT_SEC } from "./config";
 import type { AlertTimings, DefaultMode } from "./protocol-v2";
 import { MAX_WAIT_LIMIT_MS } from "./stop-wait";
+import { DEFAULT_PAIRING_TTL_DAYS } from "./tls";
 import type { Logger } from "./types";
 
 /** Global Constraints: age boost 30 s, dwell 8 s, ack 5 s, backoff 5/10/20 s, reminder 5 min. Expiry is the wait limit. */
@@ -23,6 +24,8 @@ export interface PhoneSettings {
   timings: AlertTimings;
   waitLimitMs: number;
   defaultModes: DefaultModes;
+  /** Days a phone pairing may go unused before the phone must pair again. */
+  pairingTtlDays: number;
 }
 
 const FILE_VERSION = 1;
@@ -80,6 +83,13 @@ export function parseWaitLimitMs(value: unknown): number | undefined {
   return duration(value, MIN_WAIT_LIMIT_MS);
 }
 
+/** A whole number of days, 1 to 365. Anything else is not a setting. */
+export function parsePairingTtlDays(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 365
+    ? value
+    : undefined;
+}
+
 export function parseDefaultModes(value: unknown): DefaultModes | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -108,6 +118,7 @@ export class PhoneSettingsStore {
       timings: { ...this.current.timings, retryBackoffMs: [...this.current.timings.retryBackoffMs] },
       waitLimitMs: this.current.waitLimitMs,
       defaultModes: { ...this.current.defaultModes },
+      pairingTtlDays: this.current.pairingTtlDays,
     };
   }
 
@@ -123,6 +134,7 @@ export class PhoneSettingsStore {
       timings: { ...DEFAULT_ALERT_TIMINGS, retryBackoffMs: [...DEFAULT_ALERT_TIMINGS.retryBackoffMs] },
       waitLimitMs: (waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
       defaultModes: { claude: "ask", codex: "ask" },
+      pairingTtlDays: DEFAULT_PAIRING_TTL_DAYS,
     };
     let parsed: Record<string, unknown> | undefined;
     try {
@@ -144,6 +156,8 @@ export class PhoneSettingsStore {
       timings: parseTimings(parsed.timings) ?? defaults.timings,
       waitLimitMs: parseWaitLimitMs(parsed.waitLimitMs) ?? defaults.waitLimitMs,
       defaultModes: parseDefaultModes(parsed.defaultModes) ?? defaults.defaultModes,
+      // Absent from files written before the setting existed.
+      pairingTtlDays: parsePairingTtlDays(parsed.pairingTtlDays) ?? defaults.pairingTtlDays,
     };
   }
 

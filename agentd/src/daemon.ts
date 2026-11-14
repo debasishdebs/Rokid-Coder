@@ -28,7 +28,7 @@ import { QuestionRelay } from "./question-relay";
 import { TranscriptTailManager, readTranscriptHeading } from "./transcript";
 import { DETAIL_MESSAGE_LIMIT, readRecentMessages } from "./transcript-messages";
 import { sessionKeyOf } from "./protocol-v2";
-import { ensureAgentCert, ensureSteerSecret, PinStore, readSteerSecret, steerSecretFile } from "./tls";
+import { DAY_MS, ensureAgentCert, ensureSteerSecret, PinStore, readSteerSecret, steerSecretFile } from "./tls";
 import type { AgentProvider, HookPayload } from "./types";
 import { WsHub } from "./ws-server";
 
@@ -68,6 +68,8 @@ export interface RunningDaemon {
   isTailing(sessionId: string): boolean;
   /** The once-a-minute housekeeping: stalled sessions, and approve-all for Claude sessions that are gone. */
   sweepSessions(): Promise<void>;
+  /** The hourly pairing expiry: forgets phones unused for the TTL, returning their fingerprints. */
+  sweepPairings(now?: number): string[];
   stop(): Promise<void>;
 }
 
@@ -78,6 +80,7 @@ export interface DaemonOptions {
 
 const APPLIED_ID_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_QUEUED_RESET_NOTICES = 64;
+const PAIRING_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 function envMs(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
@@ -451,7 +454,14 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
   const agentCert = await ensureAgentCert(tlsDir);
   ensureSteerSecret(tlsDir);
-  const pins = new PinStore(path.join(tlsDir, "phone-pins.json"));
+  const pins = new PinStore(path.join(tlsDir, "phone-pins.json"), { logger });
+  const phoneSettings = new PhoneSettingsStore(
+    path.join(config.rokidCoder.stateDir, "settings.json"),
+    config.rokidCoder.waitLimitSec,
+    logger,
+  );
+  // Read live: the phone's settings screen changes it, and the next check uses the new value.
+  const pairingTtlMs = (): number => phoneSettings.get().pairingTtlDays * DAY_MS;
   // Both transports share one v2 layer, built once the pieces it needs exist.
   const v2Hooks = {
     handle: (frame: Record<string, unknown>, channel: Parameters<PhoneV2["handle"]>[1]) =>
@@ -509,6 +519,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     tls: { key: agentCert.key, cert: agentCert.cert },
     // The same set the dialled link pins into, watched: `phones forget` cuts a wss phone off live.
     pins,
+    pairingTtlMs,
     // Checked live, and the file watched: `pair --rotate-steer` cuts off connected phones without a restart.
     steer: () => readSteerSecret(tlsDir),
     steerFile: steerSecretFile(tlsDir),
@@ -538,6 +549,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
     pins,
+    pairingTtlMs,
     clientCert: { key: agentCert.key, cert: agentCert.cert },
     v2: v2Hooks,
     onConnected: (trusted) => onPhoneConnected("phonelink", trusted),
@@ -598,11 +610,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     stopWait,
     questionRelay,
     codex,
-    settings: new PhoneSettingsStore(
-      path.join(config.rokidCoder.stateDir, "settings.json"),
-      config.rokidCoder.waitLimitSec,
-      logger,
-    ),
+    settings: phoneSettings,
     appliedIds: new AppliedIds(
       path.join(config.rokidCoder.stateDir, "applied-ids.json"),
       APPLIED_ID_RETENTION_MS,
@@ -682,6 +690,21 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     sweepSessions().catch(() => undefined);
   }, 60_000);
   heartbeatTimer.unref();
+  // Pairings unused for the TTL are forgotten. The pins file is the signal: both
+  // hubs watch it and cut off the forgotten phone's live link (link_trust false).
+  const sweepPairings = (now: number = Date.now()): string[] => {
+    try {
+      return pins.expire(now, pairingTtlMs());
+    } catch (error) {
+      logger.warn("phone_pairing_sweep_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
+  };
+  sweepPairings();
+  const pairingTimer = setInterval(() => sweepPairings(), PAIRING_SWEEP_INTERVAL_MS);
+  pairingTimer.unref();
 
   try {
     await httpServer.start();
@@ -693,6 +716,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     launcherRouter.start();
   } catch (error) {
     clearInterval(heartbeatTimer);
+    clearInterval(pairingTimer);
     launcherRouter.stop();
     phone.stop();
     stopListeningForDetach();
@@ -732,12 +756,14 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     takeResetNotices,
     isTailing: (sessionId) => tailManager.isTailing(sessionId),
     sweepSessions,
+    sweepPairings,
     async stop() {
       if (stopped) {
         return;
       }
       stopped = true;
       clearInterval(heartbeatTimer);
+      clearInterval(pairingTimer);
       stopListeningForDetach();
       launcherRouter.stop();
       await launchers.stop();

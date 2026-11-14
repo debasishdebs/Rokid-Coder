@@ -10,8 +10,10 @@ import {
 } from "./config";
 import { startDaemon } from "./daemon";
 import { pairingPayload } from "./pairing";
+import { PhoneSettingsStore } from "./phone-settings";
 import {
   ALLOW_NEXT_WINDOW_MS,
+  DAY_MS,
   PinStore,
   ensureAgentCert,
   ensureSteerSecret,
@@ -164,8 +166,23 @@ async function main(): Promise<void> {
       const pins = new PinStore(path.join(tlsDir, "phone-pins.json"));
       const action = process.argv[3];
       if (action === "list") {
-        const phones = pins.list();
-        process.stdout.write(phones.length > 0 ? `${phones.join("\n")}\n` : "No trusted phones.\n");
+        const entries = pins.entries();
+        const ttlMs = new PhoneSettingsStore(
+          path.join(config.rokidCoder.stateDir, "settings.json"),
+          config.rokidCoder.waitLimitSec,
+        ).get().pairingTtlDays * DAY_MS;
+        const now = Date.now();
+        const days = (count: number): string => `${count} day${count === 1 ? "" : "s"}`;
+        process.stdout.write(
+          entries.length > 0
+            ? `${entries
+                .map((entry) => {
+                  const unused = now - entry.lastUsedAt;
+                  return `${entry.fp}  last used ${days(Math.floor(unused / DAY_MS))} ago · signs out in ${days(Math.max(0, Math.ceil((ttlMs - unused) / DAY_MS)))}`;
+                })
+                .join("\n")}\n`
+            : "No trusted phones.\n",
+        );
         if (pins.allowNextOpen(Date.now())) {
           process.stdout.write("allow-next is open: the next new phone to authenticate will be trusted.\n");
         }

@@ -28,6 +28,7 @@ import {
   type PhoneSettings,
   parseDefaultModes,
   parseTimings,
+  parsePairingTtlDays,
   parseWaitLimitMs,
 } from "./phone-settings";
 import type { QuestionClosed, QuestionOpened, QuestionRelay } from "./question-relay";
@@ -888,12 +889,18 @@ export class PhoneV2 {
     }
     const parsedTimings = parseTimings(frame.timings);
     const waitLimitMs = parseWaitLimitMs(frame.waitLimitMs);
-    if (!parsedTimings || waitLimitMs === undefined) {
+    // Optional, so a phone that does not send it leaves the stored value alone; a present one must be valid.
+    const pairingTtlDays = "pairingTtlDays" in frame ? parsePairingTtlDays(frame.pairingTtlDays) : undefined;
+    if (!parsedTimings || waitLimitMs === undefined || ("pairingTtlDays" in frame && pairingTtlDays === undefined)) {
       this.ack(channel, msgId, "rejected", "bad_settings");
       return;
     }
     try {
-      this.deps.settings.update({ timings: parsedTimings, waitLimitMs });
+      this.deps.settings.update({
+        timings: parsedTimings,
+        waitLimitMs,
+        ...(pairingTtlDays === undefined ? {} : { pairingTtlDays }),
+      });
     } catch {
       this.ack(channel, msgId, "rejected", "state_unwritable");
       return;

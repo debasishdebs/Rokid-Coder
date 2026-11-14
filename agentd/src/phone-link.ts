@@ -21,7 +21,14 @@ import {
 import type { SessionStore } from "./session-store";
 import type { TerminalInputOutcome } from "./terminal-input";
 import { TailscalePeerDiscovery } from "./tailnet-discovery";
-import { PinStore, pinnedFingerprint, shortFingerprint, watchFiles } from "./tls";
+import {
+  DAY_MS,
+  DEFAULT_PAIRING_TTL_DAYS,
+  PinStore,
+  pinnedFingerprint,
+  shortFingerprint,
+  watchFiles,
+} from "./tls";
 import { DETAIL_MESSAGE_LIMIT } from "./transcript-messages";
 import type {
   AgentConfig,
@@ -84,6 +91,8 @@ export interface PhoneLinkOptions {
    * Without a store the set lasts only as long as the process.
    */
   pins?: PinStore;
+  /** How long a pairing may go unused before the phone must pair again; read live, since the phone can change it. */
+  pairingTtlMs?: () => number;
   /**
    * agentd's own identity, presented as the TLS client certificate when it
    * dials a phone, so the phone can pin this computer too (R114).
@@ -95,6 +104,8 @@ export interface PhoneLinkOptions {
   helloTimeoutMs?: number;
   /** How often a live link re-checks that its phone is still trusted (a file watch also triggers it). */
   trustCheckIntervalMs?: number;
+  /** How often a live link pings, which is also when it keeps its pairing in use. Test seam. */
+  pingIntervalMs?: number;
   reconnectDelayMs?: number;
   targetRefreshIntervalMs?: number;
   threadStartTimeoutMs?: number;
@@ -333,7 +344,7 @@ export class PhoneLink {
       return false;
     }
     try {
-      return this.pins.has(this.peerFingerprint);
+      return this.pins.isTrusted(this.peerFingerprint, this.now(), this.pairingTtlMs());
     } catch {
       return false;
     }
@@ -567,6 +578,31 @@ export class PhoneLink {
     this.options.logger.warn("phone_announcement_plaintext_ignored", { target });
   }
 
+  private pairingTtlMs(): number {
+    return this.options.pairingTtlMs?.() ?? DEFAULT_PAIRING_TTL_DAYS * DAY_MS;
+  }
+
+  /**
+   * Records a use of the phone's pairing while the link is trusted right now (a
+   * stale pairing is forgotten, not renewed). The store writes at most once an
+   * hour per phone; a failed write only costs the record, never the link.
+   */
+  private touchPairing(): void {
+    const fingerprint = this.peerFingerprint;
+    if (!fingerprint || !this.linkTrusted) {
+      return;
+    }
+    try {
+      if (this.trusted) {
+        this.pins.touch(fingerprint, this.now());
+      }
+    } catch (error) {
+      this.options.logger.warn("phone_link_pairing_touch_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private hasTrustedPhones(): boolean {
     try {
       return this.pins.everPinned();
@@ -618,7 +654,8 @@ export class PhoneLink {
 
   /** In the set, or eligible for trust on first use: only inside an open pairing window. */
   private mayTrust(fingerprint: string): boolean {
-    return this.pins.has(fingerprint) || this.pins.allowNextOpen(this.now());
+    // Stale counts as unpinned (and is forgotten on the spot): an expired phone cannot renew itself by reconnecting.
+    return this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs()) || this.pins.allowNextOpen(this.now());
   }
 
   /**
@@ -861,7 +898,9 @@ export class PhoneLink {
     this.clearPingTimer();
     this.pingTimer = setInterval(() => {
       this.send({ type: "ping", t: this.now() });
-    }, LINK_PING_INTERVAL_MS);
+      // A link that stays up keeps its pairing in use.
+      this.touchPairing();
+    }, this.options.pingIntervalMs ?? LINK_PING_INTERVAL_MS);
     this.pingTimer.unref();
     const file = this.pins.filePath;
     this.stopTrustWatch = watchFiles(
@@ -870,6 +909,8 @@ export class PhoneLink {
       () => this.recheckTrust(),
     );
     this.options.onConnected?.(this.linkTrusted);
+    // Admitted: this is a use of the pairing.
+    this.touchPairing();
   }
 
   /**
@@ -885,8 +926,8 @@ export class PhoneLink {
     }
     let known: boolean;
     try {
-      known = this.pins.has(fingerprint);
-      if (!known && !this.mayTrust(fingerprint)) {
+      known = this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs());
+      if (!known && !this.pins.allowNextOpen(this.now())) {
         return false;
       }
     } catch (error) {
@@ -896,7 +937,7 @@ export class PhoneLink {
     if (!known) {
       try {
         // Adding also closes an open allow-next window: one admission per arming.
-        this.pins.add(fingerprint);
+        this.pins.add(fingerprint, this.now());
       } catch (error) {
         // Unpinned means untrusted: better refused than trusted by a store that cannot remember it.
         this.options.logger.error("phone_link_pin_store_failed", {

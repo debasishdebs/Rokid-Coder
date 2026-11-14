@@ -93,6 +93,7 @@ async function withDaemon({ transport, tls = true, attached = [], discovered = [
     );
 
     for (const [name, content] of Object.entries(coderFiles)) {
+      await fsp.mkdir(path.dirname(path.join(coderDir, name)), { recursive: true });
       await fsp.writeFile(path.join(coderDir, name), JSON.stringify(content));
     }
 

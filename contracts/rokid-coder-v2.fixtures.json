@@ -318,6 +318,7 @@
         "reminderMs": 300000
       },
       "waitLimitMs": 1800000,
+      "pairingTtlDays": 14,
       "msgId": "fx-msg-settings_sync"
     },
     "models_request": {

@@ -618,6 +618,67 @@ test("settings_sync_updates_wait_limit_and_caps_at_3600s", async () => {
   }
 });
 
+test("settings_sync_pairing_ttl_days_validated_and_persisted", async () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  for (const transport of TRANSPORTS) {
+    await withDaemon({ transport, tls: true }, async ({ daemon, phone, coderDir, pins }) => {
+      const base = { type: "settings_sync", v: 2, timings: DEFAULT_ALERT_TIMINGS, waitLimitMs: 900_000 };
+      const settingsFile = path.join(coderDir, "settings.json");
+      for (const [index, bad] of [0, 366, -1, 1.5, "30", null, [], Number.NaN].entries()) {
+        const msgId = `ttl-bad-${index}`;
+        phone.send({ ...base, msgId, pairingTtlDays: bad });
+        assert.equal((await ackFor(phone, msgId)).error, "bad_settings", JSON.stringify(bad));
+      }
+      assert.equal(await exists(settingsFile), false, "nothing was saved");
+
+      // Without the field, as an older phone sends it: applied, and the default stands.
+      phone.send({ ...base, msgId: "ttl-none" });
+      assert.equal((await ackFor(phone, "ttl-none")).result, "applied");
+      assert.equal(JSON.parse(await fsp.readFile(settingsFile, "utf8")).pairingTtlDays, 14);
+
+      // The pairing was just used, so 20 days on it is inside a 30-day TTL, and outside the 14-day one.
+      phone.send({ ...base, msgId: "ttl-ok", pairingTtlDays: 30 });
+      assert.equal((await ackFor(phone, "ttl-ok")).result, "applied");
+      const saved = JSON.parse(await fsp.readFile(settingsFile, "utf8"));
+      assert.equal(saved.pairingTtlDays, 30);
+      assert.equal(saved.version, 1);
+      assert.equal(saved.waitLimitMs, 900_000);
+      assert.deepEqual(daemon.sweepPairings(Date.now() + 20 * DAY), [], "30 days applies to the next expire");
+      assert.equal(pins.list().length, 1);
+
+      // A frame without it later keeps 30.
+      phone.send({ ...base, msgId: "ttl-keep", waitLimitMs: 600_000 });
+      await ackFor(phone, "ttl-keep");
+      assert.equal(JSON.parse(await fsp.readFile(settingsFile, "utf8")).pairingTtlDays, 30);
+
+      phone.send({ ...base, msgId: "ttl-1", pairingTtlDays: 1 });
+      assert.equal((await ackFor(phone, "ttl-1")).result, "applied");
+      phone.send({ ...base, msgId: "ttl-365", pairingTtlDays: 365 });
+      assert.equal((await ackFor(phone, "ttl-365")).result, "applied");
+      assert.equal(new PhoneSettingsStore(settingsFile).get().pairingTtlDays, 365, "what the next start reads");
+      assert.deepEqual(daemon.sweepPairings(Date.now() + 364 * DAY), []);
+      assert.equal(daemon.sweepPairings(Date.now() + 366 * DAY).length, 1);
+    });
+  }
+});
+
+test("settings_files_without_pairing_ttl_days_still_load", async () => {
+  const dir = await fsp.mkdtemp(path.join(require("node:os").tmpdir(), "rokid-coder-test-"));
+  try {
+    const file = path.join(dir, "settings.json");
+    await fsp.writeFile(file, JSON.stringify({ version: 1, timings: DEFAULT_ALERT_TIMINGS, waitLimitMs: 900_000 }));
+    const loaded = new PhoneSettingsStore(file).get();
+    assert.equal(loaded.waitLimitMs, 900_000, "the rest of an older file is kept");
+    assert.equal(loaded.pairingTtlDays, 14);
+    for (const junk of [0, 366, 2.5, "7", null]) {
+      await fsp.writeFile(file, JSON.stringify({ version: 1, waitLimitMs: 900_000, pairingTtlDays: junk }));
+      assert.equal(new PhoneSettingsStore(file).get().pairingTtlDays, 14, `a bad stored value (${junk}) falls back`);
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("settings_sync_with_default_modes_key_is_rejected", async () => {
   for (const transport of TRANSPORTS) {
     await withDaemon({ transport, tls: true }, async ({ daemon, phone, coderDir }) => {

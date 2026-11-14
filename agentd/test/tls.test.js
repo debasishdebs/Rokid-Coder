@@ -321,7 +321,7 @@ test("a_version_1_host_keyed_pin_file_is_migrated_into_the_set", async () => {
     const store = new PinStore(file);
     assert.deepEqual(store.list(), [fp]);
     store.add((await phoneCert("b")).fingerprint256);
-    assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).version, 2, "rewritten as version 2");
+    assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).version, 3, "rewritten as version 3");
   });
 });
 
@@ -1632,6 +1632,379 @@ test("forget_one_says_its_links_close_and_keeps_steer", async () => {
       assert.equal(phone.closes, closesBefore);
       const frame = phone.sendFrame("mode_set", ["claude:s1", "acceptEdits"]);
       assert.equal((await phone.waitFor("ack", (f) => f.msgId === frame.msgId)).result, "applied");
+    },
+  );
+});
+
+// ---- usage-based pairing TTL ----
+
+const DAY = 24 * 60 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
+const pinsFileOf = (dir) => path.join(dir, "tls", "phone-pins.json");
+
+test("v2_pins_migrate_to_v3_with_now_as_last_used", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const fpA = (await phoneCert("a")).fingerprint256;
+    const fpB = (await phoneCert("b")).fingerprint256;
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, JSON.stringify({ version: 2, everPinned: true, phones: [fpA, fpB], allowNextUntil: 0 }));
+    const store = new PinStore(file, { now: () => 5_000_000 });
+    assert.deepEqual(
+      store.entries(),
+      [fpA, fpB].map((fp) => ({ fp, addedAt: 5_000_000, lastUsedAt: 5_000_000 })),
+    );
+    assert.deepEqual(store.list(), [fpA, fpB], "the same phones, so nobody is signed out by the upgrade");
+    assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).version, 2, "reading alone does not rewrite");
+    // The first expiry run writes the migration down, so a restart does not start the clock over.
+    assert.deepEqual(store.expire(5_000_000 + 1, 14 * DAY), []);
+    const written = JSON.parse(await fsp.readFile(file, "utf8"));
+    assert.equal(written.version, 3);
+    assert.deepEqual(written.phones, [
+      { fp: fpA, addedAt: 5_000_000, lastUsedAt: 5_000_000 },
+      { fp: fpB, addedAt: 5_000_000, lastUsedAt: 5_000_000 },
+    ]);
+    assert.deepEqual(new PinStore(file, { now: () => 99_000_000 }).entries()[0].lastUsedAt, 5_000_000);
+  });
+});
+
+test("a_version_3_file_with_a_bad_entry_is_refused", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const fp = (await phoneCert("a")).fingerprint256;
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    for (const phones of [[fp], [{ fp, addedAt: 1 }], [{ fp: "nope", addedAt: 1, lastUsedAt: 1 }]]) {
+      await fsp.writeFile(file, JSON.stringify({ version: 3, phones }));
+      assert.throws(() => new PinStore(file), /Invalid phone pins/);
+    }
+  });
+});
+
+test("touch_writes_at_most_hourly", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const fp = (await phoneCert("a")).fingerprint256;
+    const other = (await phoneCert("b")).fingerprint256;
+    let writes = 0;
+    const counting = (target, content) => {
+      writes += 1;
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, content);
+    };
+    const t0 = 10 * DAY;
+    const store = new PinStore(file, { writeFile: counting });
+    store.add(fp, t0);
+    store.add(other, t0);
+    assert.equal(writes, 2);
+    store.touch(fp, t0 + 1_000);
+    store.touch(fp, t0 + 30 * 60_000);
+    store.touch(fp, t0 + HOUR - 1);
+    assert.equal(writes, 2, "within the hour of its last use: nothing is written");
+    store.touch(fp, t0 + HOUR);
+    assert.equal(writes, 3, "an hour on: written");
+    assert.equal(store.entries().find((e) => e.fp === fp).lastUsedAt, t0 + HOUR);
+    store.touch(fp, t0 + HOUR + 59 * 60_000);
+    assert.equal(writes, 3, "the hour counts from the last write");
+    store.touch(fp, t0 + 2 * HOUR);
+    assert.equal(writes, 4);
+    assert.equal(new PinStore(file).entries().find((e) => e.fp === fp).lastUsedAt, t0 + 2 * HOUR, "on disk");
+    assert.equal(new PinStore(file).entries().find((e) => e.fp === other).lastUsedAt, t0, "the other phone is untouched");
+    store.touch((await phoneCert("stranger")).fingerprint256, t0 + 9 * HOUR);
+    assert.equal(writes, 4, "an unpinned fingerprint is ignored");
+  });
+});
+
+test("future_last_used_is_clamped_to_now", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const fp = (await phoneCert("a")).fingerprint256;
+    const now = 100 * DAY;
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    // The clock went back: last used a year from now.
+    const future = { version: 3, phones: [{ fp, addedAt: now - DAY, lastUsedAt: now + 365 * DAY }] };
+    await fsp.writeFile(file, JSON.stringify(future));
+    const store = new PinStore(file, { now: () => now });
+    assert.equal(store.entries()[0].lastUsedAt, now, "reads as now, never the future");
+    assert.equal(store.isTrusted(fp, now, 14 * DAY), true);
+    // Not the immortal pin a future time would make: 14 days on it is as stale as any other.
+    assert.equal(store.isTrusted(fp, now + 14 * DAY - 1, 14 * DAY), true);
+    assert.deepEqual(store.expire(now + 14 * DAY, 14 * DAY), [fp]);
+
+    // The next write puts the corrected time on disk, even inside the hour.
+    await fsp.writeFile(file, JSON.stringify(future));
+    store.touch(fp, now + 1_000);
+    assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).phones[0].lastUsedAt, now + 1_000);
+  });
+});
+
+test("expire_forgets_only_the_stale_and_isTrusted_forgets_on_the_spot", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const old = (await phoneCert("old")).fingerprint256;
+    const fresh = (await phoneCert("fresh")).fingerprint256;
+    const t0 = 50 * DAY;
+    const { entries, logger } = loggerHarness();
+    const store = new PinStore(file, { logger });
+    store.add(old, t0);
+    store.add(fresh, t0 + 10 * DAY);
+    const now = t0 + 15 * DAY;
+    assert.deepEqual(store.expire(now, 14 * DAY), [old]);
+    assert.deepEqual(store.list(), [fresh]);
+    assert.deepEqual(new PinStore(file).list(), [fresh], "on disk");
+    const logged = entries.find((e) => e.event === "phone_pairing_expired");
+    assert.deepEqual(logged.meta, { fingerprint: short(old), unused_days: 15 });
+    assert.equal(new PinStore(file).everPinned(), true, "forgetting is not a fresh install");
+    assert.deepEqual(store.expire(now, 14 * DAY), [], "nothing more to forget");
+
+    assert.equal(store.isTrusted(fresh, t0 + 24 * DAY - 1, 14 * DAY), true);
+    assert.equal(store.isTrusted(fresh, t0 + 24 * DAY, 14 * DAY), false, "stale: not trusted");
+    assert.deepEqual(store.list(), [], "and forgotten on the spot");
+    assert.equal(store.isTrusted("not a fingerprint", now, DAY), false);
+  });
+});
+
+for (const transport of TRANSPORTS) {
+  test(`pin_unused_for_ttl_is_expired_and_link_revoked (${transport})`, async () => {
+    await withDaemon(
+      { transport, attached: [{ provider: "claude", id: "s1" }] },
+      async ({ daemon, phone, pins, coderDir }) => {
+        const connectedAt = Date.now();
+        assert.equal(pins.entries().length, 1);
+        assert.ok(pins.entries()[0].lastUsedAt <= connectedAt, "the phone's pairing was used when it connected");
+        const seen = phone.frames.length;
+        const closesBefore = phone.closes;
+        // 15 days later with nothing used it since: the hourly sweep runs.
+        const forgotten = daemon.sweepPairings(connectedAt + 15 * DAY);
+        assert.deepEqual(forgotten, [phone.fingerprint]);
+        await phone.waitForClose(closesBefore, 4000);
+        assert.deepEqual(
+          phone.frames.slice(seen).filter((f) => f.type === "link_trust"),
+          [FIXTURES.agent_to_phone.link_trust],
+          "told before the link went",
+        );
+        assert.equal(new PinStore(path.join(coderDir, "tls", "phone-pins.json")).list().length, 0, "gone from the file");
+      },
+    );
+  });
+}
+
+test("connected_phone_never_expires (phonelink)", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const phoneId = await phoneCert("phone");
+    const server = await listenAsPhone(phoneId);
+    let clock = Date.now();
+    const pins = new PinStore(file, { now: () => clock });
+    pins.add(phoneId.fingerprint256, clock);
+    const { link, stop } = newLink(pins, { now: () => clock, pingIntervalMs: 10, trustCheckIntervalMs: 20 });
+    try {
+      dialTls(link, server);
+      await waitUntil(() => link.trustedConnected, "link never became trusted");
+      const lastUsed = () => new PinStore(file, { now: () => clock }).entries()[0].lastUsedAt;
+      assert.equal(lastUsed(), clock);
+      // Ten days at a time, three times: longer than the TTL in all, but never idle for it.
+      for (let step = 1; step <= 3; step += 1) {
+        clock += 10 * DAY;
+        await waitUntil(() => lastUsed() === clock, `the live link did not renew its pairing (step ${step})`);
+        assert.equal(pins.expire(clock, 14 * DAY).length, 0, "so the sweep forgets nothing");
+      }
+      await settle(80);
+      assert.equal(link.trustedConnected, true);
+      assert.equal(server.seen.closes, 0, "never dropped");
+    } finally {
+      stop();
+      server.close();
+    }
+  });
+});
+
+test("connected_phone_never_expires (wshub)", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    let clock = Date.now();
+    const phoneId = await phoneCert("phone");
+    const pins = new PinStore(file, { now: () => clock });
+    pins.add(phoneId.fingerprint256, clock);
+    const { hub, agent } = await newHub({ pins, now: () => clock, keepaliveIntervalMs: 10, trustCheckIntervalMs: 20 });
+    const phone = await connectPhone(hub, agent, { cert: phoneId });
+    const lastUsed = () => new PinStore(file, { now: () => clock }).entries()[0].lastUsedAt;
+    assert.equal(lastUsed(), clock);
+    for (let step = 1; step <= 3; step += 1) {
+      clock += 10 * DAY;
+      await waitUntil(() => lastUsed() === clock, `the live link did not renew its pairing (step ${step})`);
+      assert.equal(pins.expire(clock, 14 * DAY).length, 0, "so the sweep forgets nothing");
+    }
+    await settle(80);
+    assert.equal(hub.hasTrustedClient, true);
+    assert.equal(phone.closes, 0, "never dropped");
+    assert.equal(phone.frames.some((f) => f.type === "link_trust"), false);
+  });
+});
+
+test("a_link_is_not_touched_on_every_tick", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const phoneId = await phoneCert("phone");
+    const server = await listenAsPhone(phoneId);
+    const clock = Date.now();
+    let writes = 0;
+    const pins = new PinStore(file, {
+      now: () => clock,
+      writeFile: (target, content) => {
+        writes += 1;
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, content);
+      },
+    });
+    pins.add(phoneId.fingerprint256, clock);
+    const { link, stop } = newLink(pins, { now: () => clock, pingIntervalMs: 5 });
+    try {
+      dialTls(link, server);
+      await waitUntil(() => link.trustedConnected, "link never became trusted");
+      await settle(100); // twenty pings
+      assert.equal(writes, 1, "only the pin itself was written; no touch inside the hour");
+    } finally {
+      stop();
+      server.close();
+    }
+  });
+});
+
+test("expired_phone_reconnecting_before_sweep_is_refused (phonelink)", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const phoneId = await phoneCert("phone");
+    const server = await listenAsPhone(phoneId);
+    const now = Date.now();
+    let writes = 0;
+    const pins = new PinStore(file, {
+      writeFile: (target, content) => {
+        writes += 1;
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, content);
+      },
+    });
+    pins.add(phoneId.fingerprint256, now - 15 * DAY);
+    pins.add((await phoneCert("fresh")).fingerprint256, now);
+    const writesBefore = writes;
+    const { link, logs, stop } = newLink(pins, { now: () => now });
+    try {
+      // 15 days idle, and no sweep has run: the phone dials in.
+      dialTls(link, server);
+      await waitUntil(() => logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "the stale phone was admitted");
+      await settle(40);
+      assert.equal(link.connected, false);
+      assert.deepEqual(server.seen.lines, [], "refused before hello: no token went to it");
+      assert.equal(pins.has(phoneId.fingerprint256), false, "the entry is removed");
+      assert.equal(new PinStore(file).has(phoneId.fingerprint256), false, "on disk");
+      assert.equal(writes, writesBefore + 1, "one write, the removal; it was never touched");
+      assert.equal(pins.entries().length, 1, "the fresh phone stays");
+    } finally {
+      stop();
+      server.close();
+    }
+  });
+});
+
+test("expired_phone_reconnecting_before_sweep_is_refused (wshub)", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const phoneId = await phoneCert("phone");
+    const now = Date.now();
+    let writes = 0;
+    const pins = new PinStore(file, {
+      writeFile: (target, content) => {
+        writes += 1;
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, content);
+      },
+    });
+    pins.add(phoneId.fingerprint256, now - 15 * DAY);
+    pins.add((await phoneCert("fresh")).fingerprint256, now);
+    const writesBefore = writes;
+    const { hub, agent, logs } = await newHub({ pins, now: () => now });
+    const { reject, code } = await refusedHello(hub, agent, { cert: phoneId });
+    assert.deepEqual(reject, REPAIR_NEEDED);
+    assert.equal(code, 4403);
+    assert.deepEqual(
+      logs.entries.find((e) => e.event === "ws_auth_rejected").meta,
+      { reason: "unpinned_cert", fingerprint: short(phoneId.fingerprint256) },
+    );
+    assert.equal(hub.hasTrustedClient, false);
+    assert.equal(new PinStore(file).has(phoneId.fingerprint256), false, "the entry is removed");
+    assert.equal(writes, writesBefore + 1, "one write, the removal; it was never touched");
+    assert.equal(pins.entries().length, 1, "the fresh phone stays");
+  });
+});
+
+test("a_phone_that_expired_can_pair_again_through_the_window", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const phoneId = await phoneCert("phone");
+    const now = Date.now();
+    const pins = new PinStore(file);
+    pins.add(phoneId.fingerprint256, now - 20 * DAY);
+    pins.armAllowNext(now);
+    const { hub, agent } = await newHub({ pins, now: () => now });
+    const phone = await connectPhone(hub, agent, { cert: phoneId });
+    assert.equal(phone.frames.find((f) => f.type === "hello_ack").steering, true);
+    const [entry] = new PinStore(file).entries();
+    assert.equal(entry.lastUsedAt, now, "pinned afresh, as new");
+    assert.equal(entry.addedAt, now);
+  });
+});
+
+test("phones_list_shows_last_used_and_sign_out_in", async () => {
+  await withTempDir(async (dir) => {
+    const stateDir = path.join(dir, "nexus-agentd");
+    const coderDir = path.join(dir, "rokid-coder");
+    const { ensureConfig, saveConfig } = require("../dist/config.js");
+    saveConfig({ ...ensureConfig(stateDir), rokidCoder: { stateDir: coderDir } }, stateDir);
+    const a = (await phoneCert("a")).fingerprint256;
+    const b = (await phoneCert("b")).fingerprint256;
+    const c = (await phoneCert("c")).fingerprint256;
+    const now = Date.now();
+    const file = pinsFileOf(coderDir);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, JSON.stringify({
+      version: 3,
+      everPinned: true,
+      allowNextUntil: 0,
+      phones: [
+        { fp: a, addedAt: now - 40 * DAY, lastUsedAt: now - 3 * DAY - HOUR },
+        { fp: b, addedAt: now - 40 * DAY, lastUsedAt: now - 1 * DAY - HOUR },
+        { fp: c, addedAt: now - 40 * DAY, lastUsedAt: now - 20 * DAY },
+      ],
+    }));
+    let { stdout } = await runCli(coderDir, ["phones", "list"]);
+    assert.deepEqual(stdout.trim().split("\n"), [
+      `${a}  last used 3 days ago · signs out in 11 days`,
+      `${b}  last used 1 day ago · signs out in 13 days`,
+      `${c}  last used 20 days ago · signs out in 0 days`,
+    ]);
+    // The phone's synced setting is what it counts down to.
+    await fsp.writeFile(path.join(coderDir, "settings.json"), JSON.stringify({ version: 1, pairingTtlDays: 30 }));
+    ({ stdout } = await runCli(coderDir, ["phones", "list"]));
+    assert.ok(stdout.includes(`${a}  last used 3 days ago · signs out in 27 days`), stdout);
+  });
+});
+
+test("daemon_expires_stale_pairings_at_startup", async () => {
+  const stale = "CD".repeat(32);
+  await withDaemon(
+    {
+      transport: "wshub",
+      coderFiles: {
+        "tls/phone-pins.json": {
+          version: 3,
+          everPinned: true,
+          allowNextUntil: 0,
+          phones: [{ fp: stale.match(/../g).join(":"), addedAt: 1, lastUsedAt: Date.now() - 20 * DAY }],
+        },
+      },
+    },
+    async ({ phone, pins }) => {
+      assert.deepEqual(pins.list(), [phone.fingerprint], "only the phone that is connected is left");
     },
   );
 });

@@ -18,10 +18,16 @@ import {
 import path from "node:path";
 import { generate } from "selfsigned";
 import { defaultRokidCoderStateDir } from "./config";
+import type { Logger } from "./types";
 
 const CERT_COMMON_NAME = "rokid-coder-agentd";
 const CERT_VALID_DAYS = 3650;
-const PINS_VERSION = 2;
+const PINS_VERSION = 3;
+/** A phone whose pairing goes unused for this long must pair again; the phone's settings may change it. */
+export const DEFAULT_PAIRING_TTL_DAYS = 14;
+export const DAY_MS = 24 * 60 * 60 * 1000;
+/** `touch` writes a phone's last use at most this often. */
+const TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 /** How long `phones allow-next` leaves the door open for one more phone. */
 export const ALLOW_NEXT_WINDOW_MS = 2 * 60 * 1000;
 const CERT_LOCK_STALE_MS = 30_000;
@@ -267,9 +273,20 @@ export function watchFiles(files: string[], intervalMs: number, onChange: () => 
   };
 }
 
+export interface PinEntry {
+  /** Normalised fingerprint. */
+  fp: string;
+  addedAt: number;
+  lastUsedAt: number;
+}
+
 /**
  * The set of phone certificates agentd trusts, by `fingerprint256`. A phone is
  * its cert, wherever it is dialled from, so an IP change needs nothing.
+ *
+ * Each pin remembers when the phone was added and last used, and a pairing
+ * unused for the TTL is forgotten (`expire`, and `isTrusted` on the spot, so a
+ * phone cannot renew itself between sweeps).
  *
  * Trust on first use applies only at first-ever setup, while there is no pin
  * file at all, or inside the window `phones allow-next` opens for one more
@@ -283,18 +300,24 @@ export function watchFiles(files: string[], intervalMs: number, onChange: () => 
  * change is kept only once it is on disk.
  */
 export class PinStore {
-  private phones = new Set<string>();
+  private phones = new Map<string, PinEntry>();
   private allowNextUntil = 0;
   private pinnedBefore = false;
+  /** True while what was read differs from the file (an older format, or a time in the future), until the next write. */
+  private needsWrite = false;
   private signature: string | undefined;
   private readonly writeFile: (file: string, content: string) => void;
+  private readonly clock: () => number;
+  private readonly logger?: Logger;
 
-  /** Without a file the set lives only as long as the process. `writeFile` is for tests. */
+  /** Without a file the set lives only as long as the process. `writeFile` and `now` are for tests. */
   constructor(
     private readonly file?: string,
-    options: { writeFile?: (file: string, content: string) => void } = {},
+    options: { writeFile?: (file: string, content: string) => void; now?: () => number; logger?: Logger } = {},
   ) {
     this.writeFile = options.writeFile ?? writePrivate;
+    this.clock = options.now ?? Date.now;
+    this.logger = options.logger;
     this.reload();
   }
 
@@ -305,13 +328,87 @@ export class PinStore {
 
   list(): string[] {
     this.reload();
-    return [...this.phones];
+    return [...this.phones.keys()];
   }
 
+  /** Each pinned phone with when it was added and last used (never later than now). */
+  entries(): PinEntry[] {
+    this.reload();
+    const now = this.clock();
+    return [...this.phones.values()].map((entry) => ({
+      fp: entry.fp,
+      addedAt: entry.addedAt,
+      lastUsedAt: Math.min(entry.lastUsedAt, now),
+    }));
+  }
+
+  /** Pinned, whether or not stale. For the CLI; admission and trust checks use `isTrusted`. */
   has(fp: string): boolean {
     this.reload();
     const normalized = normalizeFingerprint(fp);
     return normalized !== undefined && this.phones.has(normalized);
+  }
+
+  /**
+   * Pinned and used within `ttlMs`. A stale entry is forgotten on the spot,
+   * so a phone whose pairing has run out cannot reconnect and renew itself
+   * before the next sweep. Throws when the file cannot be read or written.
+   */
+  isTrusted(fp: string, now: number, ttlMs: number): boolean {
+    this.reload();
+    const normalized = normalizeFingerprint(fp);
+    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+    if (!entry) {
+      return false;
+    }
+    if (!isStale(entry, now, ttlMs)) {
+      return true;
+    }
+    this.expire(now, ttlMs);
+    return false;
+  }
+
+  /**
+   * Records that the phone was used, at most once an hour per phone. Called
+   * only after the phone was admitted; an unpinned fingerprint is ignored.
+   */
+  touch(fp: string, now: number): void {
+    this.reload();
+    const normalized = normalizeFingerprint(fp);
+    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+    if (!entry) {
+      return;
+    }
+    if (!this.needsWrite && now >= entry.lastUsedAt && now - entry.lastUsedAt < TOUCH_INTERVAL_MS) {
+      return;
+    }
+    const next = new Map(this.phones);
+    next.set(entry.fp, { ...entry, lastUsedAt: now });
+    this.commit(next, this.allowNextUntil, this.pinnedBefore);
+  }
+
+  /**
+   * Forgets every phone unused for `ttlMs`; returns their fingerprints. Also
+   * writes back what was migrated from an older file format or corrected on read.
+   */
+  expire(now: number, ttlMs: number): string[] {
+    this.reload();
+    const gone = [...this.phones.values()].filter((entry) => isStale(entry, now, ttlMs));
+    if (gone.length === 0 && !this.needsWrite) {
+      return [];
+    }
+    const remaining = new Map(this.phones);
+    for (const entry of gone) {
+      remaining.delete(entry.fp);
+    }
+    this.commit(remaining, this.allowNextUntil, this.pinnedBefore);
+    for (const entry of gone) {
+      this.logger?.info("phone_pairing_expired", {
+        fingerprint: shortFingerprint(entry.fp),
+        unused_days: Math.floor((now - Math.min(entry.lastUsedAt, now)) / DAY_MS),
+      });
+    }
+    return gone.map((entry) => entry.fp);
   }
 
   isEmpty(): boolean {
@@ -325,14 +422,16 @@ export class PinStore {
     return this.pinnedBefore;
   }
 
-  add(fp: string): void {
+  add(fp: string, now: number = this.clock()): void {
     const normalized = normalizeFingerprint(fp);
     if (!normalized) {
       throw new Error("not a SHA-256 certificate fingerprint");
     }
     this.reload();
     // A phone admitted through the empty set used up an open window too.
-    this.commit(new Set([...this.phones, normalized]), 0, true);
+    const next = new Map(this.phones);
+    next.set(normalized, { fp: normalized, addedAt: this.phones.get(normalized)?.addedAt ?? now, lastUsedAt: now });
+    this.commit(next, 0, true);
   }
 
   /** Removes the phone whose fingerprint is `fp` or starts with it; returns what was removed. */
@@ -342,12 +441,12 @@ export class PinStore {
     if (wanted.length < 8 || !/^[0-9A-F]+$/.test(wanted)) {
       throw new Error("give at least 8 hex digits of the fingerprint");
     }
-    const hits = [...this.phones].filter((phone) => phone.replace(/:/g, "").startsWith(wanted));
+    const hits = [...this.phones.keys()].filter((phone) => phone.replace(/:/g, "").startsWith(wanted));
     if (hits.length > 1) {
       throw new Error("that matches more than one phone; give more of the fingerprint");
     }
     if (hits.length > 0) {
-      const remaining = new Set(this.phones);
+      const remaining = new Map(this.phones);
       for (const hit of hits) {
         remaining.delete(hit);
       }
@@ -359,7 +458,7 @@ export class PinStore {
   /** Empties the set. Not a fresh install: a new phone then needs `phones allow-next`. */
   forgetAll(): void {
     this.reload();
-    this.commit(new Set(), 0, this.pinnedBefore);
+    this.commit(new Map(), 0, this.pinnedBefore);
   }
 
   /** Lets one more unknown phone be trusted on first use until `now` + the window. */
@@ -414,26 +513,39 @@ export class PinStore {
     if (!record || typeof record !== "object") {
       throw new Error(`Invalid phone pins file at ${file}`);
     }
-    // Version 1 keyed fingerprints by the host they were first seen on. The
-    // fingerprints were authentic first uses, so they carry over as the set.
+    // Versions 1 and 2 kept bare fingerprints (1 keyed them by the host they
+    // were first seen on). They were authentic first uses, so they carry over,
+    // with the time of this migration as when they were added and last used.
+    const readAt = this.clock();
     let raw: unknown[];
+    let migrated = true;
     if (record.version === 1 && record.pins && typeof record.pins === "object" && !Array.isArray(record.pins)) {
       raw = Object.values(record.pins);
+    } else if (record.version === 2 && Array.isArray(record.phones)) {
+      raw = record.phones;
     } else if (record.version === PINS_VERSION && Array.isArray(record.phones)) {
       raw = record.phones;
+      migrated = false;
     } else {
       throw new Error(`Invalid phone pins file at ${file}`);
     }
-    const phones = new Set<string>();
-    for (const entry of raw) {
-      const normalized = typeof entry === "string" ? normalizeFingerprint(entry) : undefined;
-      if (!normalized) {
+    const phones = new Map<string, PinEntry>();
+    let needsWrite = migrated;
+    for (const item of raw) {
+      const entry = migrated ? migratedEntry(item, readAt) : parseEntry(item);
+      if (!entry) {
         throw new Error(`Invalid phone pins file at ${file}`);
       }
-      phones.add(normalized);
+      // Never used in the future: with the clock set back a pin would otherwise outlive its TTL by that much.
+      if (entry.lastUsedAt > readAt) {
+        entry.lastUsedAt = readAt;
+        needsWrite = true;
+      }
+      phones.set(entry.fp, entry);
     }
     this.signature = signature;
     this.phones = phones;
+    this.needsWrite = needsWrite;
     // Any pin file, of any version and even with no phones, was written after
     // setup began; older builds left `forget --all` files without the flag.
     this.pinnedBefore = true;
@@ -444,7 +556,7 @@ export class PinStore {
   }
 
   /** Writes the new state and keeps it only once the write succeeded: a pin the disk lacks is no pin. */
-  private commit(phones: Set<string>, allowNextUntil: number, pinnedBefore: boolean): void {
+  private commit(phones: Map<string, PinEntry>, allowNextUntil: number, pinnedBefore: boolean): void {
     if (this.file) {
       privateDir(path.dirname(this.file));
       this.writeFile(
@@ -454,7 +566,7 @@ export class PinStore {
             version: PINS_VERSION,
             // Still written, so an older binary reading this file stays closed too.
             everPinned: true,
-            phones: [...phones],
+            phones: [...phones.values()],
             allowNextUntil,
           },
           null,
@@ -466,9 +578,32 @@ export class PinStore {
       this.signature = undefined;
     }
     this.phones = phones;
+    this.needsWrite = false;
     this.allowNextUntil = allowNextUntil;
     this.pinnedBefore = pinnedBefore || this.file !== undefined;
   }
+}
+
+/** A recorded use in the future (the clock went back) counts as now. */
+function isStale(entry: PinEntry, now: number, ttlMs: number): boolean {
+  return now - Math.min(entry.lastUsedAt, now) >= ttlMs;
+}
+
+function migratedEntry(item: unknown, at: number): PinEntry | undefined {
+  const fp = typeof item === "string" ? normalizeFingerprint(item) : undefined;
+  return fp ? { fp, addedAt: at, lastUsedAt: at } : undefined;
+}
+
+function parseEntry(item: unknown): PinEntry | undefined {
+  if (!item || typeof item !== "object") {
+    return undefined;
+  }
+  const { fp, addedAt, lastUsedAt } = item as Record<string, unknown>;
+  const normalized = typeof fp === "string" ? normalizeFingerprint(fp) : undefined;
+  return normalized && typeof addedAt === "number" && Number.isFinite(addedAt) &&
+    typeof lastUsedAt === "number" && Number.isFinite(lastUsedAt)
+    ? { fp: normalized, addedAt, lastUsedAt }
+    : undefined;
 }
 
 /**
