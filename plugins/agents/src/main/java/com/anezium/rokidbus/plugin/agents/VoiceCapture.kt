@@ -125,3 +125,79 @@ object VoiceApproval {
         return kept.toString().trim().replace(Regex("\\s+"), " ")
     }
 }
+
+/** What an utterance is for; it decides the words of the heard card and what its first row does. */
+enum class VoiceKind { FOLLOWUP, ANSWER, APPROVAL }
+
+enum class VoiceAct { SEND, USE, SPEAK_AGAIN, CANCEL, CONFIRM }
+
+data class VoiceRow(val text: String, val sub: String?, val act: VoiceAct)
+
+/** [initial] is the row the card opens on; [decision] is set only on the confirm card of a voice approval. */
+data class VoiceView(
+    val title: String,
+    val body: String?,
+    val rows: List<VoiceRow>,
+    val initial: Int,
+    val decision: ApprovalDecision? = null,
+)
+
+/**
+ * The card of one utterance, as a pure model. Nothing is sent from a state that
+ * is not a heard card with a first row the wearer pressed: a follow-up needs
+ * `Send`, an approval needs the `Confirm` of its own `Allow?` / `Deny?` card,
+ * and that card opens on `Cancel`.
+ */
+object VoiceCard {
+    private const val TEXT_CHARS = 238
+
+    fun view(kind: VoiceKind, state: VoiceCapture.State): VoiceView {
+        val title = when (kind) {
+            VoiceKind.FOLLOWUP -> "Reply by voice"
+            VoiceKind.ANSWER -> "Answer by voice"
+            VoiceKind.APPROVAL -> "Approve by voice"
+        }
+        val again = VoiceRow("Speak again", null, VoiceAct.SPEAK_AGAIN)
+        val cancel = VoiceRow("Cancel", null, VoiceAct.CANCEL)
+        return when (state) {
+            VoiceCapture.State.Idle ->
+                VoiceView(title, "Starting…", listOf(VoiceRow("Cancel", null, VoiceAct.CANCEL)), 0)
+            VoiceCapture.State.Listening ->
+                VoiceView(title, "Listening…", listOf(VoiceRow("Cancel", "speak now", VoiceAct.CANCEL)), 0)
+            is VoiceCapture.State.Failed -> VoiceView(
+                title,
+                state.message,
+                listOf(again, cancel),
+                0,
+            )
+            is VoiceCapture.State.Heard -> when (kind) {
+                VoiceKind.FOLLOWUP -> VoiceView(
+                    title,
+                    state.text.singleLine(TEXT_CHARS),
+                    listOf(VoiceRow("Send", null, VoiceAct.SEND), again, cancel),
+                    0,
+                )
+                VoiceKind.ANSWER -> VoiceView(
+                    title,
+                    state.text.singleLine(TEXT_CHARS),
+                    listOf(VoiceRow("Use answer", "sent with Send answer", VoiceAct.USE), again, cancel),
+                    0,
+                )
+                VoiceKind.APPROVAL -> when (val decision = VoiceApproval.match(state.text)) {
+                    null -> VoiceView(title, VoiceApproval.PROMPT, listOf(again, cancel), 0)
+                    else -> VoiceView(
+                        title = if (decision == ApprovalDecision.ALLOW) "Allow?" else "Deny?",
+                        body = "Nothing is sent until you confirm",
+                        rows = listOf(VoiceRow("Confirm", null, VoiceAct.CONFIRM), cancel),
+                        initial = 1,
+                        decision = decision,
+                    )
+                }
+            }
+        }
+    }
+
+    /** The sub line of a failure that the wearer can fix, or null. */
+    fun hint(state: VoiceCapture.State): String? =
+        if (state == VoiceCapture.State.Failed(VoiceCapture.UNAVAILABLE)) "allow Speech to text in Nexus settings" else null
+}

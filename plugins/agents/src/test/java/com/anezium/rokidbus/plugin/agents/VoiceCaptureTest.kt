@@ -4,6 +4,7 @@ import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
 import com.anezium.rokidbus.plugin.agents.VoiceCapture.State
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoiceCaptureTest {
@@ -161,5 +162,55 @@ class VoiceCaptureTest {
         )) {
             assertNull(said, VoiceApproval.match(said))
         }
+    }
+
+    // ------------------------------------------------------------------ the card
+
+    @Test
+    fun a_heard_followup_offers_send_speak_again_and_cancel() {
+        val view = VoiceCard.view(VoiceKind.FOLLOWUP, State.Heard("run the tests"))
+        assertEquals(listOf(VoiceAct.SEND, VoiceAct.SPEAK_AGAIN, VoiceAct.CANCEL), view.rows.map { it.act })
+        assertEquals(listOf("Send", "Speak again", "Cancel"), view.rows.map { it.text })
+        assertEquals("run the tests", view.body)
+    }
+
+    @Test
+    fun nothing_but_a_heard_card_offers_to_send() {
+        for (state in listOf(State.Idle, State.Listening, State.Failed("Mic busy — try again"))) {
+            for (kind in VoiceKind.entries) {
+                val acts = VoiceCard.view(kind, state).rows.map { it.act }
+                assertTrue("$kind $state", acts.none { it == VoiceAct.SEND || it == VoiceAct.USE || it == VoiceAct.CONFIRM })
+            }
+        }
+        assertEquals("Mic busy — try again", VoiceCard.view(VoiceKind.FOLLOWUP, State.Failed("Mic busy — try again")).body)
+    }
+
+    @Test
+    fun a_voice_approval_goes_through_its_own_confirm_card_that_opens_on_cancel() {
+        val allow = VoiceCard.view(VoiceKind.APPROVAL, State.Heard("allow it"))
+        assertEquals("Allow?", allow.title)
+        assertEquals(ApprovalDecision.ALLOW, allow.decision)
+        assertEquals(listOf("Confirm", "Cancel"), allow.rows.map { it.text })
+        assertEquals(VoiceAct.CANCEL, allow.rows[allow.initial].act)
+
+        val deny = VoiceCard.view(VoiceKind.APPROVAL, State.Heard("No"))
+        assertEquals("Deny?", deny.title)
+        assertEquals(ApprovalDecision.DENY, deny.decision)
+    }
+
+    @Test
+    fun an_unmatched_voice_approval_asks_again_and_offers_no_confirm() {
+        for (said in listOf("don't allow", "do not approve", "allow it please", "no allow", "what")) {
+            val view = VoiceCard.view(VoiceKind.APPROVAL, State.Heard(said))
+            assertEquals(said, "Say allow or deny", view.body)
+            assertNull(said, view.decision)
+            assertEquals(said, listOf(VoiceAct.SPEAK_AGAIN, VoiceAct.CANCEL), view.rows.map { it.act })
+        }
+    }
+
+    @Test
+    fun an_answer_by_voice_is_only_kept_not_sent() {
+        val view = VoiceCard.view(VoiceKind.ANSWER, State.Heard("the blue one"))
+        assertEquals(VoiceAct.USE, view.rows.first().act)
     }
 }

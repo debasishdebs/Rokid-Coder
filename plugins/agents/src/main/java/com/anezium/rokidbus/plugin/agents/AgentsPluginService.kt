@@ -15,6 +15,11 @@ import com.anezium.rokidbus.client.plugin.NexusReaderSegment
 import com.anezium.rokidbus.client.plugin.NexusReaderSegmentKind
 import com.anezium.rokidbus.client.plugin.NexusRowTone
 import com.anezium.rokidbus.client.plugin.NexusSdkResult
+import com.anezium.rokidbus.client.plugin.NexusSpeechCallbacks
+import com.anezium.rokidbus.client.plugin.NexusSpeechError
+import com.anezium.rokidbus.client.plugin.NexusSpeechSession
+import com.anezium.rokidbus.client.plugin.NexusSpeechState
+import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
 import com.anezium.rokidbus.client.plugin.NexusSurfaceSession
 import com.anezium.rokidbus.shared.EditableSurfaceField
 import com.anezium.rokidbus.shared.plugin.NexusInputEvent
@@ -87,6 +92,22 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     /** The Done or error alert whose summary heads the open conversation. */
     private var outputAlert: AgentdAction.Alert? = null
 
+    /** The row of the alert decision card: 0 Allow, 1 Deny, 2 Say allow or deny. */
+    private var alertRow = 0
+
+    /**
+     * The one utterance in flight or on screen, if any: a follow-up reply, a free-text
+     * answer of the question card, or a voice approval. It is dropped, and its speech
+     * session stopped, the moment the thing it was for stops being answerable.
+     */
+    private var voice: VoiceRun? = null
+
+    /** The question card's state: answers per item, one item per page, bound to its alert by id. */
+    private var questionFlow: QuestionFlow? = null
+    private var questionPage = 0
+    private var questionRow = 0
+    private var questionGuardUntil = 0L
+
     /** The held tool call the wearer is answering, if they are answering one. */
     private var decidingRequestId: String? = null
     private var decisionChoice = ApprovalDecision.ALLOW
@@ -102,9 +123,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private var replySessionId: String? = null
     private var replyAttempt = 0
     private var pendingReplyRequestId: String? = null
-
-    /** True when the reply card was opened from the control menu: it sends a v2 `followup`, not a session_input. */
-    private var replyViaFollowup = false
 
     /**
      * The per-session control menu behind ENTER on a board row. It is a card of
@@ -199,6 +217,16 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             AgentsRuntime.store.sessions.collectLatest { raiseAttention() }
         }
         serviceScope.launch {
+            // A reply for a session that left the board would send into nothing.
+            AgentsRuntime.store.sessions.collect { sessions ->
+                val target = voice?.target as? VoiceTarget.Followup ?: return@collect
+                if (sessions.none { it.key == target.sessionKey }) {
+                    stopVoice()
+                    if (surfaceShown) render(show = false)
+                }
+            }
+        }
+        serviceScope.launch {
             AgentsRuntime.store.threadStart.collectLatest { result ->
                 if (result != null && result.requestId == launchRequestId) {
                     launchRequestId = null
@@ -267,6 +295,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         surfaceShown = false
         AgentsRuntime.hudOpen = false
         decidingAlert = null
+        stopVoice()
+        questionFlow = null
         menu = null
         menuReading = null
         leaveConversation()
@@ -278,6 +308,14 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     override fun onNexusInput(event: NexusInputEvent) {
         if (event.action != KeyEvent.ACTION_DOWN) return
+        voice?.let { run ->
+            onVoiceInput(run, event)
+            return
+        }
+        questionFlow?.let { flow ->
+            onQuestionInput(flow, event)
+            return
+        }
         if (decidingRequestId != null || decidingAlert != null) {
             onDecisionInput(event)
             return
@@ -312,6 +350,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     private fun onDecisionInput(event: NexusInputEvent) {
+        if (decidingAlert != null) {
+            onAlertDecisionInput(event)
+            return
+        }
         when {
             event.keyCode in BACKWARD_KEYS || event.keyCode in FORWARD_KEYS -> {
                 decisionChoice = when (decisionChoice) {
@@ -325,6 +367,27 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             -> confirmDecision()
             event.keyCode == KeyEvent.KEYCODE_BACK -> {
                 decidingRequestId = null
+                render(show = false)
+            }
+        }
+    }
+
+    /** The alert's decision card walks three rows: Allow, Deny and, on a steering link, the voice row. */
+    private fun onAlertDecisionInput(event: NexusInputEvent) {
+        val rows = if (AgentsRuntime.link.value?.secure == true) ALERT_DECISION_ROWS else 2
+        when {
+            event.keyCode in BACKWARD_KEYS -> {
+                alertRow = (alertRow - 1 + rows) % rows
+                render(show = false)
+            }
+            event.keyCode in FORWARD_KEYS -> {
+                alertRow = (alertRow + 1) % rows
+                render(show = false)
+            }
+            event.keyCode == KeyEvent.KEYCODE_ENTER ||
+                event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+            -> confirmDecision()
+            event.keyCode == KeyEvent.KEYCODE_BACK -> {
                 decidingAlert = null
                 render(show = false)
             }
@@ -479,25 +542,42 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     override fun openDecision(alert: AgentdAction.Alert) {
         coverMenu()
+        stopVoice()
         decidingAlert = alert
-        decisionChoice = ApprovalDecision.ALLOW
+        alertRow = 0
         decisionOpenedAt = System.currentTimeMillis()
         showBoard()
     }
 
-    /** Until the question card exists (Task 7), Answer opens the session's conversation. */
+    /** Answer opens the question card, one item per page, bound to the alert by id (R73). */
     override fun openQuestion(alert: AgentdAction.Alert) {
-        val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
-        if (session == null) {
+        val payload = alert.question
+        if (payload == null) {
             showBriefNotice(AlertCoordinator.NO_LONGER_WAITING, AlertCoordinator.NO_LONGER_WAITING_BODY)
             return
         }
-        showConversation(session)
+        coverMenu()
+        stopVoice()
+        questionFlow = QuestionFlow(alert.id, alert.sessionKey, payload)
+        questionPage = 0
+        questionRow = 0
+        questionGuardUntil = System.currentTimeMillis() + DECISION_GUARD_MS
+        showBoard()
     }
 
+    /** What a card or an utterance was bound to is gone: close them, and stop listening for it. */
     override fun invalidate(alertId: String) {
-        if (decidingAlert?.id != alertId) return
-        decidingAlert = null
+        val voiceBound = when (val target = voice?.target) {
+            is VoiceTarget.Answer -> target.alertId == alertId
+            is VoiceTarget.Approval -> target.alertId == alertId
+            else -> false
+        }
+        val decisionBound = decidingAlert?.id == alertId
+        val questionBound = questionFlow?.alertId == alertId
+        if (!voiceBound && !decisionBound && !questionBound) return
+        if (voiceBound) stopVoice()
+        if (decisionBound) decidingAlert = null
+        if (questionBound) questionFlow = null
         showBriefNotice(AlertCoordinator.NO_LONGER_WAITING, AlertCoordinator.NO_LONGER_WAITING_BODY)
         if (surfaceShown) render(show = false)
     }
@@ -576,12 +656,17 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private fun confirmDecision() {
         decidingAlert?.let { alert ->
             if (System.currentTimeMillis() - decisionOpenedAt < DECISION_GUARD_MS) return
+            if (alertRow == VOICE_ROW) {
+                // Hearing is not deciding: the utterance still needs its own confirm card.
+                if (AgentsRuntime.link.value?.secure == true) startVoice(VoiceTarget.Approval(alert.id))
+                return
+            }
             decidingAlert = null
             render(show = false)
             // The coordinator only lets a card that is still bound answer.
             AgentsRuntime.alertDirector?.onCardConfirm(
                 alert.id,
-                if (decisionChoice == ApprovalDecision.ALLOW) AlertCoordinator.ALLOW else AlertCoordinator.DENY,
+                if (alertRow == 0) AlertCoordinator.ALLOW else AlertCoordinator.DENY,
             )
             return
         }
@@ -617,11 +702,11 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             showBriefNotice("Still working", "wait for it to stop before typing")
             return
         }
-        beginReply(session, viaFollowup = false)
+        beginReply(session)
     }
 
-    /** Opens the editable reply card for [session]; [viaFollowup] picks the v2 `followup` as its send path. */
-    private fun beginReply(session: AgentSession, viaFollowup: Boolean) {
+    /** Opens the editable reply card for [session]: typed on the glasses, sent as `session_input`. */
+    private fun beginReply(session: AgentSession) {
         val client = nexusClient
         if (client?.supportsEditableSurface != true) {
             showBriefNotice("Can't type here", "this glasses hub is too old")
@@ -631,7 +716,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         coverMenu()
         replyTargetKey = session.key
         replySessionId = session.id
-        replyViaFollowup = viaFollowup
         val attempt = ++replyAttempt
         activeSurface.onRejected = { code -> onReplyRejected(attempt, code) }
         render(show = false)
@@ -658,17 +742,12 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     override fun onNexusSurfaceTextCommitted(surfaceId: String, text: String, cancelled: Boolean) {
         val sessionKey = replyTargetKey ?: return
         val sessionId = replySessionId
-        val viaFollowup = replyViaFollowup
         replyTargetKey = null
         replySessionId = null
         render(show = false)
         if (cancelled || sessionId == null) return
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        if (viaFollowup) {
-            sendFollowup(sessionKey, trimmed)
-            return
-        }
         val requestId = UUID.randomUUID().toString()
         pendingReplyRequestId = requestId
         awaitingReplyForKey = sessionKey
@@ -681,6 +760,313 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             }
         }
         AgentsMonitorService.sendSessionInput(applicationContext, requestId, sessionId, trimmed)
+    }
+
+    // ------------------------------------------------------------------ voice
+
+    private sealed interface VoiceTarget {
+        data class Followup(val sessionKey: String) : VoiceTarget
+        data class Answer(val alertId: String, val itemIndex: Int) : VoiceTarget
+        data class Approval(val alertId: String) : VoiceTarget
+    }
+
+    /** One utterance: its target, the state machine over the hub's callbacks, and where the card's selection is. */
+    private class VoiceRun(val target: VoiceTarget) {
+        val capture = VoiceCapture()
+        var speech: NexusSpeechSession? = null
+        var row = 0
+        var guardUntil = 0L
+
+        val kind: VoiceKind
+            get() = when (target) {
+                is VoiceTarget.Followup -> VoiceKind.FOLLOWUP
+                is VoiceTarget.Answer -> VoiceKind.ANSWER
+                is VoiceTarget.Approval -> VoiceKind.APPROVAL
+            }
+    }
+
+    /**
+     * Starts one tap-to-talk utterance for [target], replacing any before it. The
+     * speech callbacks run on the main thread; each is tied to its own run, so one
+     * that arrives after the card was closed or restarted is dropped. Nothing the
+     * wearer says is logged, and nothing is sent until ENTER on the heard card.
+     */
+    private fun startVoice(target: VoiceTarget) {
+        stopVoice()
+        coverMenu()
+        val run = VoiceRun(target)
+        voice = run
+        val session = nexusSpeechSession(object : NexusSpeechCallbacks {
+            override fun onSpeechStarted(realtime: Boolean) = onVoiceEvent(run) { it.onStarted() }
+            override fun onSpeechState(state: NexusSpeechState) = Unit
+            override fun onSpeechPartial(text: String) {
+                if (voice === run) run.capture.onPartial(text)
+            }
+            override fun onSpeechFinal(text: String) = onVoiceEvent(run) { it.onFinal(text) }
+            override fun onSpeechStopped(reason: NexusSpeechStopReason, error: NexusSpeechError?) {
+                run.speech = null
+                onVoiceEvent(run) { it.onStopped(reason) }
+            }
+        })
+        run.speech = session
+        val refused = when {
+            session == null -> NexusSpeechStopReason.DENIED_NOT_READY
+            else -> when (session.start("auto")) {
+                NexusSdkResult.SENT -> null
+                NexusSdkResult.NOT_REGISTERED -> NexusSpeechStopReason.DENIED_NO_LINK
+                else -> NexusSpeechStopReason.DENIED_NOT_READY
+            }
+        }
+        if (refused != null) {
+            run.speech = null
+            run.capture.onStopped(refused)
+        }
+        voiceChanged(run)
+    }
+
+    private fun onVoiceEvent(run: VoiceRun, event: (VoiceCapture) -> Unit) {
+        if (voice !== run) return
+        event(run.capture)
+        voiceChanged(run)
+    }
+
+    /** A new card state: the selection starts over, and a tap aimed at the old one cannot land on it. */
+    private fun voiceChanged(run: VoiceRun) {
+        run.row = VoiceCard.view(run.kind, run.capture.state).initial
+        run.guardUntil = System.currentTimeMillis() + DECISION_GUARD_MS
+        if (surfaceShown) render(show = false)
+    }
+
+    /** Ends the utterance for good: whatever the hub still delivers for it is dropped. */
+    private fun stopVoice() {
+        val run = voice ?: return
+        voice = null
+        run.capture.invalidate()
+        run.speech?.stop()
+        run.speech = null
+    }
+
+    private fun onVoiceInput(run: VoiceRun, event: NexusInputEvent) {
+        val view = VoiceCard.view(run.kind, run.capture.state)
+        when {
+            event.keyCode in BACKWARD_KEYS -> {
+                run.row = (run.row - 1 + view.rows.size) % view.rows.size
+                render(show = false)
+            }
+            event.keyCode in FORWARD_KEYS -> {
+                run.row = (run.row + 1) % view.rows.size
+                render(show = false)
+            }
+            event.keyCode == KeyEvent.KEYCODE_ENTER ||
+                event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+            -> {
+                if (System.currentTimeMillis() < run.guardUntil) return
+                val act = view.rows.getOrNull(run.row)?.act ?: return
+                onVoiceAct(run, act, view)
+            }
+            event.keyCode == KeyEvent.KEYCODE_BACK -> {
+                stopVoice()
+                render(show = false)
+            }
+        }
+    }
+
+    private fun onVoiceAct(run: VoiceRun, act: VoiceAct, view: VoiceView) {
+        when (act) {
+            VoiceAct.CANCEL -> {
+                stopVoice()
+                render(show = false)
+            }
+            VoiceAct.SPEAK_AGAIN -> startVoice(run.target)
+            VoiceAct.SEND -> {
+                val text = run.capture.confirmedText() ?: return
+                val target = run.target as? VoiceTarget.Followup ?: return
+                stopVoice()
+                render(show = false)
+                sendFollowup(target.sessionKey, text)
+            }
+            VoiceAct.USE -> {
+                val text = run.capture.confirmedText() ?: return
+                val target = run.target as? VoiceTarget.Answer ?: return
+                questionFlow?.takeIf { it.alertId == target.alertId }?.setFreeText(target.itemIndex, text)
+                stopVoice()
+                render(show = false)
+            }
+            VoiceAct.CONFIRM -> {
+                val decision = view.decision ?: return
+                val target = run.target as? VoiceTarget.Approval ?: return
+                stopVoice()
+                decidingAlert = null
+                render(show = false)
+                // The coordinator only lets a card that is still bound answer.
+                AgentsRuntime.alertDirector?.onCardConfirm(
+                    target.alertId,
+                    if (decision == ApprovalDecision.ALLOW) AlertCoordinator.ALLOW else AlertCoordinator.DENY,
+                )
+            }
+        }
+    }
+
+    private fun voiceCard(run: VoiceRun): NexusCard {
+        val state = run.capture.state
+        val view = VoiceCard.view(run.kind, state)
+        val rows = buildList {
+            view.body?.let { add(NexusCardLine(text = it, sub = VoiceCard.hint(state), tone = NexusRowTone.BODY)) }
+            view.rows.forEachIndexed { index, row ->
+                add(
+                    NexusCardLine(
+                        text = row.text,
+                        sub = row.sub,
+                        selected = index == run.row,
+                        tone = if (index == run.row) NexusRowTone.ALERT else NexusRowTone.DIM,
+                    ),
+                )
+            }
+        }
+        val subtitle = when (val target = run.target) {
+            is VoiceTarget.Followup -> AgentsRuntime.store.sessions.value
+                .firstOrNull { it.key == target.sessionKey }?.displayTitle.orEmpty()
+            is VoiceTarget.Answer -> questionFlow?.payload?.items?.getOrNull(target.itemIndex)?.text.orEmpty()
+            is VoiceTarget.Approval -> decidingAlert?.title.orEmpty()
+        }
+        return card(
+            title = view.title.singleLine(110),
+            subtitle = subtitle.singleLine(120),
+            rows = rows,
+            footer = "swipe choose · tap select · 2-tap cancel",
+        )
+    }
+
+    // --------------------------------------------------------------- question
+
+    private sealed interface QuestionRow {
+        data class Option(val index: Int) : QuestionRow
+        data object AnswerBox : QuestionRow
+        data object Next : QuestionRow
+        data object Send : QuestionRow
+    }
+
+    private fun questionRows(flow: QuestionFlow, page: Int): List<QuestionRow> {
+        val item = flow.payload.items[page]
+        return buildList {
+            item.options.indices.forEach { add(QuestionRow.Option(it)) }
+            if (item.allowFreeText) add(QuestionRow.AnswerBox)
+            add(if (page == flow.itemCount - 1) QuestionRow.Send else QuestionRow.Next)
+        }
+    }
+
+    private fun questionCard(flow: QuestionFlow): NexusCard {
+        val page = questionPage.coerceIn(0, flow.itemCount - 1)
+        val item = flow.payload.items[page]
+        val secure = AgentsRuntime.link.value?.secure == true
+        val rows = questionRows(flow, page)
+        val selected = questionRow.coerceIn(0, rows.lastIndex)
+        val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == flow.sessionKey }
+        val lines = windowedRows(rows, selected) { row, isSelected ->
+            when (row) {
+                is QuestionRow.Option -> {
+                    val picked = flow.isPicked(page, row.index)
+                    val mark = when {
+                        item.multiSelect -> if (picked) "[x] " else "[ ] "
+                        else -> if (picked) "(x) " else "( ) "
+                    }
+                    val option = item.options[row.index]
+                    NexusCardLine(
+                        text = (mark + option.label).singleLine(MENU_LINE_CHARS),
+                        sub = option.description?.singleLine(MENU_LINE_CHARS),
+                        tone = if (picked) NexusRowTone.ALERT else NexusRowTone.NORMAL,
+                        selected = isSelected,
+                    )
+                }
+                QuestionRow.AnswerBox -> NexusCardLine(
+                    text = "Answer box (voice)",
+                    sub = flow.freeText(page)?.singleLine(MENU_LINE_CHARS) ?: "tap to speak",
+                    tone = if (flow.freeText(page) != null) NexusRowTone.ALERT else NexusRowTone.NORMAL,
+                    selected = isSelected,
+                )
+                QuestionRow.Next -> NexusCardLine(
+                    text = "Next question",
+                    sub = if (flow.isAnswered(page)) null else "answer this one first",
+                    tone = if (flow.isAnswered(page)) NexusRowTone.NORMAL else NexusRowTone.DIM,
+                    selected = isSelected,
+                )
+                QuestionRow.Send -> NexusCardLine(
+                    text = "Send answer",
+                    sub = when {
+                        !secure -> AlertNotices.MONITOR_ONLY_BODY
+                        flow.answers() == null -> "answer every question first"
+                        else -> null
+                    },
+                    tone = if (secure && flow.answers() != null) NexusRowTone.NORMAL else NexusRowTone.DIM,
+                    selected = isSelected,
+                )
+            }
+        }
+        val heading = session?.displayTitle?.singleLine(100) ?: flow.payload.source
+        return card(
+            title = if (flow.itemCount > 1) "Q${page + 1}/${flow.itemCount} · $heading" else heading,
+            subtitle = item.text.singleLine(MENU_LINE_CHARS),
+            rows = lines,
+            footer = if (page > 0) "swipe move · tap pick · 2-tap previous" else "swipe move · tap pick · 2-tap close",
+        )
+    }
+
+    private fun onQuestionInput(flow: QuestionFlow, event: NexusInputEvent) {
+        val page = questionPage.coerceIn(0, flow.itemCount - 1)
+        val rows = questionRows(flow, page)
+        when {
+            event.keyCode in BACKWARD_KEYS -> {
+                questionRow = (questionRow.coerceIn(0, rows.lastIndex) - 1 + rows.size) % rows.size
+                render(show = false)
+            }
+            event.keyCode in FORWARD_KEYS -> {
+                questionRow = (questionRow.coerceIn(0, rows.lastIndex) + 1) % rows.size
+                render(show = false)
+            }
+            event.keyCode == KeyEvent.KEYCODE_ENTER ||
+                event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+            -> {
+                // The second tap of the double tap that opened this card must not pick on it.
+                if (System.currentTimeMillis() < questionGuardUntil) return
+                onQuestionPick(flow, page, rows[questionRow.coerceIn(0, rows.lastIndex)])
+            }
+            event.keyCode == KeyEvent.KEYCODE_BACK -> {
+                if (page > 0) {
+                    questionPage = page - 1
+                    questionRow = 0
+                } else {
+                    questionFlow = null
+                }
+                render(show = false)
+            }
+        }
+    }
+
+    private fun onQuestionPick(flow: QuestionFlow, page: Int, row: QuestionRow) {
+        when (row) {
+            is QuestionRow.Option -> {
+                flow.toggle(page, row.index)
+                render(show = false)
+            }
+            QuestionRow.AnswerBox -> startVoice(VoiceTarget.Answer(flow.alertId, page))
+            QuestionRow.Next -> if (flow.isAnswered(page)) {
+                questionPage = page + 1
+                questionRow = 0
+                questionGuardUntil = System.currentTimeMillis() + DECISION_GUARD_MS
+                render(show = false)
+            }
+            QuestionRow.Send -> {
+                if (AgentsRuntime.link.value?.secure != true) {
+                    showBriefNotice(AlertCoordinator.MONITOR_ONLY_TITLE, AlertCoordinator.MONITOR_ONLY_BODY)
+                    return
+                }
+                val answers = flow.answers() ?: return
+                questionFlow = null
+                render(show = false)
+                // The coordinator only lets a card that is still bound answer.
+                AgentsRuntime.alertDirector?.onQuestionConfirm(flow.alertId, answers)
+            }
+        }
     }
 
     // ------------------------------------------------------------------- menu
@@ -776,7 +1162,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 menuReading = step.title to step.text
                 render(show = false)
             }
-            ControlMenu.Step.Reply -> beginReply(session, viaFollowup = true)
+            ControlMenu.Step.Reply -> startVoice(VoiceTarget.Followup(session.key))
             ControlMenu.Step.Read -> openConversation(session)
             ControlMenu.Step.Close -> {
                 menu = null
@@ -842,8 +1228,13 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private fun onAgentdEvent(event: AgentdEvent) {
         when (event) {
             // The menu's rows follow the link: a link that stopped steering greys them.
-            is AgentdEvent.LinkUp, is AgentdEvent.LinkDown ->
-                if (surfaceShown && menu != null) render(show = false)
+            is AgentdEvent.LinkUp, is AgentdEvent.LinkDown -> {
+                // An utterance for a link that came or went answers nothing: stop listening.
+                stopVoice()
+                if (surfaceShown && (menu != null || questionFlow != null || decidingAlert != null)) {
+                    render(show = false)
+                }
+            }
             is AgentdEvent.Action -> onControlAction(event.action)
         }
     }
@@ -855,10 +1246,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 ControlMenu.ackNotice(action)?.let { showBriefNotice(ControlMenu.NOTICE_TITLE, it) }
             }
             is AgentdAction.FollowupClosed -> {
-                // A reply card for a window that closed would send into nothing.
-                if (replyTargetKey == action.sessionKey && replyViaFollowup) {
-                    replyTargetKey = null
-                    replySessionId = null
+                // A reply for a window that closed would send into nothing.
+                val target = voice?.target
+                if (target is VoiceTarget.Followup && target.sessionKey == action.sessionKey) {
+                    stopVoice()
                     if (surfaceShown) render(show = false)
                 }
                 ControlMenu.followupClosedNotice(action.reason)
@@ -980,6 +1371,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     /** An open conversation with something to read is the one reader screen. */
     private fun activeReader(): NexusReader? {
+        if (voice != null || questionFlow != null) return null
         if (decidingRequestId != null || decidingAlert != null || replyTargetKey != null) return null
         menuReading?.let { (title, text) -> return menuReader(title, text) }
         val conversation = AgentsRuntime.store.conversation.value ?: return null
@@ -992,6 +1384,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     private fun buildCard(): NexusCard {
+        voice?.let { return voiceCard(it) }
+        questionFlow?.let { return questionCard(it) }
         decidingAlert?.let { return alertDecisionCard(it) }
         decidingRequestId?.let { return decisionCard(it) }
         replyTargetKey?.let { key ->
@@ -1059,8 +1453,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 ),
             )
             if (AgentsRuntime.link.value?.secure == true) {
-                add(choiceRow("Allow", "let it run", ApprovalDecision.ALLOW))
-                add(choiceRow("Deny", "tell the agent no", ApprovalDecision.DENY))
+                add(alertChoiceRow("Allow", "let it run", 0))
+                add(alertChoiceRow("Deny", "tell the agent no", 1))
+                add(alertChoiceRow(VoiceApproval.PROMPT, "asks you to confirm", VOICE_ROW))
             } else {
                 add(NexusCardLine(text = AlertNotices.MONITOR_ONLY_BODY, tone = NexusRowTone.DIM))
             }
@@ -1081,6 +1476,16 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         val working = session?.status == AgentStatus.WORKING
         val segments = if (conversation.loading) emptyList() else readerSegments(conversation, working)
         return AlertNotices.outputReader(alert, session, segments)
+    }
+
+    private fun alertChoiceRow(label: String, sub: String, row: Int): NexusCardLine {
+        val picked = alertRow == row
+        return NexusCardLine(
+            text = label,
+            sub = sub,
+            selected = picked,
+            tone = if (picked) NexusRowTone.ALERT else NexusRowTone.DIM,
+        )
     }
 
     private fun choiceRow(label: String, sub: String, choice: ApprovalDecision): NexusCardLine {
@@ -1691,6 +2096,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         private const val LAUNCH_VERDICT_TIMEOUT_MS = 35_000L
         private const val MENU_LINE_CHARS = 240
         private const val CONTROL_MSG_IDS = 32
+        private const val ALERT_DECISION_ROWS = 3
+        private const val VOICE_ROW = 2
 
         /** Virtual board row: the door into the start-an-agent walk. */
         private const val START_KEY = "!start-an-agent"

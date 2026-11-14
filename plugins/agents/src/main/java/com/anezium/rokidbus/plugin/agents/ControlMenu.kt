@@ -220,7 +220,7 @@ object ControlMenu {
         /** [text] is too long for a row: it opens in a reader. */
         data class ReadText(val title: String, val text: String) : Step
 
-        /** Open the editable reply card; its send path is the v2 `followup`. */
+        /** Start a voice reply; it is sent as the v2 `followup` after the heard card's Send. */
         data object Reply : Step
 
         /** Open the conversation. */
