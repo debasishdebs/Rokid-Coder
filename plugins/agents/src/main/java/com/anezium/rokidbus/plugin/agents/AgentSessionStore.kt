@@ -20,6 +20,7 @@ data class LinkMachine(
 )
 
 private const val MAX_NOT_APPLIED = 32
+private const val NOT_APPLIED_MS = 30_000L
 
 class AgentSessionStore {
     private val providerSessions = AgentProvider.values().associateWith {
@@ -151,20 +152,34 @@ class AgentSessionStore {
     }
 
     /**
-     * A mode change agentd refused, kept with the session until its next upsert:
-     * the menu shows the real mode and this beside it (R101). A brief is an extra.
+     * A mode change agentd refused: the menu shows the real mode and this beside
+     * it (R101). It lasts until an upsert shows another temporary mode than the
+     * one shown when it was refused, or for [NOT_APPLIED_MS] (R107): a busy
+     * session's ordinary progress must not erase it. A brief is an extra.
      */
-    private val notApplied = LinkedHashMap<String, String>()
+    private class Refusal(val error: String, val tempMode: TempMode?, val atMs: Long)
+
+    private val notApplied = LinkedHashMap<String, Refusal>()
 
     @Synchronized
-    fun noteNotApplied(sessionKey: String, error: String) {
+    fun noteNotApplied(sessionKey: String, error: String, nowMs: Long = System.currentTimeMillis()) {
+        val shown = providerSessions.values.firstNotNullOfOrNull { sessions ->
+            sessions.values.firstOrNull { it.key == sessionKey }
+        }?.v2?.tempMode
         notApplied.remove(sessionKey)
-        notApplied[sessionKey] = error
+        notApplied[sessionKey] = Refusal(error, shown, nowMs)
         while (notApplied.size > MAX_NOT_APPLIED) notApplied.remove(notApplied.keys.first())
     }
 
     @Synchronized
-    fun notApplied(sessionKey: String): String? = notApplied[sessionKey]
+    fun notApplied(sessionKey: String, nowMs: Long = System.currentTimeMillis()): String? {
+        val refusal = notApplied[sessionKey] ?: return null
+        if (nowMs - refusal.atMs >= NOT_APPLIED_MS) {
+            notApplied.remove(sessionKey)
+            return null
+        }
+        return refusal.error
+    }
 
     /**
      * A follow-up agentd rejected, kept with the session until the next follow-up
@@ -191,7 +206,9 @@ class AgentSessionStore {
     @Synchronized
     fun upsert(session: AgentSession, nowMs: Long = System.currentTimeMillis()) {
         providerSessions.getValue(session.provider)[session.id] = session
-        notApplied.remove(session.key)
+        // Only a mode change ends the refusal of one.
+        val refusal = notApplied[session.key]
+        if (refusal != null && session.v2?.tempMode != refusal.tempMode) notApplied.remove(session.key)
         publish(nowMs)
     }
 

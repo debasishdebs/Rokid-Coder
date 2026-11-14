@@ -121,6 +121,7 @@ class AlertDirector(
                 }
                 is AgentdAction.AlertClosed -> apply(coordinator.onAlertClosed(action.id, action.reason))
                 is AgentdAction.FollowupClosed -> apply(coordinator.invalidateSession(action.sessionKey))
+                is AgentdAction.Ack -> apply(coordinator.onAck(action))
                 else -> Unit
             }
         }
@@ -133,15 +134,18 @@ class AlertDirector(
         gone.forEach { apply(coordinator.invalidateSession(it)) }
     }
 
-    /** A press on the band's action row. Between LinkDown and LinkUp the link is not secure, so nothing steers. */
+    /**
+     * A press on the band's action row. Between LinkDown and LinkUp the link is not secure, so nothing steers.
+     * A band this director never put up (the monitor service restarted under it) answers nothing, and says so.
+     */
     fun onBandAction(action: String) = post {
-        val id = bandId ?: return@post
+        val id = bandId ?: return@post orphanedBand()
         apply(coordinator.onAction(id, action, secure()))
     }
 
     /** The single confirm of an interactive band: display evidence, and for Done or error the reader. */
     fun onBandInput() = post {
-        val id = bandId ?: return@post
+        val id = bandId ?: return@post orphanedBand()
         val alert = coordinator.current?.takeIf { it.id == id } ?: return@post
         apply(coordinator.onShownEvidence(id))
         if (alert.kind == AlertKind.DONE || alert.kind == AlertKind.ERROR) glasses()?.openOutput(alert)
@@ -210,6 +214,11 @@ class AlertDirector(
         apply(coordinator.onQuestionConfirm(alertId, answers, secure()))
     }
 
+    private fun orphanedBand() {
+        enqueue(Brief(AlertCoordinator.NO_LONGER_WAITING, AlertCoordinator.NO_LONGER_WAITING_BODY, safety = true))
+        settle()
+    }
+
     private fun apply(effects: List<AlertCoordinator.Effect>) {
         applyEffects(effects)
         _waiting.value = coordinator.current?.waiting ?: 0
@@ -274,9 +283,12 @@ class AlertDirector(
                     glasses()?.hideBand()
                 }
                 is AlertCoordinator.Effect.Send -> write(effect.line)
-                // The coordinator's only refusal brief is Monitor only; its text is ours, never agentd's.
-                is AlertCoordinator.Effect.Brief ->
-                    onBrief(effect.title, effect.body, safety = effect.title == AlertCoordinator.MONITOR_ONLY_TITLE)
+                // The coordinator's refusal briefs are Monitor only and Not sent; their titles are ours, never agentd's.
+                is AlertCoordinator.Effect.Brief -> onBrief(
+                    effect.title,
+                    effect.body,
+                    safety = effect.title == AlertCoordinator.MONITOR_ONLY_TITLE || effect.title == AlertCoordinator.NOT_SENT,
+                )
                 is AlertCoordinator.Effect.Invalidate -> glasses()?.invalidate(effect.alertId)
                 is AlertCoordinator.Effect.OpenDecision -> glasses()?.openDecision(effect.alert)
                 is AlertCoordinator.Effect.OpenQuestion -> glasses()?.openQuestion(effect.alert)

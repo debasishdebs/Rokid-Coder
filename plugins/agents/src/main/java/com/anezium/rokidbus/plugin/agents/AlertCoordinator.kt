@@ -186,6 +186,18 @@ class AlertCoordinator(
         return listOf(Effect.Send(line))
     }
 
+    /**
+     * agentd refused an answer this coordinator sent (`alert_action` or
+     * `question_answer`): the wearer must not believe they answered. The brief is
+     * the only word: an approval or a question has no menu line to keep it on.
+     */
+    fun onAck(ack: AgentdAction.Ack): List<Effect> {
+        if (ack.result != "rejected" || ack.msgId.isEmpty()) return emptyList()
+        if (seen.values.none { ack.msgId in it.msgIds.values }) return emptyList()
+        val why = ack.error?.singleLine(REJECTION_CHARS)?.takeIf(String::isNotBlank)
+        return listOf(Effect.Brief(NOT_SENT, if (why != null) "$NOT_SENT_BODY · $why" else NOT_SENT_BODY))
+    }
+
     /** The band for [id] closed. Only the wearer's close is evidence; any close ends the episode. */
     fun onBandClosed(id: String, reason: NexusNoticeCloseReason): List<Effect> {
         if (episode?.alert?.id != id) return emptyList()
@@ -269,6 +281,7 @@ class AlertCoordinator(
         const val NOT_SENT = "Not sent"
         const val NOT_SENT_BODY = "Answer on laptop"
         private const val QUESTION_ANSWER = "question_answer"
+        private const val REJECTION_CHARS = 120
 
         const val ALLOW = "allow"
         const val DENY = "deny"

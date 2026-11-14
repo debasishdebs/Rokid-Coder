@@ -403,22 +403,13 @@ class ControlMenuTest {
         val session = session()
         val covered = ControlMenu.covered(confirmAllState(session))
 
-        // The menu comes back long after it was opened: the guard starts when it is drawn.
-        val drawnAt = 100_000L
-        val shown = ControlMenu.shown(covered, drawnAt)
-        assertFalse(ControlMenu.accepts(shown, drawnAt + 50))
-        assertFalse(ControlMenu.accepts(shown, drawnAt + 599))
-        assertTrue(ControlMenu.accepts(shown, drawnAt + 600))
-
-        // Even past the guard, no row of the main menu sends approve-all.
+        // The guard that starts when it is drawn again is the screen's (GlassesScreenTest).
+        // Even past it, no row of the main menu sends approve-all.
         for (index in items(session).indices) {
-            val step = ControlMenu.pick(shown.copy(index = index), session, secure = true)
+            val step = ControlMenu.pick(covered.copy(index = index), session, secure = true)
             val sent = (step as? ControlMenu.Step.Send)?.command
             assertFalse("row $index", sent == ControlMenu.Command.ModeSet(TempMode.APPROVE_ALL, confirmed = true))
         }
-        // A menu that was not covered keeps its guard as it was.
-        val plain = ControlMenu.open("claude:s1")
-        assertTrue(ControlMenu.shown(plain, drawnAt) === plain)
     }
 
     @Test

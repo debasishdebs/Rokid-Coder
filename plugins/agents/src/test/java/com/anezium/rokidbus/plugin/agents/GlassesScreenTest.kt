@@ -12,6 +12,7 @@ class GlassesScreenTest {
     private var now = 0L
     private val confirms = mutableListOf<Pair<String, String>>()
     private val decided = mutableListOf<String>()
+    private var menuEnters = 0
 
     private val screen = GlassesScreen(
         clock = { now },
@@ -21,7 +22,9 @@ class GlassesScreenTest {
             override fun render() = Unit
             override fun voiceInput(run: VoiceRun, event: NexusInputEvent) = Unit
             override fun questionInput(flow: QuestionFlow, event: NexusInputEvent) = Unit
-            override fun menuInput(event: NexusInputEvent) = Unit
+            override fun menuInput(event: NexusInputEvent) {
+                if (GlassesKeys.isEnter(event)) menuEnters++
+            }
             override fun boardInput(event: NexusInputEvent) = Unit
             override fun startVoice(target: VoiceTarget) = Unit
             override fun confirmAlert(alertId: String, action: String) {
@@ -137,6 +140,30 @@ class GlassesScreenTest {
         now += 100L
         enter()
         assertTrue(decided.isEmpty())
+    }
+
+    @Test
+    fun stray_tap_after_an_alert_never_reaches_the_menu() {
+        screen.openMenu(ControlMenu.open("claude:s1"))
+        now = 60_000L
+        // An alert takes the screen, then the menu is drawn again long after: its guard starts then.
+        screen.bandTaken(v2 = true)
+        now += 20_000L
+        val drawnAt = now
+        screen.menuDrawn(checkNotNull(screen.menu))
+        now = drawnAt + 50L
+        enter()
+        now = drawnAt + 599L
+        enter()
+        assertEquals(0, menuEnters)
+        now = drawnAt + 600L
+        enter()
+        assertEquals(1, menuEnters)
+        // A menu drawn again without being covered keeps its guard as it was.
+        now += 5_000L
+        screen.menuDrawn(checkNotNull(screen.menu))
+        enter()
+        assertEquals(2, menuEnters)
     }
 
     @Test

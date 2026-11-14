@@ -4,6 +4,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.anezium.rokidbus.plugin.agents.BuildConfig.VERSION_NAME
 import kotlinx.coroutines.CoroutineScope
@@ -209,7 +210,13 @@ class AgentsMonitorService : Service() {
 
     private fun startAlerts() {
         AgentsRuntime.alertDirector = alertDirector
-        alertScope.launch { for (work in alertWork) work() }
+        alertScope.launch {
+            for (work in alertWork) {
+                // One failing effect must not end the consumer, and with it every alert after it.
+                // Only the class is logged: a message could carry agent text.
+                runCatching { work() }.onFailure { Log.w("AgentsMonitor", "alert work failed: ${it.javaClass.simpleName}") }
+            }
+        }
         // Launched on Main.immediate, so each collector is subscribed before this returns.
         alertScope.launch {
             AgentsRuntime.events.collect { event ->

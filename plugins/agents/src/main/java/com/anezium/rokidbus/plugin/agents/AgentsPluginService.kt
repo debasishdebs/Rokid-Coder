@@ -664,7 +664,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
         // A menu that was covered starts its tap guard now that it is on screen again.
         val shown = screen.menuDrawn(state)
-        // What agentd refused stays beside the real mode until the session's next upsert (R101).
+        // What agentd refused stays beside the real mode until the mode changes, or 30 s (R101, R107).
         val withNotice = shown.copy(
             notApplied = AgentsRuntime.store.notApplied(state.sessionKey),
             replyNotSent = AgentsRuntime.store.replyNotSent(state.sessionKey),
@@ -819,7 +819,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 }
                 val modeSession = modeSetMsgIds.remove(action.msgId)
                 if (modeSession != null && action.result == "rejected") {
-                    // The durable answer is on the menu until the session's next upsert; the brief is an extra.
+                    // The durable answer is on the menu until the mode changes, or 30 s; the brief is an extra.
                     AgentsRuntime.store.noteNotApplied(modeSession, notApplied(action))
                     if (surfaceShown && screen.menu?.sessionKey == modeSession) render(show = false)
                 }

@@ -235,7 +235,18 @@ permission.
 
 ENTER is ignored for the first 600 ms of that screen: the touchpad's double tap
 is two ENTER downs a few dozen milliseconds apart, and the second would
-otherwise land on a decision the wearer had only just opened.
+otherwise land on a decision the wearer had only just opened. The same guard
+restarts whenever a band appears, is touched or closes, and when the HUD opens
+again, so a double tap aimed at a band never lands on the card under it.
+
+An approval band leads with what will run: the command (then the agent's
+description), or the file an edit changes. More opens the whole request in a
+reader, summary first; a tap there moves on to the Allow and Deny card.
+
+On a hub that does not echo notice correlations (phone hub without
+`noticeInteractionVersion: 1`), a band press can be credited to whichever band
+is up when it arrives, so a preempting approval shown in that instant could
+receive it. Use a phone hub that advertises it with Agents.
 
 If nobody answers, the daemon's timeout expires and Claude asks on the computer
 as it always would. Being away means being asked later, never being decided for.
@@ -308,12 +319,17 @@ open the microphone itself and logs no spoken text.
 
 - **Reply by voice.** From a session's menu, "Reply by voice" starts one
   listening session. The result appears on a card to confirm: Send, Speak again
-  or Cancel. Nothing is sent until you press Send. A reply over 16 KiB is
-  refused rather than cut. It works while the session waits and, in launcher
-  mode, at any time (see the table above).
+  or Cancel. Nothing is sent until you press Send, and the card shows the whole
+  transcript that Send sends, over up to four rows. A transcript longer than
+  the card can show (960 characters, four rows of 240) is refused with "Too
+  long to review — say a shorter reply", never cut. It works while the session
+  waits and, in launcher mode, at any time (see the table above).
 - **Question answers.** A question band opens one card per question with the
   options, an "Answer box (voice)" row when free text is allowed, and a
-  last page with Send answer.
+  last page with Send answer. The answer box shows the whole answer, under the
+  same 960-character limit. Answers carry the question and option text exactly
+  as agentd sent it; a question too large for the glasses to answer exactly
+  says "Question too long — answer on laptop" on its band and offers no Answer.
 - **Voice approval.** The decision card has a "Say allow or deny" row. Only a
   complete, plain utterance from a fixed list counts (for example allow,
   approve, yes, ok; deny, no, reject). Anything else, including "don't allow",

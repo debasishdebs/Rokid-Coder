@@ -56,8 +56,6 @@ object ControlMenu {
     /** How long a Codex chooser waits for agentd's `models` frame (R98). */
     const val MODELS_TIMEOUT_MS = 10_000L
 
-    /** Long enough to swallow a double tap, short enough never to be felt. */
-    const val GUARD_MS = 600L
     const val FOLLOWUP_CAP_REACHED = "continue on laptop or rk claude"
     const val FOLLOWUP_UNAVAILABLE = "session not waiting"
     const val MODEL_WARNING = "This also changes the default for new sessions"
@@ -181,9 +179,8 @@ object ControlMenu {
      * [index] counts the selectable rows of the current screen only. [models] is
      * the last `models` frame for this session, and [modelsAskedAt] is when the
      * request went out, so the list shows "loading", then "unavailable", rather
-     * than "empty". [guardUntil] is when ENTER starts to count again after a
-     * screen change, and [rearm] says the menu was covered and the guard must
-     * start over from the moment it is drawn again.
+     * than "empty". [rearm] says the menu was covered and its ENTER guard, which
+     * is the screen's [ActiveCard], must start over the moment it is drawn again.
      */
     data class MenuState(
         val sessionKey: String,
@@ -191,18 +188,12 @@ object ControlMenu {
         val index: Int = 0,
         val models: AgentdAction.Models? = null,
         val modelsAskedAt: Long? = null,
-        val guardUntil: Long = 0L,
         val rearm: Boolean = false,
-        /** A mode change agentd refused, shown beside the real mode until the next upsert (R101). */
+        /** A mode change agentd refused, shown beside the real mode until the mode changes, or 30 s (R101, R107). */
         val notApplied: String? = null,
         /** A follow-up agentd rejected, shown on the Reply by voice row until the next one (R106). */
         val replyNotSent: String? = null,
     )
-
-    /** The state a screen change leaves: ENTER is ignored for [GUARD_MS]. */
-    fun guarded(state: MenuState, now: Long): MenuState = state.copy(guardUntil = now + GUARD_MS, rearm = false)
-
-    fun accepts(state: MenuState, now: Long): Boolean = now >= state.guardUntil
 
     /**
      * Another card or an alert took the screen (R96): whatever confirm was open
@@ -215,9 +206,6 @@ object ControlMenu {
         } else {
             state.copy(screen = Screen.Main, index = 0, modelsAskedAt = null, rearm = true)
         }
-
-    /** Called as the menu is drawn: a covered menu's guard starts now. */
-    fun shown(state: MenuState, now: Long): MenuState = if (state.rearm) guarded(state, now) else state
 
     sealed interface Step {
         /** Show [state]; nothing leaves the phone. */

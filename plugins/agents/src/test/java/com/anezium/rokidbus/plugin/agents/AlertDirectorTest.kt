@@ -108,6 +108,35 @@ class AlertDirectorTest {
     private fun up() = director.onEvent(AgentdEvent.LinkUp(1L, secure))
 
     @Test
+    fun a_rejected_answer_is_reported_to_the_wearer() {
+        up()
+        feed(alert(id = "A"))
+        director.onBandAction(AlertCoordinator.ALLOW)
+        val sent = written.single { it.getString("type") == "alert_action" }
+        director.onEvent(
+            AgentdEvent.Action(AgentdAction.Ack(sent.getString("msgId"), "rejected", "wrong_request")),
+        )
+        // Like every brief it waits for the alert's band, then says so.
+        assertTrue(glasses.briefs.isEmpty())
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("A", "withdrawn")))
+        assertEquals(AlertCoordinator.NOT_SENT to "Answer on laptop · wrong_request", glasses.briefs.single())
+
+        // An ack for a frame the coordinator never sent, or an applied one, says nothing.
+        director.onEvent(AgentdEvent.Action(AgentdAction.Ack("someone-else", "rejected", "x")))
+        director.onEvent(AgentdEvent.Action(AgentdAction.Ack(sent.getString("msgId"), "applied", null)))
+        assertEquals(1, glasses.briefs.size)
+    }
+
+    @Test
+    fun an_action_on_a_band_this_director_never_put_up_says_no_longer_waiting() {
+        // A restarted monitor service: the band is still on the glasses, but not this director's.
+        up()
+        director.onBandAction(AlertCoordinator.ALLOW)
+        assertEquals(AlertCoordinator.NO_LONGER_WAITING to AlertCoordinator.NO_LONGER_WAITING_BODY, glasses.briefs.single())
+        assertTrue(types().none { it == "alert_action" })
+    }
+
+    @Test
     fun a_new_alert_shows_and_a_retry_refreshes_the_same_band_silently() {
         up()
         feed(alert(waiting = 2))
@@ -263,7 +292,8 @@ class AlertDirectorTest {
         up()
         director.onBandAction("allow")
 
-        assertEquals(listOf("hide", "show CLAUDE · approve", "hide", "free"), glasses.log)
+        // A press that arrives for the band the link-up hid answers nothing, and says so.
+        assertEquals(listOf("hide", "show CLAUDE · approve", "hide", "free", "brief No longer waiting"), glasses.log)
         assertEquals(emptyList<String>(), types())
     }
 

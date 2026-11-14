@@ -81,6 +81,14 @@ class AgentdLinkServer internal constructor(
     @Volatile private var client: LinkConnection? = null
 
     /**
+     * Every connection still being served, the client included, so [stop] can end
+     * the ones mid-hello too: one that finished its hello after a stop would bind a
+     * second wire (R35). Both are guarded by [clientLock].
+     */
+    private val connections = HashSet<LinkConnection>()
+    private var stopped = false
+
+    /**
      * Callers are UI/service threads; Android forbids socket writes there, so the
      * line joins the connection's single writer. The wire holds its lock across
      * this call, and the client is only swapped after the old connection's link
@@ -94,6 +102,7 @@ class AgentdLinkServer internal constructor(
 
     fun start() {
         if (acceptJob != null) return
+        synchronized(clientLock) { stopped = false }
         store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING, "waiting for a computer")
         acceptJob = scope.launch(Dispatchers.IO) { acceptLoop() }
         discoveryJob = scope.launch(Dispatchers.IO) { discoveryLoop() }
@@ -108,10 +117,13 @@ class AgentdLinkServer internal constructor(
         serverSocket = null
         runCatching { discoverySocket?.close() }
         discoverySocket = null
-        synchronized(clientLock) {
+        val open = synchronized(clientLock) {
+            stopped = true
             client?.let { link.end(it.linkOwner) }
-            client.also { client = null }
-        }?.close()
+            client = null
+            connections.toList().also { connections.clear() }
+        }
+        open.forEach(LinkConnection::close)
         store.setLinkMachine(null)
         store.setConnection(AgentProvider.CLAUDE, ConnectionState.DISCONNECTED)
         store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
@@ -166,6 +178,11 @@ class AgentdLinkServer internal constructor(
     }
 
     internal fun serve(connection: LinkConnection) {
+        val admitted = synchronized(clientLock) { !stopped && connections.add(connection) }
+        if (!admitted) {
+            connection.close()
+            return
+        }
         val codec = AgentdProtocolCodec()
         val gate = AgentdInboundGate { hello -> authorizeMachine(hello, connection.clientCert) }
         codec.reset()
@@ -177,7 +194,7 @@ class AgentdLinkServer internal constructor(
                 when (val decision = gate.receive(codec.parse(line))) {
                     is AgentdInboundDecision.HelloAccepted -> {
                         connection.machineId = decision.hello.machineId
-                        activate(connection)
+                        if (!activate(connection)) return@lines false
                         if (decision.newlyTrusted) {
                             onMachineTrusted(decision.hello.machineName)
                         }
@@ -227,6 +244,7 @@ class AgentdLinkServer internal constructor(
         } finally {
             // The link ends before the socket closes, so no write is reported Sent onto it.
             val wasActive = synchronized(clientLock) {
+                connections.remove(connection)
                 link.end(connection.linkOwner)
                 if (client !== connection) {
                     false
@@ -250,13 +268,15 @@ class AgentdLinkServer internal constructor(
         }
     }
 
-    /** The previous connection's trust ends before this one becomes the client. */
-    private fun activate(connection: LinkConnection) {
+    /** The previous connection's trust ends before this one becomes the client. False once stopped. */
+    private fun activate(connection: LinkConnection): Boolean {
         val previous = synchronized(clientLock) {
+            if (stopped) return false
             client?.let { link.end(it.linkOwner) }
             client.also { client = connection }
         }
         if (previous !== connection) previous?.close()
+        return true
     }
 
     /**

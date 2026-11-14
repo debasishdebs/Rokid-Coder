@@ -18,17 +18,19 @@ class RejectedModeTest {
         ),
     )
 
-    private fun approvalSub(): String? {
-        val state = ControlMenu.open(session.key).copy(notApplied = store.notApplied(session.key))
-        return ControlMenu.page(state, session, secure = true).rows.first { it.text.contains("pprov", ignoreCase = true) }.sub
+    private fun approvalSub(nowMs: Long = 0L, shown: AgentSession = session): String? {
+        val state = ControlMenu.open(session.key).copy(notApplied = store.notApplied(session.key, nowMs))
+        return ControlMenu.page(state, shown, secure = true).rows.first { it.text.contains("pprov", ignoreCase = true) }.sub
     }
 
+    private val edits = session.copy(v2 = session.v2!!.copy(tempMode = TempMode.ACCEPT_EDITS))
+
     @Test
-    fun rejected_mode_change_shown_on_menu_until_next_upsert() {
+    fun rejected_mode_change_shown_on_menu_until_the_mode_changes() {
         store.upsert(session)
         assertEquals("ask", approvalSub())
 
-        store.noteNotApplied(session.key, "session is busy")
+        store.noteNotApplied(session.key, "session is busy", nowMs = 0L)
         // The real mode stays, and what agentd refused sits beside it.
         assertEquals("ask · Not applied: session is busy", approvalSub())
 
@@ -36,20 +38,33 @@ class RejectedModeTest {
         store.upsert(session.copy(id = "other"))
         assertTrue(approvalSub()!!.contains("Not applied"))
 
+        // A mode that did change ends it.
+        store.upsert(edits)
+        assertNull(store.notApplied(session.key, 0L))
+        assertEquals("accept edits", approvalSub(shown = edits))
+    }
+
+    @Test
+    fun not_applied_survives_same_mode_upsert() {
         store.upsert(session)
-        assertNull(store.notApplied(session.key))
-        assertEquals("ask", approvalSub())
+        store.noteNotApplied(session.key, "session is busy", nowMs = 1_000L)
+        // A busy session upserts on every tool call; its mode is still the one shown.
+        repeat(20) { store.upsert(session.copy(status = AgentStatus.WORKING, lastActivityAt = it.toLong())) }
+        assertEquals("ask · Not applied: session is busy", approvalSub(nowMs = 30_999L))
+        // Thirty seconds on, it has said its piece.
+        assertNull(store.notApplied(session.key, nowMs = 31_000L))
+        assertEquals("ask", approvalSub(nowMs = 31_000L))
     }
 
     @Test
     fun a_snapshot_or_a_removal_also_ends_it() {
-        store.noteNotApplied(session.key, "x")
+        store.noteNotApplied(session.key, "x", nowMs = 0L)
         store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(session))
-        assertNull(store.notApplied(session.key))
+        assertNull(store.notApplied(session.key, 0L))
 
-        store.noteNotApplied(session.key, "x")
+        store.noteNotApplied(session.key, "x", nowMs = 0L)
         store.remove(session.provider, session.id)
-        assertNull(store.notApplied(session.key))
+        assertNull(store.notApplied(session.key, 0L))
     }
 
     private fun replySub(): String? {

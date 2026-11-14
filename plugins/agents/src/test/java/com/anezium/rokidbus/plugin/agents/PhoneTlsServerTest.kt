@@ -242,6 +242,26 @@ class PhoneTlsServerTest {
     }
 
     @Test
+    fun stop_ends_a_dial_in_still_mid_hello() {
+        config.armLinkWindow()
+        listen { listener ->
+            dial(listener, agentA).use { agentd ->
+                // Connected and through TLS, but no hello yet when the wearer's change stops the server.
+                agentd.socket.session.peerCertificates
+                awaitCondition { served.isNotEmpty() }
+                Thread.sleep(100)
+                server.stop(clearSessions = false)
+                agentd.hello()
+                // Its hello is never answered, and it never binds a wire.
+                assertNull(agentd.next())
+            }
+            awaitServed()
+            assertTrue(events.filterIsInstance<AgentdEvent.LinkUp>().isEmpty())
+            assertFalse(server.linkSecure.value)
+        }
+    }
+
+    @Test
     fun forget_machine_clears_client_pin() {
         config.armLinkWindow()
         assertEquals(MachineTrustResult.NEWLY_TRUSTED, config.authorizeMachine("pc-1", "secret", "Desk", agentA.fingerprint))
