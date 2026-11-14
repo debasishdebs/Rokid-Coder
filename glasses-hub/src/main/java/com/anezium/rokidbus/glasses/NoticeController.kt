@@ -228,6 +228,85 @@ internal sealed interface NoticeAnswer {
     data class Input(val keyCode: Int) : NoticeAnswer
 }
 
+internal enum class DisplayEpisodeOwner { ASSISTANT, AGENTS }
+
+/**
+ * The display-hold signals a notice decision sends, in the order the episodes
+ * must receive them. A band replaced by a show never closes through
+ * [NoticeStateDecision.Closed], so the Agents end for it rides on the show.
+ * Each takeover goes before the signals themselves, so an engage always lands
+ * on a panel the other episode has let go of. Agents counts the actions still
+ * on offer, so an answered band ends its hold.
+ */
+internal fun noticeEpisodeSignals(
+    decision: NoticeStateDecision,
+    genuineEngagement: Boolean = false,
+    preserveOwnerClose: Boolean = false,
+): List<Pair<DisplayEpisodeOwner, AssistantEpisodeSignal>> {
+    val (assistant, agents) = when (decision) {
+        is NoticeStateDecision.Shown -> assistantEpisodeNoticeShownSignal(
+            surfaceId = decision.notice.surfaceId,
+            ownerPluginId = decision.notice.ownerPluginId,
+            seq = decision.notice.seq,
+            engaged = decision.notice.content.interactive,
+        ) to agentsEpisodeNoticeShownSignal(
+            surfaceId = decision.notice.surfaceId,
+            actionCount = decision.notice.liveActions.size,
+            seq = decision.notice.seq,
+        )
+        is NoticeStateDecision.Updated -> if (genuineEngagement) {
+            assistantEpisodeNoticeShownSignal(
+                surfaceId = decision.notice.surfaceId,
+                ownerPluginId = decision.notice.ownerPluginId,
+                seq = decision.notice.seq,
+                engaged = decision.notice.content.interactive,
+            )
+        } else {
+            assistantEpisodeNoticeRedrawSignal(
+                surfaceId = decision.notice.surfaceId,
+                seq = decision.notice.seq,
+                engaged = decision.notice.content.interactive,
+                reason = DisplayHoldRenewReason.BAND_UPDATE,
+            )
+        } to agentsEpisodeNoticeRedrawSignal(
+            surfaceId = decision.notice.surfaceId,
+            actionCount = decision.notice.liveActions.size,
+            seq = decision.notice.seq,
+            reason = DisplayHoldRenewReason.BAND_UPDATE,
+        )
+        is NoticeStateDecision.Answered -> assistantEpisodeNoticeRedrawSignal(
+            surfaceId = decision.notice.surfaceId,
+            seq = decision.notice.seq,
+            engaged = decision.notice.content.interactive,
+            reason = DisplayHoldRenewReason.BAND_ANSWER,
+        ) to agentsEpisodeNoticeRedrawSignal(
+            surfaceId = decision.notice.surfaceId,
+            actionCount = decision.notice.liveActions.size,
+            seq = decision.notice.seq,
+            reason = DisplayHoldRenewReason.BAND_ANSWER,
+        )
+        is NoticeStateDecision.Closed -> assistantEpisodeNoticeClosedSignal(
+            surfaceId = decision.surfaceId,
+            reason = decision.reason,
+            preserveOwnerClose = preserveOwnerClose,
+        ) to agentsEpisodeNoticeClosedSignal(decision.surfaceId, decision.reason)
+        NoticeStateDecision.DroppedStale,
+        NoticeStateDecision.Ignored,
+        -> return emptyList()
+    }
+    val replaced = (decision as? NoticeStateDecision.Shown)?.replacedNotice?.let {
+        DisplayEpisodeOwner.AGENTS to
+            agentsEpisodeNoticeClosedSignal(it.surfaceId, NoticeCloseReason.REPLACED)
+    }
+    return listOfNotNull(
+        replaced,
+        DisplayEpisodeOwner.ASSISTANT to displayEpisodeTakeoverSignal(agents),
+        DisplayEpisodeOwner.AGENTS to displayEpisodeTakeoverSignal(assistant),
+        DisplayEpisodeOwner.ASSISTANT to assistant,
+        DisplayEpisodeOwner.AGENTS to agents,
+    ).filter { (_, signal) -> signal != AssistantEpisodeSignal.None }
+}
+
 internal sealed interface NoticeStateDecision {
     data class Shown(
         val notice: NexusNoticeSurface,
@@ -1045,28 +1124,16 @@ internal object NoticeController {
         genuineEngagement: Boolean = false,
         preserveOwnerClose: Boolean = false,
     ) {
+        noticeEpisodeSignals(decision, genuineEngagement, preserveOwnerClose)
+            .forEach { (owner, signal) ->
+                when (owner) {
+                    DisplayEpisodeOwner.ASSISTANT -> AssistantDisplayEpisode.accept(serviceContext, signal)
+                    DisplayEpisodeOwner.AGENTS -> AgentsDisplayEpisode.accept(serviceContext, signal)
+                }
+            }
         when (decision) {
             is NoticeStateDecision.Shown -> {
                 resetRingInput()
-                decision.replacedNotice?.let { replaced ->
-                    AgentsDisplayEpisode.accept(
-                        serviceContext,
-                        agentsEpisodeNoticeClosedSignal(replaced.surfaceId, NoticeCloseReason.REPLACED),
-                    )
-                }
-                acceptEpisodeSignals(
-                    assistant = assistantEpisodeNoticeShownSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        ownerPluginId = decision.notice.ownerPluginId,
-                        seq = decision.notice.seq,
-                        engaged = decision.notice.content.interactive,
-                    ),
-                    agents = agentsEpisodeNoticeShownSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        actionCount = decision.notice.content.actions.size,
-                        seq = decision.notice.seq,
-                    ),
-                )
                 log(
                     "notice state=shown seq=${decision.notice.seq} " +
                         "ttlMs=${decision.notice.content.ttlMs}",
@@ -1078,48 +1145,10 @@ internal object NoticeController {
                 if (pendingRingNotice?.let { !state.isCurrentInteraction(it) } == true) {
                     resetRingInput()
                 }
-                val signal = if (genuineEngagement) {
-                    assistantEpisodeNoticeShownSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        ownerPluginId = decision.notice.ownerPluginId,
-                        seq = decision.notice.seq,
-                        engaged = decision.notice.content.interactive,
-                    )
-                } else {
-                    assistantEpisodeNoticeRedrawSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        seq = decision.notice.seq,
-                        engaged = decision.notice.content.interactive,
-                        reason = DisplayHoldRenewReason.BAND_UPDATE,
-                    )
-                }
-                acceptEpisodeSignals(
-                    assistant = signal,
-                    agents = agentsEpisodeNoticeRedrawSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        actionCount = decision.notice.content.actions.size,
-                        seq = decision.notice.seq,
-                        reason = DisplayHoldRenewReason.BAND_UPDATE,
-                    ),
-                )
                 scheduleExpiry(decision.notice)
                 notifyChanged()
             }
             is NoticeStateDecision.Answered -> {
-                acceptEpisodeSignals(
-                    assistant = assistantEpisodeNoticeRedrawSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        seq = decision.notice.seq,
-                        engaged = decision.notice.content.interactive,
-                        reason = DisplayHoldRenewReason.BAND_ANSWER,
-                    ),
-                    agents = agentsEpisodeNoticeRedrawSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        actionCount = decision.notice.content.actions.size,
-                        seq = decision.notice.seq,
-                        reason = DisplayHoldRenewReason.BAND_ANSWER,
-                    ),
-                )
                 // No expiry rescheduling: answering neither shortens nor extends
                 // the band's life, and the deadline it was already given still
                 // stands. The re-render is what makes the row leave the band.
@@ -1136,18 +1165,6 @@ internal object NoticeController {
                 notifyChanged()
             }
             is NoticeStateDecision.Closed -> {
-                AssistantDisplayEpisode.accept(
-                    serviceContext,
-                    assistantEpisodeNoticeClosedSignal(
-                        surfaceId = decision.surfaceId,
-                        reason = decision.reason,
-                        preserveOwnerClose = preserveOwnerClose,
-                    ),
-                )
-                AgentsDisplayEpisode.accept(
-                    serviceContext,
-                    agentsEpisodeNoticeClosedSignal(decision.surfaceId, decision.reason),
-                )
                 clearPendingNoticeWake()
                 cancelExpiry()
                 resetRingInput()
@@ -1165,16 +1182,6 @@ internal object NoticeController {
             NoticeStateDecision.DroppedStale -> log("notice dropped stale")
             NoticeStateDecision.Ignored -> Unit
         }
-    }
-
-    private fun acceptEpisodeSignals(
-        assistant: AssistantEpisodeSignal,
-        agents: AssistantEpisodeSignal,
-    ) {
-        AssistantDisplayEpisode.accept(serviceContext, displayEpisodeTakeoverSignal(agents))
-        AgentsDisplayEpisode.accept(serviceContext, displayEpisodeTakeoverSignal(assistant))
-        AssistantDisplayEpisode.accept(serviceContext, assistant)
-        AgentsDisplayEpisode.accept(serviceContext, agents)
     }
 
     /** Tells the phone the slot is free, and why, so it can tell the owner. */

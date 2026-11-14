@@ -1,6 +1,8 @@
 package com.anezium.rokidbus.glasses
 
+import com.anezium.rokidbus.shared.NoticeAction
 import com.anezium.rokidbus.shared.NoticeCloseReason
+import com.anezium.rokidbus.shared.NoticeSurfaceContent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -165,12 +167,124 @@ class AgentsNoticeHoldPolicyTest {
         assertEquals(DisplayHoldReleaseReason.NO_ACTIONS, release(withoutActions).reason)
         assertNull(harness.lifecycle.snapshot())
         assertEquals(1, harness.leases.single().releases)
+    }
 
-        harness.apply(agentsApproval(seq = 4L), nowMs = 30_000L)
-        val surface = harness.apply(agentsEpisodeSurfacePresentedSignal(), nowMs = 40_000L)
+    @Test
+    fun surface_update_does_not_end_agents_hold() {
+        val harness = Harness()
+        harness.apply(agentsApproval(seq = 1L), nowMs = 0L)
 
-        assertEquals(DisplayHoldReleaseReason.SURFACE_PRESENTED, release(surface).reason)
+        val update = harness.apply(
+            agentsEpisodeSurfacePresentedSignal(isHandoff = false),
+            nowMs = 10_000L,
+        )
+
+        assertTrue(update.isEmpty())
+        assertEquals(AgentsDisplayEpisode.OWNER_ID, harness.lifecycle.snapshot()?.ownerId)
+        assertEquals(0, harness.leases.single().releases)
+    }
+
+    @Test
+    fun new_surface_handoff_ends_agents_hold() {
+        val harness = Harness()
+        harness.apply(agentsApproval(seq = 1L), nowMs = 0L)
+
+        val handoff = harness.apply(
+            agentsEpisodeSurfacePresentedSignal(isHandoff = true),
+            nowMs = 10_000L,
+        )
+
+        assertEquals(DisplayHoldReleaseReason.SURFACE_PRESENTED, release(handoff).reason)
         assertNull(harness.lifecycle.snapshot())
+        assertEquals(1, harness.leases.single().releases)
+    }
+
+    @Test
+    fun answered_band_ends_agents_hold() {
+        val harness = Harness()
+        val band = agentsBand(seq = 1L)
+        harness.applyAll(noticeEpisodeSignals(NoticeStateDecision.Shown(band)), nowMs = 0L)
+
+        val answered = noticeEpisodeSignals(
+            NoticeStateDecision.Answered(
+                band.copy(answered = true),
+                NoticeAnswer.Action(band.content.actions.first()),
+            ),
+        )
+        val transitions = harness.applyAll(answered, nowMs = 10_000L)
+
+        assertEquals(
+            listOf(
+                DisplayEpisodeOwner.AGENTS to
+                    AssistantEpisodeSignal.End(DisplayHoldReleaseReason.NO_ACTIONS),
+            ),
+            answered,
+        )
+        assertEquals(DisplayHoldReleaseReason.NO_ACTIONS, release(transitions).reason)
+        assertNull(harness.lifecycle.snapshot())
+        assertEquals(1, harness.leases.single().releases)
+    }
+
+    @Test
+    fun notice_wiring_ends_a_replaced_agents_band_before_any_engage() {
+        val replacement = agentsBand(seq = 2L)
+
+        val signals = noticeEpisodeSignals(
+            NoticeStateDecision.Shown(replacement, replacedNotice = agentsBand(seq = 1L)),
+        )
+
+        assertEquals(
+            listOf(
+                DisplayEpisodeOwner.AGENTS to
+                    AssistantEpisodeSignal.End(DisplayHoldReleaseReason.NOTICE_REPLACED),
+                DisplayEpisodeOwner.ASSISTANT to
+                    AssistantEpisodeSignal.End(DisplayHoldReleaseReason.ENGAGED_NOTICE_TAKEOVER),
+                DisplayEpisodeOwner.AGENTS to AssistantEpisodeSignal.Engage(2L),
+            ),
+            signals,
+        )
+    }
+
+    @Test
+    fun notice_wiring_sends_the_takeover_before_the_assistant_engage() {
+        val assistantBand = agentsBand(seq = 3L).copy(
+            surfaceId = ASSISTANT_NOTICE,
+            ownerPluginId = ASSISTANT_PLUGIN,
+            content = agentsBand(seq = 3L).content.copy(interactive = true, actions = emptyList()),
+        )
+
+        val signals = noticeEpisodeSignals(
+            NoticeStateDecision.Shown(assistantBand, replacedNotice = agentsBand(seq = 2L)),
+        )
+
+        assertEquals(
+            listOf(
+                DisplayEpisodeOwner.AGENTS to
+                    AssistantEpisodeSignal.End(DisplayHoldReleaseReason.NOTICE_REPLACED),
+                DisplayEpisodeOwner.AGENTS to
+                    AssistantEpisodeSignal.End(DisplayHoldReleaseReason.ENGAGED_NOTICE_TAKEOVER),
+                DisplayEpisodeOwner.ASSISTANT to AssistantEpisodeSignal.Engage(3L),
+            ),
+            signals,
+        )
+    }
+
+    @Test
+    fun notice_wiring_ends_agents_hold_on_close() {
+        for (reason in NoticeCloseReason.entries) {
+            val signals = noticeEpisodeSignals(
+                NoticeStateDecision.Closed(
+                    surfaceId = AGENTS_NOTICE,
+                    seq = 1L,
+                    ttlMs = 45_000L,
+                    reason = reason,
+                ),
+                preserveOwnerClose = true,
+            )
+
+            assertEquals(reason.name, DisplayEpisodeOwner.AGENTS, signals.single().first)
+            assertTrue(reason.name, signals.single().second is AssistantEpisodeSignal.End)
+        }
     }
 
     @Test
@@ -228,19 +342,12 @@ class AgentsNoticeHoldPolicyTest {
         val harness = Harness()
         harness.apply(agentsApproval(seq = 1L), nowMs = 0L)
 
+        // Unanswered `+N waiting` updates re-assert what is left, never more.
         val update = harness.apply(agentsRedraw(actionCount = 3, seq = 2L), nowMs = 30_000L)
-        val answer = harness.apply(
-            agentsEpisodeNoticeRedrawSignal(
-                AGENTS_NOTICE,
-                actionCount = 3,
-                seq = 3L,
-                reason = DisplayHoldRenewReason.BAND_ANSWER,
-            ),
-            nowMs = 60_000L,
-        )
+        val laterUpdate = harness.apply(agentsRedraw(actionCount = 3, seq = 3L), nowMs = 60_000L)
 
         assertEquals(60_000L, renew(update).leaseMs)
-        assertEquals(30_000L, renew(answer).leaseMs)
+        assertEquals(30_000L, renew(laterUpdate).leaseMs)
         assertEquals(90_000L, harness.lifecycle.snapshot()?.deadlineAtMs)
 
         val ceiling = harness.lifecycle.enforceCeiling(
@@ -274,6 +381,25 @@ class AgentsNoticeHoldPolicyTest {
             reason = DisplayHoldRenewReason.BAND_UPDATE,
         )
 
+    private fun agentsBand(seq: Long) = NexusNoticeSurface(
+        surfaceId = AGENTS_NOTICE,
+        seq = seq,
+        content = NoticeSurfaceContent(
+            title = "Approve Bash?",
+            body = "rm -rf build",
+            footer = null,
+            actions = listOf(
+                NoticeAction("allow", "check", "Allow"),
+                NoticeAction("deny", "close", "Deny"),
+                NoticeAction("more", "more", "More"),
+            ),
+            ttlMs = 45_000L,
+        ),
+        expiresAtMs = 45_000L,
+        hardExpiresAtMs = 45_000L,
+        ownerPluginId = AGENTS_PLUGIN,
+    )
+
     private fun renew(transitions: List<DisplayHoldTransition>): DisplayHoldTransition.Renew =
         transitions.single() as DisplayHoldTransition.Renew
 
@@ -289,6 +415,13 @@ class AgentsNoticeHoldPolicyTest {
 
         fun apply(signal: AssistantEpisodeSignal, nowMs: Long): List<DisplayHoldTransition> =
             lifecycle.apply(signal, nowMs) { FakeLease().also(leases::add) }
+
+        fun applyAll(
+            signals: List<Pair<DisplayEpisodeOwner, AssistantEpisodeSignal>>,
+            nowMs: Long,
+        ): List<DisplayHoldTransition> = signals
+            .filter { (owner, _) -> owner == DisplayEpisodeOwner.AGENTS }
+            .flatMap { (_, signal) -> apply(signal, nowMs) }
     }
 
     private class FakeLease : DisplayHoldLease {

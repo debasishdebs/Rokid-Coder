@@ -490,11 +490,11 @@ object SurfaceController {
                 context,
                 assistantEpisodeSurfacePresentedSignal(surface.ownerPluginId),
             )
-            AgentsDisplayEpisode.accept(context, agentsEpisodeSurfacePresentedSignal())
             // Lyrics and Media push updates to the same surfaceId continuously;
             // only a genuinely new surface taking over the screen counts as a
             // handoff worth stepping the launcher and any stale activity aside for.
             val isHandoff = active?.surfaceId != surface.surfaceId
+            AgentsDisplayEpisode.accept(context, agentsEpisodeSurfacePresentedSignal(isHandoff))
             active = surface
             syncInkFrameMeter(surface)
             RingFocusBroadcastCoordinator.setSurfaceActive(
@@ -557,8 +557,8 @@ object SurfaceController {
                     context,
                     assistantEpisodeSurfacePresentedSignal(surface.ownerPluginId),
                 )
-                AgentsDisplayEpisode.accept(context, agentsEpisodeSurfacePresentedSignal())
                 val isHandoff = active?.surfaceId != surface.surfaceId
+                AgentsDisplayEpisode.accept(context, agentsEpisodeSurfacePresentedSignal(isHandoff))
                 active = surface
                 RingFocusBroadcastCoordinator.setSurfaceActive(
                     context,
@@ -609,8 +609,11 @@ object SurfaceController {
                                 context,
                                 assistantEpisodeSurfacePresentedSignal(published.ownerPluginId),
                             )
-                            AgentsDisplayEpisode.accept(context, agentsEpisodeSurfacePresentedSignal())
                             val isHandoff = current?.surfaceId != published.surfaceId
+                            AgentsDisplayEpisode.accept(
+                                context,
+                                agentsEpisodeSurfacePresentedSignal(isHandoff),
+                            )
                             active = published
                             RingFocusBroadcastCoordinator.setSurfaceActive(
                                 context,

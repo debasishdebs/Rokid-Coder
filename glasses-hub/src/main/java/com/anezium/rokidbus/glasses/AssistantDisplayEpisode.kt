@@ -33,7 +33,10 @@ internal object NoticeDisplayHoldPolicy {
     /**
      * An Agents band holds while it asks the wearer something: approvals and
      * questions carry actions, done, error and notice bands carry none. Keyed
-     * on the actions rather than `interactive`, which an approval leaves false.
+     * on the actions alone, not `interactive`: an approval leaves that false,
+     * and the done and error bands set it without asking anything.
+     * [actionCount] is the actions still on offer, so an answered band, which
+     * offers none, no longer holds.
      */
     fun agentsNoticeHoldsDisplay(surfaceId: String, actionCount: Int): Boolean =
         surfaceId == AGENTS_NOTICE_ID && actionCount >= 1
@@ -234,7 +237,10 @@ internal fun agentsEpisodeNoticeShownSignal(
     AssistantEpisodeSignal.None
 }
 
-/** A redraw never re-arms; one that withdraws the last action ends the hold. */
+/**
+ * A redraw never re-arms. One that leaves no action on offer, whether the
+ * owner withdrew them or the wearer answered, ends the hold.
+ */
 internal fun agentsEpisodeNoticeRedrawSignal(
     surfaceId: String,
     actionCount: Int,
@@ -269,12 +275,23 @@ internal fun agentsEpisodeNoticeClosedSignal(
     )
 }
 
-internal fun agentsEpisodeSurfacePresentedSignal(): AssistantEpisodeSignal =
-    AssistantEpisodeSignal.End(DisplayHoldReleaseReason.SURFACE_PRESENTED)
+/**
+ * A new surface taking the screen ends the hold; an update to the surface
+ * already up does not, or a Lyrics or Media stream would cut every approval
+ * short.
+ */
+internal fun agentsEpisodeSurfacePresentedSignal(isHandoff: Boolean): AssistantEpisodeSignal =
+    if (isHandoff) {
+        AssistantEpisodeSignal.End(DisplayHoldReleaseReason.SURFACE_PRESENTED)
+    } else {
+        AssistantEpisodeSignal.None
+    }
 
 /**
  * Assistant and Agents each hold through their own episode, but only one may
- * hold the panel at a time: whichever engages ends the other.
+ * hold the panel at a time: whichever engages ends the other. That includes an
+ * Agents approval shown over an Assistant card, whose hold outlives its band:
+ * the approval takes precedence, and the card is one touch from awake again.
  */
 internal fun displayEpisodeTakeoverSignal(engaging: AssistantEpisodeSignal): AssistantEpisodeSignal =
     if (engaging is AssistantEpisodeSignal.Engage) {
