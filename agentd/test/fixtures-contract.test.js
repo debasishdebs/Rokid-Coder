@@ -400,9 +400,9 @@ const HANDLERS = {
         }
       });
       const send = (frame) => socket.write(`${JSON.stringify(frame)}\n`);
-      const next = async (type) => {
+      const next = async (type, match = () => true) => {
         for (let tries = 0; tries < 300; tries += 1) {
-          const found = frames.find((f) => f.type === type);
+          const found = frames.find((f) => f.type === type && match(f));
           if (found) return found;
           await settle(10);
         }
@@ -418,6 +418,16 @@ const HANDLERS = {
       send({ type: "command_result", cmdId: typed.cmdId, ok: true });
       const applied = await phone.waitFor("ack", (f) => f.msgId === fixture.msgId && f.result !== "rejected");
       assert.deepEqual([applied.result, applied.error, applied.v], ["applied", undefined, 2]);
+      // R152: typed, then failed. The id is spent, and the ack says so.
+      const consumedId = FROM_AGENT_VARIANTS.ack_consumed.msgId;
+      phone.send({ ...fixture, msgId: consumedId });
+      const second = await next("type_command", (f) => f.cmdId !== typed.cmdId);
+      send({ type: "command_written", cmdId: second.cmdId, at: Date.now() });
+      send({ type: "command_result", cmdId: second.cmdId, ok: false, error: "dialog_not_seen" });
+      const spent = await ack(consumedId);
+      assertSameShape(spent, FROM_AGENT_VARIANTS.ack_consumed, "consumed ack", {
+        values: { msgId: consumedId, result: "rejected", error: "dialog_not_seen", consumed: true },
+      });
     } finally {
       socket.destroy();
       child.kill("SIGKILL");

@@ -210,6 +210,14 @@
       "truncated": true,
       "waiting": 0,
       "reason": "new"
+    },
+    "ack_consumed": {
+      "type": "ack",
+      "v": 2,
+      "msgId": "fx-msg-launcher-consumed",
+      "result": "rejected",
+      "error": "dialog_not_seen",
+      "consumed": true
     }
   },
   "phone_to_agent": {

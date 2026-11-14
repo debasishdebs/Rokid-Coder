@@ -536,8 +536,8 @@ export class PhoneV2 {
     }
   }
 
-  private ack(channel: PhoneChannel, msgId: string, result: AckFrame["result"], error?: string): void {
-    channel.send({ type: "ack", v: 2, msgId, result, ...(error ? { error } : {}) });
+  private ack(channel: PhoneChannel, msgId: string, result: AckFrame["result"], error?: string, consumed = false): void {
+    channel.send({ type: "ack", v: 2, msgId, result, ...(error ? { error } : {}), ...(consumed ? { consumed: true } : {}) });
   }
 
   /**
@@ -591,7 +591,14 @@ export class PhoneV2 {
       type: String(frame.type).slice(0, 40),
       result: outcome.ok ? "applied" : outcome.error,
     });
-    this.ack(channel, msgId, outcome.ok ? "applied" : "rejected", outcome.ok ? undefined : outcome.error);
+    // `consumed` tells the phone to keep this id: a resend answers duplicate, never types again.
+    this.ack(
+      channel,
+      msgId,
+      outcome.ok ? "applied" : "rejected",
+      outcome.ok ? undefined : outcome.error,
+      !outcome.ok && outcome.consumed === true,
+    );
   }
 
   private apply(frame: Record<string, unknown>, msgId: string, record: () => void): Outcome | Promise<Outcome> {

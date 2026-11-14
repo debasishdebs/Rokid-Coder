@@ -875,3 +875,42 @@ test("timeout_cancel_then_late_command_written_acks_typed_after_cancel", async (
     assert.equal((await ack("lw5")).error, "timeout");
   });
 });
+
+// R152: the phone keeps a consumed command's id, so the ack must say it was consumed.
+test("consumed_launcher_failure_ack_says_consumed", async () => {
+  await withBound(async ({ launcher, command, ack }) => {
+    // Typed, then the launcher reports a failure: the id is spent.
+    command({ command: "compact" }, "cs1");
+    const typed = await launcher.waitFor("type_command");
+    launcher.send({ type: "command_written", cmdId: typed.cmdId, at: Date.now() });
+    launcher.send({ type: "command_result", cmdId: typed.cmdId, ok: false, error: "dialog_not_seen" });
+    const consumed = await ack("cs1");
+    assert.deepEqual([consumed.result, consumed.error, consumed.consumed], ["rejected", "dialog_not_seen", true]);
+  });
+  await withBound(async ({ launcher, command, ack }) => {
+    // Refused before anything was typed: the id is freed and the ack carries no `consumed`.
+    command({ command: "compact" }, "cs2");
+    const typed = await launcher.waitFor("type_command");
+    launcher.send({ type: "command_result", cmdId: typed.cmdId, ok: false, error: "laptop_draft" });
+    const freed = await ack("cs2");
+    assert.deepEqual([freed.result, freed.error, "consumed" in freed], ["rejected", "laptop_draft", false]);
+  });
+  await withBound(async ({ launcher, ack, heldStop, daemon, followup }) => {
+    // typed_after_cancel is consumed too.
+    followup("R1", "cs3");
+    const frame = await launcher.waitFor("type_command");
+    const { reply } = await heldStop();
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);
+    launcher.send({ type: "command_written", cmdId: frame.cmdId, at: Date.now() });
+    const late = await ack("cs3");
+    assert.deepEqual([late.error, late.consumed], ["typed_after_cancel", true]);
+    daemon.stopWait.releaseByLaptop(ID);
+    await reply;
+  });
+  await withBound(async ({ command, ack }) => {
+    // A refusal that never reached the launcher carries no `consumed`.
+    command({ command: "nonsense" }, "cs4");
+    const bad = await ack("cs4");
+    assert.deepEqual([bad.error, "consumed" in bad], ["bad_command", false]);
+  });
+});

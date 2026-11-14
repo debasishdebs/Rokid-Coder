@@ -103,7 +103,9 @@ export interface AlertFrame {
  * phone may resend the same frame once the cause (`error`) is gone. The one
  * exception (R152): a launcher command that was typed into the session and
  * then failed is `rejected` with its msgId spent, and a resend answers
- * `duplicate` rather than typing it again.
+ * `duplicate` rather than typing it again. That rejection carries
+ * `consumed: true`, so the phone keeps the id; every other rejection frees it
+ * and omits the field.
  */
 export interface AckFrame {
   type: "ack";
@@ -111,6 +113,7 @@ export interface AckFrame {
   msgId: string;
   result: "applied" | "duplicate" | "rejected";
   error?: string;
+  consumed?: true;
 }
 
 export interface FollowupClosedFrame {
