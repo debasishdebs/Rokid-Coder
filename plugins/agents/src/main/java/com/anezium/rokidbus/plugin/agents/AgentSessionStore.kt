@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.util.concurrent.CopyOnWriteArrayList
 
 data class LinkMachine(
     val machineId: String,
@@ -141,6 +142,39 @@ open class AgentSessionStore {
         publish(nowMs)
     }
 
+    /** A `session_removed` agentd sent for [sessionKey], over a live link from [machineId]. */
+    data class SessionRemoval(val sessionKey: String, val machineId: String)
+
+    private class Owner(val machineId: String, val provider: AgentProvider)
+
+    /**
+     * The machine that first reported each session, by key. It outlives the
+     * session on the board: a launcher id kept for a session is bound to it.
+     */
+    private val owners = LinkedHashMap<String, Owner>()
+
+    private val removalListeners = CopyOnWriteArrayList<(SessionRemoval) -> Unit>()
+
+    /** The machine that first reported [sessionKey], or null when no link said. */
+    @Synchronized
+    fun ownerOf(sessionKey: String): String? = owners[sessionKey]?.machineId
+
+    /**
+     * Calls [listener] for every `session_removed` with the machine it came from,
+     * on the transport's thread, after the board has dropped the session. Returns
+     * the call that stops it.
+     */
+    fun onSessionRemoved(listener: (SessionRemoval) -> Unit): () -> Unit {
+        removalListeners += listener
+        return { removalListeners -= listener }
+    }
+
+    private fun own(session: AgentSession, machineId: String?) {
+        if (machineId == null || session.key in owners) return
+        owners[session.key] = Owner(machineId, session.provider)
+        while (owners.size > MAX_OWNERS) owners.remove(owners.keys.first())
+    }
+
     /**
      * The sessions a transport cleared from the board, by key, with their provider. Their fate is
      * unknown until the next authenticated snapshot says it.
@@ -161,8 +195,10 @@ open class AgentSessionStore {
     fun replaceLinkSessions(
         providers: Set<AgentProvider>,
         sessions: List<AgentSession>,
+        machineId: String?,
         nowMs: Long = System.currentTimeMillis(),
     ) {
+        sessions.forEach { own(it, machineId) }
         providers.forEach { provider ->
             val replacement = linkedMapOf<String, AgentSession>()
             sessions.filter { it.provider == provider }.forEach { replacement[it.id] = it }
@@ -257,7 +293,8 @@ open class AgentSessionStore {
     }
 
     @Synchronized
-    fun upsert(session: AgentSession, nowMs: Long = System.currentTimeMillis()) {
+    fun upsert(session: AgentSession, machineId: String? = null, nowMs: Long = System.currentTimeMillis()) {
+        own(session, machineId)
         providerSessions.getValue(session.provider)[session.id] = session
         // Only a mode change ends the refusal of one.
         val refusal = notApplied[session.key]
@@ -265,18 +302,24 @@ open class AgentSessionStore {
         publish(nowMs)
     }
 
-    @Synchronized
+    /** agentd's `session_removed`, over a live link from [machineId]. */
     fun remove(
         provider: AgentProvider,
         sessionId: String,
+        machineId: String?,
         nowMs: Long = System.currentTimeMillis(),
     ) {
-        providerSessions.getValue(provider).remove(sessionId)
-        unconfirmed.remove("${provider.wireValue}:$sessionId")
-        notApplied.remove("${provider.wireValue}:$sessionId")
-        replyNotSent.remove("${provider.wireValue}:$sessionId")
-        publish(nowMs)
-        _sessionEnded.tryEmit("${provider.wireValue}:$sessionId")
+        val key = "${provider.wireValue}:$sessionId"
+        synchronized(this) {
+            providerSessions.getValue(provider).remove(sessionId)
+            unconfirmed.remove(key)
+            notApplied.remove(key)
+            replyNotSent.remove(key)
+            publish(nowMs)
+            _sessionEnded.tryEmit(key)
+        }
+        // Outside the lock: a listener may read the store.
+        if (machineId != null) removalListeners.forEach { it(SessionRemoval(key, machineId)) }
     }
 
     /**
@@ -357,6 +400,9 @@ open class AgentSessionStore {
 
     companion object {
         const val DONE_RETENTION_MS = 30 * 60 * 1_000L
+
+        /** Owners remembered, well above the history's 200 entries; the oldest go first. */
+        private const val MAX_OWNERS = 1_024
 
         /**
          * Attention first. A failed session used to sort below idle ones while

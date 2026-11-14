@@ -820,7 +820,7 @@ class AlertDirectorTest {
         val store = AgentSessionStore()
         launch(start = CoroutineStart.UNDISPATCHED) { store.sessionEnded.collect(director::onSessionEnded) }
         up()
-        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(linkSession))
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(linkSession), machineId = "A")
         director.onBoard(setOf("claude:s1"))
         feed(alert(id = "A"))
 
@@ -831,7 +831,7 @@ class AlertDirectorTest {
         assertEquals("a transient clear ends nothing", Outcome.PENDING, entry("A").outcome)
 
         up()
-        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, reconnectSnapshot.toList())
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, reconnectSnapshot.toList(), machineId = "A")
         director.onBoard(reconnectSnapshot.mapTo(HashSet()) { it.key })
         yield()
         coroutineContext.cancelChildren()

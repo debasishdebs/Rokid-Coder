@@ -59,11 +59,11 @@ class RejectedModeTest {
     @Test
     fun a_snapshot_or_a_removal_also_ends_it() {
         store.noteNotApplied(session.key, "x", nowMs = 0L)
-        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(session))
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(session), machineId = "A")
         assertNull(store.notApplied(session.key, 0L))
 
         store.noteNotApplied(session.key, "x", nowMs = 0L)
-        store.remove(session.provider, session.id)
+        store.remove(session.provider, session.id, machineId = "A")
         assertNull(store.notApplied(session.key, 0L))
     }
 

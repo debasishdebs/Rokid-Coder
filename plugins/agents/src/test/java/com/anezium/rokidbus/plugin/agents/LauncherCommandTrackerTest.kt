@@ -1,9 +1,5 @@
 package com.anezium.rokidbus.plugin.agents
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.cancelChildren
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.yield
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -19,7 +15,7 @@ class LauncherCommandTrackerTest {
     private val tracker = LauncherCommandTracker(newId = { "id-${++counter}" })
 
     private fun id(now: Long, command: String = "compact", arg: String? = null, key: String = session): String =
-        tracker.msgIdFor(key, command, arg, now) ?: error("held")
+        tracker.msgIdFor(key, command, arg, now, owner = "A") ?: error("held")
 
     private fun ack(msgId: String, result: String, consumed: Boolean = false, now: Long) =
         tracker.onAck(msgId, result, consumed, now)
@@ -131,7 +127,7 @@ class LauncherCommandTrackerTest {
         assertEquals(LauncherCommandTracker.AckOutcome.UNKNOWN, ack("nobody", "duplicate", now = 0))
         val kept = id(0)
         val other = id(0, key = "claude:s2")
-        tracker.forgetSession(session)
+        tracker.forgetRemoved(session, "A")
         assertNotEquals(kept, id(1_000))
         assertEquals(other, id(1_000, key = "claude:s2"))
         assertEquals(LauncherCommandTracker.AckOutcome.UNKNOWN, ack(kept, "duplicate", now = 1_500))
@@ -180,34 +176,33 @@ class LauncherCommandTrackerTest {
     }
 
     /** The service's wiring: a real store, a [ControlSender] following it, and the frames it wrote. */
-    private class Wired(scope: CoroutineScope) {
+    private class Wired {
         var ids = 0
         val wire = mutableListOf<String>()
         val store = AgentSessionStore()
-        val sender = ControlSender(write = { wire += it }, clock = { 0L }, newId = { "m${++ids}" })
+        val sender = ControlSender(write = { wire += it }, ownerOf = store::ownerOf, clock = { 0L }, newId = { "m${++ids}" })
         val board = AgentSession(id = "s1", provider = AgentProvider.CLAUDE, title = "s1", status = AgentStatus.WORKING)
 
         init {
-            sender.follow(store, scope)
+            sender.follow(store)
         }
 
         fun msgIdOf(index: Int): String = JSONObject(wire[index]).getString("msgId")
 
         fun tap() = sender.send(ControlMenu.Command.LauncherCompact, board.key) as ControlSender.Sent.Written
 
-        /** agentd's snapshot over a fresh link. */
-        fun snapshot(vararg sessions: AgentSession) =
-            store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, sessions.toList())
+        /** agentd's snapshot over a fresh link from [machine]. */
+        fun snapshot(machine: String, vararg sessions: AgentSession) =
+            store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, sessions.toList(), machine)
 
         /** An inbound disconnect, a monitoring stop or a link drop: the transport empties the board. */
         fun transportClear() = store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
     }
 
     @Test
-    fun consumed_rejection_survives_disconnect_reconnect_retap_is_duplicate() = runBlocking {
-        val w = Wired(this)
-        w.snapshot(w.board)
-        yield()
+    fun consumed_rejection_survives_disconnect_reconnect_retap_is_duplicate() {
+        val w = Wired()
+        w.snapshot("A", w.board)
         val sent = w.tap()
         assertEquals(
             LauncherCommandTracker.AckOutcome.KEPT_CONSUMED,
@@ -215,45 +210,50 @@ class LauncherCommandTrackerTest {
         )
         // The link drops and comes back with the same session: the kept id was never agentd's to free.
         w.transportClear()
-        yield()
-        w.snapshot(w.board)
-        yield()
+        w.snapshot("A", w.board)
         w.tap()
         assertEquals("a re-tap must carry the consumed id, so agentd answers duplicate", w.msgIdOf(0), w.msgIdOf(1))
 
-        // agentd itself reports the session removed: now the id goes with it.
-        w.store.remove(AgentProvider.CLAUDE, "s1")
-        yield()
-        w.snapshot(w.board)
-        yield()
+        // agentd on A itself reports the session removed: now the id goes with it.
+        w.store.remove(AgentProvider.CLAUDE, "s1", machineId = "A")
+        w.snapshot("A", w.board)
         w.tap()
         assertNotEquals(w.msgIdOf(1), w.msgIdOf(2))
-        coroutineContext.cancelChildren()
     }
 
     @Test
-    fun lost_ack_survives_disconnect_reconnect_retap_reuses_id() = runBlocking {
-        val w = Wired(this)
-        w.snapshot(w.board)
-        yield()
+    fun lost_ack_survives_disconnect_reconnect_retap_reuses_id() {
+        val w = Wired()
+        w.snapshot("A", w.board)
         w.tap()
         // No ack: the link drops before it lands, and comes back.
         w.transportClear()
-        yield()
-        w.snapshot(w.board)
-        yield()
+        w.snapshot("A", w.board)
         w.tap()
         assertEquals("a re-tap after a lost ack must reuse the id, never compact twice", w.msgIdOf(0), w.msgIdOf(1))
 
-        // The session was closed on the laptop while the link was down: the reconnect snapshot omits it.
+        // Even A's own snapshot omitting the session is no session_removed: the id stays until its 23 h run out.
         w.transportClear()
-        yield()
-        w.snapshot()
-        yield()
-        w.snapshot(w.board)
-        yield()
+        w.snapshot("A")
+        w.snapshot("A", w.board)
         w.tap()
-        assertNotEquals(w.msgIdOf(1), w.msgIdOf(2))
-        coroutineContext.cancelChildren()
+        assertEquals(w.msgIdOf(1), w.msgIdOf(2))
+    }
+
+    @Test
+    fun other_computers_snapshot_never_drops_kept_ids() {
+        val w = Wired()
+        // Computer A reports s1, and a compact is sent and its ack lost.
+        w.snapshot("A", w.board)
+        w.tap()
+        // A's link goes; computer B links, its snapshot knows nothing of A's session, and it even says removed.
+        w.transportClear()
+        w.snapshot("B")
+        w.store.remove(AgentProvider.CLAUDE, "s1", machineId = "B")
+        // Back on A: the re-tap must still carry the kept id.
+        w.transportClear()
+        w.snapshot("A", w.board)
+        w.tap()
+        assertEquals("another computer must never free A's kept id", w.msgIdOf(0), w.msgIdOf(1))
     }
 }

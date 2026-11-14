@@ -363,9 +363,9 @@ class AgentdLinkServer internal constructor(
     ) {
         when (action) {
             is AgentdAction.Snapshot ->
-                store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, action.sessions)
-            is AgentdAction.Upsert -> store.upsert(action.session)
-            is AgentdAction.Removed -> store.remove(action.provider, action.sessionId)
+                store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, action.sessions, connection.machineId)
+            is AgentdAction.Upsert -> store.upsert(action.session, connection.machineId)
+            is AgentdAction.Removed -> store.remove(action.provider, action.sessionId, connection.machineId)
             is AgentdAction.Detail ->
                 store.setConversation(action.provider, action.sessionId, action.messages)
             is AgentdAction.DetailAppend ->

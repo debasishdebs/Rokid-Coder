@@ -238,6 +238,8 @@ class AgentdClient(
         val ended = CompletableDeferred<ConnectionOutcome>()
         val connected = AtomicBoolean(false)
         val owner = LinkOwner()
+        // The dialled computer is known by its pinned fingerprint: the owner of the sessions it reports.
+        val machineId = GuidedPairing.dialledId(config.fp.orEmpty())
         lateinit var deadlines: ConnectionDeadlines
 
         fun isLive(): Boolean = sockets.isCurrent(generation) && !ended.isCompleted
@@ -293,7 +295,7 @@ class AgentdClient(
                         touchUsed()
                         _needsRepair.value = false
                         onSecureConnected(
-                            GuidedPairing.dialledId(config.fp.orEmpty()),
+                            machineId,
                             action.machineName?.takeIf(String::isNotBlank) ?: config.name,
                         )
                         deadlines.clear(DEADLINE_HELLO)
@@ -314,16 +316,17 @@ class AgentdClient(
                         store.replaceLinkSessions(
                             AgentProvider.AGENTD_PROVIDERS,
                             action.sessions,
+                            machineId,
                         )
                         // A fresh connection knows nothing of the open conversation.
                         openSessionId?.let { write(AgentdProtocolCodec.detailOpen(it)) }
                     }
                     is AgentdAction.Upsert -> {
-                        if (connected.get()) store.upsert(action.session)
+                        if (connected.get()) store.upsert(action.session, machineId)
                     }
                     is AgentdAction.Removed -> {
                         if (connected.get()) {
-                            store.remove(action.provider, action.sessionId)
+                            store.remove(action.provider, action.sessionId, machineId)
                         }
                     }
                     is AgentdAction.Detail -> {

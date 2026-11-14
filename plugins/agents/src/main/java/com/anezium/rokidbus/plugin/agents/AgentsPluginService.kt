@@ -212,7 +212,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
      */
     private val controlSender = ControlSender(
         write = { frame -> AgentsMonitorService.sendV2(applicationContext, frame) },
+        ownerOf = AgentsRuntime.store::ownerOf,
     )
+    private var stopFollowingRemovals: (() -> Unit)? = null
 
     /** The mode_set frames among them, with their session: a rejection of one is shown on that session's menu. */
     private val modeSetMsgIds = LinkedHashMap<String, String>()
@@ -300,7 +302,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             // do with whether the daemon is currently answering.
             AgentsRuntime.store.sessions.collectLatest { raiseAttention() }
         }
-        controlSender.follow(AgentsRuntime.store, serviceScope)
+        stopFollowingRemovals = controlSender.follow(AgentsRuntime.store)
         serviceScope.launch {
             // A reply for a session that left the board would send into nothing.
             AgentsRuntime.store.sessions.collect { sessions ->
@@ -468,6 +470,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     override fun onDestroy() {
+        stopFollowingRemovals?.invoke()
+        stopFollowingRemovals = null
         tts?.close()
         tts = null
         chime.close()

@@ -1,8 +1,5 @@
 package com.anezium.rokidbus.plugin.agents
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
@@ -38,7 +35,8 @@ internal class LauncherCommandTracker(private val newId: () -> String = { UUID.r
         DUPLICATE,
     }
 
-    private class Kept(val msgId: String, val sentAt: Long)
+    /** [owner] is the machine that reported the session when the id was kept, or null when none did. */
+    private class Kept(val msgId: String, val sentAt: Long, val owner: String?)
 
     private val kept = LinkedHashMap<CommandKey, Kept>()
     private val retryUntil = HashMap<CommandKey, Long>()
@@ -48,14 +46,14 @@ internal class LauncherCommandTracker(private val newId: () -> String = { UUID.r
      * the kept id is older than [KEPT_ID_MAX_MS], so the retry is armed and the
      * caller shows [ControlMenu.MAY_ALREADY_BE_SENT].
      */
-    fun msgIdFor(sessionKey: String, command: String, arg: String?, now: Long): String? {
+    fun msgIdFor(sessionKey: String, command: String, arg: String?, now: Long, owner: String? = null): String? {
         val key = CommandKey(sessionKey, command, arg)
         if (retryArmed(key, now)) {
             // The wearer was told it may be sent already and tapped again.
             retryUntil.remove(key)
-            return fresh(key, now)
+            return fresh(key, now, owner)
         }
-        val held = kept[key] ?: return fresh(key, now)
+        val held = kept[key] ?: return fresh(key, now, owner)
         if (now - held.sentAt >= KEPT_ID_MAX_MS) {
             retryUntil[key] = now + RETRY_WINDOW_MS
             return null
@@ -104,18 +102,20 @@ internal class LauncherCommandTracker(private val newId: () -> String = { UUID.r
             }
 
     /**
-     * Kept ids go with their session once agentd says it ended. A board a
-     * transport emptied is not that: the session may well be back on the next
-     * link, and a fresh id there could type the command twice.
+     * agentd on [machineId] sent `session_removed` for [sessionKey]: the ids kept
+     * for it on that machine go. Nothing else drops a kept id but its acks and
+     * the [KEPT_ID_MAX_MS] rule. A cleared board or a snapshot, from this
+     * machine or another, is not that: the session may come back, and a fresh
+     * id there could type the command twice.
      */
-    fun forgetSession(sessionKey: String) {
-        kept.keys.removeAll { it.sessionKey == sessionKey }
-        retryUntil.keys.removeAll { it.sessionKey == sessionKey }
+    fun forgetRemoved(sessionKey: String, machineId: String) {
+        val gone = kept.filter { (key, held) -> key.sessionKey == sessionKey && held.owner == machineId }.keys
+        gone.forEach(::forget)
     }
 
-    private fun fresh(key: CommandKey, now: Long): String {
+    private fun fresh(key: CommandKey, now: Long, owner: String?): String {
         val id = newId()
-        kept[key] = Kept(id, now)
+        kept[key] = Kept(id, now, owner)
         return id
     }
 
@@ -144,6 +144,8 @@ internal class LauncherCommandTracker(private val newId: () -> String = { UUID.r
  */
 internal class ControlSender(
     private val write: (String) -> Unit,
+    /** The machine that reported a session; a kept id is bound to it. */
+    private val ownerOf: (String) -> String? = { null },
     private val clock: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) {
@@ -160,12 +162,15 @@ internal class ControlSender(
 
     private val tracker = LauncherCommandTracker(newId)
 
+    @Synchronized
     fun send(command: ControlMenu.Command, sessionKey: String): Sent {
         val msgId = when (command) {
             ControlMenu.Command.LauncherCompact ->
-                tracker.msgIdFor(sessionKey, LauncherCommandTracker.COMPACT, null, clock()) ?: return Sent.Held
+                tracker.msgIdFor(sessionKey, LauncherCommandTracker.COMPACT, null, clock(), ownerOf(sessionKey))
+                    ?: return Sent.Held
             is ControlMenu.Command.LauncherModel ->
-                tracker.msgIdFor(sessionKey, LauncherCommandTracker.MODEL, command.model, clock()) ?: return Sent.Held
+                tracker.msgIdFor(sessionKey, LauncherCommandTracker.MODEL, command.model, clock(), ownerOf(sessionKey))
+                    ?: return Sent.Held
             else -> newId()
         }
         val frame = try {
@@ -178,14 +183,19 @@ internal class ControlSender(
     }
 
     /** Routes an ack to the tracker; anything that is not a launcher command's id is [LauncherCommandTracker.AckOutcome.UNKNOWN]. */
+    @Synchronized
     fun onAck(ack: AgentdAction.Ack): LauncherCommandTracker.AckOutcome =
         tracker.onAck(ack.msgId, ack.result, ack.consumed, clock())
 
     /** The launcher commands of [sessionKey] the wearer may now send again on purpose. */
+    @Synchronized
     fun armed(sessionKey: String): Set<ControlMenu.Command> = tracker.armedCommands(sessionKey, clock())
 
-    /** Drops the kept ids of each session [store] reports ended (R152), on [scope]'s thread. */
-    fun follow(store: AgentSessionStore, scope: CoroutineScope): Job = scope.launch {
-        store.sessionEnded.collect(tracker::forgetSession)
+    /**
+     * Drops a session's kept ids when its own machine sends `session_removed` (R152). Called on the
+     * transport's thread, hence the lock. Returns the call that stops following.
+     */
+    fun follow(store: AgentSessionStore): () -> Unit = store.onSessionRemoved { removal ->
+        synchronized(this) { tracker.forgetRemoved(removal.sessionKey, removal.machineId) }
     }
 }

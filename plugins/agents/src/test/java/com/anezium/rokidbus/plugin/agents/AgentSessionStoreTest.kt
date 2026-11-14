@@ -110,7 +110,7 @@ class AgentSessionStoreTest {
         assertEquals(emptyList<String>(), ended)
 
         store.replaceProvider(AgentProvider.CLAUDE, listOf(session("b", AgentProvider.CLAUDE, AgentStatus.IDLE)))
-        store.remove(AgentProvider.CLAUDE, "b")
+        store.remove(AgentProvider.CLAUDE, "b", machineId = "A")
         yield()
         assertEquals(listOf("claude:b"), ended)
         job.cancel()
@@ -123,16 +123,16 @@ class AgentSessionStoreTest {
         val job = launch(start = CoroutineStart.UNDISPATCHED) { store.sessionEnded.collect { ended += it } }
         val a = session("a", AgentProvider.CLAUDE, AgentStatus.IDLE)
         val b = session("b", AgentProvider.CODEX, AgentStatus.IDLE)
-        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(a, b))
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(a, b), machineId = "A")
 
         // The dialled link drops and the board keeps both while it redials; b closed meanwhile.
         store.noteLinkLost(AgentProvider.AGENTD_PROVIDERS)
-        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(a))
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(a), machineId = "A")
         yield()
         assertEquals(listOf("codex:b"), ended)
 
         // Only the first snapshot after the loss settles it: a refresh on the live link announces nothing.
-        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList(), machineId = "A")
         yield()
         assertEquals(listOf("codex:b"), ended)
         job.cancel()
