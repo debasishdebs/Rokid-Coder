@@ -1,0 +1,190 @@
+# Plan 3 final fix wave: re-review (opus)
+
+- **Range:** `14cd2390..7127efa2`, 3 commits (e37d8a7a, 8f90ebff, 7127efa2), read from the review diff file in four passes.
+- **Process:** one reviewer, no subagents, no edits. The router, hub and launcher-client sources around the diff were read to check R165 and the readiness paths.
+- **Focused check:** one scratch probe was run, outside the repo. A stdin-echo Codex ran under `rk codex` in a pty, with and without the R158 wait. No keystroke was lost to rk in any run: 0/18.
+
+### Finding Verdicts
+
+- **I1 / R160: a compact past `ok` is not cancelled on link loss.** ADDRESSED (fixed).
+  - launcher-client.ts:166 `linkChanged` clears `running` and calls `typist.cancelActive()`.
+  - typist.ts:164: cancelling a compacting command releases with `unless_held`.
+  - Test: `link_drop_after_compact_ok_releases_keyboard`. It covers held keys waiting for a fresh idle, immediate echo, no `busy` on the next command, and an immediate release when nothing is held.
+- **I2 / R161: uncertainty is discarded on an agentd restart.** ADDRESSED (fixed), with Minors N1 and N2.
+  - rk.ts:447 sends `uncertain` in `launcher_bind`.
+  - launcher-hub.ts:544 validates it, and launcher-hub.ts:712 seeds the binding with it.
+  - session-state.ts:337-339 latches when a binding is uncertain and has no latch.
+  - rk.ts:416: a `binding_state` false is ignored, and true calls `markUncertain`.
+  - The launcher clears its flag only through typist.ts:182 (the file is idle after `uncertainSince`) or launcher-client.ts:135-139 (`prompt_submitted`).
+  - Test: `uncertainty_survives_agentd_restart_and_blocks_next_command`.
+- **I3 / R162: restore misses the alternate screen and mouse modes.** ADDRESSED (fixed), with Minor N6.
+  - terminal.ts:73 writes, in order: the kitty pops, mouse off, focus off, `?1049l`, cursor on, paste off.
+  - It runs on every exit path and in `emergencyCleanup` (rk.ts, `restoreTerminal(saved, kitty.depth)`), and in `leave()` for codex.
+  - Tests: the restore test now runs with `FAKE_TUI_MODES=1` and gains a `sigkill` scenario. `rk_codex_fatal_error_…` asserts `?1049l`.
+- **I4 / R163: no cancel when a hold, approval or question opens.** ADDRESSED (fixed) for every ruled trigger. The cancel race is graded separately under R165, below.
+  - The triggers are wired at daemon.ts:213 (Stop hold), daemon.ts:214 (question), daemon.ts:402 (PermissionRequest) and session-state.ts:392-396 (UserPromptSubmit).
+  - session-state.ts:481: `waitForReady` returns `held` only when the session is not claimed.
+  - daemon.ts:208: non-delivered releases republish the state.
+  - Tests: `stop_hold_opening_cancels_queued_command`, `pending_approval_cancels_queued_command` and `queued_reply_never_typed_after_a_later_laptop_turn`.
+- **R151: Esc gap, and held keys into a dialog.** ADDRESSED (fixed), with Minors N4 and N5.
+  - The takeover key goes alone (laptop-input.ts:256). Held keys are replayed after `REPLAY_GAP_MS` (typist.ts:444).
+  - Keys typed in the gap queue behind the held ones.
+  - Keys are dropped while `dialogMayBeOpen()` (typist.ts:416, laptop-input.ts:275): the model command is past its first write, or the binding is uncertain.
+  - Test: `takeover_esc_then_held_keys_after_gap_no_alt_chord`.
+- **R164: kitty Esc and Ctrl-C.** ADDRESSED (fixed), with Minor N3.
+  - laptop-input.ts:165 `kittyKey`: code 27 is a takeover and a draft. Code 99 with exactly Ctrl, ignoring the lock bits, is a takeover and a clear. Release events and `CSI ? … u` are neutral. Any other press is a draft.
+  - Test: `kitty_protocol_esc_and_ctrl_c_take_over`.
+- **R149: `prompt_submitted`.** ADDRESSED (fixed).
+  - Sent from session-state.ts:395 and launcher-hub.ts:309.
+  - laptop-input.ts:319 clears the draft only when `enterLast` is set and `lastEnterAt <= at`.
+  - Test: `enter_while_busy_cleared_by_prompt_submitted`.
+- **R158: the rk codex hint wait.** ADDRESSED (fixed), with Minor N7.
+  - rk.ts:596: only on a TTY, waits for a key or 3 s, then prints the reminder in `leave()`.
+  - Test: `rk_codex_hint_waits_for_key_or_3s_on_tty`.
+  - The probe above confirms the wait doesn't steal Codex's input.
+- **Codex #3: EOF sweep.** ADDRESSED (fixed) per the R140 ruling: the code is kept and the README is corrected (README.md:134-137).
+- **Codex #5: rk codex fatal cleanup.** ADDRESSED (fixed).
+  - rk.ts:634 `onFatal` sends TERM, arms the KILL and a hard exit, and `leave()` restores and exits 143.
+  - Test: `rk_codex_fatal_error_ends_codex_and_restores_terminal`.
+- **Codex #6: raw mode after a failed `stty -g`.** ADDRESSED (fixed).
+  - terminal.ts:33 returns `"failed"`. rk.ts:260 skips `setRawMode` and warns.
+  - Test: `failed_stty_save_runs_cooked_and_warns`. It is flaky; see N8.
+- **Codex #7: launcher-side framing.** ADDRESSED (fixed).
+  - rk.ts:171 applies the byte bound per line before parsing.
+  - rk.ts:139 requires strict JSON of a known type. Anything else destroys the link.
+  - Test: `launcher_link_closes_on_oversize_line_bad_json_or_unknown_frame`.
+- **R132 containment.** ADDRESSED (fixed).
+  - pty.ts:35 `insideModules` resolves realpaths on both sides, against `OWN_MODULES` (pty.ts:29).
+  - postinstall.js:17 does the same.
+  - Tests: the symlink-out case, and `runtime_spawn_helper_chmod_contained_…`.
+- **T1 TOCTOU.** ADDRESSED (fixed).
+  - launcher-hub.ts:385 opens with `O_RDONLY|O_DIRECTORY|O_NOFOLLOW`. `fstat` and `fchmod` go through the fd (launcher-hub.ts:413).
+  - The socket-path checks follow, as before.
+- **rk socket owner check (M6).** ADDRESSED (fixed) for rk and the status probe.
+  - status-probe.ts `launcherSocketTrusted` checks that the dir is ours, real, with no group or other bits, and that the socket is ours. It is used at rk.ts:98 and in `socketAnswers`.
+  - The hook-forward `armPairing` check is left, as accepted under R166.
+  - Test: `launcher_socket_trusted_only_in_a_private_dir_of_ours`.
+- **Minors the implementer claims are fixed:**
+  - M1 (= Codex #3): fixed (README).
+  - M2 (= Codex #5): fixed.
+  - M3 (= Codex #6): fixed.
+  - M4 (= Codex #7): fixed.
+  - M5: fixed.
+    - Backoff is at rk.ts:46 and rk.ts:400.
+    - The hub rebinds on `/rokid:on` (launcher-hub.ts:732, 753).
+    - Moving the detach check ahead of the ps walk is left, as accepted under R166.
+  - M6: fixed (above).
+  - M7: fixed (daemon.ts:166). Stale discovered records are left, as accepted under R166.
+  - M8: fixed (protocol-v2.ts:104).
+  - M9: fixed (attach-command.ts:192).
+  - M10: partly fixed. The startup prune is at attach-registry.ts:222. The SessionEnd prune is left, as accepted under R166.
+
+### R165: a late `command_written` after a cancel. NOT ADDRESSED: residual **Important**
+
+- The cancel path:
+  1. `cancelUnwritten` (session-state.ts:418-422) aborts `"cancelled"`.
+  2. `run()` (session-state.ts:526-531) calls `cancelCommand`, then returns `failed("cancelled")` while `running.written` is still false, so there is no `consumed`.
+  3. `finally` deletes `running` (session-state.ts:558-560).
+- A `command_written` that then arrives is passed on by the hub regardless (launcher-hub.ts:574-578). The router's handler (session-state.ts:316-324) only latches: `this.running.get(key)` is gone, so nothing marks the msgId spent. The ack has already gone out as `rejected cancelled`.
+- phone-v2.ts:586 then frees the msgId, so a phone resend of the same msgId types the reply a second time.
+- No `typed_after_cancel` exists anywhere in `src`, and no test sends a `command_written` after the cancel. The R163 tests answer with `command_result cancelled`.
+- **Window:**
+  - The launcher writes the frame in the same tick as its first pty write, before Claude has the bytes.
+  - So the race needs a hold, approval, question or laptop UserPromptSubmit landing within socket latency of that write.
+  - The timeout cancel path has the same gap.
+- **Fix:** keep cancelled cmdIds for a short while (or until the connection's next command). On a `command_written` for one of them, record the msgId as consumed, and send the phone a corrective `rejected typed_after_cancel` (or hold the cancel ack until the launcher's `command_result` arrives).
+
+### Specific checks
+
+- **Held keys and dialogs.** No path remains for *held* keys to reach a dialog:
+  - **Takeover:** keys held during a model command are dropped, never queued (laptop-input.ts:275). During the 100 ms gap, `holding` stays true, so no command can make a first write (typist.ts `stepWaiting` needs `!holding`).
+  - **No early flush:** `end()` from a takeover only sets `releaseAfter` and never flushes synchronously, so the takeover key always precedes the replay.
+  - **Link drop and cancel:** a dialog-phase cancel sends Esc and marks the binding uncertain. Later keys are still dropped while it is uncertain, and release needs `!uncertain()` and a fresh idle (typist.ts `tryRelease`).
+  - The one leftover path is not held keys: see N4, where a takeover chunk is passed whole.
+- **Uncertainty: no permanent wedge.**
+  - Positive clears exist on both sides: agentd's own (session-state.ts:115-120 on UserPromptSubmit, session-state.ts:213-223 on a newer idle), and the launcher's own (typist.ts:182, launcher-client.ts:135-139).
+  - The router re-latches whenever it is uncertain without a latch, so a newer idle always clears it (session-state.ts:337-339).
+  - Esc or Ctrl-C frees the keyboard even while uncertain. With held keys already dropped there is nothing to replay, so `holding` ends.
+  - Worst case: it becomes over-sticky after a link blip (N1). A laptop prompt or any status change clears it. Graded Minor.
+- **Kitty parsing.**
+  - **No false takeover from ordinary typing:** only code 27, or code 99 with Ctrl alone (lock bits masked), is a takeover. Releases (`:3`) and flag replies are neutral, and bracketed paste is skipped.
+  - **Missed takeover:** only on a non-Latin layout, or with flag 8 for Enter (N3). Both fail safe: the key is held or the draft is kept.
+
+### New Breakage in the Fix Diff
+
+No Critical. No Important other than R165 above. Minors:
+
+- **N1 (Minor). A stale uncertainty is re-sent at bind time.**
+  - **What happens:**
+    1. rk.ts:447 calls `client.uncertain()` while unbound. `readOwned` (launcher-client.ts:73-77) returns undefined until `onBound`, so the launcher's file check can't clear the flag.
+    2. A raw `true` is therefore re-sent even after Claude's file showed idle after the write. The raw flag is evaluated only lazily, when a command arrives, so it often is still raw `true`.
+    3. agentd then latches at bind time (session-state.ts:337-339).
+  - **Result:** after a link blip or restart, glasses commands are refused `uncertain` until a newer status change or a laptop prompt. Fail-safe.
+  - **Fix:** evaluate it against the polled session file (`setSession`), or call `uncertain()` while still bound in `onLinkDown`.
+- **N2 (Minor). The hub's M5 rebind replays a stale `uncertain`.**
+  - **Where:** launcher-hub.ts:753 re-runs the bind with `lastBind.uncertain` (launcher-hub.ts:544), which is the value from rk's last refused ask.
+  - **Result:** if rk has cleared since, `/rokid:on` seeds a spurious uncertainty on agentd. rk refreshes the value at each backoff retry, so the staleness is bounded at 30 s.
+- **N3 (Minor). Two kitty-protocol cases miss.**
+  - **Non-Latin layouts:** laptop-input.ts:15 discards the alternate-key sub-fields. On a non-Latin layout, Ctrl-C reports the layout's codepoint, with 99 only as the base-layout alternate, so it is neither a takeover nor a clear.
+  - **Flag 8 (report all keys):** Enter arrives as `CSI 13u`, which never arms `enterPending`/`enterLast`. R145 and R149 can't clear the draft, so it sticks until Ctrl-C.
+  - Both fail safe.
+- **N4 (Minor). A takeover chunk passes whole.**
+  - **Where:** laptop-input.ts:256 `deliver(data)`. Any keys read in the same chunk as the Esc or Ctrl-C reach the pty at once, with no gap and no drop.
+  - **Result:** `"\r\x1b"` read together during a glasses `/model` dialog confirms the dialog.
+  - **Notes:** the behaviour predates this wave, and it is unlikely: it needs two keys in one read. It is the only remaining dialog path.
+  - **Fix:** split the chunk at the takeover key. Pass the prefix through the hold/drop logic.
+- **N5 (Minor). The R151 bell can break a split OSC.**
+  - **Where:** rk.ts:368 writes `\x07` between child output chunks.
+  - **Result:** if Claude's output split an OSC across chunks (a title or an OSC 8 link), the BEL terminates it, and the rest prints as text. It is unlikely: it needs the first dropped key of a hold to land in that gap.
+- **N6 (Minor). The kitty tracker misses two cases.**
+  - terminal.ts:43 tracks only the `CSI > u` / `CSI < u` forms, not `CSI = flags;mode u`.
+  - The pops are written before `?1049l`. A push made on the main screen before Claude entered the alternate screen is popped on the alternate stack, because kitty keeps a stack per screen.
+  - Neither is verified against real Claude.
+- **N7 (Minor). Ctrl-C at the hint starts Codex.** In rk.ts `waitForKey` (raw mode), Ctrl-C at the R158 hint is consumed as "any key" and starts Codex instead of aborting.
+- **N8 (Minor). The new `failed_stty_save_runs_cooked_and_warns` test is flaky.**
+  - **Evidence:** it failed in my first full run (`Cannot read properties of undefined (reading 'ppid')` at test/rk.test.js:367). It passed 5/5 alone, and passed in the second full run.
+  - **Cause:** `sttyScenario` reads `pids.json` at the mid sample, before the fake has written it under load. This is the known T2-deferred `sttyScenario` race, now in a new test.
+  - **Fix:** wait `until(() => readJson(pids))`.
+
+### Test run (`cd agentd && npm test`, at 7127efa2, clean tree)
+
+First run (real tail):
+```
+✖ failed_stty_save_runs_cooked_and_warns (740.01375ms)
+  TypeError [Error]: Cannot read properties of undefined (reading 'ppid')
+      at drive (~/Desktop/rokid/Rokid-Coder/agentd/test/rk.test.js:367:48)
+      at sttyScenario (~/Desktop/rokid/Rokid-Coder/agentd/test/rk.test.js:298:9)
+ℹ tests 646
+ℹ pass 645
+ℹ fail 1
+ℹ duration_ms 53656.217459
+EXIT 1
+```
+The test alone passed 5/5 (`node --test --test-name-pattern=failed_stty_save_runs_cooked_and_warns test/rk.test.js`).
+
+Second full run (real tail):
+```
+✔ a phone that dialled in can be held for approval and answer over the same socket (126.460959ms)
+✔ a malformed approval decision is ignored rather than forwarded (18.029875ms)
+ℹ tests 646
+ℹ suites 0
+ℹ pass 646
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 53767.600959
+EXIT 0
+```
+`git status` is clean after both runs.
+
+### Out-of-Scope Observations
+
+None beyond the items R166 already accepted: the hook-forward `armPairing` owner check, the M5 detach-check order, the M10 SessionEnd prune and M7 stale records.
+
+### Verdict
+
+**Fix round:** findings remain open.
+- Every listed finding is fixed or fixed per its ruling. The exception is M10, which is partly fixed, as accepted under R166.
+- **One residual Important is open: R165.** It is not implemented, so a late `command_written` after a cancel leaves the msgId unconsumed, and a phone resend can type the reply twice.
+- There are 8 new Minors (N1–N8).
