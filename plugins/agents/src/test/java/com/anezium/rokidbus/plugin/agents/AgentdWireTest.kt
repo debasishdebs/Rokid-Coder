@@ -426,7 +426,8 @@ class AgentdWireTest {
         val events = CopyOnWriteArrayList<AgentdEvent>()
         val server = AgentdLinkServer(
             store = AgentSessionStore(),
-            authorizeMachine = { MachineTrustResult.TRUSTED },
+            authorizeMachine = { _, _ -> MachineTrustResult.TRUSTED },
+            clientCertPinned = { _, _ -> false },
             touchMachineSeen = {},
             scope = scope,
             onMachineTrusted = {},

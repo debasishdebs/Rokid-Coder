@@ -86,7 +86,8 @@ object CertPins {
  * A client for one pinned agentd, built apart from [base] so nothing here leaks
  * into the shared client. agentd's self-signed certificate names no host, LAN
  * or Tailscale, so the hostname check is replaced by the pin itself, on this
- * client only. No cleartext spec: a `ws://` URL cannot even be attempted.
+ * client only. No cleartext spec: a `ws://` URL cannot even be attempted. No
+ * redirects either: the link goes to the pinned peer's URL and nowhere else.
  */
 internal fun pinnedOkHttpClient(base: OkHttpClient, pin: String): OkHttpClient {
     val trust = CertPins.trustManager(pin)
@@ -97,5 +98,7 @@ internal fun pinnedOkHttpClient(base: OkHttpClient, pin: String): OkHttpClient {
             CertPins.matches(runCatching { session.peerCertificates.firstOrNull() }.getOrNull(), pin)
         }
         .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS))
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 }

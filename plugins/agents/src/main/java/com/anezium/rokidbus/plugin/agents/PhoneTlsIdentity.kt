@@ -9,6 +9,7 @@ import java.security.KeyStore
 import java.security.Principal
 import java.security.PrivateKey
 import java.security.SecureRandom
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.util.Date
@@ -16,6 +17,7 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.X509ExtendedKeyManager
+import javax.net.ssl.X509TrustManager
 import javax.security.auth.x500.X500Principal
 
 /**
@@ -79,17 +81,35 @@ class KeystorePhoneTlsIdentity(private val alias: String = DEFAULT_ALIAS) : Phon
     }
 }
 
-/** A server context that presents [chain] and signs with [key]; no client certificate is asked for. */
+/**
+ * A server context that presents [chain] and signs with [key], and takes any
+ * client certificate at the TLS layer: agentd's is self-signed, and whether it
+ * is the right one is the machine's pin, checked at hello (R114).
+ */
 internal fun serverSslContext(key: PrivateKey, chain: Array<X509Certificate>): SSLContext =
-    SSLContext.getInstance("TLS").apply { init(arrayOf(SingleKeyManager(key, chain)), null, null) }
+    SSLContext.getInstance("TLS").apply {
+        init(arrayOf(SingleKeyManager(key, chain)), arrayOf(AnyClientCertificate), null)
+    }
 
-/** The listening socket of the link agentd dials: TLS only, there is no plaintext listener. */
+/** The listening socket of the link agentd dials: mutual TLS only, there is no plaintext listener. */
 internal fun tlsServerSocket(identity: PhoneTlsIdentity, port: Int): SSLServerSocket =
     (identity.sslContext().serverSocketFactory.createServerSocket(port) as SSLServerSocket).apply {
-        needClientAuth = false
-        wantClientAuth = false
+        needClientAuth = true
         enabledProtocols = enabledProtocols.filter { it == "TLSv1.2" || it == "TLSv1.3" }.toTypedArray()
     }
+
+/** Requires a client certificate and leaves its identity to the pin; never trusts a server. */
+private object AnyClientCertificate : X509TrustManager {
+    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+        if (chain.isNullOrEmpty()) throw CertificateException("a client certificate is required")
+    }
+
+    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+        throw CertificateException("this context trusts no server")
+    }
+
+    override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+}
 
 /**
  * Serves one key. A key held by AndroidKeyStore is not exportable, so the

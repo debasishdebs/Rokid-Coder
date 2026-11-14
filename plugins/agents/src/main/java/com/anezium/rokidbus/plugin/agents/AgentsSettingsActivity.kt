@@ -64,9 +64,10 @@ class AgentsSettingsActivity : ComponentActivity() {
         }
         observeLink()
         lifecycleScope.launch {
+            // A key that cannot be made means no TLS listener either; say so rather than hide the row.
             phoneFingerprint = withContext(Dispatchers.IO) {
                 runCatching { KeystorePhoneTlsIdentity().fingerprint256() }.getOrNull()
-            }?.let(CertPins::display)
+            }?.let(CertPins::display) ?: PHONE_KEY_UNAVAILABLE
             refresh()
         }
         if (configStore.load().shouldMonitor) {
@@ -228,6 +229,8 @@ class AgentsSettingsActivity : ComponentActivity() {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 }
+
+private const val PHONE_KEY_UNAVAILABLE = "Unavailable — this phone could not make its TLS key"
 
 internal fun ProviderConnectionState.displayText(authFailure: String): String {
     val label = if (state == ConnectionState.AUTH_FAILED) authFailure else state.wireValue.uppercase()

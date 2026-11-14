@@ -31,13 +31,17 @@ import javax.net.ssl.SSLSocket
  * asymmetry — the daemon broadcasts, we answer by unicast, and Windows lets that
  * reply back in because it answers a broadcast the PC itself just sent.
  *
- * Every accepted connection is TLS with [tlsIdentity]: agentd holds the phone
- * to the certificate it pinned (R45) before it writes its hello, so the token
- * and everything after it travel encrypted, and the link may steer.
+ * Every accepted connection is mutual TLS with [tlsIdentity] (R114). agentd
+ * holds the phone to the certificate it pinned (R45) before it writes its
+ * hello; the phone holds agentd to the client certificate it pinned for that
+ * machine when it first trusted it. A token that arrives with any other
+ * certificate is refused before hello_ack, so a replayed token never steers.
  */
 class AgentdLinkServer internal constructor(
     private val store: AgentSessionStore,
-    private val authorizeMachine: (AgentdAction.Hello) -> MachineTrustResult,
+    /** The hello, and the fingerprint of the client certificate it came with. */
+    private val authorizeMachine: (AgentdAction.Hello, String?) -> MachineTrustResult,
+    private val clientCertPinned: (machineId: String, fingerprint: String) -> Boolean,
     private val touchMachineSeen: (String) -> Unit,
     private val scope: CoroutineScope,
     private val onMachineTrusted: (String) -> Unit,
@@ -52,13 +56,15 @@ class AgentdLinkServer internal constructor(
         onMachineTrusted: (String) -> Unit = {},
     ) : this(
         store = store,
-        authorizeMachine = { hello ->
+        authorizeMachine = { hello, clientCert ->
             configStore.authorizeMachine(
                 machineId = hello.machineId,
                 token = hello.token,
                 machineName = hello.machineName,
+                clientCert = clientCert,
             )
         },
+        clientCertPinned = configStore::isClientCertPinned,
         touchMachineSeen = { machineId -> configStore.touchMachineSeen(machineId) },
         scope = scope,
         onMachineTrusted = onMachineTrusted,
@@ -161,7 +167,7 @@ class AgentdLinkServer internal constructor(
 
     internal fun serve(connection: LinkConnection) {
         val codec = AgentdProtocolCodec()
-        val gate = AgentdInboundGate(authorizeMachine)
+        val gate = AgentdInboundGate { hello -> authorizeMachine(hello, connection.clientCert) }
         codec.reset()
         try {
             // Before the writer and the first line: nothing is read or written until TLS is up.
@@ -203,7 +209,7 @@ class AgentdLinkServer internal constructor(
                             store.setConnection(
                                 AgentProvider.CLAUDE,
                                 ConnectionState.AUTH_FAILED,
-                                "Machine authentication failed",
+                                if (decision.certChanged) PairingCopy.CERT_CHANGED else "Machine authentication failed",
                             )
                         }
                         false
@@ -260,8 +266,12 @@ class AgentdLinkServer internal constructor(
      */
     private fun bind(connection: LinkConnection): Boolean = synchronized(clientLock) {
         if (client !== connection) return@synchronized false
-        // TLS, and agentd sent its hello only after it found this phone's cert in its pinned set.
-        link.up(connection.linkOwner, secure = connection.tls) != null
+        // Both ends pinned: agentd found this phone's cert in its set before its
+        // hello, and the cert agentd presented is the one pinned for its machine.
+        val clientCert = connection.clientCert
+        val machineId = connection.machineId
+        val secure = connection.tls && clientCert != null && machineId != null && clientCertPinned(machineId, clientCert)
+        link.up(connection.linkOwner, secure = secure) != null
     }
 
     private fun isActive(connection: LinkConnection): Boolean =
@@ -376,7 +386,7 @@ internal sealed interface AgentdInboundDecision {
     ) : AgentdInboundDecision
 
     data class Frame(val action: AgentdAction) : AgentdInboundDecision
-    data class AuthRejected(val reason: String) : AgentdInboundDecision
+    data class AuthRejected(val reason: String, val certChanged: Boolean = false) : AgentdInboundDecision
     data object ProtocolRejected : AgentdInboundDecision
 }
 
@@ -400,8 +410,10 @@ internal class AgentdInboundGate(
                 }
                 MachineTrustResult.REJECTED_BAD_TOKEN,
                 MachineTrustResult.REJECTED_NOT_INVITED,
+                MachineTrustResult.REJECTED_CERT_CHANGED,
                 -> AgentdInboundDecision.AuthRejected(
                     result.rejectionReason ?: AgentdProtocolCodec.REJECT_UNKNOWN_MACHINE,
+                    certChanged = result == MachineTrustResult.REJECTED_CERT_CHANGED,
                 )
             }
         }
@@ -431,6 +443,10 @@ internal class LinkConnection(private val socket: Socket) {
     @Volatile var tls = false
         private set
 
+    /** The fingerprint of the client certificate agentd presented; set with [tls]. */
+    @Volatile var clientCert: String? = null
+        private set
+
     /** Every line after the handshake, written in order by one coroutine. */
     private val outbound = Channel<String>(Channel.UNLIMITED)
 
@@ -458,6 +474,8 @@ internal class LinkConnection(private val socket: Socket) {
         socket.soTimeout = TLS_HANDSHAKE_TIMEOUT_MS
         socket.startHandshake()
         socket.soTimeout = LINK_IDLE_TIMEOUT_MS
+        // needClientAuth: a handshake that completed has a client certificate.
+        clientCert = CertPins.fingerprint256(socket.session.peerCertificates.first().encoded)
         tls = true
     }
 

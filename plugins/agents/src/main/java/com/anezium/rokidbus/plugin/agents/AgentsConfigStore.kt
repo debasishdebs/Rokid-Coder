@@ -124,6 +124,13 @@ internal enum class MachineTrustResult(val rejectionReason: String? = null) {
 
     /** A stranger, and the wearer is not holding the door open. */
     REJECTED_NOT_INVITED(AgentdProtocolCodec.REJECT_UNKNOWN_MACHINE),
+
+    /**
+     * The right token from another certificate (R114): a replayed token, or a
+     * computer whose identity was reset. agentd hears bad_token, whose advice
+     * (Forget, then link again) is what fixes it.
+     */
+    REJECTED_CERT_CHANGED(AgentdProtocolCodec.REJECT_BAD_TOKEN),
     ;
 
     val isRejection: Boolean
@@ -320,12 +327,20 @@ class AgentsConfigStore internal constructor(
     /**
      * Atomically applies the LAN trust-on-first-use/link-window policy.
      * Existing machine tokens are never changed by this operation.
+     *
+     * [clientCert] is the fingerprint of the certificate the computer presented
+     * on this connection (R114). It is pinned when the machine is trusted now,
+     * or when a machine trusted before pins existed connects (migration). Once
+     * pinned, the token alone admits nobody: another certificate is refused.
+     * So an accepted result with a [clientCert] always means that cert is the
+     * machine's pin.
      */
     @Synchronized
     internal fun authorizeMachine(
         machineId: String,
         token: String,
         machineName: String,
+        clientCert: String? = null,
     ): MachineTrustResult {
         val key = machineKey(machineId)
         val knownToken = prefs.getString(key, null)
@@ -336,15 +351,27 @@ class AgentsConfigStore internal constructor(
             linkWindowOpen = isLinkWindowOpen(),
             presentedToken = token,
         )
+        val pinKey = "$KEY_MACHINE_CERT_PREFIX$machineId"
+        val pinned = prefs.getString(pinKey, null)
+        if (result == MachineTrustResult.TRUSTED && pinned != null && pinned != clientCert) {
+            return MachineTrustResult.REJECTED_CERT_CHANGED
+        }
         if (result == MachineTrustResult.NEWLY_TRUSTED) {
             prefs.edit()
                 .putString(key, token)
                 .putString("$KEY_MACHINE_NAME_PREFIX$machineId", machineName)
+                .apply { if (clientCert != null) putString(pinKey, clientCert) else remove(pinKey) }
                 .remove(KEY_LINK_WINDOW_DEADLINE)
                 .apply()
+        } else if (result == MachineTrustResult.TRUSTED && pinned == null && clientCert != null) {
+            prefs.edit().putString(pinKey, clientCert).apply()
         }
         return result
     }
+
+    /** True when [fingerprint] is the certificate pinned for [machineId]. */
+    internal fun isClientCertPinned(machineId: String, fingerprint: String): Boolean =
+        prefs.getString("$KEY_MACHINE_CERT_PREFIX$machineId", null) == fingerprint
 
     fun trustMachine(machineId: String, token: String, machineName: String) {
         prefs.edit()
@@ -450,6 +477,7 @@ class AgentsConfigStore internal constructor(
         prefs.edit()
             .remove(v2SeenKey(machineId))
             .remove(machineKey(machineId))
+            .remove("$KEY_MACHINE_CERT_PREFIX$machineId")
             .remove("$KEY_MACHINE_NAME_PREFIX$machineId")
             .remove("$KEY_MACHINE_SEEN_PREFIX$machineId")
             .remove("$KEY_PROJECTS_PREFIX$machineId")
@@ -500,6 +528,7 @@ class AgentsConfigStore internal constructor(
             prefs.all.keys
                 .filter {
                     it.startsWith(KEY_MACHINE_PREFIX) ||
+                        it.startsWith(KEY_MACHINE_CERT_PREFIX) ||
                         it.startsWith(KEY_MACHINE_NAME_PREFIX) ||
                         it.startsWith(KEY_MACHINE_SEEN_PREFIX) ||
                         it.startsWith(KEY_V2_SEEN_PREFIX)
@@ -550,6 +579,7 @@ class AgentsConfigStore internal constructor(
         const val KEY_MACHINE_PREFIX = "machine.token."
         const val KEY_MACHINE_NAME_PREFIX = "machine.name."
         const val KEY_MACHINE_SEEN_PREFIX = "machine.seen."
+        const val KEY_MACHINE_CERT_PREFIX = "machine.cert."
         const val KEY_HEARTBEAT_AT = "monitor.heartbeat_at"
         const val KEY_WAS_SUSPENDED = "monitor.was_suspended"
         const val KEY_PROJECTS_PREFIX = "machine.projects."

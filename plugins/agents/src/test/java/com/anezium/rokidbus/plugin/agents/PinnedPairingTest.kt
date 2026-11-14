@@ -1,11 +1,16 @@
 package com.anezium.rokidbus.plugin.agents
 
 import java.net.InetAddress
+import java.net.ServerSocket
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.logging.Level
+import java.util.logging.Logger
+import kotlin.concurrent.thread
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLPeerUnverifiedException
 import kotlinx.coroutines.CoroutineScope
@@ -40,6 +45,11 @@ class PinnedPairingTest {
     @After
     fun tearDown() {
         scope.cancel()
+    }
+
+    init {
+        // A refused handshake is the point of several tests here, not news.
+        Logger.getLogger(MockWebServer::class.java.name).level = Level.OFF
     }
 
     // ------------------------------------------------------ the pairing line and the store
@@ -200,6 +210,29 @@ class PinnedPairingTest {
             assertEquals(1, server.requestCount)
             assertEquals(0, harness.plain.connections.size)
             assertTrue(harness.events.isEmpty())
+        }
+    }
+
+    @Test
+    fun tls_failure_on_a_pinned_link_retries_over_wss_only() {
+        // A peer that answers in plaintext: the handshake fails, but not on the pin.
+        ServerSocket(0, 8, InetAddress.getByName("127.0.0.1")).use { listener ->
+            val accepts = AtomicInteger()
+            thread(isDaemon = true) {
+                while (true) {
+                    val socket = runCatching { listener.accept() }.getOrNull() ?: break
+                    accepts.incrementAndGet()
+                    socket.use { it.getOutputStream().write("HTTP/1.1 400 Bad Request\r\n\r\n".toByteArray()) }
+                }
+            }
+            val harness = Harness(real = true)
+            harness.client.start(config(port = listener.localPort))
+            harness.awaitState(ConnectionState.DISCONNECTED, "Secure link failed")
+            // Still retrying, and still over TLS through the pinned client: never ws://.
+            awaitCondition { accepts.get() >= 2 }
+            assertEquals(0, harness.plain.connections.size)
+            assertTrue(harness.events.isEmpty())
+            harness.client.stop(clearSessions = true)
         }
     }
 
