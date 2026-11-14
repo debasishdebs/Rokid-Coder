@@ -10,7 +10,11 @@ sealed interface AgentdAction {
         val machineName: String,
         val token: String,
     ) : AgentdAction
-    data class HelloAcknowledged(val machineName: String?) : AgentdAction
+    /** [steering] is agentd's own grant (R126); null from an agentd that predates it, which grants nothing. */
+    data class HelloAcknowledged(val machineName: String?, val steering: Boolean? = null) : AgentdAction
+
+    /** agentd's live trust in this link changed (R126); `false` comes just before it drops the link. */
+    data class LinkTrust(val steering: Boolean) : AgentdAction
     data class Snapshot(val seq: Long, val sessions: List<AgentSession>) : AgentdAction
     data class Upsert(val seq: Long, val session: AgentSession) : AgentdAction
     data class Removed(
@@ -128,7 +132,12 @@ class AgentdProtocolCodec {
                 AgentdAction.HelloAcknowledged(
                     json.optJSONObject("server")
                         ?.nullableString("machineName", MAX_HUD_LABEL_CHARS),
+                    steering = json.booleanOrNull("steering"),
                 )
+            }
+            "link_trust" -> {
+                if (json.intOrNull("v") != 2) return AgentdAction.Ignore
+                AgentdAction.LinkTrust(json.booleanOrNull("steering") ?: return AgentdAction.Ignore)
             }
             "snapshot" -> {
                 val seq = json.longOrNull("seq") ?: return AgentdAction.Ignore
@@ -711,33 +720,77 @@ private fun JSONObject.toQuestionPayload(): QuestionPayload? {
     val requestRef = identifierOrNull("requestRef", MAX_REQUEST_REF_CHARS) ?: return null
     val source = nullableString("source", MAX_WIRE_TYPE_CHARS) ?: return null
     val itemsJson = optJSONArray("items") ?: return null
+    // What the glasses cannot answer exactly as sent is refused, never trimmed to fit (R124).
+    var tooLong = itemsJson.length() > MAX_QUESTION_ITEMS
+    var unanswerable = false
     val items = buildList {
         for (index in 0 until minOf(itemsJson.length(), MAX_QUESTION_ITEMS)) {
-            itemsJson.optJSONObject(index)?.toQuestionItem()?.let(::add)
+            val parsed = itemsJson.optJSONObject(index)?.toQuestionItem()
+            if (parsed == null) {
+                unanswerable = true
+                continue
+            }
+            tooLong = tooLong || parsed.tooLong
+            unanswerable = unanswerable || parsed.unanswerable
+            add(parsed.item)
         }
     }
-    return items.takeIf { it.isNotEmpty() }?.let { QuestionPayload(requestRef, source, it) }
+    if (items.isEmpty()) return null
+    val texts = items.map { it.text }
+    // agentd keys the answers by question text: two items with one text, or a key it refuses, cannot be answered.
+    if (texts.toSet().size != texts.size || texts.any { it in FORBIDDEN_ANSWER_KEYS }) unanswerable = true
+    val refusal = when {
+        tooLong -> QuestionPayload.TOO_LONG
+        unanswerable -> QuestionPayload.UNANSWERABLE
+        else -> null
+    }
+    return QuestionPayload(requestRef, source, items, refusal)
 }
 
-private fun JSONObject.toQuestionItem(): QuestionItem? {
-    val text = nullableString("text", MAX_HUD_TEXT_CHARS) ?: return null
+private class ParsedQuestionItem(val item: QuestionItem, val tooLong: Boolean, val unanswerable: Boolean)
+
+/** The item with its text and labels exactly as sent; one over agentd's answer bounds is kept cut, for display only. */
+private fun JSONObject.toQuestionItem(): ParsedQuestionItem? {
+    val text = (opt("text") as? String)?.takeIf(String::isNotBlank) ?: return null
+    var tooLong = text.length > MAX_ANSWER_CHARS
+    var unanswerable = false
     val optionsJson = optJSONArray("options")
+    if (optionsJson != null && optionsJson.length() > MAX_QUESTION_OPTIONS) tooLong = true
     val options = buildList {
         if (optionsJson != null) {
             for (index in 0 until minOf(optionsJson.length(), MAX_QUESTION_OPTIONS)) {
-                val option = optionsJson.optJSONObject(index) ?: continue
-                val label = option.nullableString("label", MAX_HUD_LABEL_CHARS) ?: continue
-                add(QuestionOption(label, option.nullableString("description", MAX_STATUS_DETAIL_CHARS)))
+                val option = optionsJson.optJSONObject(index)
+                val label = (option?.opt("label") as? String)?.takeIf(String::isNotBlank)
+                if (option == null || label == null) {
+                    unanswerable = true
+                    continue
+                }
+                if (label.length > MAX_ANSWER_CHARS) tooLong = true
+                add(
+                    QuestionOption(
+                        label.take(MAX_HUD_TEXT_CHARS),
+                        option.nullableString("description", MAX_STATUS_DETAIL_CHARS),
+                    ),
+                )
             }
         }
     }
-    return QuestionItem(
-        text = text,
-        options = options,
-        multiSelect = booleanOrNull("multiSelect") ?: false,
-        allowFreeText = booleanOrNull("allowFreeText") ?: false,
+    val allowFreeText = booleanOrNull("allowFreeText") ?: false
+    // Nothing to pick and nothing to say: no answer the glasses could send.
+    if (options.isEmpty() && !allowFreeText) unanswerable = true
+    return ParsedQuestionItem(
+        QuestionItem(
+            text = text.take(MAX_HUD_TEXT_CHARS),
+            options = options,
+            multiSelect = booleanOrNull("multiSelect") ?: false,
+            allowFreeText = allowFreeText,
+        ),
+        tooLong = tooLong,
+        unanswerable = unanswerable,
     )
 }
+
+private val FORBIDDEN_ANSWER_KEYS = setOf("__proto__", "constructor", "prototype")
 
 /** Strings only, trimmed and capped; anything else in the array is skipped. */
 private fun JSONArray?.toStrings(

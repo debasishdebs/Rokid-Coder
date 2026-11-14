@@ -274,9 +274,12 @@ internal object BoardCards {
                     tone = NexusRowTone.BODY,
                 ),
             )
+            // What will run, whole: agentd caps it at 400 chars, two rows at most.
             approval.detail
                 ?.takeIf { it.isNotBlank() && it != approval.summary }
-                ?.let { add(NexusCardLine(text = it.singleLine(238), tone = NexusRowTone.BODY)) }
+                ?.singleLine(Int.MAX_VALUE)
+                ?.chunked(MENU_LINE_CHARS)
+                ?.forEach { add(NexusCardLine(text = it, tone = NexusRowTone.BODY)) }
             add(choiceRow("Allow", "let it run", choice == ApprovalDecision.ALLOW))
             add(choiceRow("Deny", "tell the agent no", choice == ApprovalDecision.DENY))
         }
@@ -302,7 +305,9 @@ internal object BoardCards {
         val rows = buildList {
             add(
                 NexusCardLine(
-                    text = alert.body.ifBlank { alert.title }.singleLine(238),
+                    text = alert.body.ifBlank { alert.title }.singleLine(Int.MAX_VALUE).let {
+                        if (it.length > 238) it.take(237) + "…" else it
+                    },
                     badge = AlertNotices.providerLabel(alert).take(6),
                     tone = NexusRowTone.BODY,
                 ),

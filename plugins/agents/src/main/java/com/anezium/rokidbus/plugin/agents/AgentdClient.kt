@@ -209,17 +209,25 @@ class AgentdClient(
                 when (val action = codec.parse(text)) {
                     is AgentdAction.HelloAcknowledged -> {
                         if (!connected.compareAndSet(false, true)) return
-                        // Steering only over the pinned wss whose hello carried the secret;
-                        // a plaintext link, or a pin without the secret, is monitor-only.
-                        link.up(owner, secure = pin != null && config.steer != null, stillLive = ::isLive) ?: return
+                        // Steering only over the pinned wss whose hello carried the secret, and
+                        // only when agentd says it granted it (R126): a rotated or stale secret
+                        // is accepted as a monitor client, so the phone's own config is not proof.
+                        val steering = pin != null && config.steer != null && action.steering == true
+                        link.up(owner, secure = steering, stillLive = ::isLive) ?: return
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()
                         store.setConnection(
                             AgentProvider.CLAUDE,
                             ConnectionState.CONNECTED,
-                            action.machineName,
+                            if (pin != null && !steering) REPAIR_TO_STEER else action.machineName,
                         )
+                    }
+                    is AgentdAction.LinkTrust -> {
+                        // A trust that went is final for this connection; one never comes back mid-link.
+                        if (!connected.get() || action.steering) return
+                        link.up(owner, secure = false, stillLive = ::isLive) ?: return
+                        store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTED, REPAIR_TO_STEER)
                     }
                     is AgentdAction.Snapshot -> {
                         if (!connected.get()) return
@@ -349,10 +357,12 @@ class AgentdClient(
         }
     }
 
-    private companion object {
-        const val BAD_TOKEN_CLOSE_CODE = 4401
-        const val SECURE_LINK_FAILED = "Secure link failed"
-        const val DEADLINE_HELLO = "hello"
-        const val DEADLINE_SNAPSHOT = "snapshot"
+    companion object {
+        /** A pinned link agentd does not let steer: the pairing line's secret is stale (R126). */
+        const val REPAIR_TO_STEER = "Re-pair to allow approvals"
+        private const val BAD_TOKEN_CLOSE_CODE = 4401
+        private const val SECURE_LINK_FAILED = "Secure link failed"
+        private const val DEADLINE_HELLO = "hello"
+        private const val DEADLINE_SNAPSHOT = "snapshot"
     }
 }

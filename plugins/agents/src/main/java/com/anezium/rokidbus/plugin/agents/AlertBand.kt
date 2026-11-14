@@ -78,11 +78,13 @@ internal class AlertBand(
         // An approval's band is never replaced by this one; the wearer's answer comes first.
         if (screen.v2BandUp || AgentsRuntime.alertDirector?.slotBusy == true) return null
         // A computer that has spoken v2 stays off this path even while its link is down (R92).
-        val steering = AgentsRuntime.link.value?.secure == true
+        val link = AgentsRuntime.link.value
+        val steering = link?.secure == true
         val director = AgentsRuntime.alertDirector
         val pending = attention.pending(AgentsRuntime.store.sessions.value) { session ->
             // A session that had a v2 alert on this link is the alerts' to announce, not v1's.
-            configStore.v1AttentionSuppressed(session, steering) || director?.hadAlert(session.key) == true
+            configStore.v1AttentionSuppressed(session, steering, monitorOnlyLinkUp = link != null && !steering) ||
+                director?.hadAlert(session.key) == true
         }
         if (pending.isEmpty()) return null
         val notice = if (pending.size == 1) singleNotice(pending.single()) else groupNotice(pending)

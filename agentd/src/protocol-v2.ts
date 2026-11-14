@@ -191,7 +191,8 @@ export type AgentToPhoneFrameV2 =
   | AckFrame
   | FollowupClosedFrame
   | ModeResetFrame
-  | ModelsFrame;
+  | ModelsFrame
+  | LinkTrustFrame;
 
 // phone -> agent
 
@@ -313,6 +314,21 @@ export type PhoneToAgentFrameV2 =
   | DefaultsSetFrame
   | SettingsSyncFrame
   | ModelsRequestFrame;
+
+/**
+ * Live trust changed on this link (R126): sent when a rotated steer or a
+ * forgotten phone revokes steering, just before agentd drops the link. A
+ * phone that hears `steering: false` stops steering and asks for a re-pair.
+ */
+export interface LinkTrustFrame {
+  type: "link_trust";
+  v: 2;
+  steering: boolean;
+}
+
+export function linkTrustFrame(steering: boolean): LinkTrustFrame & Record<string, unknown> {
+  return { type: "link_trust", v: 2, steering };
+}
 
 export type FrameClass = "monitor" | "steering";
 

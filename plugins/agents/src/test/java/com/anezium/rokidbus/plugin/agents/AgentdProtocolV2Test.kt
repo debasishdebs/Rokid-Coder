@@ -46,9 +46,10 @@ class AgentdProtocolV2Test {
         // Every fixture has a parse expectation below: a new one cannot go untested.
         val covered = setOf(
             "snapshot", "session_upsert", "approval_request", "approval_resolved", "alert",
-            "alert_closed", "detail_rejected", "ack", "followup_closed", "mode_reset", "models",
+            "alert_closed", "detail_rejected", "ack", "followup_closed", "mode_reset", "models", "link_trust",
         )
         assertEquals(covered, fromAgent.keys().asSequence().toSet())
+        assertEquals(AgentdAction.LinkTrust(steering = false), parse(AgentdProtocolCodec(), fixture("link_trust")))
 
         val codec = AgentdProtocolCodec()
         val snapshot = parse(codec, fixture("snapshot")) as AgentdAction.Snapshot
@@ -244,16 +245,62 @@ class AgentdProtocolV2Test {
         assertEquals(MAX_ALERT_ACTIONS, alert.actions.size)
         assertTrue(alert.actions.all { it.length == MAX_WIRE_TYPE_CHARS })
 
-        // The same caps hold inside a question.
+        // Inside a question nothing that answers is cut: past agentd's bounds the question is refused (R124).
         val question = JSONObject(fixture("alert").toString()).apply {
             getJSONObject("question").getJSONArray("items").getJSONObject(0)
                 .put("text", "q".repeat(MAX_HUD_TEXT_CHARS * 2))
                 .getJSONArray("options").getJSONObject(0).put("label", "l".repeat(MAX_HUD_LABEL_CHARS * 2))
         }
         val parsed = AgentdProtocolCodec().parse(question.toString()) as AgentdAction.Alert
-        val item = parsed.question!!.items[0]
-        assertEquals(MAX_HUD_TEXT_CHARS, item.text.length)
-        assertEquals(MAX_HUD_LABEL_CHARS, item.options[0].label.length)
+        assertEquals(QuestionPayload.TOO_LONG, parsed.question!!.refusal)
+        // Kept for display only, within the HUD's bound.
+        assertEquals(MAX_HUD_TEXT_CHARS, parsed.question!!.items[0].text.length)
+    }
+
+    @Test
+    fun answer_uses_exact_wire_strings() {
+        val text = "  Which runner?\n"
+        val label = "node:test " + "with a long explanation ".repeat(10) + " "
+        val wire = JSONObject(fixture("alert").toString()).apply {
+            getJSONObject("question").put(
+                "items",
+                JSONArray().put(
+                    JSONObject().put("text", text).put("multiSelect", false).put("allowFreeText", false).put(
+                        "options",
+                        JSONArray().put(JSONObject().put("label", label)).put(JSONObject().put("label", " vitest")),
+                    ),
+                ),
+            )
+        }
+        val alert = AgentdProtocolCodec().parse(wire.toString()) as AgentdAction.Alert
+        val payload = alert.question!!
+        assertNull(payload.refusal)
+        assertEquals(text, payload.items[0].text)
+        assertEquals(label, payload.items[0].options[0].label)
+
+        val flow = QuestionFlow(alert.id, alert.sessionKey, payload)
+        flow.toggle(0, 0)
+        // Keyed and valued with exactly what agentd sent, so its exact match finds them.
+        assertEquals(mapOf<String, Any>(text to label), flow.answers())
+
+        // A question that cannot be answered exactly is refused on the band, never trimmed.
+        val tooLong = JSONObject(wire.toString()).apply {
+            getJSONObject("question").getJSONArray("items").getJSONObject(0).put("text", "q".repeat(MAX_ANSWER_CHARS + 1))
+        }
+        val refused = AgentdProtocolCodec().parse(tooLong.toString()) as AgentdAction.Alert
+        assertEquals("Question too long — answer on laptop", refused.question!!.refusal)
+        val band = AlertNotices.build(refused, monitorOnly = false, wake = false)
+        assertEquals("Question too long — answer on laptop", band.body)
+        assertEquals(listOf(AlertCoordinator.LATER), band.actions.map { it.id })
+
+        // An item with nothing to pick and no free text cannot be answered here either.
+        val nothing = JSONObject(wire.toString()).apply {
+            getJSONObject("question").getJSONArray("items").getJSONObject(0).put("options", JSONArray())
+        }
+        assertEquals(
+            QuestionPayload.UNANSWERABLE,
+            (AgentdProtocolCodec().parse(nothing.toString()) as AgentdAction.Alert).question!!.refusal,
+        )
     }
 
     @Test
@@ -290,7 +337,7 @@ class AgentdProtocolV2Test {
             ),
         )
 
-        // Lists over the cap are cut, not refused.
+        // Lists over the cap are refused: a question cut to fit would be answered incompletely (R124).
         val bigQuestion = JSONObject().put("requestRef", "r").put("source", "claude_tool").put(
             "items",
             JSONArray(
@@ -303,6 +350,7 @@ class AgentdProtocolV2Test {
             ),
         )
         val capped = (questionAlert(bigQuestion) as AgentdAction.Alert).question!!
+        assertEquals(QuestionPayload.TOO_LONG, capped.refusal)
         assertEquals(MAX_QUESTION_ITEMS, capped.items.size)
         assertTrue(capped.items.all { it.options.size == MAX_QUESTION_OPTIONS })
 

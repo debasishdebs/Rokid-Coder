@@ -200,15 +200,9 @@ class AgentsMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    /** Any v2 frame over a link that steers means v1 attention stays off for that computer for good (R92). */
+    /** A v2 alert over a link that steers means v1 attention stays off for that computer for good (R92). */
     private fun noteV2(event: AgentdEvent) {
-        val v2 = event is AgentdEvent.Action && when (event.action) {
-            is AgentdAction.Alert, is AgentdAction.AlertClosed, is AgentdAction.FollowupClosed,
-            is AgentdAction.ModeReset, is AgentdAction.Models, is AgentdAction.Ack,
-            -> true
-            else -> false
-        }
-        if (v2 && AgentsRuntime.link.value?.secure == true) {
+        if (marksV2Seen(event, linkSecure = AgentsRuntime.link.value?.secure == true)) {
             configStore.markV2Seen(AgentsRuntime.store.linkMachine.value?.machineId)
         }
     }
@@ -567,3 +561,11 @@ class AgentsMonitorService : Service() {
         }
     }
 }
+
+/**
+ * Only an alert over a link bound as steering proves the computer speaks v2 to
+ * this phone (R126). An ack, a `monitor_only` rejection above all, or any frame
+ * over a monitor-only link proves nothing, and must not silence v1 for good.
+ */
+internal fun marksV2Seen(event: AgentdEvent, linkSecure: Boolean): Boolean =
+    linkSecure && event is AgentdEvent.Action && event.action is AgentdAction.Alert

@@ -55,6 +55,13 @@ internal class GlassesScreen(
     var decidingAlert: AgentdAction.Alert? = null
         private set
 
+    /**
+     * True while More's reader of the alert is up, before its decision card: the
+     * wearer reads what will run in full, and a tap moves on to Allow and Deny (R125).
+     */
+    var alertReading = false
+        private set
+
     /** The row of the alert decision card: 0 Allow, 1 Deny, 2 Say allow or deny. */
     var alertRow = 0
         private set
@@ -124,7 +131,10 @@ internal class GlassesScreen(
     fun close(kind: ActiveCard.Kind) {
         when (kind) {
             ActiveCard.Kind.QUESTION -> questionFlow = null
-            ActiveCard.Kind.ALERT_DECISION -> decidingAlert = null
+            ActiveCard.Kind.ALERT_DECISION -> {
+                decidingAlert = null
+                alertReading = false
+            }
             ActiveCard.Kind.REQUEST_DECISION -> decidingRequestId = null
             ActiveCard.Kind.REPLY -> {
                 replyTargetKey = null
@@ -151,6 +161,7 @@ internal class GlassesScreen(
     fun openAlertDecision(alert: AgentdAction.Alert) {
         open(ActiveCard.Kind.ALERT_DECISION)
         decidingAlert = alert
+        alertReading = true
         alertRow = 0
     }
 
@@ -304,6 +315,21 @@ internal class GlassesScreen(
 
     /** The alert's decision card walks three rows: Allow, Deny and, on a steering link, the voice row. */
     private fun onAlertDecisionInput(alert: AgentdAction.Alert, event: NexusInputEvent) {
+        if (alertReading) {
+            // The hub scrolls the reader; a tap moves on to the decision, with a fresh guard.
+            when {
+                GlassesKeys.isEnter(event) -> {
+                    alertReading = false
+                    rearm()
+                    host.render()
+                }
+                event.keyCode == KeyEvent.KEYCODE_BACK -> {
+                    close(ActiveCard.Kind.ALERT_DECISION)
+                    host.render()
+                }
+            }
+            return
+        }
         val rows = if (host.secure) ALERT_DECISION_ROWS else 2
         when {
             event.keyCode in GlassesKeys.BACKWARD -> {

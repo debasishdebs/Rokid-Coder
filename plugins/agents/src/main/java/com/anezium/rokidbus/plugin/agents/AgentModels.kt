@@ -157,11 +157,23 @@ data class QuestionItem(
     val allowFreeText: Boolean,
 )
 
+/**
+ * [items] hold the exact wire strings agentd matches answers by (R124): a
+ * question's text and its option labels are never trimmed or cut here, only
+ * when drawn. [refusal] is set when the glasses cannot answer the payload as
+ * sent, and then says why; such a question is answered on the laptop.
+ */
 data class QuestionPayload(
     val requestRef: String,
     val source: String,
     val items: List<QuestionItem>,
-)
+    val refusal: String? = null,
+) {
+    companion object {
+        const val TOO_LONG = "Question too long — answer on laptop"
+        const val UNANSWERABLE = "Can't answer here — answer on laptop"
+    }
+}
 
 /**
  * The alert thresholds the phone owns and syncs to agentd. There is no expiry:

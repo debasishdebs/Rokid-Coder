@@ -54,6 +54,28 @@ const HEADING_FALLBACK_CHARS = 48;
  */
 export const CODEX_EFFORTS: readonly string[] = ["low", "medium", "high"];
 
+const FILE_PATH_PART = /^(?:file_path|notebook_path|path): (.*?)(?:; [a-z_]+: |$)/s;
+
+/**
+ * The approval alert's body leads with what will actually run (R125): a
+ * command for Bash and any request that carries one, then the model's own
+ * description on a second line; the file for a file edit; otherwise the
+ * request's detail. The description alone is the model's words, and a
+ * wearer who allows on it must still see what they allow.
+ */
+export function approvalAlertBody(request: Pick<ApprovalRequest, "tool" | "approvalKind" | "summary" | "detail">): string {
+  const summary = request.summary.trim();
+  const detail = request.detail.trim();
+  const fileEdit = request.approvalKind === "fileChange" || CLAUDE_FILE_TOOLS.has(request.tool);
+  const action = (fileEdit ? FILE_PATH_PART.exec(detail)?.[1]?.trim() : undefined) || detail || summary;
+  if (!summary || action === summary || action.startsWith(summary)) {
+    return action;
+  }
+  return `${action}\n${summary}`;
+}
+
+const CLAUDE_FILE_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
 /** The v1 frames: the transports keep handling these themselves, behind the same gate. */
 const V1_FRAME_TYPES: ReadonlySet<string> = new Set([
   "hello", "hello_ack", "hello_reject", "refresh", "detail_open", "detail_close",
@@ -370,7 +392,7 @@ export class PhoneV2 {
   private onApprovalPending(request: ApprovalRequest): void {
     const id = this.pushAlert(request.sessionKey, "approval", {
       title: request.tool,
-      body: request.summary,
+      body: approvalAlertBody(request),
       actions: ["allow", "deny"],
     }, { kind: "approval", requestId: request.requestId });
     this.approvalAlerts.set(request.requestId, id);

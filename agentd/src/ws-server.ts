@@ -7,7 +7,7 @@ import path from "node:path";
 import type { TLSSocket } from "node:tls";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { NotAttachedError } from "./attach-registry";
-import { gateFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
+import { gateFrame, linkTrustFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
 import { digestMatchesSecret, secretDigest, secretMatches, watchFiles } from "./tls";
 import { SessionStore } from "./session-store";
 import type {
@@ -341,6 +341,9 @@ export class WsHub {
       this.send(socket, {
         type: "hello_ack",
         v: PROTOCOL_VERSION,
+        // The grant, stated (R126): the phone binds steering from this, never from its own config,
+        // so a stale or missing steer reads as monitor-only on both sides.
+        steering: this.isTrusted(state),
         server: {
           name: "nexus-agentd",
           version: SERVER_VERSION,
@@ -445,6 +448,8 @@ export class WsHub {
         state.steerDigest = undefined;
         revoked = true;
         this.logger.warn("ws_trust_revoked", { reason: "steer_rotated" });
+        // Said before the close, so the phone stops treating the link as steering (R126).
+        this.send(socket, linkTrustFrame(false));
         socket.close(4403, "steering secret rotated");
         socket.terminate();
       }

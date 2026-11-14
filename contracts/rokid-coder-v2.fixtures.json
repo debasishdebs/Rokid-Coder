@@ -133,6 +133,11 @@
       "id": "fx-alert",
       "reason": "withdrawn"
     },
+    "link_trust": {
+      "type": "link_trust",
+      "v": 2,
+      "steering": false
+    },
     "detail_rejected": {
       "type": "detail_rejected",
       "sessionId": "fx-claude",

@@ -476,6 +476,11 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             showBriefNotice(AlertCoordinator.NO_LONGER_WAITING, AlertCoordinator.NO_LONGER_WAITING_BODY)
             return
         }
+        // Never a card that would answer with altered or missing strings (R124).
+        payload.refusal?.let { refusal ->
+            showBriefNotice(QUESTION_REFUSED_TITLE, refusal, safety = true)
+            return
+        }
         screen.openQuestion(QuestionFlow(alert.id, alert.sessionKey, payload))
         showBoard()
     }
@@ -931,6 +936,11 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     /** An open conversation with something to read is the one reader screen. */
     private fun activeReader(): NexusReader? {
+        if (screen.kind == ActiveCard.Kind.ALERT_DECISION && screen.alertReading) {
+            val alert = screen.decidingAlert ?: return null
+            val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
+            return AlertNotices.approvalReader(alert, session, AgentsRuntime.store.approvalFor(alert.sessionKey))
+        }
         if (screen.kind != ActiveCard.Kind.NONE && screen.kind != ActiveCard.Kind.MENU) return null
         screen.menuReading?.let { (title, text) -> return BoardCards.menuReader(title, text) }
         val conversation = AgentsRuntime.store.conversation.value ?: return null
@@ -1388,6 +1398,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         private const val RENDER_SETTLE_MS = 300L
         private const val LAUNCH_VERDICT_TIMEOUT_MS = 35_000L
         private const val CONTROL_MSG_IDS = 32
+        private const val QUESTION_REFUSED_TITLE = "Can't answer here"
         private const val NOT_APPLIED_CHARS = 120
     }
 }

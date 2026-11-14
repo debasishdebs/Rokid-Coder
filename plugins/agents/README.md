@@ -162,7 +162,10 @@ the phone can prove is the right computer. Pairing sets that up:
   it never falls back to plain `ws`. A line with no `fp` is a legacy
   **monitor-only** pairing (you see sessions, you cannot steer). A line with
   `fp` but no `steer` is monitor-only too. A malformed `fp` or `steer` is
-  refused, not silently downgraded.
+  refused, not silently downgraded. The phone steers only when agentd's
+  `hello_ack` says `steering: true`: a `steer` agentd no longer accepts (after
+  `agentd pair --rotate-steer`) leaves the link monitor-only, with "Re-pair to
+  allow approvals" in Settings and the v1 status band on the glasses.
 - **Inbound, computer dials the phone.** The phone advertises `tls:true` in
   its discovery reply and serves TLS with a self-signed certificate held in
   the Android keystore. **The inbound link is mutual TLS**: agentd presents

@@ -131,6 +131,37 @@ object AlertNotices {
         )
     }
 
+    /**
+     * What More opens before the decision card (R125): the request in full, summary
+     * first, then what will run (agentd leads the body with the command or the
+     * file) and the model's description. [held] is the v1 request agentd holds for
+     * the same session, whose detail an older agentd left out of the body.
+     */
+    fun approvalReader(alert: AgentdAction.Alert, session: AgentSession?, held: AgentApproval?): NexusReader {
+        val label = providerLabel(alert)
+        val summary = listOfNotNull(label, alert.title.line(READER_LINE_CHARS).ifEmpty { null }).joinToString(" · ")
+        val body = alert.body.trim().ifEmpty { alert.title.trim() }
+        val extra = held?.detail?.trim()?.takeIf { it.isNotEmpty() && !body.contains(it) }
+        val segments = buildList {
+            add(NexusReaderSegment(NexusReaderSegmentKind.HEADER, cut(summary, READER_SEGMENT_CHARS)))
+            addAll(proseSegments(body))
+            extra?.let { addAll(proseSegments(it)) }
+            add(NexusReaderSegment(NexusReaderSegmentKind.ASIDE, "tap to decide"))
+        }.take(READER_MAX_SEGMENTS)
+        return NexusReader(
+            title = (session?.displayTitle ?: alert.title).line(READER_TITLE_CHARS).ifEmpty { "Permission" },
+            subtitle = "$label · approve".take(READER_LINE_CHARS),
+            footer = "swipe scroll · tap decide · 2-tap later",
+            contentKey = digest("approve\u0000" + alert.id + segments.joinToString("\u0000") { it.text }),
+            handlesBack = true,
+            segments = fitOldest(segments, READER_TOTAL_CHARS),
+            anchor = NexusReaderAnchor.TOP,
+        )
+    }
+
+    private fun refusal(alert: AgentdAction.Alert): String? =
+        alert.question?.refusal?.takeIf { alert.kind == AlertKind.QUESTION }
+
     /** The provider of the alert's session, as the band title names it. */
     fun providerLabel(alert: AgentdAction.Alert): String =
         when (AgentProvider.fromWire(alert.sessionKey.substringBefore(':'))) {
@@ -153,6 +184,8 @@ object AlertNotices {
     }
 
     private fun body(alert: AgentdAction.Alert, monitorOnly: Boolean): String? {
+        // A question the glasses cannot answer as sent says so, and where to answer it (R124).
+        refusal(alert)?.let { return it }
         val monitor = monitorOnly && alert.kind == AlertKind.APPROVAL
         val text = alert.body.line(Int.MAX_VALUE)
         // The suffix is the wearer's way out, so it never pays for a long body.
@@ -179,8 +212,8 @@ object AlertNotices {
                 }
                 add(NexusNoticeAction(AlertCoordinator.MORE, "dot", "More"))
             }
-            AlertKind.QUESTION -> listOf(
-                NexusNoticeAction(AlertCoordinator.ANSWER, "mic", "Answer"),
+            AlertKind.QUESTION -> listOfNotNull(
+                NexusNoticeAction(AlertCoordinator.ANSWER, "mic", "Answer").takeIf { refusal(alert) == null },
                 NexusNoticeAction(AlertCoordinator.LATER, "timer", "Later"),
             )
             AlertKind.DONE, AlertKind.ERROR, AlertKind.NOTICE -> emptyList()

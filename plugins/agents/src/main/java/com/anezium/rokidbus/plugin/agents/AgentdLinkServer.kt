@@ -310,10 +310,19 @@ class AgentdLinkServer internal constructor(
             is AgentdAction.Models,
             is AgentdAction.DetailRejected,
             -> link.deliver(connection.linkOwner, action)
+            is AgentdAction.LinkTrust -> if (!action.steering) revokeSteering(connection)
             is AgentdAction.Hello,
             is AgentdAction.HelloAcknowledged,
             AgentdAction.Ignore,
             -> Unit
+        }
+    }
+
+    /** agentd no longer trusts this phone (R126): the link stops steering now, before agentd drops it. */
+    private fun revokeSteering(connection: LinkConnection) = synchronized(clientLock) {
+        if (client !== connection) return@synchronized
+        if (link.up(connection.linkOwner, secure = false) != null) {
+            store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTED, AgentdClient.REPAIR_TO_STEER)
         }
     }
 

@@ -24,6 +24,7 @@ const {
 const { createFakePhone } = require("./fake-phone.js");
 const { withDaemon, withTempDir, postHook, settle } = require("./helpers/daemon.js");
 const { agentCert, phoneCert } = require("./helpers/tls.js");
+const FIXTURES = require("../../contracts/rokid-coder-v2.fixtures.json");
 
 
 // Whatever a test opens is closed after it, pass or fail, so a failing
@@ -1150,6 +1151,49 @@ test("wss_with_wrong_steer_is_monitor_only", async () => {
   }
 });
 
+test("hello_ack_reports_steering_false_for_wrong_or_missing_steer", async () => {
+  const { hub, agent, stop } = await newHub();
+  const phones = [];
+  try {
+    // R126: the phone binds steering from this flag, so every case it would get wrong says so.
+    for (const steer of [undefined, "wrong-secret", STEER.slice(0, -1), ""]) {
+      const phone = await connectPhone(hub, agent, { tls: true, ...(steer === undefined ? {} : { steer }) });
+      phones.push(phone);
+      const ack = phone.frames.find((f) => f.type === "hello_ack");
+      assert.equal(ack.steering, false, `steer ${JSON.stringify(steer)}`);
+    }
+    const good = await connectPhone(hub, agent, { tls: true, steer: STEER });
+    phones.push(good);
+    assert.equal(good.frames.find((f) => f.type === "hello_ack").steering, true);
+  } finally {
+    for (const phone of phones) phone.close();
+    await stop();
+  }
+});
+
+test("link_trust_frame_on_rotation", async () => {
+  await withTempDir(async (dir) => {
+    const tlsDir = path.join(dir, "tls");
+    const first = ensureSteerSecret(tlsDir);
+    const { hub, agent, stop } = await newHub({
+      steer: () => readSteerSecret(tlsDir),
+      steerFile: path.join(tlsDir, "steer.secret"),
+    });
+    const steering = await connectPhone(hub, agent, { tls: true, steer: first });
+    try {
+      const closesBefore = steering.closes;
+      rotateSteerSecret(tlsDir);
+      await steering.waitForClose(closesBefore, 3000);
+      const trust = steering.frames.filter((f) => f.type === "link_trust");
+      assert.deepEqual(trust, [{ type: "link_trust", v: 2, steering: false }]);
+      assert.deepEqual(trust[0], FIXTURES.agent_to_phone.link_trust, "the shared fixture is what agentd sends");
+    } finally {
+      steering.close();
+      await stop();
+    }
+  });
+});
+
 test("wss_with_steer_is_trusted", async () => {
   const { hub, agent, stop } = await newHub();
   const phone = await connectPhone(hub, agent, { tls: true, steer: STEER });
@@ -1479,6 +1523,8 @@ test("revoked_phone_receives_no_alerts_after_revocation (phonelink, pin forgotte
       ]);
       assert.deepEqual(reply, {}, "not held for a forgotten phone");
       await phone.waitForClose(closesBefore, 3000);
+      // R126: the phone heard the trust go before the link did.
+      assert.ok(phone.frames.slice(seen).some((f) => f.type === "link_trust" && f.steering === false));
       assert.equal(
         phone.frames.slice(seen).some((f) => f.type === "approval_request" || f.type === "alert"),
         false,

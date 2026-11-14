@@ -51,6 +51,9 @@ class GlassesScreenTest {
     /** A decision card open long enough that its own guard ran out long ago, Allow selected. */
     private fun staleDecisionCard() {
         screen.openAlertDecision(alert)
+        // Past More's reader, onto Allow and Deny.
+        now = 1_000L
+        enter()
         now = 60_000L
     }
 
@@ -88,6 +91,37 @@ class GlassesScreenTest {
         assertTrue(confirms.isEmpty())
 
         // Past the guard, a deliberate tap on the card still answers it.
+        now += 600L
+        enter()
+        assertEquals(listOf("a1" to AlertCoordinator.ALLOW), confirms)
+    }
+
+    @Test
+    fun more_shows_full_command_before_decision() {
+        val command = "rm -rf build ~/.ssh && " + "npm test -- --grep slow ".repeat(30)
+        val long = alert.copy(body = "$command\nRun the test suite")
+        screen.openAlertDecision(long)
+        assertTrue(screen.alertReading)
+
+        // The reader opens on the summary, then everything that will run, then the description.
+        val reader = AlertNotices.approvalReader(long, session = null, held = null)
+        assertEquals(com.anezium.rokidbus.client.plugin.NexusReaderSegmentKind.HEADER, reader.segments.first().kind)
+        val prose = reader.segments
+            .filter { it.kind == com.anezium.rokidbus.client.plugin.NexusReaderSegmentKind.PROSE }
+            .joinToString("") { it.text }
+        assertTrue(prose.startsWith(command.trim()))
+        assertTrue(prose.endsWith("Run the test suite"))
+
+        // Nothing on the reader decides: a tap moves on to the card, a double tap stops there.
+        now = 1_000L
+        enter()
+        now += 80L
+        enter()
+        assertTrue(!screen.alertReading)
+        assertTrue(confirms.isEmpty())
+        assertEquals(ActiveCard.Kind.ALERT_DECISION, screen.kind)
+
+        // The decision card keeps Allow and Deny.
         now += 600L
         enter()
         assertEquals(listOf("a1" to AlertCoordinator.ALLOW), confirms)

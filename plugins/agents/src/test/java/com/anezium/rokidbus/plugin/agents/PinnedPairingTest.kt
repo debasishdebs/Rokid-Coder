@@ -166,6 +166,73 @@ class PinnedPairingTest {
         )
     }
 
+    @Test
+    fun rotated_steer_shows_repair_and_keeps_v1_alerts() {
+        // agentd's steer was rotated: the redial with the old one is accepted as a monitor client only.
+        val harness = Harness()
+        harness.client.start(config())
+        val wss = harness.pinnedConnection()
+        wss.open()
+        assertEquals(STEER, JSONObject(wss.sent.single()).getString("steer"))
+        wss.message(HELLO_ACK_MONITOR)
+        assertFalse((harness.events.single() as AgentdEvent.LinkUp).secure)
+        assertFalse(harness.client.linkSecure.value)
+        harness.awaitState(ConnectionState.CONNECTED, "Re-pair to allow approvals")
+        assertEquals(
+            AgentdWire.Result.MonitorOnly,
+            harness.client.write(AgentdProtocolCodec.modeRevokeAll(UUID.randomUUID().toString())),
+        )
+        // A hello_ack from an agentd that states no grant grants nothing either.
+        val old = Harness()
+        old.client.start(config())
+        old.pinnedConnection().apply { open(); message(HELLO_ACK) }
+        assertFalse(old.client.linkSecure.value)
+
+        // This computer spoke v2 before, but its link is up and cannot steer: v1 attention speaks for it.
+        val config = store()
+        config.markV2Seen(null)
+        val session = AgentSession(
+            provider = AgentProvider.CLAUDE,
+            id = "s1",
+            title = "s1",
+            status = AgentStatus.NEEDS_YOU,
+        )
+        assertFalse(config.v1AttentionSuppressed(session, linkSecure = false, monitorOnlyLinkUp = true))
+        // While the link is down, R92 still keeps it off.
+        assertTrue(config.v1AttentionSuppressed(session, linkSecure = false, monitorOnlyLinkUp = false))
+    }
+
+    @Test
+    fun link_trust_revocation_stops_steering_at_once() {
+        val harness = Harness()
+        harness.client.start(config())
+        val wss = harness.pinnedConnection()
+        wss.open()
+        wss.message(HELLO_ACK_STEERING)
+        assertTrue(harness.client.linkSecure.value)
+
+        wss.message("""{"type":"link_trust","v":2,"steering":false}""")
+        assertFalse(harness.client.linkSecure.value)
+        assertFalse((harness.events.last() as AgentdEvent.LinkUp).secure)
+        harness.awaitState(ConnectionState.CONNECTED, "Re-pair to allow approvals")
+        // It never comes back mid-link.
+        wss.message("""{"type":"link_trust","v":2,"steering":true}""")
+        assertFalse(harness.client.linkSecure.value)
+    }
+
+    @Test
+    fun monitor_only_ack_never_sets_v2_seen() {
+        val rejected = AgentdEvent.Action(AgentdAction.Ack("m1", "rejected", "monitor_only"))
+        assertFalse(marksV2Seen(rejected, linkSecure = false))
+        assertFalse(marksV2Seen(rejected, linkSecure = true))
+        assertFalse(marksV2Seen(AgentdEvent.Action(AgentdAction.Ack("m2", "applied", null)), linkSecure = true))
+        val alert = AgentdEvent.Action(
+            AgentdAction.Alert("a1", "claude:s1", AlertKind.APPROVAL, "Bash", "ls", emptyList(), null, 0, AlertReason.NEW),
+        )
+        assertFalse(marksV2Seen(alert, linkSecure = false))
+        assertTrue(marksV2Seen(alert, linkSecure = true))
+    }
+
     // ------------------------------------------------------ a real TLS agentd
 
     @Test
@@ -297,7 +364,7 @@ class PinnedPairingTest {
                 MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                     override fun onMessage(webSocket: WebSocket, text: String) {
                         received += text
-                        if (JSONObject(text).optString("type") == "hello") webSocket.send(HELLO_ACK)
+                        if (JSONObject(text).optString("type") == "hello") webSocket.send(HELLO_ACK_STEERING)
                     }
 
                     override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -380,5 +447,7 @@ class PinnedPairingTest {
         const val FP = FixturePhoneTlsIdentity.FINGERPRINT
         const val STEER = "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJ-0123"
         const val HELLO_ACK = """{"type":"hello_ack","v":1,"server":{"machineName":"Desk"}}"""
+        const val HELLO_ACK_STEERING = """{"type":"hello_ack","v":1,"steering":true,"server":{"machineName":"Desk"}}"""
+        const val HELLO_ACK_MONITOR = """{"type":"hello_ack","v":1,"steering":false,"server":{"machineName":"Desk"}}"""
     }
 }

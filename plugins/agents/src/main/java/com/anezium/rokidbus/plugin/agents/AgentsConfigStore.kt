@@ -464,11 +464,17 @@ class AgentsConfigStore internal constructor(
 
     /**
      * True when the v1 status band must stay silent for [session]: agentd's own
-     * providers on a link that steers, or on a computer that has shown v2 before.
+     * providers on a link that steers, or on a computer that has shown v2 before
+     * while its link is down (R92). A link that is up but that agentd does not let
+     * steer ([monitorOnlyLinkUp]) gets no v2 alerts at all, so v1 speaks for it (R126).
      */
-    fun v1AttentionSuppressed(session: AgentSession, linkSecure: Boolean): Boolean =
+    fun v1AttentionSuppressed(
+        session: AgentSession,
+        linkSecure: Boolean,
+        monitorOnlyLinkUp: Boolean = false,
+    ): Boolean =
         session.provider in AgentProvider.AGENTD_PROVIDERS &&
-            (linkSecure || prefs.getBoolean(v2SeenKey(keyFor(session.machineId)), false))
+            (linkSecure || (!monitorOnlyLinkUp && prefs.getBoolean(v2SeenKey(keyFor(session.machineId)), false)))
 
     /** A LAN-linked computer is keyed by its id; the one this phone dials is a single pairing. */
     private fun keyFor(machineId: String?): String =

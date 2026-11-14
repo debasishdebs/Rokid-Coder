@@ -11,7 +11,7 @@ import type {
 } from "./approval-manager";
 import { NotAttachedError } from "./attach-registry";
 import { parsePhoneTarget, readPhoneLinkConfig } from "./config";
-import { gateFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
+import { gateFrame, linkTrustFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
 import {
   listDirectory,
   listRoots,
@@ -341,6 +341,8 @@ export class PhoneLink {
         target: this.connectedTo ?? "unknown",
         fingerprint: this.peerFingerprint ? shortFingerprint(this.peerFingerprint) : "none",
       });
+      // Said before the drop, so the phone stops treating the link as steering (R126).
+      this.write(linkTrustFrame(false));
       this.socket.destroy();
       this.options.onTrustRevoked?.();
     }
