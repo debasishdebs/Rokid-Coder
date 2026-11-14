@@ -14,8 +14,9 @@ import { CodexMonitor } from "./codex/monitor";
 import { DEFAULT_WAIT_LIMIT_SEC, configPath, defaultStateDir, ensureConfig } from "./config";
 import { claudeSessionGone, discoverRecentSessions } from "./discovery";
 import { HookHttpServer } from "./http-server";
-import { claudeSessionsDir, liveClaudeSessionIds } from "./launcher/claude-sessions";
+import { claudeSessionsDir, liveClaudeSessionIds, readClaudeSession } from "./launcher/claude-sessions";
 import { LauncherHub } from "./launcher/launcher-hub";
+import { COMPACT_LIMIT_MS, LauncherRouter, READY_WAIT_MS, SessionStates } from "./launcher/session-state";
 import { FileLogger } from "./logger";
 import { SessionStore } from "./session-store";
 import { DEFAULT_STOP_CONTINUATION_CAP, StopWait } from "./stop-wait";
@@ -62,6 +63,8 @@ export interface RunningDaemon {
   approvals: ApprovalManager;
   /** The `rk` launchers' socket and the session bindings it proves. */
   launchers: LauncherHub;
+  /** Readiness of launcher-bound sessions, and the glasses' commands and late follow-ups into them. */
+  launcherRouter: LauncherRouter;
   isTailing(sessionId: string): boolean;
   /** The once-a-minute housekeeping: stalled sessions, and approve-all for Claude sessions that are gone. */
   sweepSessions(): Promise<void>;
@@ -75,6 +78,11 @@ export interface DaemonOptions {
 
 const APPLIED_ID_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_QUEUED_RESET_NOTICES = 64;
+
+function envMs(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return process.env[name] !== undefined && Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<RunningDaemon> {
   const stateDir = defaultStateDir();
@@ -146,6 +154,40 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     claudeSessionsDir: launcherSessionsDir,
     logger,
     registry: attachRegistry,
+  });
+  // agentd's own read of the file Claude keeps for the bound process (R55).
+  const launcherStates = new SessionStates(
+    (claudePid) => {
+      const file = readClaudeSession(launcherSessionsDir, claudePid);
+      return file && { status: file.status, statusUpdatedAt: file.statusUpdatedAt ?? 0, sessionId: file.sessionId };
+    },
+    Date.now,
+    {
+      binding: (key) => launchers.binding(key),
+      held: (key) => key.startsWith("claude:") && stopWait.state(key.slice("claude:".length)).waiting,
+      asking: (key) => {
+        const id = key.slice(key.indexOf(":") + 1);
+        return approvals?.hasPendingForSession(id) === true || questionRelay.hasPendingForSession(id);
+      },
+      clearUncertain: (key) => launchers.setUncertain(key, false),
+    },
+  );
+  // The environment overrides exist only so tests need not wait the windows out.
+  const launcherRouter = new LauncherRouter({
+    port: launchers,
+    states: launcherStates,
+    timings: {
+      readyWaitMs: envMs("ROKID_LAUNCHER_READY_WAIT_MS", READY_WAIT_MS),
+      compactLimitMs: envMs("ROKID_LAUNCHER_COMPACT_LIMIT_MS", COMPACT_LIMIT_MS),
+    },
+    onStateChange: (key) => phoneV2?.onLauncherChange(key),
+  });
+  // Synchronous, inside the release: the session is busy before the Stop hook's
+  // response is written (Review Focus 2).
+  stopWait.onRelease((sessionId, reason) => {
+    if (reason === "delivered") {
+      launcherRouter.onStopDelivered(sessionKeyOf("claude", sessionId));
+    }
   });
   const discovered = await discoverRecentSessions(path.join(claudeDir, "projects"), logger);
   for (const session of discovered) {
@@ -260,6 +302,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
           void seedRecentMessages(id, hook.transcript_path);
         }
       },
+      isLauncherBound: (id) => launchers.binding(sessionKeyOf("claude", id)) !== undefined,
     });
     if (attachReply) {
       return attachReply;
@@ -279,6 +322,9 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     }
     sessions.handleHook(payload);
     const eventName = typeof payload.hook_event_name === "string" ? payload.hook_event_name : undefined;
+    if (sessionId && eventName) {
+      launcherRouter.onHook(sessionKeyOf("claude", sessionId), eventName, payload);
+    }
     const transcriptPath =
       typeof payload.transcript_path === "string"
         ? payload.transcript_path
@@ -286,6 +332,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
           ? sessions.transcriptPath(sessionId)
           : undefined;
     if (sessionId && eventName === "SessionEnd") {
+      launcherRouter.endSession(sessionKeyOf("claude", sessionId));
       tailManager.stop(sessionId);
       approvals?.resolveSession(sessionId);
       stopWait.endSession(sessionId);
@@ -525,6 +572,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       logger,
     ),
     outlet,
+    launcher: launcherRouter,
     takeResetNotices,
     logger,
   });
@@ -548,6 +596,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     tailManager.stop(entry.id);
     approvals?.resolveSession(entry.id);
     if (entry.provider === "claude") {
+      // Before the hub's own listener unbinds it, so a command in flight is cancelled, not "exited".
+      launcherRouter.endSession(sessionKeyOf("claude", entry.id));
       stopWait.endSession(entry.id);
       questionRelay.endSession(entry.id);
     }
@@ -602,8 +652,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     codex.start();
     phone.start();
     await launchers.start();
+    launcherRouter.start();
   } catch (error) {
     clearInterval(heartbeatTimer);
+    launcherRouter.stop();
     phone.stop();
     stopListeningForDetach();
     await launchers.stop();
@@ -638,6 +690,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     phoneV2: phone,
     approvals,
     launchers,
+    launcherRouter,
     takeResetNotices,
     isTailing: (sessionId) => tailManager.isTailing(sessionId),
     sweepSessions,
@@ -648,6 +701,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       stopped = true;
       clearInterval(heartbeatTimer);
       stopListeningForDetach();
+      launcherRouter.stop();
       await launchers.stop();
       phone.stop();
       await codex.stop();

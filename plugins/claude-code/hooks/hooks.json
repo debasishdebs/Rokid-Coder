@@ -113,6 +113,26 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [

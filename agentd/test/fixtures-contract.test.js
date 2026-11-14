@@ -13,6 +13,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fsp = require("node:fs/promises");
+const net = require("node:net");
+const { spawn } = require("node:child_process");
 const path = require("node:path");
 const { classifyFrame, FRAME_CLASS } = require("../dist/protocol-v2.js");
 const { withDaemon, postHook, settle } = require("./helpers/daemon.js");
@@ -367,14 +369,57 @@ const HANDLERS = {
     assert.deepEqual(requests, [{ method: "thread/compact/start", params: { threadId: CODEX } }]);
   },
 
-  async launcher_command({ phone, ack }, fixture) {
+  async launcher_command({ daemon, phone, ack, claudeDir }, fixture) {
     phone.send(fixture);
-    const reply = await ack(fixture.msgId);
-    // Reserved for Plan 3: refused, and the id stays free.
-    assert.deepEqual([reply.result, reply.error, reply.v], ["rejected", "not_launcher", 2]);
-    assertSameShape(reply, FROM_AGENT.ack, "ack", {
+    const refused = await ack(fixture.msgId);
+    // R130: a plugin-mode session is refused, and the id stays free.
+    assert.deepEqual([refused.result, refused.error, refused.v], ["rejected", "not_launcher", 2]);
+    assertSameShape(refused, FROM_AGENT.ack, "ack", {
       values: { msgId: fixture.msgId, result: "rejected", error: "not_launcher" },
     });
+    // Bound to an `rk claude` launcher (played here over its socket), the same
+    // frame is typed and gets the launcher's real result.
+    const sessionsDir = path.join(claudeDir, "sessions");
+    await fsp.mkdir(sessionsDir, { recursive: true });
+    const child = spawn("sleep", ["30"], { stdio: "ignore" });
+    const socket = net.createConnection(daemon.launchers.socketPath);
+    try {
+      await fsp.writeFile(
+        path.join(sessionsDir, `${child.pid}.json`),
+        JSON.stringify({ pid: child.pid, sessionId: CLAUDE, status: "idle", statusUpdatedAt: Date.now() - 60_000 }),
+      );
+      const frames = [];
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        buffer += chunk;
+        for (let index; (index = buffer.indexOf("\n")) >= 0; buffer = buffer.slice(index + 1)) {
+          frames.push(JSON.parse(buffer.slice(0, index)));
+        }
+      });
+      const send = (frame) => socket.write(`${JSON.stringify(frame)}\n`);
+      const next = async (type) => {
+        for (let tries = 0; tries < 300; tries += 1) {
+          const found = frames.find((f) => f.type === type);
+          if (found) return found;
+          await settle(10);
+        }
+        throw new Error(`no ${type}`);
+      };
+      send({ type: "launcher_hello", v: 1, launcherId: "fx-launcher", provider: "claude", childPid: child.pid });
+      send({ type: "launcher_bind", sessionId: CLAUDE });
+      await next("bind_accepted");
+      phone.send(fixture);
+      const typed = await next("type_command");
+      assert.deepEqual([typed.command, typed.model], [fixture.command, fixture.model]);
+      send({ type: "command_written", cmdId: typed.cmdId, at: Date.now() });
+      send({ type: "command_result", cmdId: typed.cmdId, ok: true });
+      const applied = await phone.waitFor("ack", (f) => f.msgId === fixture.msgId && f.result !== "rejected");
+      assert.deepEqual([applied.result, applied.error, applied.v], ["applied", undefined, 2]);
+    } finally {
+      socket.destroy();
+      child.kill("SIGKILL");
+    }
   },
 
   async defaults_set({ daemon, phone, ack, coderDir }, fixture) {

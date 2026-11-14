@@ -5,6 +5,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { LAUNCHER_ATTACH_TEXT } from "./attach-command";
 import { defaultStateDir } from "./config";
 import { claudeSessionsDir, findOwnedClaudeSession } from "./launcher/claude-sessions";
 import { LauncherClient } from "./launcher/launcher-client";
@@ -12,8 +13,7 @@ import { LAUNCHER_SOCKET_NAME } from "./launcher/launcher-hub";
 import { spawnPty, type PtyChild } from "./launcher/pty";
 import { restoreTerminal, saveTerminal } from "./launcher/terminal";
 
-const CLAUDE_BANNER =
-  "Rokid-Coder launcher: attached. From the glasses you can reply at any time, compact, and change model (changing model also sets your default for new sessions).";
+const CLAUDE_BANNER = LAUNCHER_ATTACH_TEXT;
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
 const CODEX_REFUSAL =
   "rk codex: -c and --dangerously-bypass-hook-trust move Codex off the shared daemon; run plain codex for those.";

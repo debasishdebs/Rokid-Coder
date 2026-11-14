@@ -271,9 +271,9 @@ export interface CodexCompactFrame {
 }
 
 /**
- * Reserved: the launcher runs these in Plan 3. Until then every one is
- * answered `ack rejected error=not_launcher`, so the phone can be built
- * against the final shape.
+ * Compact or model change for a session an `rk claude` launcher holds. A
+ * session no live launcher holds is answered `ack rejected error=not_launcher`;
+ * a bound one gets the launcher's real result (R130).
  */
 export interface LauncherCommandFrame {
   type: "launcher_command";

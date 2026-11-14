@@ -250,6 +250,10 @@ export class QuestionRelay {
     return this.holds.has(toolUseId);
   }
 
+  hasPendingForSession(sessionId: string): boolean {
+    return [...this.holds.values()].some((hold) => hold.sessionId === sessionId);
+  }
+
   private emitOpened(event: QuestionOpened): void {
     for (const listener of [...this.opened]) {
       try {

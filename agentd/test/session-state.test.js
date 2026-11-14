@@ -1,0 +1,460 @@
+"use strict";
+/**
+ * SessionStates and LauncherRouter against a fake launcher port and a sessions
+ * file held as a plain object, with the windows shrunk so nothing waits long.
+ * The daemon-level routing (real hub, real hooks, the phone) is in
+ * launcher-routing.test.js.
+ */
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { SessionStates, LauncherRouter } = require("../dist/launcher/session-state.js");
+
+const KEY = "claude:s1";
+const PID = 4242;
+const TIMINGS = { readyWaitMs: 400, compactLimitMs: 400, pollMs: 10 };
+
+const settle = (ms = 40) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function until(check, ms = 2000, what = "condition") {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = check();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await settle(5);
+  }
+}
+
+/** The hub as the router sees it, with the launcher's side driven by the test. */
+function fakePort() {
+  const changes = [];
+  const written = [];
+  const port = {
+    bindings: new Map([[KEY, { gen: 1, claudePid: PID, uncertain: false }]]),
+    drafts: new Map(),
+    sent: [],
+    pending: undefined,
+    cancels: [],
+    compactDones: [],
+    binding: (key) => (port.bindings.has(key) ? { ...port.bindings.get(key) } : undefined),
+    boundKeys: () => [...port.bindings.keys()],
+    unbound: new Map(),
+    unboundReason: (key) => (port.bindings.has(key) ? undefined : port.unbound.get(key)),
+    send(key, cmd) {
+      const binding = port.bindings.get(key);
+      if (!binding) return Promise.resolve({ ok: false, error: "exited" });
+      if (port.pending) return Promise.resolve({ ok: false, error: "busy" });
+      if (binding.uncertain) return Promise.resolve({ ok: false, error: "uncertain" });
+      port.sent.push({ key, gen: binding.gen, ...cmd });
+      return new Promise((resolve) => {
+        port.pending = { key, cmdId: cmd.cmdId, resolve };
+      });
+    },
+    cancel(key, reason) {
+      port.cancels.push(reason);
+      port.settle({ ok: false, error: reason });
+    },
+    setUncertain(key, uncertain) {
+      const binding = port.bindings.get(key);
+      if (binding && binding.uncertain !== uncertain) {
+        binding.uncertain = uncertain;
+        port.emit(key);
+      }
+    },
+    laptopDraft: (key) => port.drafts.get(key) === true,
+    compactDone: (key, cmdId) => port.compactDones.push(cmdId),
+    onChange: (cb) => changes.push(cb),
+    onCommandWritten: (cb) => written.push(cb),
+    // The launcher's side.
+    emit: (key) => changes.forEach((cb) => cb(key)),
+    written(at) {
+      for (const cb of written) cb(port.pending.key, port.pending.cmdId, at);
+    },
+    settle(result) {
+      const pending = port.pending;
+      port.pending = undefined;
+      pending?.resolve(result);
+    },
+    /** The same launcher binds anew: the hub settles a pending command cancelled. */
+    rebind(key) {
+      port.settle({ ok: false, error: "cancelled" });
+      port.bindings.get(key).gen += 1;
+      port.emit(key);
+    },
+    /** The launcher's connection closes. */
+    drop(key) {
+      port.bindings.delete(key);
+      port.unbound.set(key, "exited");
+      port.settle({ ok: false, error: "exited" });
+      port.emit(key);
+    },
+  };
+  return port;
+}
+
+function setup({ held = false, asking = false } = {}) {
+  const port = fakePort();
+  const file = { status: "idle", statusUpdatedAt: Date.now() - 60_000, sessionId: "s1" };
+  const flags = { held, asking };
+  const states = new SessionStates(
+    (pid) => (pid === PID ? { ...file } : undefined),
+    Date.now,
+    {
+      binding: (key) => port.binding(key),
+      held: () => flags.held,
+      asking: () => flags.asking,
+      clearUncertain: (key) => port.setUncertain(key, false),
+    },
+  );
+  const router = new LauncherRouter({ port, states, timings: TIMINGS });
+  return { port, file, flags, states, router };
+}
+
+/** Claude writes its sessions file: a strictly newer timestamp than anything so far. */
+function claudeWrites(file, status) {
+  file.status = status;
+  file.statusUpdatedAt = Math.max(file.statusUpdatedAt + 1, Date.now() + 1);
+}
+
+test("startup_idle_session_is_ready_without_any_hook", async () => {
+  const { port, states, router } = setup();
+  // The file's idle is a minute old and no hook ever fired: no latch, so ready.
+  assert.equal(states.state(KEY), "ready");
+  assert.equal(router.followupState(KEY), "ready");
+  const result = router.command(KEY, { command: "model", model: "sonnet" });
+  await until(() => port.sent.length === 1, 200, "an immediate dispatch");
+  assert.equal("notBefore" in port.sent[0], false);
+  port.written(Date.now());
+  port.settle({ ok: true });
+  assert.deepEqual(await result, { ok: true });
+});
+
+test("first_command_on_idle_session_not_blocked_by_its_own_dispatch", async () => {
+  const { port, file, states, router } = setup();
+  const result = router.command(KEY, { command: "compact" });
+  await until(() => port.sent.length === 1, 200, "the dispatch");
+  // Dispatching sets no latch: only the launcher's command_written does, after the write.
+  assert.equal(states.latchAt(KEY), undefined);
+  assert.equal(port.sent[0].notBefore, undefined);
+  const at = Date.now();
+  port.written(at);
+  assert.equal(states.latchAt(KEY), at);
+  port.settle({ ok: true });
+  router.onHook(KEY, "PreCompact", { trigger: "manual" });
+  router.onHook(KEY, "PostCompact", { trigger: "manual" });
+  assert.deepEqual(await result, { ok: true });
+
+  // A text command keeps its latch past its ok: the next one waits for a fresh idle.
+  const text = router.followup(KEY, "hello", () => assert.fail("not held"));
+  await until(() => port.sent.length === 2, 200, "the text dispatch");
+  const at2 = Date.now();
+  port.written(at2);
+  port.settle({ ok: true });
+  assert.deepEqual(await text, { ok: true });
+  assert.equal(states.state(KEY), "busy", "Claude's last idle is older than the write");
+  const next = router.command(KEY, { command: "compact" });
+  await settle(60);
+  assert.equal(port.sent.length, 2);
+  claudeWrites(file, "idle");
+  await until(() => port.sent.length === 3, 200, "the next dispatch");
+  assert.equal(port.sent[2].notBefore, at2, "the barrier reaches the launcher");
+  port.settle({ ok: false, error: "laptop_draft" });
+  assert.deepEqual(await next, { ok: false, error: "laptop_draft" });
+});
+
+test("two_consecutive_model_commands_both_run", async () => {
+  const { port, states, router } = setup();
+  const first = router.command(KEY, { command: "model", model: "sonnet" });
+  await until(() => port.sent.length === 1);
+  port.written(Date.now());
+  port.settle({ ok: true });
+  assert.deepEqual(await first, { ok: true });
+  // /model may never flip Claude's status; its ok cleared the latch.
+  assert.equal(states.latchAt(KEY), undefined);
+  const second = router.command(KEY, { command: "model", model: "haiku" });
+  await until(() => port.sent.length === 2, 200, "the second dispatch, without a fresh idle");
+  assert.equal(port.sent[1].model, "haiku");
+  assert.equal("notBefore" in port.sent[1], false);
+  port.written(Date.now());
+  port.settle({ ok: true });
+  assert.deepEqual(await second, { ok: true });
+});
+
+test("silent_busy_period_does_not_count_as_idle", async () => {
+  const { port, file, states, router } = setup();
+  claudeWrites(file, "busy");
+  // Busy, no output, no hooks: time alone never makes it ready.
+  const result = router.command(KEY, { command: "compact" });
+  await settle(200);
+  assert.equal(states.state(KEY), "busy");
+  assert.equal(port.sent.length, 0);
+  claudeWrites(file, "idle");
+  await until(() => port.sent.length === 1, 200, "the dispatch once idle");
+  port.settle({ ok: false, error: "taken_over" });
+  assert.deepEqual(await result, { ok: false, error: "taken_over" });
+});
+
+test("busy_until_the_readiness_window_ends_is_rejected_busy", async () => {
+  const { port, file, router } = setup();
+  claudeWrites(file, "busy");
+  const started = Date.now();
+  assert.deepEqual(await router.command(KEY, { command: "compact" }), { ok: false, error: "busy" });
+  assert.ok(Date.now() - started >= TIMINGS.readyWaitMs);
+  assert.equal(port.sent.length, 0);
+});
+
+test("pending_approval_or_question_is_busy", async () => {
+  const { states, flags } = setup({ asking: true });
+  assert.equal(states.state(KEY), "busy");
+  flags.asking = false;
+  assert.equal(states.state(KEY), "ready");
+});
+
+test("auto_compact_does_not_complete_launcher_compact", async () => {
+  const { port, router } = setup();
+  // A manual compact that started before this dispatch is not this one.
+  router.onHook(KEY, "PreCompact", { trigger: "manual" });
+  const result = router.command(KEY, { command: "compact" });
+  await until(() => port.sent.length === 1);
+  port.written(Date.now());
+  router.onHook(KEY, "PostCompact", { trigger: "manual" });
+  port.settle({ ok: true });
+  router.onHook(KEY, "PreCompact", { trigger: "auto" });
+  router.onHook(KEY, "PostCompact", { trigger: "auto" });
+  assert.deepEqual(await result, { ok: false, error: "timeout" });
+  assert.deepEqual(port.compactDones, []);
+});
+
+test("compact_applied_only_on_post_compact_of_same_generation", async () => {
+  const { port, states, router } = setup();
+  const result = router.command(KEY, { command: "compact" });
+  await until(() => port.sent.length === 1);
+  const { cmdId } = port.sent[0];
+  port.written(Date.now());
+  port.settle({ ok: true });
+  // A PostCompact with no manual PreCompact before it completes nothing.
+  router.onHook(KEY, "PostCompact", { trigger: "manual" });
+  await settle();
+  assert.deepEqual(port.compactDones, []);
+  // Another session's hooks are not this one's.
+  router.onHook("claude:other", "PreCompact", { trigger: "manual" });
+  router.onHook("claude:other", "PostCompact", { trigger: "manual" });
+  await settle();
+  assert.deepEqual(port.compactDones, []);
+  router.onHook(KEY, "PreCompact", { trigger: "manual" });
+  router.onHook(KEY, "PostCompact", { trigger: "manual" });
+  assert.deepEqual(await result, { ok: true });
+  assert.deepEqual(port.compactDones, [cmdId], "compact_done names the command");
+  assert.equal(states.latchAt(KEY), undefined);
+
+  // The manual PreCompact came under gen 1; the binding is gen 2 before its PostCompact.
+  const second = router.command(KEY, { command: "compact" });
+  await until(() => port.sent.length === 2);
+  port.written(Date.now());
+  port.settle({ ok: true });
+  router.onHook(KEY, "PreCompact", { trigger: "manual" });
+  port.rebind(KEY);
+  router.onHook(KEY, "PostCompact", { trigger: "manual" });
+  assert.deepEqual(await second, { ok: false, error: "cancelled" });
+  assert.equal(port.compactDones.length, 1);
+});
+
+test("compact_timeout_rejected", async () => {
+  const { port, file, router } = setup();
+  // The launcher typed it but Claude never reported the compact.
+  const typed = router.command(KEY, { command: "compact" });
+  await until(() => port.sent.length === 1);
+  port.written(Date.now());
+  port.settle({ ok: true });
+  assert.deepEqual(await typed, { ok: false, error: "timeout" });
+  assert.deepEqual(port.compactDones, []);
+
+  // The launcher never answers at all: the hub has no timeout, so the router cancels it.
+  claudeWrites(file, "idle");
+  const silent = router.command(KEY, { command: "compact" });
+  await until(() => port.sent.length === 2);
+  assert.deepEqual(await silent, { ok: false, error: "timeout" });
+  assert.deepEqual(port.cancels, ["cancelled"]);
+  assert.equal(port.pending, undefined);
+});
+
+test("uncertain_binding_rejects_until_laptop_prompt", async () => {
+  const { port, file, states, router } = setup();
+  const model = router.command(KEY, { command: "model", model: "opus" });
+  await until(() => port.sent.length === 1);
+  port.written(Date.now());
+  port.settle({ ok: false, error: "dialog_not_seen" });
+  assert.deepEqual(await model, { ok: false, error: "dialog_not_seen" });
+  assert.equal(port.binding(KEY).uncertain, true, "R141: the launcher is told");
+
+  for (const cmd of [{ command: "compact" }, { command: "model", model: "sonnet" }]) {
+    assert.deepEqual(await router.command(KEY, cmd), { ok: false, error: "uncertain" });
+  }
+  assert.deepEqual(await router.followup(KEY, "hi", () => assert.fail("not held")), { ok: false, error: "uncertain" });
+  assert.equal(port.sent.length, 1, "nothing more was typed");
+  assert.equal(router.followupState(KEY), "unavailable");
+
+  // The wearer types at the laptop: that clears it.
+  router.onHook(KEY, "UserPromptSubmit", { prompt: "/model sonnet" });
+  assert.equal(port.binding(KEY).uncertain, false);
+  claudeWrites(file, "idle");
+  const after = router.command(KEY, { command: "compact" });
+  await until(() => port.sent.length === 2, 200, "a command once certain again");
+  port.settle({ ok: false, error: "busy" });
+  await after;
+
+  // So does Claude's own idle newer than the write that left it uncertain.
+  const again = router.command(KEY, { command: "model", model: "opus" });
+  await until(() => port.sent.length === 3);
+  port.written(Date.now());
+  port.settle({ ok: false, error: "taken_over" });
+  await again;
+  assert.equal(port.binding(KEY).uncertain, true, "taken_over after the write is uncertain too");
+  assert.equal(states.state(KEY), "busy");
+  claudeWrites(file, "idle");
+  assert.equal(states.state(KEY), "ready");
+  assert.equal(port.binding(KEY).uncertain, false);
+});
+
+test("model_failure_before_any_write_is_not_uncertain", async () => {
+  const { port, router } = setup();
+  const model = router.command(KEY, { command: "model", model: "opus" });
+  await until(() => port.sent.length === 1);
+  port.settle({ ok: false, error: "cancelled" });
+  assert.deepEqual(await model, { ok: false, error: "cancelled" });
+  assert.equal(port.binding(KEY).uncertain, false);
+});
+
+test("model_applied_after_typist_ok", async () => {
+  const { port, router } = setup();
+  const result = router.command(KEY, { command: "model", model: "sonnet" });
+  await until(() => port.sent.length === 1);
+  assert.deepEqual(
+    { command: port.sent[0].command, model: port.sent[0].model, gen: port.sent[0].gen },
+    { command: "model", model: "sonnet", gen: 1 },
+  );
+  let done = false;
+  void result.then(() => (done = true));
+  port.written(Date.now());
+  await settle();
+  assert.equal(done, false, "the write alone is not applied");
+  port.settle({ ok: true });
+  assert.deepEqual(await result, { ok: true });
+});
+
+test("no_type_command_while_held", async () => {
+  const { port, flags, states, router } = setup({ held: true });
+  assert.equal(states.state(KEY), "held");
+  assert.equal(router.followupState(KEY), "waiting");
+  assert.deepEqual(await router.command(KEY, { command: "compact" }), { ok: false, error: "busy" });
+  assert.deepEqual(await router.command(KEY, { command: "model", model: "opus" }), { ok: false, error: "busy" });
+  assert.equal(port.sent.length, 0);
+  flags.held = false;
+  assert.equal(states.state(KEY), "ready");
+});
+
+test("followup_while_held_uses_stop_hook", async () => {
+  const { port, router } = setup({ held: true });
+  let delivered = 0;
+  assert.deepEqual(await router.followup(KEY, "go on", () => (delivered += 1, { ok: true })), { ok: true });
+  assert.equal(delivered, 1);
+  assert.equal(port.sent.length, 0);
+});
+
+test("followup_after_y_types_when_idle", async () => {
+  const { port, router } = setup();
+  const result = router.followup(KEY, "late reply", () => assert.fail("nothing is held"));
+  await until(() => port.sent.length === 1);
+  assert.deepEqual({ command: port.sent[0].command, text: port.sent[0].text }, { command: "text", text: "late reply" });
+  port.written(Date.now());
+  port.settle({ ok: true });
+  assert.deepEqual(await result, { ok: true });
+});
+
+test("busy_followup_waits_for_a_held_stop_or_idle", async () => {
+  const { port, file, flags, router } = setup();
+  claudeWrites(file, "busy");
+  let delivered = 0;
+  const result = router.followup(KEY, "next", () => (delivered += 1, { ok: true }));
+  await settle(80);
+  // Claude's turn ends and its Stop is held: the hook takes it, nothing is typed.
+  flags.held = true;
+  assert.deepEqual(await result, { ok: true });
+  assert.equal(delivered, 1);
+  assert.equal(port.sent.length, 0);
+});
+
+test("rebind_during_wait_cancels_and_rejects_cancelled", async () => {
+  const { port, file, router } = setup();
+  claudeWrites(file, "busy");
+  const waiting = router.command(KEY, { command: "compact" });
+  await settle(50);
+  port.rebind(KEY);
+  assert.deepEqual(await waiting, { ok: false, error: "cancelled" });
+  assert.equal(port.sent.length, 0);
+
+  // While running, the hub settles it cancelled; nothing waits on.
+  claudeWrites(file, "idle");
+  const running = router.command(KEY, { command: "model", model: "opus" });
+  await until(() => port.sent.length === 1);
+  port.rebind(KEY);
+  assert.deepEqual(await running, { ok: false, error: "cancelled" });
+
+  // A session end while waiting, too.
+  claudeWrites(file, "busy");
+  const ended = router.command(KEY, { command: "compact" });
+  await settle(50);
+  router.endSession(KEY);
+  assert.deepEqual(await ended, { ok: false, error: "cancelled" });
+});
+
+test("launcher_exit_while_waiting_or_compacting_is_exited", async () => {
+  const { port, file, router } = setup();
+  const compact = router.command(KEY, { command: "compact" });
+  await until(() => port.sent.length === 1);
+  port.written(Date.now());
+  port.settle({ ok: true });
+  port.drop(KEY);
+  assert.deepEqual(await compact, { ok: false, error: "exited" });
+  assert.equal(router.isBound(KEY), false);
+  assert.deepEqual(await router.command(KEY, { command: "compact" }), { ok: false, error: "not_launcher" });
+
+  port.bindings.set(KEY, { gen: 5, claudePid: PID, uncertain: false });
+  claudeWrites(file, "busy");
+  const waiting = router.command(KEY, { command: "compact" });
+  await settle(50);
+  port.drop(KEY);
+  assert.deepEqual(await waiting, { ok: false, error: "exited" });
+});
+
+test("commands_are_serialised_through_completion", async () => {
+  const { port, router } = setup();
+  const first = router.command(KEY, { command: "compact" });
+  await until(() => port.sent.length === 1);
+  port.written(Date.now());
+  port.settle({ ok: true });
+  // The compact is typed but not yet complete: the model change waits for it.
+  const second = router.command(KEY, { command: "model", model: "haiku" });
+  await settle(80);
+  assert.equal(port.sent.length, 1);
+  router.onHook(KEY, "PreCompact", { trigger: "manual" });
+  router.onHook(KEY, "PostCompact", { trigger: "manual" });
+  assert.deepEqual(await first, { ok: true });
+  await until(() => port.sent.length === 2, 200, "the model change after the compact");
+  port.settle({ ok: true });
+  assert.deepEqual(await second, { ok: true });
+});
+
+test("a_session_file_for_another_session_is_not_ready", async () => {
+  const { file, states } = setup();
+  file.sessionId = "someone-else";
+  assert.equal(states.state(KEY), "busy");
+});
+
+test("laptop_draft_makes_followup_unavailable", async () => {
+  const { port, router } = setup();
+  port.drafts.set(KEY, true);
+  assert.equal(router.followupState(KEY), "unavailable");
+  port.drafts.set(KEY, false);
+  assert.equal(router.followupState(KEY), "ready");
+});

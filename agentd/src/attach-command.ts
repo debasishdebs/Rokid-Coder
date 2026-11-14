@@ -45,6 +45,9 @@ export const ATTACH_TEXT =
   'Attached to Rokid-Coder (plugin mode). Works: progress, approvals, questions, context, voice follow-ups while waiting. Not available: compact, model change — use "rk claude" for those.';
 export const CODEX_ATTACH_TEXT =
   "Attached to Rokid-Coder (plugin mode). All controls are available: follow-ups, approvals, questions, context, compact, model change.";
+/** The `rk claude` banner, and what `/rokid:on` says in a session a launcher holds (R135). */
+export const LAUNCHER_ATTACH_TEXT =
+  "Rokid-Coder launcher: attached. From the glasses you can reply at any time, compact, and change model (changing model also sets your default for new sessions).";
 const DETACH_TEXT = "Detached from Rokid-Coder. This session no longer sends anything to the phone.";
 const STATUS_ATTACHED_TEXT = "Attached to Rokid-Coder (plugin mode).";
 const STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder. Type /rokid:on to attach.";
@@ -99,6 +102,8 @@ export interface AttachCommandContext {
   logger: Logger;
   /** Called after a session is attached so it shows up before its next hook. */
   onAttached(payload: HookPayload, sessionId: string): void;
+  /** A live `rk claude` binding holds this Claude session (R135). */
+  isLauncherBound?(sessionId: string): boolean;
 }
 
 /**
@@ -124,9 +129,11 @@ export function handleAttachCommand(
   }
   const { registry } = context;
   switch (action) {
-    case "attach":
+    case "attach": {
+      // R135: opting in again never takes a bound session out of launcher mode.
+      const bound = provider === "claude" && context.isLauncherBound?.(sessionId) === true;
       try {
-        registry.attach(provider, sessionId, "plugin");
+        registry.attach(provider, sessionId, bound ? "launcher" : "plugin");
       } catch (error) {
         context.logger.error("attach_command_failed", {
           reason: error instanceof Error ? error.name : "unknown",
@@ -138,7 +145,8 @@ export function handleAttachCommand(
       if (provider === "claude") {
         context.onAttached(payload, sessionId);
       }
-      return block(provider === "codex" ? CODEX_ATTACH_TEXT : ATTACH_TEXT);
+      return block(provider === "codex" ? CODEX_ATTACH_TEXT : bound ? LAUNCHER_ATTACH_TEXT : ATTACH_TEXT);
+    }
     case "detach":
       registry.detach(provider, sessionId);
       return block(DETACH_TEXT);

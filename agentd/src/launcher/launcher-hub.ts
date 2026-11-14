@@ -51,7 +51,7 @@ export interface Binding {
   gen: number;
   childPid: number;
   claudePid?: number;
-  /** Task 4: set after a failed model recovery; commands are refused while it holds. */
+  /** Set after a model command left the prompt in a state nobody saw (R141); commands are refused while it holds. */
   uncertain: boolean;
 }
 
@@ -145,6 +145,9 @@ export class LauncherHub {
   private readonly byLauncherId = new Map<string, Connection>();
   private readonly byKey = new Map<SessionKey, Connection>();
   private readonly listeners: Array<(key: SessionKey) => void> = [];
+  private readonly writtenListeners: Array<(key: SessionKey, cmdId: string, at: number) => void> = [];
+  /** Why each key's last binding ended: `exited` when its launcher went away, `cancelled` when it moved on. */
+  private readonly unbound = new Map<SessionKey, CommandError>();
   private generation = 0;
   private stopListening?: () => void;
 
@@ -208,7 +211,13 @@ export class LauncherHub {
     return binding ? { ...binding } : undefined;
   }
 
-  send(key: SessionKey, cmd: Omit<TypeCommand, "cmdId" | "gen">): Promise<CommandResult> {
+  /** Bound sessions, for whoever has to look at each in turn. */
+  boundKeys(): SessionKey[] {
+    return [...this.byKey.keys()];
+  }
+
+  /** `cmdId` lets the caller tie the launcher's later frames to this command; it is made up here otherwise. */
+  send(key: SessionKey, cmd: Omit<TypeCommand, "cmdId" | "gen"> & { cmdId?: string }): Promise<CommandResult> {
     const connection = this.byKey.get(key);
     const binding = connection?.binding;
     if (!connection || !binding || connection.closed) {
@@ -217,9 +226,13 @@ export class LauncherHub {
     if (connection.pending) {
       return Promise.resolve({ ok: false, error: "busy" });
     }
+    // R141: nothing is typed into a prompt whose state is not known.
+    if (binding.uncertain) {
+      return Promise.resolve({ ok: false, error: "uncertain" });
+    }
     const frame: TypeCommand & { type: "type_command" } = {
       type: "type_command",
-      cmdId: randomUUID(),
+      cmdId: cmd.cmdId ?? randomUUID(),
       gen: binding.gen,
       ...(cmd.notBefore !== undefined ? { notBefore: cmd.notBefore } : {}),
       command: cmd.command,
@@ -243,6 +256,19 @@ export class LauncherHub {
     }
   }
 
+  /** A compact this launcher typed has really finished (Task 4 saw its PostCompact). */
+  compactDone(key: SessionKey, cmdId: string): void {
+    const connection = this.byKey.get(key);
+    if (connection?.binding) {
+      this.write(connection, { type: "compact_done", cmdId });
+    }
+  }
+
+  /** What a command still waiting on a key that is no longer bound fails with. */
+  unboundReason(key: SessionKey): CommandError | undefined {
+    return this.byKey.has(key) ? undefined : this.unbound.get(key);
+  }
+
   laptopDraft(key: SessionKey): boolean {
     return this.byKey.get(key)?.draft === true;
   }
@@ -261,6 +287,11 @@ export class LauncherHub {
 
   onChange(cb: (key: SessionKey) => void): void {
     this.listeners.push(cb);
+  }
+
+  /** A launcher wrote a command's first bytes into its session's prompt. */
+  onCommandWritten(cb: (key: SessionKey, cmdId: string, at: number) => void): void {
+    this.writtenListeners.push(cb);
   }
 
   private disable(reason: string): void {
@@ -439,7 +470,6 @@ export class LauncherHub {
         return undefined;
       }
       case "command_written":
-        // Task 4 latches the session on this; for now it only has to be well formed.
         if (
           !hasShape(frame, ["type", "cmdId", "at"]) ||
           typeof frame.cmdId !== "string" ||
@@ -448,6 +478,11 @@ export class LauncherHub {
           !Number.isFinite(frame.at)
         ) {
           return "bad_frame";
+        }
+        // Any write counts, even one for a command already settled here: the
+        // prompt was typed into either way.
+        if (connection.binding) {
+          this.emitWritten(connection.binding.key, frame.cmdId, frame.at);
         }
         return undefined;
       case "laptop_state":
@@ -573,6 +608,7 @@ export class LauncherHub {
     };
     connection.binding = binding;
     this.byKey.set(key, connection);
+    this.unbound.delete(key);
     this.options.logger.info("launcher_bound", { gen: binding.gen });
     this.write(connection, { type: "bind_accepted", gen: binding.gen });
     this.write(connection, { type: "binding_state", gen: binding.gen, uncertain: false });
@@ -614,6 +650,7 @@ export class LauncherHub {
     connection.binding = undefined;
     if (this.byKey.get(binding.key) === connection) {
       this.byKey.delete(binding.key);
+      this.unbound.set(binding.key, options.error);
     }
     this.settlePending(connection, options.error, options.notify);
     if (options.demote) {
@@ -667,6 +704,16 @@ export class LauncherHub {
   private write(connection: Connection, frame: object): void {
     if (!connection.closed && connection.socket.writable) {
       connection.socket.write(`${JSON.stringify(frame)}\n`);
+    }
+  }
+
+  private emitWritten(key: SessionKey, cmdId: string, at: number): void {
+    for (const listener of [...this.writtenListeners]) {
+      try {
+        listener(key, cmdId, at);
+      } catch (error) {
+        this.options.logger.error("launcher_listener_failed", { reason: errorCode(error) });
+      }
     }
   }
 

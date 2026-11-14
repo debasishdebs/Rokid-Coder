@@ -255,6 +255,7 @@ export class SessionStore {
         break;
       }
       case "PreCompact":
+      case "PostCompact":
       case "PostToolUse":
       case "PostToolUseFailure":
       case "PermissionDenied":

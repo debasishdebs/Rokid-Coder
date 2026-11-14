@@ -10,6 +10,7 @@ import { MAX_APPROVAL_ACTION_CHARS } from "./approval-manager";
 import type { ApprovalPolicy, ResetNotice } from "./approval-policy";
 import type { AttachRegistry } from "./attach-registry";
 import type { CodexMonitor } from "./codex/monitor";
+import { CLAUDE_MODELS, type LauncherRouter } from "./launcher/session-state";
 import {
   parseSessionKey,
   sessionKeyOf,
@@ -103,6 +104,8 @@ export interface PhoneV2Deps {
   settings: PhoneSettingsStore;
   appliedIds: AppliedIds;
   outlet: PhoneOutlet;
+  /** Routes launcher_command and late follow-ups into `rk claude` sessions; absent, every session is plugin mode. */
+  launcher?: Pick<LauncherRouter, "isBound" | "followupState" | "command" | "followup">;
   /** Drains the reset notices queued since the last call, restart notices first. */
   takeResetNotices: () => ResetNotice[];
   logger: Logger;
@@ -199,14 +202,18 @@ export class PhoneV2 {
   decorate(session: Session): Record<string, unknown> {
     const { provider, id } = session;
     const key = sessionKeyOf(provider, id);
-    const mode = this.deps.attachRegistry.mode(provider, id) ?? "plugin";
-    const launcher = mode === "launcher";
+    // Launcher mode is a live binding and nothing else (R135, Review Focus 4):
+    // not what the registry last saved, and not what a hook says.
+    const launcher = provider === "claude" && this.isLauncherBound(key);
+    const mode = provider === "claude"
+      ? (launcher ? "launcher" : "plugin")
+      : this.deps.attachRegistry.mode(provider, id) ?? "plugin";
     return {
       ...session,
       mode,
       capabilities: provider === "codex"
         ? { compact: true, model: true, followup: this.codexFollowup() }
-        : { compact: launcher, model: launcher, followup: this.claudeFollowup(id, launcher) },
+        : { compact: launcher, model: launcher, followup: this.claudeFollowup(key, id, launcher) },
       tempMode: this.deps.approvalPolicy.get(key),
       heading: session.heading ?? (session.title.slice(0, HEADING_FALLBACK_CHARS) || id.slice(0, 8)),
     };
@@ -216,15 +223,24 @@ export class PhoneV2 {
     return this.deps.codex.availability().available ? "ready" : "unavailable";
   }
 
-  private claudeFollowup(sessionId: string, launcher: boolean): FollowupState {
-    if (launcher) {
-      return "ready";
+  private isLauncherBound(key: SessionKey): boolean {
+    return this.deps.launcher?.isBound(key) === true;
+  }
+
+  private claudeFollowup(key: SessionKey, sessionId: string, launcher: boolean): FollowupState {
+    if (launcher && this.deps.launcher) {
+      return this.deps.launcher.followupState(key);
     }
     const state = this.deps.stopWait.state(sessionId);
     if (state.waiting) {
       return "waiting";
     }
     return state.continuationsLeft === 0 ? "cap_reached" : "unavailable";
+  }
+
+  /** A launcher bound, unbound or changed what a bound session can take: the phone sees it now. */
+  onLauncherChange(key: SessionKey): void {
+    this.republish(key);
   }
 
   private republish(key: SessionKey | string): void {
@@ -592,8 +608,7 @@ export class PhoneV2 {
       case "codex_compact":
         return this.codexCompact(frame, record);
       case "launcher_command":
-        // Reserved for Plan 3. A rejection never records the msgId.
-        return fail("not_launcher");
+        return this.launcherCommand(frame, record);
       case "defaults_set":
         return this.defaultsSet(frame, record);
       default:
@@ -650,6 +665,12 @@ export class PhoneV2 {
     if (text.trim().length === 0 || Buffer.byteLength(text, "utf8") > MAX_FOLLOWUP_BYTES) {
       return fail("bad_text");
     }
+    if (target.provider === "claude" && this.isLauncherBound(target.key) && this.deps.launcher) {
+      // Held: the Stop hook takes it, as in plugin mode. Idle past the wait
+      // limit: the launcher types it. Busy: it waits for one of the two.
+      record();
+      return this.deps.launcher.followup(target.key, text, () => this.deliverHeld(target.id, text, msgId));
+    }
     if (target.provider === "claude") {
       const wait = this.deps.stopWait.state(target.id);
       if (!wait.waiting) {
@@ -668,6 +689,47 @@ export class PhoneV2 {
     record();
     await this.deps.codex.followUp(target.id, text, msgId);
     return OK;
+  }
+
+  private deliverHeld(sessionId: string, text: string, msgId: string): Outcome {
+    switch (this.deps.stopWait.deliver(sessionId, text, msgId)) {
+      case "delivered":
+        return OK;
+      case "cap_reached":
+        return fail("cap_reached");
+      default:
+        return fail("not_waiting");
+    }
+  }
+
+  /**
+   * Compact or model change for an `rk claude` session. A session no live
+   * launcher holds is refused `not_launcher`, as in Plan 2, and its id stays
+   * free; a bound one waits for the prompt to be ready and gets the real result.
+   */
+  private async launcherCommand(frame: Record<string, unknown>, record: () => void): Promise<Outcome> {
+    const parsed = parseSessionKey(frame.sessionKey);
+    if (!parsed) {
+      return fail("bad_session_key");
+    }
+    const key = sessionKeyOf(parsed.provider, parsed.id);
+    const launcher = this.deps.launcher;
+    if (parsed.provider !== "claude" || !launcher || !this.isLauncherBound(key)) {
+      return fail("not_launcher");
+    }
+    let command: Parameters<LauncherRouter["command"]>[1];
+    if (frame.command === "model") {
+      if (typeof frame.model !== "string" || !CLAUDE_MODELS.includes(frame.model)) {
+        return fail("bad_model");
+      }
+      command = { command: "model", model: frame.model };
+    } else if (frame.command === "compact" && frame.model === undefined) {
+      command = { command: "compact" };
+    } else {
+      return fail("bad_command");
+    }
+    record();
+    return launcher.command(key, command);
   }
 
   private async questionAnswer(frame: Record<string, unknown>, msgId: string, record: () => void): Promise<Outcome> {
