@@ -3,8 +3,15 @@
 Agents is the mission-control plugin for coding-agent sessions. It merges the
 Claude Code and Codex sessions carried by `nexus-agentd` with OpenClaw
 Gateway sessions, keeps the connections in a low-priority foreground service,
-posts transition-only phone notifications, and renders a structured Nexus card
-on the glasses.
+holds one visible monitoring notification on the phone, and renders a structured
+Nexus card plus alert bands on the glasses.
+
+With protocol v2 the glasses do more than watch. A session that needs you wakes
+the display with an approval, question, Done or error band; you can allow or deny,
+answer a question, reply by voice, and switch a session's approval mode, all from
+the glasses. That control only runs over a TLS-pinned link. See
+[Protocol v2](#protocol-v2), [Linking a computer](#linking-a-computer) and
+[Voice](#voice).
 
 ## Quick start
 
@@ -26,9 +33,14 @@ End to end, computer to phone to glasses:
    - Same Wi-Fi, first computer ever paired: turn on **Monitor sessions** in
      Settings and the phone finds it on its own — this is the zero-setup path.
    - Anything else (a second computer, different networks, automatic
-     discovery failing): run `node dist/cli.js pair` on the computer, then
-     **Add a computer → paste pairing line** on the phone. A computer after
-     the first needs the wearer to hold the door open for it on that screen.
+     discovery failing): run `agentd pair` (`node dist/cli.js pair` from the
+     source tree) on the computer, then **Add a computer → paste pairing
+     line** on the phone. A computer after the first needs the wearer to hold
+     the door open for it on that screen.
+   - Either way, the **pairing line** is what turns on steering: it carries
+     the computer's certificate fingerprint (`fp`) and a steering secret
+     (`steer`). A link made without them is monitor-only. See
+     [Linking a computer](#linking-a-computer).
    - Away from home: install Tailscale on both ends and sign in with the same
      account — no re-pairing needed afterward.
 
@@ -39,6 +51,9 @@ End to end, computer to phone to glasses:
      Vivo device): **Open App info → Battery usage → Allow background power
      usage**. That's a ROM-level battery manager Android's own exemption API
      cannot reach, not something the plugin can request directly.
+   - **Allow Speech to text and Text to speech** for Agents in the Nexus app,
+     under Plugin access. The voice features need both, and the grant is
+     asked again after this update (see [Voice](#voice)).
    - `allowTerminalInput: true` in the **computer's**
      `~/.nexus-agentd/config.json` — off by default, needed only for typing a
      reply into a session from the glasses (see below).
@@ -79,17 +94,16 @@ then flows through the ordinary monitoring to the board.
   roads as equals: automatic on the home Wi-Fi (a two-minute door with a
   visible countdown and a Cancel button), Tailscale for everywhere else,
   and a pasted pairing line for whoever wants neither.
-  The pairing line is the single JSON line `nexus-agentd pair` prints; the
+  The pairing line is the single JSON line `agentd pair` prints; the
   plugin validates `v:1` and `kind:"nexus-agentd"` and stores one
-  host/port/token/name slot.
+  host/port/token/name slot, plus the `fp` and `steer` values described under
+  [Linking a computer](#linking-a-computer). The command is `agentd` (the
+  `bin` of the daemon package), not `nexus-agentd`, which is only the
+  protocol and service name.
 - OpenClaw: enter the Gateway host, port (default `18789`), and token. A host
   may include `ws://` or `wss://`; a plain host uses `ws://`.
-- **Agents posts no alert on the phone.** The one notification it holds
-  `POST_NOTIFICATIONS` for is the visible, low-importance "Agents monitoring ·
-  n sessions" one of the monitoring service, with Settings and Stop (a
-  documented exception in `plugins/AGENTS.md` section 3.5). Turning Monitoring
-  on asks for the permission once; if it is refused, settings says
-  "Notifications off — Android may pause Agents".
+- **Agents posts no alert on the phone, with one exception.** See
+  [The monitoring notification](#the-monitoring-notification).
 - **A spoken cue, off by Do Not Disturb or the quiet toggle.** A fresh approval,
   question, Done or error alert says a short generic line ("Claude needs
   approval") through the glasses' text to speech. It stays silent while the phone
@@ -116,6 +130,44 @@ The daemon dials the phone, so the phone decides who is allowed in:
 - Forgetting a machine is per machine, takes two deliberate taps, and drops
   its live connection on the spot.
 - A new link is announced on the glasses, never on the phone.
+
+#### TLS pairing (v2)
+
+Steering a session (allow, deny, answer, reply, mode switches) needs a link
+the phone can prove is the right computer. Pairing sets that up:
+
+- **The pairing line carries two extra fields.** `fp` is the SHA-256
+  fingerprint of the computer's own certificate, and `steer` is a steering
+  secret. The phone pins `fp` before it trusts `wss`, and it sends `steer`
+  only in the `wss` hello, after the pin check. agentd never sends `steer` on
+  any socket. Treat the pairing line like a password.
+- **Outbound, phone to computer (`wss`).** The phone dials with the pin. A
+  pin mismatch is final and says "Computer's certificate changed — re-pair";
+  it never falls back to plain `ws`. A line with no `fp` is a legacy
+  **monitor-only** pairing (you see sessions, you cannot steer). A line with
+  `fp` but no `steer` is monitor-only too. A malformed `fp` or `steer` is
+  refused, not silently downgraded.
+- **Inbound, computer dials the phone.** The phone advertises `tls:true` in
+  its discovery reply and serves TLS with a self-signed certificate held in
+  the Android keystore. **The inbound link is mutual TLS**: agentd presents
+  its own certificate as a client certificate, and the phone requires one and
+  pins it per computer. A later mismatch is refused before the hello is
+  answered, with "Computer's certificate changed — re-pair". The link counts
+  as secure only with the matching pinned certificate.
+- **The phone's fingerprint** is shown in Settings as "This phone's
+  fingerprint". agentd logs `phone_link_pinned` with the same digits when it
+  trusts the phone; compare them.
+- **agentd decides which phones it trusts.** `agentd pair` prints the line
+  and opens a two-minute window for one new phone. `agentd phones allow-next`
+  opens the same window without printing a line. Outside a window a phone
+  whose certificate is not already trusted is refused, and once any phone is
+  trusted plain-text dials are refused. `agentd phones list` shows the trusted
+  fingerprints and `agentd phones forget <fp>|--all` removes them. Rotate the
+  steering secret with `agentd pair --rotate-steer`; every phone must then pair
+  again.
+- **Older daemons.** An agentd that predates the client certificate cannot
+  link inbound at all. It fails closed, so update the daemon and the phone
+  together.
 
 ### Away from home
 
@@ -179,9 +231,89 @@ Nothing is queued for glasses that are asleep: the session simply stays at the
 top of the board, which is where the wearer will look.
 
 Unlike ordinary dormant Nexus plugins, this product explicitly requires a
-monitoring foreground service and phone alerts while its HUD is closed. The
+monitoring foreground service and alerts while its HUD is closed. The
 network owner is therefore a separate, non-exported `AgentsMonitorService`;
 the one exported `AgentsPluginService` remains the normal SDK adapter.
+
+### The monitoring notification
+
+Agents posts no alert, status or per-event notification on the phone; alerts
+belong on the glasses. The one exception is the monitoring foreground service's
+own notification, which is **visible on purpose**: "Agents monitoring · n
+sessions", low importance and ongoing, with **Settings** and **Stop** actions.
+Some ROMs freeze a foreground service whose notification is never shown (seen
+on a Vivo device), and a frozen monitor misses the alerts it exists to
+deliver. The notification carries a session count only, never a session
+heading, agent text or alert.
+
+- Agents holds `POST_NOTIFICATIONS` for this notification alone. This is a
+  documented exception in `plugins/AGENTS.md` section 3.5.
+- It exists only while the Monitoring switch is on. **Stop** turns that switch
+  off and stops the service; the pairing is kept.
+- Turning Monitoring on asks for the permission once. If it is refused,
+  Settings says "Notifications off — Android may pause Agents" and does not
+  ask again.
+
+### Modes and their limits
+
+Both Claude modes are supported, and each mode's limits are shown rather than
+hidden: as a mode tag on the board row, in the session's control menu, in the
+phone app, and in the `/rokid:on` and `rk claude` startup text. Claude is
+attached with `/rokid:on` (plugin `rokid`; also `/rokid:off` and
+`/rokid:status`). Codex uses the plain-text commands `rokid:on|off|status`.
+Sessions are opt-in: an unattached session sends nothing.
+
+| | Plugin mode: normal `claude` + `/rokid:on` | Launcher mode: `rk claude` |
+|---|---|---|
+| Progress, Done, approvals, questions, context | Yes | Yes |
+| Voice follow-up | Yes while the session waits (limit *Y*); after that, continue at the laptop | Yes always, also after *Y* expires |
+| Approval-mode switch | Yes (agentd auto-answers) | Yes (same mechanism) |
+| Compact | No: shown greyed out as "needs rk claude" | Yes |
+| Model change | No: shown greyed out as "needs rk claude" | Yes, with a warning that it also changes the default for new sessions |
+
+- `rk claude` starts attached.
+- Codex needs no mode split. All capabilities work on normal `codex` sessions
+  through the shared daemon, and Codex is opt-in the same way as Claude. A
+  Codex session whose capability is false shows "not available", not
+  "needs rk claude".
+- Codex model and approval-policy changes from the glasses apply on the next
+  follow-up, and the HUD shows them as "pending" until then.
+- Approve-all (the temporary approval mode) is never silent: the board row is
+  tagged while it is on, and a rejected change leaves the menu showing the real
+  mode with "Not applied: <error>".
+
+### Voice
+
+Voice goes through the Nexus `stt` and `tts` capabilities. The plugin does not
+open the microphone itself and logs no spoken text.
+
+- **Reply by voice.** From a session's menu, "Reply by voice" starts one
+  listening session. The result appears on a card to confirm: Send, Speak again
+  or Cancel. Nothing is sent until you press Send. A reply over 16 KiB is
+  refused rather than cut. It works while the session waits and, in launcher
+  mode, at any time (see the table above).
+- **Question answers.** A question band opens one card per question with the
+  options, an "Answer box (voice)" row when free text is allowed, and a
+  last page with Send answer.
+- **Voice approval.** The decision card has a "Say allow or deny" row. Only a
+  complete, plain utterance from a fixed list counts (for example allow,
+  approve, yes, ok; deny, no, reject). Anything else, including "don't allow",
+  says "Say allow or deny" again. A match still asks "Allow?" or "Deny?" and
+  needs Confirm.
+- **Errors you may see:** "Voice unavailable" (not granted yet), "Mic busy —
+  try again" (another plugin holds speech, or the last session is still
+  stopping), "Glasses link lost" and "Didn't catch that". A final result that
+  comes back empty falls back to the last words heard.
+- **The spoken alert cue** is separate: a short generic line through text to
+  speech, silent under Do Not Disturb, the Quiet row, a muted glasses volume,
+  or glasses known to be off the head.
+
+**Re-approve the grant after updating.** The plugin's manifest now declares the
+`stt` and `tts` capabilities (`CAPABILITIES=surfaces,stt,tts`). Nexus resets a
+plugin's grant when its capabilities change, so open the Nexus app, go to
+**Plugin access** and allow **Agents** for Speech to text and Text to speech.
+Until you do, voice features say "Voice unavailable" and the spoken cue stays
+silent; the bands and board still work.
 
 ### Typing a reply into a session
 
@@ -217,6 +349,39 @@ Implemented exactly:
 
 Every reconnect resets sequence state, sends a fresh hello immediately, and
 waits for a new authoritative snapshot.
+
+### Protocol v2
+
+Protocol v2 is the same connection with more frames, defined in
+`agentd/src/protocol-v2.ts` and mirrored byte for byte by the plugin's codec
+and the fixtures in `contracts/`.
+
+- **Agent to phone:** `session_upsert` gains the v2 fields (`mode`
+  plugin or launcher, `capabilities` for compact, model and follow-up,
+  `tempMode`, a heading and the current file). The new frames drive the bands
+  on the glasses: `alert` (with a reason such as new, retry or reminder),
+  `alert_closed`, `ack`, `followup_closed`, `mode_reset` and `models`.
+- **Phone to agent, steering:** `approval_decision`, `session_input`,
+  `thread_start`, `alert_action`, `followup`, `question_answer`, `mode_set`,
+  `mode_revoke_all`, `codex_settings`, `codex_compact`, `launcher_command`,
+  `defaults_set` and `settings_sync`. Every one carries a `msgId` (a UUID, at most 128
+  characters) made once per user action and reused if it is resent, so a
+  repeat is acknowledged but not run twice. `followup.text` is at most 16 KiB.
+- **Phone to agent, monitor:** `alert_shown`, `alert_dismissed`,
+  `models_request` and the v1 monitor frames. These are allowed on any link.
+- **Steering needs a secure link.** One gate (`AgentdWire`) classifies every
+  outgoing frame. Steering frames are refused on a link that is not secure
+  (plain `ws`, no pinned certificate, or no `steer`), and the board and
+  menus say "Monitor only — approve on laptop" instead of offering a button
+  that cannot work.
+- **The phone is the configuration owner.** On every secure link it sends
+  `settings_sync` (the alert timings and the wait limit *Y*), which
+  overwrites the computer's copy. Edit these in the Settings screen, not on
+  the laptop.
+- **Alerts come from the v2 frames.** Once a computer has spoken v2, the older
+  v1 approval and status attention for that computer's Claude and Codex
+  sessions stays off, even while the link is down, so nothing alerts twice.
+  OpenClaw sessions keep the v1 path.
 
 ### OpenClaw Gateway v4
 
@@ -305,6 +470,16 @@ $env:GRADLE_USER_HOME = (Join-Path (Get-Location) ".gradle-user")
 ..\..\gradlew.bat testDebugUnitTest assembleDebug
 ```
 
+On macOS or Linux, with JDK 17:
+
+```bash
+cd plugins/agents
+JAVA_HOME=/path/to/jdk17 ../../gradlew testDebugUnitTest assembleDebug
+```
+
+The on-glasses checks that no unit test can cover are listed in
+`docs/coding-agent/claude/plan/2026-11-14-plan-2-device-checklist.md`.
+
 The module uses the same first-party namespace, `minSdk 30`, SDK project
 dependency, signing script, AndroidX Core/coroutines versions, JUnit stack, and
 JSON choice as Transit, plus the repository’s existing OkHttp `4.12.0`.
@@ -326,7 +501,8 @@ JSON choice as Transit, plus the repository’s existing OkHttp `4.12.0`.
   exist too, but only when that session happens to be running inside `screen`
   or `tmux` on the computer — agentd types into it the way a person would
   rather than owning the process, and a session outside a multiplexer simply
-  does not offer the reply field. Voice input does not exist.
+  does not offer the reply field. Voice follow-ups need the `stt` grant and
+  the limits in [Modes and their limits](#modes-and-their-limits).
 - **The phone may stop running Agents altogether, not merely throttle it.**
   Measured on a Vivo device: Android froze the process outright
   (`cgroup.freeze=1`, no CPU time accruing) while the service still reported

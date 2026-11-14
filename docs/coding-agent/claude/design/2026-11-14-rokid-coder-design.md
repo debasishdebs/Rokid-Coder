@@ -305,9 +305,9 @@ Resolved by the 2026-11-14 compatibility tests (see §5a). Remaining:
 ## 11a. Ruling: two Claude modes, both in v1 **[user, 2026-11-14]**
 Both are supported, and **the user is told each mode's limits clearly**: on the
 glasses board (a mode tag on the session row), in the session's control menu, in
-the phone app, and in the `/rokid` and `rk claude` startup text.
+the phone app, and in the `/rokid:on` and `rk claude` startup text.
 
-| | Plugin mode: normal `claude` + `/rokid` | Launcher mode: `rk claude` |
+| | Plugin mode: normal `claude` + `/rokid:on` | Launcher mode: `rk claude` |
 |---|---|---|
 | Progress, Done, approvals, questions, context | ✅ | ✅ |
 | Voice follow-up | ✅ while the session waits (limit *Y*); after that, continue at the laptop | ✅ always, also after *Y* expires |
@@ -315,13 +315,15 @@ the phone app, and in the `/rokid` and `rk claude` startup text.
 | Compact | ❌: shown greyed out as "needs rk claude" | ✅ |
 | Model change | ❌: shown greyed out as "needs rk claude" | ✅, with a warning that it also changes the default for new sessions |
 
-- `/rokid` is a slash command from the Rokid-Coder Claude plugin. It attaches the current session
-  to the glasses. My call: sessions are opt-in, so unattached sessions don't send anything.
+- The Rokid-Coder Claude plugin (name `rokid`) provides `/rokid:on|off|status`. `/rokid:on` attaches
+  the current session to the glasses, `/rokid:off` detaches it, and `/rokid:status` shows whether it
+  is attached. My call: sessions are opt-in, so unattached sessions don't send anything.
 - `rk claude` starts attached.
 - Codex needs no mode split. All capabilities work on normal `codex` sessions through the shared
   daemon.
 - **Codex is opt-in too** **[user]**, the same way as Claude. A Rokid-Coder Codex plugin command or
-  skill attaches the current thread, and `rk codex` starts attached. Unattached daemon threads are
+  skill attaches the current thread. Its commands are `rokid:on|off|status`, typed as plain text with
+  no leading slash. `rk codex` starts attached. Unattached daemon threads are
   never shown. **Builder spike:** how a Codex plugin command/skill learns its own thread ID to
   register it with agentd. **Resolved 2026-11-14 [spike]:** Codex sets `CODEX_THREAD_ID` (= `CODEX_SESSION_ID`)
   in the env of every command it runs, and hook inputs carry `session_id`. Commands run inside the session have
@@ -401,7 +403,7 @@ the code or the evidence and accepted. All items here are **[call]** unless mark
 
 ### 12.4 Attaching sessions, with exact ids (review #4)
 - A session is identified **only by its exact id**, never by matching the working folder.
-  - Claude: `session_id` from the hook input. `/rokid` runs a hook or command that sends the
+  - Claude: `session_id` from the hook input. `/rokid:on` runs a hook or command that sends the
     current `session_id` to agentd.
   - Codex: the thread id, from the hook input `session_id` / env `CODEX_THREAD_ID` (§11a). Matching by
     folder is not allowed.

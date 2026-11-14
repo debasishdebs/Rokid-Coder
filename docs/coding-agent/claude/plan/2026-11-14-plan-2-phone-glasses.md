@@ -806,8 +806,17 @@ Steering happens only over pinned TLS.
   - `phone-hub/.../PhoneNoticeRouter.kt` and `PhoneNoticeState.kt`: a non-consuming identity check, then `deliverLocal(NOTICE_SHOWN)`.
   - `phone-hub/.../NexusUpdateChecker.kt`: repoint `RELEASES_URL` to the fork's releases.
 
+**Amendment (R122, after Task 12):** the phone-hub half of the `/notice/shown` ack must do exactly this, in this order:
+1. **Match the reported instance without consuming the answer.** The glasses report the instance of the band they attached. The router checks it against the held notice and leaves the answer state untouched (no `consume`, no spend), so a later tap or action on the same band still works.
+2. **Then stamp its CURRENT `noticeClientToken`.** After the instance matches, the phone stamps the token it stores now, not the one the glasses captured at first attach. If the owner re-armed the band in place (new question, new token) before the ack arrived, a stale token would make the SDK drop a valid ack.
+3. **Set the plugin-facing bit only when both hubs advertise it.** The plugin-visible `NOTICE_SHOWN_ACK` bit is the intersection of what the phone hub and the glasses hub advertise. If either side lacks it, the bit stays clear and the plugin keeps the interim evidence rules (R33/R47).
+
+Until Task 13 lands, `BUSSPEC.md` must call the phone-hub half "pending (Task 13)" (Task 12's review round owns that edit). Add to the tests: `shown_matches_instance_without_consuming_the_answer`, `shown_is_stamped_with_the_current_token_after_an_in_place_rearm`, `plugin_bit_requires_both_hubs`.
+
+**Context only (R121, not Task 13 work):** the phone no longer silently trusts the first machine on first use. It trusts a new machine only inside the wearer-armed 2-minute link window (Add a computer), the phone-side mirror of agentd's R60. That change belongs to the Plan 2 final fix wave and is mentioned here only because it touches the same phone-hub and Agents pairing paths. Do not implement it in this task.
+
 **Steps:**
-- Tests: `PhoneNoticeRouterTest` `shown_from_glasses_delivered_to_owner_only_for_current_identity`, and `NexusUpdateCheckerTest` updated for the URL.
+- Tests: `PhoneNoticeRouterTest` `shown_from_glasses_delivered_to_owner_only_for_current_identity` plus the three tests named in the amendment above, and `NexusUpdateCheckerTest` updated for the URL.
 - Build `./gradlew :phone-hub:testDebugUnitTest :phone-hub:assembleDebug` (no flag).
 - Commit `feat(phone-hub): route the glasses /notice/shown ack to the notice owner`.
 
