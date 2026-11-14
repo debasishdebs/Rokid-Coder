@@ -58,6 +58,7 @@ const FRAME_BUILDERS = {
   codex_settings: ([sessionKey, model, effort]) =>
     ({ sessionKey, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }),
   codex_compact: ([sessionKey]) => ({ sessionKey }),
+  launcher_command: ([sessionKey, command, model]) => ({ sessionKey, command, ...(model ? { model } : {}) }),
   alert_action: ([id, action]) => ({ id, action }),
   alert_shown: ([id]) => ({ id }),
   alert_dismissed: ([id]) => ({ id }),

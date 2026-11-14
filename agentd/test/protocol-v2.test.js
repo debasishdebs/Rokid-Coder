@@ -724,8 +724,32 @@ const STEERING_FRAMES = [
   { type: "codex_settings", v: 2, sessionKey: "codex:t1", model: "m", msgId: "r-9" },
   { type: "codex_compact", v: 2, sessionKey: "codex:t1", msgId: "r-10" },
   { type: "defaults_set", v: 2, defaultModes: { claude: "acceptEdits", codex: "acceptEdits" }, msgId: "r-11" },
+  { type: "launcher_command", v: 2, sessionKey: "claude:s1", command: "compact", msgId: "r-13" },
   { type: "a_frame_nobody_has_heard_of", v: 2, msgId: "r-12" },
 ];
+
+test("launcher_command_is_steering_and_rejected_not_launcher", async () => {
+  assert.equal(classifyFrame("launcher_command"), "steering");
+  assert.deepEqual(authorize({ type: "launcher_command" }, { trusted: false }), { ok: false, error: "monitor_only" });
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ phone, coderDir }) => {
+      for (const [args, label] of [
+        [["claude:s1", "compact"], "attached claude session"],
+        [["claude:s1", "model", "opus"], "model command"],
+        [["codex:t9", "compact"], "unattached codex session"],
+      ]) {
+        const frame = phone.sendFrame("launcher_command", args);
+        const ack = await ackFor(phone, frame.msgId);
+        assert.deepEqual([ack.result, ack.error, ack.v], ["rejected", "not_launcher", 2], label);
+        // The rejection consumed nothing: the same id answers the same way again.
+        phone.send(frame);
+        await phone.waitFor("ack", (f) => f.msgId === frame.msgId && f !== ack);
+      }
+      assert.equal(await exists(path.join(coderDir, "applied-ids.json")), false);
+    },
+  );
+});
 
 test("every_steering_frame_rejected_over_plaintext_on_both_transports", async () => {
   for (const transport of TRANSPORTS) {

@@ -72,6 +72,8 @@ export interface SessionUpsertFrameV2 {
   session: Record<string, unknown> & SessionUpsertV2Fields;
 }
 
+export type AlertSendReason = "new" | "retry" | "reminder" | "resume" | "update";
+
 export interface AlertFrame {
   type: "alert";
   v: 2;
@@ -83,6 +85,11 @@ export interface AlertFrame {
   actions?: string[];
   question?: QuestionPayload;
   waiting: number;
+  /**
+   * Why this frame is being sent. `update` re-sends the occupant only to carry
+   * a new `waiting`; it changes nothing about the alert's delivery.
+   */
+  reason: AlertSendReason;
 }
 
 /**
@@ -254,6 +261,20 @@ export interface CodexCompactFrame {
   msgId: string;
 }
 
+/**
+ * Reserved: the launcher runs these in Plan 3. Until then every one is
+ * answered `ack rejected error=not_launcher`, so the phone can be built
+ * against the final shape.
+ */
+export interface LauncherCommandFrame {
+  type: "launcher_command";
+  v: 2;
+  sessionKey: SessionKey;
+  command: "compact" | "model";
+  model?: string;
+  msgId: string;
+}
+
 export interface DefaultsSetFrame {
   type: "defaults_set";
   v: 2;
@@ -285,6 +306,7 @@ export type PhoneToAgentFrameV2 =
   | ModeRevokeAllFrame
   | CodexSettingsFrame
   | CodexCompactFrame
+  | LauncherCommandFrame
   | DefaultsSetFrame
   | SettingsSyncFrame
   | ModelsRequestFrame;
@@ -308,6 +330,7 @@ const FRAME_CLASS: Readonly<Record<string, FrameClass>> = Object.freeze({
   mode_revoke_all: "steering",
   codex_settings: "steering",
   codex_compact: "steering",
+  launcher_command: "steering",
   defaults_set: "steering",
   // Only a phone that can be held for (a trusted one) has any use for the
   // thresholds and the wait limit, and both decide how long holds last.

@@ -112,14 +112,16 @@ test("dwell_holds_shown_alert_8s", () => {
   env.queue.onShown(first);
   env.queue.push(alert("error", { title: "second" }));
 
+  // The push is told to the phone as a waiting-count update of "first", nothing more.
+  const fresh = () => env.frames.filter((f) => f.reason !== "update");
   env.advance(7_999);
   assert.equal(env.queue.current().title, "first");
-  assert.equal(env.frames.length, 1);
+  assert.equal(fresh().length, 1);
 
   env.advance(1);
   assert.equal(env.queue.current().title, "second");
-  assert.equal(env.frames.length, 2);
-  assert.equal(env.frames[1].title, "second");
+  assert.equal(fresh().length, 2);
+  assert.equal(fresh()[1].title, "second");
 });
 
 test("acting_on_the_shown_alert_releases_the_glasses_inside_the_dwell", () => {
@@ -267,14 +269,18 @@ test("waiting_count_in_every_frame", () => {
   env.queue.push(alert("error", { createdAt: env.now(), title: "b" }));
   env.queue.push(alert("done", { createdAt: env.now(), title: "c" }));
   assert.equal(env.queue.waitingCount(), 2);
+  assert.deepEqual(env.frames.slice(1).map((f) => [f.title, f.reason, f.waiting]), [
+    ["a", "update", 1],
+    ["a", "update", 2],
+  ]);
 
   env.queue.onActed(first);
-  assert.equal(env.frames[1].title, "b");
-  assert.equal(env.frames[1].waiting, 1);
-  env.queue.onShown(env.frames[1].id);
-  env.queue.onActed(env.frames[1].id);
-  assert.equal(env.frames[2].title, "c");
-  assert.equal(env.frames[2].waiting, 0);
+  env.queue.onShown(env.frames[3].id);
+  assert.equal(env.frames[3].title, "b");
+  assert.equal(env.frames[3].waiting, 1);
+  env.queue.onActed(env.frames[3].id);
+  assert.equal(env.frames[4].title, "c");
+  assert.equal(env.frames[4].waiting, 0);
   for (const frame of env.frames) {
     assert.equal(typeof frame.waiting, "number");
   }
@@ -299,13 +305,16 @@ test("frames_carry_the_v2_alert_shape_with_actions_and_question", () => {
     actions: ["answer"],
     question,
     waiting: 0,
+    reason: "new",
   });
   env.queue.push(alert("done"));
   const plain = env.queue.current();
   assert.equal(plain.id, id);
   env.queue.onActed(id);
-  assert.equal("actions" in env.frames[1], false);
-  assert.equal("question" in env.frames[1], false);
+  // frames[1] is the waiting-count update of the question; frames[2] is the done alert.
+  assert.equal(env.frames[2].kind, "done");
+  assert.equal("actions" in env.frames[2], false);
+  assert.equal("question" in env.frames[2], false);
 });
 
 test("expire_session_drops_its_alerts_only", () => {
@@ -403,4 +412,106 @@ test("setTimings_applies_to_alerts_already_queued", () => {
   env.queue.setTimings({ ...TIMINGS, expireMs: 10_000 });
   env.advance(10_000);
   assert.equal(env.queue.get(id), undefined);
+});
+
+test("first_dispatch_reason_new", () => {
+  const env = setup();
+  env.queue.push(alert("error", { createdAt: env.now() }));
+  assert.equal(env.frames.length, 1);
+  assert.equal(env.frames[0].reason, "new");
+});
+
+test("retry_reason_retry", () => {
+  const env = setup();
+  env.queue.push(alert("question", { createdAt: env.now() }));
+  env.advance(5_000);
+  env.advance(10_000);
+  assert.deepEqual(env.frames.map((f) => f.reason), ["new", "retry", "retry"]);
+});
+
+test("reminder_after_dwell_reason_reminder", () => {
+  const env = setup();
+  const id = env.queue.push(alert("error", { createdAt: env.now() }));
+  env.queue.onShown(id);
+  env.advance(TIMINGS.reminderMs);
+  assert.deepEqual(env.frames.map((f) => f.reason), ["new", "reminder"]);
+  // A retry of the reminder is a retry, and the next reminder is a reminder again.
+  env.advance(5_000);
+  env.queue.onShown(id);
+  env.advance(TIMINGS.reminderMs);
+  assert.deepEqual(env.frames.map((f) => f.reason), ["new", "reminder", "retry", "reminder"]);
+});
+
+test("parked_alert_comes_back_reason_reminder", () => {
+  const env = setup();
+  const id = env.queue.push(alert("approval", { createdAt: env.now() }));
+  env.queue.onShown(id);
+  env.queue.park(id);
+  assert.equal(env.queue.current(), undefined);
+  env.advance(TIMINGS.reminderMs);
+  assert.equal(env.queue.current().id, id);
+  assert.deepEqual(env.frames.map((f) => f.reason), ["new", "reminder"]);
+});
+
+test("preempted_alert_resumes_reason_resume", () => {
+  const env = setup();
+  const done = env.queue.push(alert("done", { createdAt: env.now(), title: "done" }));
+  env.queue.onShown(done);
+  env.advance(1_000);
+  const approval = env.queue.push(alert("approval", { createdAt: env.now(), title: "approval" }));
+  assert.equal(env.queue.current().id, approval);
+  env.queue.onShown(approval);
+  env.queue.onActed(approval);
+  assert.equal(env.queue.current().id, done);
+  assert.deepEqual(
+    env.frames.filter((f) => f.type === "alert" && f.reason !== "update").map((f) => [f.title, f.reason]),
+    [["done", "new"], ["approval", "new"], ["done", "resume"]],
+  );
+});
+
+test("link_up_requeue_reason_resume", () => {
+  const env = setup();
+  const id = env.queue.push(alert("error", { createdAt: env.now() }));
+  env.queue.onShown(id);
+  env.advance(1_000);
+  env.queue.linkUp();
+  assert.equal(env.frames.length, 2);
+  assert.equal(env.frames[1].id, id);
+  assert.equal(env.frames[1].reason, "resume");
+});
+
+test("waiting_change_resends_current_with_update_and_keeps_state", () => {
+  // A push, a withdraw and a close of waiting alerts each re-send the occupant.
+  const env = setup();
+  const current = env.queue.push(alert("approval", { createdAt: env.now() }));
+  env.queue.onShown(current);
+  env.advance(1_000);
+  assert.equal(env.frames.length, 1);
+
+  const second = env.queue.push(alert("done", { createdAt: env.now() }));
+  const third = env.queue.push(alert("done", { createdAt: env.now() }));
+  assert.deepEqual(
+    env.frames.slice(1).map((f) => [f.id, f.reason, f.waiting]),
+    [[current, "update", 1], [current, "update", 2]],
+  );
+  env.queue.withdraw(second);
+  assert.deepEqual([env.frames[3].id, env.frames[3].reason, env.frames[3].waiting], [current, "update", 1]);
+  env.queue.onDismissed(third);
+  assert.deepEqual([env.frames[4].id, env.frames[4].reason, env.frames[4].waiting], [current, "update", 0]);
+  assert.equal(env.frames.length, 5);
+  assert.equal(env.queue.current().state, "shown");
+
+  // Updates leave attempts, state and the retry clock alone.
+  const kept = setup();
+  const held = kept.queue.push(alert("question", { createdAt: kept.now() }));
+  kept.advance(3_000);
+  kept.queue.push(alert("done", { createdAt: kept.now() }));
+  assert.equal(kept.frames.at(-1).reason, "update");
+  assert.deepEqual([kept.queue.current().state, kept.queue.current().attempts], ["sent", 1]);
+  kept.advance(1_999);
+  assert.equal(kept.frames.length, 2);
+  kept.advance(1); // 5 s after the first send, not after the update
+  assert.equal(kept.frames.at(-1).reason, "retry");
+  assert.equal(kept.queue.current().attempts, 2);
+  assert.equal(kept.queue.current().id, held);
 });

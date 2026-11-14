@@ -105,7 +105,7 @@ test("classify_frame_is_exhaustive_and_unknown_is_steering", () => {
   const steering = [
     "approval_decision", "session_input", "thread_start", "alert_action", "followup",
     "question_answer", "mode_set", "mode_revoke_all", "codex_settings", "codex_compact",
-    "defaults_set", "settings_sync",
+    "launcher_command", "defaults_set", "settings_sync",
   ];
   const monitor = [
     "hello", "hello_ack", "hello_reject", "refresh", "detail_open", "detail_close",

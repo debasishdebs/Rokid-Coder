@@ -3,6 +3,7 @@ import type {
   AlertClosedReason,
   AlertFrame,
   AlertKind,
+  AlertSendReason,
   AlertTimings,
   QuestionPayload,
   SessionKey,
@@ -52,6 +53,10 @@ interface Entry {
   firstShownAt?: number;
   /** Displaced by an approval: sorts ahead of its priority class. */
   preempted: boolean;
+  /** Why the next dispatch happens: how this alert last went back to the queue. */
+  dispatchReason: "new" | "reminder" | "resume";
+  /** The `waiting` its latest frame carried; a different count is an update. */
+  sentWaiting: number;
 }
 
 /**
@@ -127,7 +132,7 @@ export class AlertQueue {
   linkUp(): void {
     const occupant = this.slot;
     if (occupant && (occupant.alert.state === "sent" || occupant.alert.state === "shown")) {
-      this.requeue(occupant, occupant.preempted);
+      this.requeue(occupant, occupant.preempted, "resume");
     }
     this.service();
   }
@@ -135,7 +140,7 @@ export class AlertQueue {
   push(input: NewAlert): string {
     const id = randomUUID();
     const alert: Alert = { ...input, id, state: "queued", attempts: 0, promoted: false };
-    this.entries.set(id, { alert, seq: this.seq++, lastSentAt: 0, preempted: false });
+    this.entries.set(id, { alert, seq: this.seq++, lastSentAt: 0, preempted: false, dispatchReason: "new", sentWaiting: 0 });
     this.service();
     return id;
   }
@@ -211,6 +216,7 @@ export class AlertQueue {
     this.remind(t);
     this.retryUnacked(t);
     this.dispatchNext(t);
+    this.updateWaiting();
   }
 
   private expireDue(t: number): void {
@@ -230,7 +236,7 @@ export class AlertQueue {
       }
       const dwellOver = t - entry.shownAt >= this.timings.dwellMs;
       if (dwellOver && t - entry.lastSentAt >= this.timings.reminderMs) {
-        this.requeue(entry, false);
+        this.requeue(entry, false, "reminder");
       }
     }
   }
@@ -238,7 +244,7 @@ export class AlertQueue {
   private retryUnacked(t: number): void {
     const entry = this.slot;
     if (entry && entry.alert.state === "sent" && t >= entry.lastSentAt + this.retryGap(entry.alert.attempts)) {
-      this.transmit(entry, t);
+      this.transmit(entry, t, "retry");
     }
   }
 
@@ -270,7 +276,7 @@ export class AlertQueue {
       if (occupant.alert.kind !== "approval") {
         const approval = this.best((e) => e.alert.state === "queued" && e.alert.kind === "approval");
         if (approval) {
-          this.requeue(occupant, true);
+          this.requeue(occupant, true, "resume");
           this.dispatch(approval, t);
         }
       }
@@ -317,7 +323,8 @@ export class AlertQueue {
     return entry.alert.promoted ? KIND_RANK.approval : KIND_RANK[entry.alert.kind];
   }
 
-  private requeue(entry: Entry, preempted: boolean): void {
+  private requeue(entry: Entry, preempted: boolean, reason: "reminder" | "resume"): void {
+    entry.dispatchReason = reason;
     entry.alert.state = "queued";
     entry.alert.attempts = 0;
     entry.shownAt = undefined;
@@ -332,13 +339,36 @@ export class AlertQueue {
     entry.alert.state = "sent";
     entry.alert.attempts = 0;
     entry.preempted = false;
-    this.transmit(entry, t);
+    this.transmit(entry, t, entry.dispatchReason);
   }
 
-  private transmit(entry: Entry, t: number): void {
+  /**
+   * A push, a close or a withdraw changed how many alerts wait behind the one
+   * on the glasses: tell the phone, so `+N waiting` stays current even for an
+   * alert that is already acknowledged. The delivery bookkeeping stays as it is.
+   */
+  private updateWaiting(): void {
+    const occupant = this.slot;
+    if (occupant && occupant.sentWaiting !== this.waitingCount()) {
+      this.send(occupant, "update");
+    }
+  }
+
+  private transmit(entry: Entry, t: number, reason: Exclude<AlertSendReason, "update">): void {
     entry.alert.attempts += 1;
     entry.lastSentAt = t;
+    // Only a shown ack ends the retries, and only a frame that reached a link
+    // counts toward the backoff.
+    if (!this.send(entry, reason)) {
+      entry.alert.attempts = Math.max(0, entry.alert.attempts - 1);
+    }
+  }
+
+  /** Hands the entry's frame to the sink; false when no link took it. */
+  private send(entry: Entry, reason: AlertSendReason): boolean {
     const alert = entry.alert;
+    const waiting = this.waitingCount();
+    entry.sentWaiting = waiting;
     const frame: AlertFrame = {
       type: "alert",
       v: 2,
@@ -349,18 +379,14 @@ export class AlertQueue {
       body: alert.body,
       ...(alert.actions ? { actions: [...alert.actions] } : {}),
       ...(alert.question ? { question: alert.question } : {}),
-      waiting: this.waitingCount(),
+      waiting,
+      reason,
     };
-    let delivered = false;
     try {
-      delivered = this.sink(frame);
+      return this.sink(frame);
     } catch {
       // Handled like a refusal.
-    }
-    // Only a shown ack ends the retries, and only a frame that reached a link
-    // counts toward the backoff.
-    if (!delivered) {
-      alert.attempts = Math.max(0, alert.attempts - 1);
+      return false;
     }
   }
 }

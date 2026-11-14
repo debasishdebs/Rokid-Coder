@@ -565,6 +565,9 @@ export class PhoneV2 {
         return this.codexSettings(frame, record);
       case "codex_compact":
         return this.codexCompact(frame, record);
+      case "launcher_command":
+        // Reserved for Plan 3. A rejection never records the msgId.
+        return fail("not_launcher");
       case "defaults_set":
         return this.defaultsSet(frame, record);
       default:
