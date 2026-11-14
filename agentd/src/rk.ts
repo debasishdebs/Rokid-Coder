@@ -10,7 +10,7 @@ import { LauncherClient } from "./launcher/launcher-client";
 import { offerPairing } from "./launcher/pair-prompt";
 import { spawnPty, type PtyChild } from "./launcher/pty";
 import { launcherSocketPath, launcherSocketTrusted, probeStatus, type StatusProbe } from "./launcher/status-probe";
-import { KittyKeyboardTracker, restoreTerminal, saveTerminal } from "./launcher/terminal";
+import { BellGate, KittyKeyboardTracker, restoreTerminal, saveTerminal } from "./launcher/terminal";
 
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
 // R155: printed before the bind, so it says attaching; only the phone shows the bind itself.
@@ -252,6 +252,7 @@ async function runClaude(args: string[]): Promise<void> {
     process.stderr.write("rk: could not save the terminal settings (stty -g failed); running without raw mode.\n");
   }
   const kitty = new KittyKeyboardTracker();
+  const bell = new BellGate();
   let child: PtyChild;
   try {
     const file = resolveExecutable(bin);
@@ -276,7 +277,7 @@ async function runClaude(args: string[]): Promise<void> {
 
   emergencyCleanup = () => {
     child.kill("SIGKILL");
-    restoreTerminal(saved, kitty.depth);
+    restoreTerminal(saved, kitty.restore());
   };
 
   // ---- exit handling (R53) ----
@@ -315,7 +316,7 @@ async function runClaude(args: string[]): Promise<void> {
     const status = shutdown?.code ?? exitStatus(code, signal);
     const done = (): void => {
       try {
-        restoreTerminal(saved, kitty.depth);
+        restoreTerminal(saved, kitty.restore());
         if (keysDropped) {
           fs.writeSync(2, `${KEYS_DROPPED}\n`);
         }
@@ -362,11 +363,15 @@ async function runClaude(args: string[]): Promise<void> {
   let refused: { sessionId: string; delay: number; retryAt: number } | undefined;
   const client = new LauncherClient({ child, send: (frame) => link.send(frame), binding, sessionsDir });
   // R151: keys typed while a glasses /model dialog may be open are dropped. The
-  // bell says so at once without drawing over Claude's screen; the line after exit says why.
+  // bell says so at once without drawing over Claude's screen (N5: never inside one of
+  // its escape sequences); the line after exit says why.
   let keysDropped = false;
   client.input.onKeysDropped(() => {
     keysDropped = true;
-    process.stdout.write("\x07");
+    const now = bell.ring();
+    if (now) {
+      process.stdout.write(now);
+    }
   });
 
   const link: LauncherLink = new LauncherLink(
@@ -476,7 +481,7 @@ async function runClaude(args: string[]): Promise<void> {
   // ---- wiring: data and exit are subscribed in the same tick as the spawn ----
   child.onData((chunk) => {
     kitty.push(chunk);
-    process.stdout.write(chunk);
+    process.stdout.write(bell.output(chunk));
   });
   child.onExit((code, signal) => finish(code, signal));
 

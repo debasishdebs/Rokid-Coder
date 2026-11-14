@@ -586,6 +586,72 @@ test("restore_terminal_resets_stty_and_escapes_and_is_idempotent", async () => {
   }
 });
 
+// N6: kitty keeps a stack per screen, and `CSI = flags ; mode u` sets flags without a push.
+test("kitty_tracker_pops_each_screen_on_its_own_and_undoes_a_bare_set", async () => {
+  const { KittyKeyboardTracker } = require("../dist/launcher/terminal.js");
+  const both = new KittyKeyboardTracker();
+  both.push("\x1b[>1u");
+  both.push("\x1b[?10");
+  both.push("49h\x1b[>5u\x1b[>1u\x1b[<u");
+  assert.deepEqual(both.restore(), { onAlt: "\x1b[<u", onMain: "\x1b[<u" }, "one pop on each screen, each on its own");
+  const bare = new KittyKeyboardTracker();
+  bare.push("\x1b[=5;");
+  bare.push("1u");
+  assert.deepEqual(bare.restore(), { onAlt: "", onMain: "\x1b[=0;1u" }, "flags set with nothing pushed are set back to 0");
+  const inside = new KittyKeyboardTracker();
+  inside.push("\x1b[>1u\x1b[=3u");
+  assert.deepEqual(inside.restore(), { onAlt: "", onMain: "\x1b[<u" }, "a set on a pushed entry goes with its pop");
+  const cleared = new KittyKeyboardTracker();
+  cleared.push("\x1b[=5u\x1b[>1u\x1b[<u");
+  assert.deepEqual(cleared.restore(), { onAlt: "", onMain: "" }, "a pop that empties the stack resets the flags");
+  const left = new KittyKeyboardTracker();
+  left.push("\x1b[?1049h\x1b[>1u\x1b[?1049l");
+  assert.deepEqual(left.restore(), { onAlt: "", onMain: "" }, "the alternate screen's stack is gone with it");
+
+  // restoreTerminal pops the alternate screen's stack before leaving it, and the main one's after.
+  await withTempDir(async (dir) => {
+    const { env } = await rkEnv(dir);
+    const script = path.join(dir, "restore.js");
+    const terminal = path.join(__dirname, "..", "dist", "launcher", "terminal.js");
+    fs.writeFileSync(
+      script,
+      `const { restoreTerminal } = require(${JSON.stringify(terminal)});
+       restoreTerminal("none", { onAlt: "\\x1b[<2u", onMain: "\\x1b[=0;1u" });`,
+    );
+    const run = inPty(process.execPath, [script], env);
+    assert.deepEqual(await run.exited, { code: 0, signal: null });
+    const alt = run.out.indexOf("\x1b[<2u");
+    const leave = run.out.indexOf("\x1b[?1049l");
+    const main = run.out.indexOf("\x1b[=0;1u");
+    assert.ok(alt >= 0 && alt < leave && leave < main, JSON.stringify(run.out));
+  });
+});
+
+// N5: rk's own bell never lands inside an escape sequence of Claude's.
+test("dropped_key_bell_waits_for_the_end_of_a_split_escape_sequence", () => {
+  const { BellGate } = require("../dist/launcher/terminal.js");
+  const gate = new BellGate();
+  assert.equal(gate.output("plain"), "plain");
+  assert.equal(gate.ring(), "\x07", "between sequences it rings at once");
+  assert.equal(gate.output("\x1b]8;;https://example.com"), "\x1b]8;;https://example.com");
+  assert.equal(gate.ring(), "", "never inside an OSC");
+  assert.equal(gate.ring(), "", "and a second ring is the same bell");
+  assert.equal(gate.output("\x1b\\link"), "\x1b\\\x07link", "right after the string terminator");
+  gate.output("\x1b]0;ti");
+  gate.ring();
+  assert.equal(gate.output("tle\x07more"), "tle\x07\x07more", "a BEL-ended title is over at its BEL");
+  gate.output("\x1b[3");
+  gate.ring();
+  assert.equal(gate.output("1mred"), "1m\x07red", "after a split CSI");
+  gate.output("abc\x1b");
+  gate.ring();
+  assert.equal(gate.output("[0m"), "[0m\x07", "after an Esc cut off at the chunk's end");
+  gate.output("\x1bP+q");
+  gate.ring();
+  assert.equal(gate.output("544e\x1b"), "544e\x1b");
+  assert.equal(gate.output("\\"), "\\\x07", "a DCS ends only at its ST");
+});
+
 test("rk_claude_banner_printed_before_spawn_not_into_tui", async () => {
   await withTempDir(async (dir) => {
     await withHub(dir, async (ctx) => {
