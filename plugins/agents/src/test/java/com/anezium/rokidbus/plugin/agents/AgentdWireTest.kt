@@ -434,6 +434,7 @@ class AgentdWireTest {
         val store: AgentSessionStore = AgentSessionStore(),
         val linkEnds: AtomicInteger = AtomicInteger(),
         besideDialled: Boolean = false,
+        onLinkEnded: () -> Unit = {},
     ) {
         val events = CopyOnWriteArrayList<AgentdEvent>()
         val server = AgentdLinkServer(
@@ -444,7 +445,10 @@ class AgentdWireTest {
             scope = scope,
             onMachineTrusted = {},
             tlsIdentity = FixturePhoneTlsIdentity(),
-            onLinkEnded = { linkEnds.incrementAndGet() },
+            onLinkEnded = {
+                onLinkEnded()
+                linkEnds.incrementAndGet()
+            },
             onEvent = { events += it },
         ).also { it.besideDialled = besideDialled }
         val dialer: Socket = agentdContext().socketFactory.createSocket(InetAddress.getLoopbackAddress(), listener.localPort)
@@ -472,10 +476,11 @@ class AgentdWireTest {
         store: AgentSessionStore = AgentSessionStore(),
         linkEnds: AtomicInteger = AtomicInteger(),
         besideDialled: Boolean = false,
+        onLinkEnded: () -> Unit = {},
         block: (LanLink) -> Unit,
     ) {
         tlsServerSocket(FixturePhoneTlsIdentity(), 0).use { listener ->
-            val lan = LanLink(listener, store, linkEnds, besideDialled)
+            val lan = LanLink(listener, store, linkEnds, besideDialled, onLinkEnded)
             try {
                 block(lan)
             } finally {
@@ -497,9 +502,68 @@ class AgentdWireTest {
             // The service is told, and reconciles: with the link gone and the window shut, the listener goes.
             awaitCondition { ends.get() == 1 }
             assertFalse(lan.server.linkSecure.value)
-            // Beside a dialled slot the link's end does not repaint the slot's connection as "waiting".
-            assertNotEquals("waiting for a computer", store.connections.value.getValue(AgentProvider.CLAUDE).detail)
+            // Beside a dialled slot the link's end writes nothing of its own: no "waiting for a computer".
+            // Putting the slot's own state back is the slot's job (republishState), covered below.
+            assertEquals(
+                ProviderConnectionState(ConnectionState.CONNECTED, "Desk"),
+                store.connections.value.getValue(AgentProvider.CLAUDE),
+            )
         }
+    }
+
+    @Test
+    fun inbound_link_ending_beside_refused_slot_restores_slot_state() {
+        val store = AgentSessionStore()
+        val http = FakeWebSocketClient()
+        val client = AgentdClient(
+            OkHttpClient(), store, scope, "test", FixturePhoneTlsIdentity(),
+            pinnedClient = { http },
+        ) {}
+        client.start(
+            AgentdConfig(
+                host = "127.0.0.1", port = 8790, token = "secret", name = "Home",
+                fp = FixturePhoneTlsIdentity.FINGERPRINT, steer = "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJ-0123",
+            ),
+        )
+        awaitCondition { http.connections.isNotEmpty() }
+        http.connections.single().apply {
+            open()
+            message("""{"type":"hello_reject","v":2,"reason":"repair_needed"}""")
+        }
+        awaitCondition { store.connections.value.getValue(AgentProvider.CLAUDE).state == ConnectionState.AUTH_FAILED }
+        val slot = store.connections.value.getValue(AgentProvider.CLAUDE)
+        assertEquals(ProviderConnectionState(ConnectionState.AUTH_FAILED, PairingCopy.REPAIR_TO_STEER), slot)
+
+        val ends = AtomicInteger()
+        lanLink(store, ends, besideDialled = true, onLinkEnded = client::republishState) { lan ->
+            // A second computer pairs inbound beside the refused slot and takes over the store's state...
+            lan.handshake()
+            assertEquals(
+                ProviderConnectionState(ConnectionState.CONNECTED, "Desk"),
+                store.connections.value.getValue(AgentProvider.CLAUDE),
+            )
+
+            // ...and when its link ends, the slot's own state is back: refused, not connected to "Desk".
+            lan.hangUp()
+            awaitCondition { ends.get() == 1 }
+            assertEquals(slot, store.connections.value.getValue(AgentProvider.CLAUDE))
+            assertTrue(client.needsRepair.value)
+        }
+        client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun a_client_that_never_published_a_state_repaints_nothing() {
+        val store = AgentSessionStore()
+        store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING, "waiting for a computer")
+        val client = AgentdClient(OkHttpClient(), store, scope, "test", FixturePhoneTlsIdentity()) {}
+
+        client.republishState()
+
+        assertEquals(
+            ProviderConnectionState(ConnectionState.CONNECTING, "waiting for a computer"),
+            store.connections.value.getValue(AgentProvider.CLAUDE),
+        )
     }
 
     @Test

@@ -67,7 +67,11 @@ class AgentsMonitorService : Service() {
             AgentsRuntime.store, configStore, serviceScope, tlsIdentity,
             onSecureConnected = AgentsRuntime::announceSecureConnection,
             // A bound link ended: the listener may have been kept only for it.
-            onLinkEnded = { alertScope.launch { reconcile() } },
+            onLinkEnded = {
+                // The shared connection state shows the inbound computer: the dialled slot's own state goes back.
+                agentdClient.republishState()
+                alertScope.launch { reconcile() }
+            },
             onMachineTrusted = { machineName -> AgentsRuntime.announceLinkedMachine(machineName) },
         )
     }

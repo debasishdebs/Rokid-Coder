@@ -130,6 +130,23 @@ class AgentdClient(
         job.start()
     }
 
+    /** The connection state this slot last put in the store: what it is, whatever another transport wrote since. */
+    @Volatile private var published: ProviderConnectionState? = null
+
+    private fun publish(state: ConnectionState, detail: String? = null) {
+        published = ProviderConnectionState(state, detail)
+        store.setConnection(AgentProvider.CLAUDE, state, detail)
+    }
+
+    /**
+     * Another transport (the inbound listener beside this slot) wrote over the shared connection state and
+     * is gone: this slot's own state goes back, refused or not. Nothing is written for a slot with none.
+     */
+    fun republishState() {
+        val own = published ?: return
+        store.setConnection(AgentProvider.CLAUDE, own.state, own.detail)
+    }
+
     @Synchronized
     fun stop(clearSessions: Boolean) {
         loopJob?.cancel()
@@ -139,6 +156,8 @@ class AgentdClient(
         link.downCurrent()
         advance.previous?.cancel()
         store.setConnection(AgentProvider.CLAUDE, ConnectionState.DISCONNECTED)
+        // A stopped slot has no state of its own to put back.
+        published = null
         store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
         if (clearSessions) {
             store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
@@ -160,7 +179,7 @@ class AgentdClient(
             // Every dial, redials included: a pairing that went stale since the last one is not dialled.
             if (!dialAllowed()) return authFailed(generation, PairingCopy.SIGNED_OUT)
             // A refused pairing being tried again keeps saying so, rather than flickering to Connecting.
-            if (!redialing) store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING)
+            if (!redialing) publish(ConnectionState.CONNECTING)
             redialing = false
             val result = try {
                 connectOnce(config, steer, http, generation, backoff)
@@ -184,18 +203,10 @@ class AgentdClient(
                     continue
                 }
                 is ConnectionOutcome.RetryWithDetail -> {
-                    store.setConnection(
-                        AgentProvider.CLAUDE,
-                        ConnectionState.DISCONNECTED,
-                        result.detail,
-                    )
+                    publish(ConnectionState.DISCONNECTED, result.detail)
                 }
                 ConnectionOutcome.Retry -> {
-                    store.setConnection(
-                        AgentProvider.CLAUDE,
-                        ConnectionState.DISCONNECTED,
-                        "Connection lost",
-                    )
+                    publish(ConnectionState.DISCONNECTED, "Connection lost")
                 }
             }
             delay(backoff.nextDelayMs())
@@ -205,7 +216,7 @@ class AgentdClient(
     private fun authFailed(generation: Long, detail: String) {
         if (!sockets.isCurrent(generation)) return
         _needsRepair.value = true
-        store.setConnection(AgentProvider.CLAUDE, ConnectionState.AUTH_FAILED, detail)
+        publish(ConnectionState.AUTH_FAILED, detail)
     }
 
     private suspend fun connectOnce(
@@ -278,7 +289,7 @@ class AgentdClient(
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()
-                        store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTED, action.machineName)
+                        publish(ConnectionState.CONNECTED, action.machineName)
                     }
                     // The token, the secret or this phone's certificate is not agentd's any more.
                     is AgentdAction.HelloRejected -> finish(ConnectionOutcome.AuthFailed(REPAIR_TO_STEER))
