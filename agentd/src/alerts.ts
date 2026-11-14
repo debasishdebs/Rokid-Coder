@@ -57,6 +57,11 @@ interface Entry {
   dispatchReason: "new" | "reminder" | "resume";
   /** The `waiting` its latest frame carried; a different count is an update. */
   sentWaiting: number;
+  /**
+   * Whether a dispatch or retry of it has reached a link. Until one has, the
+   * phone has never heard of it, so whatever sends it next says `new`.
+   */
+  delivered: boolean;
 }
 
 /**
@@ -140,7 +145,7 @@ export class AlertQueue {
   push(input: NewAlert): string {
     const id = randomUUID();
     const alert: Alert = { ...input, id, state: "queued", attempts: 0, promoted: false };
-    this.entries.set(id, { alert, seq: this.seq++, lastSentAt: 0, preempted: false, dispatchReason: "new", sentWaiting: 0 });
+    this.entries.set(id, { alert, seq: this.seq++, lastSentAt: 0, preempted: false, dispatchReason: "new", sentWaiting: 0, delivered: false });
     this.service();
     return id;
   }
@@ -358,8 +363,11 @@ export class AlertQueue {
     entry.alert.attempts += 1;
     entry.lastSentAt = t;
     // Only a shown ack ends the retries, and only a frame that reached a link
-    // counts toward the backoff.
-    if (!this.send(entry, reason)) {
+    // counts toward the backoff. An `update` is no delivery: the phone ignores
+    // one for an alert it never showed.
+    if (this.send(entry, entry.delivered ? reason : "new")) {
+      entry.delivered = true;
+    } else {
       entry.alert.attempts = Math.max(0, entry.alert.attempts - 1);
     }
   }

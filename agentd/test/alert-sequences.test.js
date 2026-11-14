@@ -19,7 +19,7 @@ test("committed_alert_sequences_match_the_real_queue", () => {
 
 test("every_scenario_the_phone_replays_is_recorded", () => {
   const { scenarios } = record();
-  assert.deepEqual(Object.keys(scenarios), ["burst", "reminder", "lost_ack", "preemption", "park_reminder", "link_up"]);
+  assert.deepEqual(Object.keys(scenarios), ["burst", "reminder", "lost_ack", "preemption", "park_reminder", "link_up", "empty_slot_link_up"]);
   for (const [name, scenario] of Object.entries(scenarios)) {
     assert.ok(scenario.steps.some((step) => step.agentd), `${name} records no agentd frame`);
   }

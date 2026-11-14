@@ -975,6 +975,70 @@
           }
         }
       ]
+    },
+    "empty_slot_link_up": {
+      "description": "An approval arrives while no phone is linked and takes the empty slot: nothing reached a link, so at link up it is new",
+      "timings": {
+        "ageBoostMs": 30000,
+        "dwellMs": 8000,
+        "ackTimeoutMs": 5000,
+        "retryBackoffMs": [
+          5000,
+          10000,
+          20000
+        ],
+        "reminderMs": 300000,
+        "expireMs": 1800000
+      },
+      "steps": [
+        {
+          "t": 0,
+          "link": "down"
+        },
+        {
+          "t": 0,
+          "op": "push",
+          "id": "A",
+          "kind": "approval"
+        },
+        {
+          "t": 10000,
+          "link": "up"
+        },
+        {
+          "t": 10000,
+          "agentd": {
+            "type": "alert",
+            "v": 2,
+            "id": "A",
+            "sessionKey": "claude:s1",
+            "kind": "approval",
+            "title": "approval A",
+            "body": "approval body A",
+            "actions": [
+              "allow",
+              "deny"
+            ],
+            "waiting": 0,
+            "reason": "new"
+          }
+        },
+        {
+          "t": 10000,
+          "glasses": {
+            "event": "shown",
+            "id": "A"
+          }
+        },
+        {
+          "t": 10000,
+          "phone": {
+            "type": "alert_shown",
+            "v": 2,
+            "id": "A"
+          }
+        }
+      ]
     }
   }
 }

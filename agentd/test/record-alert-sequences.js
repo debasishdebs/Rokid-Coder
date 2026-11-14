@@ -11,7 +11,8 @@
  * closes anything else, `alert_action` settles the alert. An `alert_closed` is
  * recorded for every close but a dismiss, as phone-v2.ts sends it. A frame sent
  * while the link is down is refused and never recorded. A `lost` phone frame
- * is recorded but never reaches the queue.
+ * is recorded but never reaches the queue; every other `alert_shown` must be
+ * one the queue accepts, or recording fails.
  *
  * Ids are the names the scenario gives its alerts, not the queue's UUIDs, so
  * the file is the same on every run. alert-sequences.test.js fails when the
@@ -107,6 +108,10 @@ function recorder(timings) {
       const id = ids.get(name);
       if (type === "alert_shown") {
         queue.onShown(id);
+        // onShown ignores an ack in any state but `sent`: the scenario must prove agentd took it.
+        if (queue.get(id)?.state !== "shown") {
+          throw new Error(`agentd did not take alert_shown for ${name} at ${at()} ms`);
+        }
       } else if (type === "alert_dismissed") {
         const kind = kinds.get(name);
         if (kind === "approval" || kind === "question") {
@@ -204,6 +209,14 @@ const SCENARIOS = {
     .phone("alert_dismissed", "B")
     .glasses("shown", "A").phone("alert_shown", "A")
     .done("The link drops before the error is acked; a question waits and a notice comes and goes meanwhile. At link up the question goes first and the error resumes after it"),
+
+  empty_slot_link_up: () => recorder(DEFAULT_TIMINGS)
+    .linkDown()
+    .push("A", "approval")
+    .advance(6_000)
+    .advance(4_000).linkUp()
+    .glasses("shown", "A").phone("alert_shown", "A")
+    .done("An approval arrives while no phone is linked and takes the empty slot: nothing reached a link, so at link up it is new"),
 };
 
 function record() {

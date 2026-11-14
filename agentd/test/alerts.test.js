@@ -515,3 +515,54 @@ test("waiting_change_resends_current_with_update_and_keeps_state", () => {
   assert.equal(kept.queue.current().attempts, 2);
   assert.equal(kept.queue.current().id, held);
 });
+
+/** A queue whose sink takes frames only while `linked` is true. */
+function linkable() {
+  let t = 1_000_000;
+  let linked = false;
+  const frames = [];
+  const queue = new AlertQueue(TIMINGS, (frame) => {
+    if (linked) {
+      frames.push(frame);
+    }
+    return linked;
+  }, () => t);
+  return {
+    queue,
+    frames,
+    now: () => t,
+    link(up) {
+      linked = up;
+    },
+    advance(ms) {
+      t += ms;
+      queue.tick();
+    },
+  };
+}
+
+test("undelivered_alert_arrives_as_new_after_link_up", () => {
+  // Pushed with no phone linked: it takes the empty slot, but nothing reached a link.
+  const env = linkable();
+  const id = env.queue.push(alert("approval", { createdAt: env.now() }));
+  env.advance(6_000);
+  assert.equal(env.queue.current().id, id);
+  env.link(true);
+  env.queue.linkUp();
+  assert.deepEqual(env.frames.map((f) => [f.id, f.reason]), [[id, "new"]]);
+  // Once delivered, the reasons follow the delivery as before.
+  env.advance(5_000);
+  env.queue.linkUp();
+  assert.deepEqual(env.frames.slice(1).map((f) => f.reason), ["retry", "resume"]);
+});
+
+test("undelivered_retry_still_new", () => {
+  // The first send was refused; the retry is the first frame the phone hears.
+  const env = linkable();
+  const id = env.queue.push(alert("notice", { createdAt: env.now() }));
+  env.link(true);
+  env.advance(5_000);
+  assert.deepEqual(env.frames.map((f) => [f.id, f.reason]), [[id, "new"]]);
+  env.advance(10_000);
+  assert.deepEqual(env.frames.map((f) => f.reason), ["new", "retry"]);
+});

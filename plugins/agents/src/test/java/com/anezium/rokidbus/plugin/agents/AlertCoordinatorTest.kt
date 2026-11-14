@@ -122,6 +122,8 @@ class AlertCoordinatorTest {
         return AgentdProtocolCodec().parse(frame.toString()) as AgentdAction.Alert
     }
 
+    private val NO_LONGER_WAITING = Effect.Brief("No longer waiting", "Answer on laptop if still needed")
+
     private fun sends(effects: List<Effect>): List<JSONObject> =
         effects.filterIsInstance<Effect.Send>().map { JSONObject(it.line) }
 
@@ -275,8 +277,11 @@ class AlertCoordinatorTest {
             assertEquals(Effect.Update::class, retry.first()::class)
             assertEquals(listOf("alert_shown"), types(retry))
         }
-        // A resume of the same band refreshes it and keeps its evidence.
-        assertEquals(listOf(Effect.Update::class), coordinator.onAlert(alert(reason = AlertReason.RESUME)).map { it::class })
+        // A resume of the same band refreshes it, keeps its evidence and re-acks (R84):
+        // agentd's requeue put the alert back to `sent`, and the hub reports no new shown.
+        val resume = coordinator.onAlert(alert(reason = AlertReason.RESUME))
+        assertEquals(Effect.Update::class, resume.first()::class)
+        assertEquals(listOf("alert_shown"), types(resume))
         assertEquals(emptyList<Effect>(), coordinator.onShownEvidence("A"))
     }
 
@@ -351,6 +356,8 @@ class AlertCoordinatorTest {
         coordinator.onShownEvidence("A")
         val more = coordinator.onAction("A", "more", secure = true)
         assertEquals(listOf(Effect.OpenDecision(coordinator.current!!)), more)
+        // A card of the wrong kind is never opened.
+        assertEquals(emptyList<Effect>(), coordinator.onAction("A", "answer", secure = true))
 
         coordinator.onAlert(alert(id = "Q", kind = AlertKind.QUESTION))
         coordinator.onShownEvidence("Q")
@@ -369,6 +376,13 @@ class AlertCoordinatorTest {
 
     @Test
     fun allow_on_insecure_briefs_monitor_only_and_writes_nothing() {
+        // On a fresh band the press is still display evidence; only the monitor ack goes out.
+        val fresh = AlertCoordinator(clock = { 0L })
+        fresh.onAlert(alert())
+        val first = fresh.onAction("A", "allow", secure = false)
+        assertEquals(listOf("alert_shown"), types(first))
+        assertTrue(Effect.Brief("Monitor only", "approve on laptop") in first)
+
         val coordinator = AlertCoordinator(clock = { 0L })
         coordinator.onAlert(alert())
         coordinator.onShownEvidence("A")
@@ -392,13 +406,10 @@ class AlertCoordinatorTest {
         coordinator.onAction("A", "more", secure = true)
         // Another alert takes the band: the decision card stays bound and answerable.
         coordinator.onAlert(alert(id = "B", kind = AlertKind.NOTICE))
-        assertEquals(listOf("alert_action"), types(coordinator.onAction("A", "deny", secure = true)))
+        assertEquals(listOf("alert_action"), types(coordinator.onCardConfirm("A", "deny", secure = true)))
 
         assertEquals(listOf(Effect.Invalidate("A")), coordinator.onAlertClosed("A", "withdrawn"))
-        assertEquals(
-            listOf(Effect.Brief("No longer waiting", "")),
-            coordinator.onAction("A", "allow", secure = true),
-        )
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onCardConfirm("A", "allow", secure = true))
         // Closing the alert on the band takes the band down as well.
         assertEquals(listOf(Effect.Hide), coordinator.onAlertClosed("B", "expired"))
         assertNull(coordinator.current)
@@ -421,6 +432,73 @@ class AlertCoordinatorTest {
         coordinator.onAction("Q", "answer", secure = true)
         assertEquals(listOf(Effect.Hide, Effect.Invalidate("Q")), coordinator.onLinkUp())
         assertNull(coordinator.current)
-        assertEquals(listOf(Effect.Brief("No longer waiting", "")), coordinator.onAction("Q", "answer", secure = true))
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onAction("Q", "answer", secure = true))
+    }
+
+    @Test
+    fun late_card_confirm_after_invalidate_session_sends_nothing() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(alert())
+        coordinator.onAction("A", "more", secure = true)
+        assertEquals(listOf(Effect.Invalidate("A")), coordinator.invalidateSession("claude:s1"))
+        // The band still shows A, but the card was invalidated.
+        assertEquals("A", coordinator.current?.id)
+        for (action in listOf("allow", "deny", "later")) {
+            assertEquals(action, listOf(NO_LONGER_WAITING), coordinator.onCardConfirm("A", action, secure = true))
+        }
+    }
+
+    @Test
+    fun late_card_confirm_after_link_down_sends_nothing() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(alert(id = "Q", kind = AlertKind.QUESTION))
+        coordinator.onAction("Q", "answer", secure = true)
+        assertEquals(listOf(Effect.Invalidate("Q")), coordinator.onLinkDown())
+        assertEquals("Q", coordinator.current?.id)
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onCardConfirm("Q", "later", secure = true))
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onCardConfirm("Q", "allow", secure = true))
+    }
+
+    @Test
+    fun card_confirm_is_not_band_evidence() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(alert())
+        coordinator.onShownEvidence("A")
+        coordinator.onAction("A", "more", secure = true)
+        // A reminder reshows A on a fresh band the card never saw.
+        coordinator.onAlert(alert(reason = AlertReason.REMINDER))
+        assertEquals(listOf("alert_action"), types(coordinator.onCardConfirm("A", "allow", secure = true)))
+        // The band's own evidence still sends the ack once.
+        assertEquals(listOf("alert_shown"), types(coordinator.onShownEvidence("A")))
+    }
+
+    @Test
+    fun later_from_a_card_dismisses_once_and_unbinds() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(alert())
+        coordinator.onAction("A", "more", secure = true)
+        coordinator.onAlert(alert(id = "B", kind = AlertKind.NOTICE))
+        assertEquals(listOf("alert_dismissed"), types(coordinator.onCardConfirm("A", "later", secure = true)))
+        assertEquals("B", coordinator.current?.id)
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onCardConfirm("A", "allow", secure = true))
+    }
+
+    @Test
+    fun user_close_after_ack_sends_only_dismissed() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(alert())
+        coordinator.onShownEvidence("A")
+        assertEquals(listOf("alert_dismissed"), types(coordinator.onBandClosed("A", NexusNoticeCloseReason.USER)))
+        assertNull(coordinator.current)
+    }
+
+    @Test
+    fun approval_queued_while_unlinked_arrives_new_with_sound() {
+        // R83: it took agentd's empty slot while no link took the frame, so link up sends it as new.
+        val emptySlot = replay("empty_slot_link_up")
+        val show = emptySlot.shows.single()
+        assertEquals(AlertReason.NEW, show.alert.reason)
+        assertTrue(show.sound)
+        assertTrue(show.wake)
     }
 }

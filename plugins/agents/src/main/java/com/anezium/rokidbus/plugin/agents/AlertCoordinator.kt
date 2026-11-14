@@ -11,8 +11,9 @@ import java.util.UUID
  *
  * A display episode is one band instance, from its show until that band
  * closes. Display evidence belongs to the episode: the first evidence sends
- * `alert_shown`, and a `retry` of the same band while it has evidence sends it
- * again, since agentd takes an ack only while the alert is out on the wire.
+ * `alert_shown`, and a `retry` or `resume` of the same band while it has
+ * evidence sends it again (R84), since agentd takes an ack only while the
+ * alert is out on the wire.
  * Only the wearer's own doing is evidence (R33): the hub's shown report, an
  * action, an input, a close by the user. A timeout, replacement, owner hide or
  * disconnect is not, since the glasses can time out a band that never attached (R47).
@@ -70,12 +71,11 @@ class AlertCoordinator(
         val up = episode?.takeIf { it.alert.id == alert.id }
         return when (alert.reason) {
             AlertReason.NEW, AlertReason.REMINDER -> show(alert, wake = true, sound = true)
-            AlertReason.RETRY -> if (up != null) {
+            AlertReason.RETRY, AlertReason.RESUME -> if (up != null) {
                 refresh(up, alert) + if (up.evidence) listOf(shown(alert.id)) else emptyList()
             } else {
                 show(alert, wake = unconfirmed(alert.id), sound = false)
             }
-            AlertReason.RESUME -> if (up != null) refresh(up, alert) else show(alert, wake = unconfirmed(alert.id), sound = false)
             AlertReason.UPDATE -> if (up != null) refresh(up, alert) else emptyList()
         }
     }
@@ -113,36 +113,48 @@ class AlertCoordinator(
     fun onShownEvidence(id: String): List<Effect> = evidence(id)
 
     /**
-     * A notice action from the band, or a confirm from a card bound to [id].
-     * An id with neither has nothing left to answer.
+     * A notice action pressed on the band showing [id]. The press is display
+     * evidence, whatever the action. A band that is not up any more has nothing
+     * left to answer.
      */
     fun onAction(id: String, action: String, secure: Boolean): List<Effect> {
-        val onBand = episode?.alert?.takeIf { it.id == id }
-        val alert = onBand ?: cards[id] ?: return listOf(Effect.Brief(NO_LONGER_WAITING, ""))
+        val alert = episode?.alert?.takeIf { it.id == id } ?: return listOf(noLongerWaiting())
         val effects = evidence(id).toMutableList()
         when (action) {
-            ALLOW, DENY -> effects += if (secure) {
-                Effect.Send(AgentdProtocolCodec.alertAction(id, action, msgIdFor(id, action)))
-            } else {
-                Effect.Brief(MONITOR_ONLY_TITLE, MONITOR_ONLY_BODY)
-            }
-            MORE -> {
+            ALLOW, DENY -> effects += answer(id, action, secure)
+            // A card for the wrong kind would offer what agentd cannot take.
+            MORE -> if (alert.kind == AlertKind.APPROVAL) {
                 cards[id] = alert
                 effects += Effect.OpenDecision(alert)
             }
-            ANSWER -> {
+            ANSWER -> if (alert.kind == AlertKind.QUESTION) {
                 cards[id] = alert
                 effects += Effect.OpenQuestion(alert)
             }
             LATER -> {
-                if (onBand != null) {
-                    episode = null
-                    effects += Effect.Hide
-                }
+                episode = null
+                effects += Effect.Hide
                 effects += Effect.Send(AgentdProtocolCodec.alertDismissed(id))
             }
         }
         return effects
+    }
+
+    /**
+     * A confirm from the card bound to [id]. It needs that binding to be live:
+     * a card invalidated since it opened answers nothing, even while the band
+     * still shows the same id. A card is no display evidence for the band.
+     */
+    fun onCardConfirm(id: String, action: String, secure: Boolean): List<Effect> {
+        if (id !in cards) return listOf(noLongerWaiting())
+        return when (action) {
+            ALLOW, DENY -> listOf(answer(id, action, secure))
+            LATER -> {
+                cards.remove(id)
+                listOf(Effect.Send(AgentdProtocolCodec.alertDismissed(id)))
+            }
+            else -> emptyList()
+        }
     }
 
     /** The band for [id] closed. Only the wearer's close is evidence; any close ends the episode. */
@@ -186,6 +198,14 @@ class AlertCoordinator(
 
     private fun shown(id: String): Effect = Effect.Send(AgentdProtocolCodec.alertShown(id))
 
+    private fun answer(id: String, action: String, secure: Boolean): Effect = if (secure) {
+        Effect.Send(AgentdProtocolCodec.alertAction(id, action, msgIdFor(id, action)))
+    } else {
+        Effect.Brief(MONITOR_ONLY_TITLE, MONITOR_ONLY_BODY)
+    }
+
+    private fun noLongerWaiting(): Effect = Effect.Brief(NO_LONGER_WAITING, NO_LONGER_WAITING_BODY)
+
     /** One msgId per (alert, action), reused when the wearer presses it again, so agentd applies it once. */
     private fun msgIdFor(id: String, action: String): String =
         seenOf(id).msgIds.getOrPut(action, newMsgId)
@@ -201,6 +221,7 @@ class AlertCoordinator(
     companion object {
         const val WAKE_INTERVAL_MS = 60_000L
         const val NO_LONGER_WAITING = "No longer waiting"
+        const val NO_LONGER_WAITING_BODY = "Answer on laptop if still needed"
         const val MONITOR_ONLY_TITLE = "Monitor only"
         const val MONITOR_ONLY_BODY = "approve on laptop"
 
@@ -212,7 +233,8 @@ class AlertCoordinator(
 
         /**
          * agentd closes an id without telling the phone when the glasses
-         * dismissed it, so what the phone remembers per id is capped.
+         * dismissed it, so what the phone remembers per id is capped. The maps
+         * are in access order, so the ids in use are the last to go.
          */
         private const val MAX_TRACKED_IDS = 64
 
@@ -220,7 +242,7 @@ class AlertCoordinator(
         fun footer(alert: AgentdAction.Alert): String? =
             alert.waiting.takeIf { it > 0 }?.let { "+$it waiting" }
 
-        private fun <V> bounded(): LinkedHashMap<String, V> = object : LinkedHashMap<String, V>() {
+        private fun <V> bounded(): LinkedHashMap<String, V> = object : LinkedHashMap<String, V>(16, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, V>?): Boolean =
                 size > MAX_TRACKED_IDS
         }
