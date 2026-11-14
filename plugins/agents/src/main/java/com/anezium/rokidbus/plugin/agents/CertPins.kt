@@ -88,10 +88,12 @@ object CertPins {
  * or Tailscale, so the hostname check is replaced by the pin itself, on this
  * client only. No cleartext spec: a `ws://` URL cannot even be attempted. No
  * redirects either: the link goes to the pinned peer's URL and nowhere else.
+ * The handshake presents [identity] as the client certificate, which agentd
+ * pins per phone (R168).
  */
-internal fun pinnedOkHttpClient(base: OkHttpClient, pin: String): OkHttpClient {
+internal fun pinnedOkHttpClient(base: OkHttpClient, pin: String, identity: PhoneTlsIdentity): OkHttpClient {
     val trust = CertPins.trustManager(pin)
-    val context = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }
+    val context = SSLContext.getInstance("TLS").apply { init(arrayOf(identity.keyManager()), arrayOf(trust), null) }
     return base.newBuilder()
         .sslSocketFactory(context.socketFactory, trust)
         .hostnameVerifier { _, session ->

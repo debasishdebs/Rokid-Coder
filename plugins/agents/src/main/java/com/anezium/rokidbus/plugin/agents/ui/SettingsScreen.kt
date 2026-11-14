@@ -38,7 +38,7 @@ import com.anezium.rokidbus.plugin.agents.ui.theme.AgentsColors
 /** Copy that is part of the contract, kept in one place so a test can hold it to the brief. */
 internal object SettingsCopy {
     const val SECURE = "Secure (TLS)"
-    const val MONITOR_ONLY = "Monitor only — approve on laptop"
+    const val PAIR_AGAIN = "Not connected — pair again"
     const val NOTIFICATIONS_OFF = "Notifications off — Android may pause Agents"
     const val DND = "Follows phone Do Not Disturb"
     const val REVOKE_ALL = "Turn off approve-all everywhere"
@@ -82,11 +82,11 @@ internal fun linkLine(state: ProviderConnectionState, sessions: List<AgentSessio
     return LinkLine("WATCHING · ${parts.joinToString(" · ")}", if (needsYou > 0) LinkTone.WARN else LinkTone.OK)
 }
 
-/** Secure only when the link steers; a plaintext link is monitor-only and the screen says so. */
+/** Secure only when the link steers. There is no monitor-only link: one that cannot steer is to pair again. */
 internal fun trustLabel(connected: Boolean, secure: Boolean): String? = when {
     !connected -> null
     secure -> SettingsCopy.SECURE
-    else -> SettingsCopy.MONITOR_ONLY
+    else -> SettingsCopy.PAIR_AGAIN
 }
 
 internal data class ComputerRow(
@@ -192,7 +192,7 @@ private fun MonitoringCard(state: SettingsUiState, actions: SettingsActions) {
             "Monitor sessions", "Claude Code, Codex, and OpenClaw", state.monitoring, actions.onMonitoring, tag = "monitor_switch",
         )
         StatusLine(state.link.text, state.link.tone, tag = "link_state")
-        state.trust?.let { NoticeText(it, error = it == SettingsCopy.MONITOR_ONLY, tag = "link_trust") }
+        state.trust?.let { NoticeText(it, error = it == SettingsCopy.PAIR_AGAIN, tag = "link_trust") }
         if (state.notificationsOff) NoticeText(SettingsCopy.NOTIFICATIONS_OFF, tag = "notifications_off")
     }
 }

@@ -21,12 +21,17 @@ import javax.net.ssl.X509TrustManager
 import javax.security.auth.x500.X500Principal
 
 /**
- * The phone's TLS server identity on the link agentd dials. agentd pins this
- * certificate (R45), so it must stay the same across restarts.
+ * The phone's one TLS identity: the server certificate on the link agentd
+ * dials, and the client certificate on the wss link the phone dials. agentd
+ * pins this certificate on both (R45, R168), so it must stay the same across
+ * restarts.
  */
 interface PhoneTlsIdentity {
     fun sslContext(): SSLContext
     fun fingerprint256(): String
+
+    /** The same key and certificate, for the wss dial's client authentication. */
+    fun keyManager(): X509ExtendedKeyManager
 }
 
 /**
@@ -41,6 +46,11 @@ class KeystorePhoneTlsIdentity(private val alias: String = DEFAULT_ALIAS) : Phon
     }
 
     override fun fingerprint256(): String = CertPins.fingerprint256(entry().certificate.encoded)
+
+    override fun keyManager(): X509ExtendedKeyManager {
+        val entry = entry()
+        return SingleKeyManager(entry.privateKey, arrayOf(entry.certificate as X509Certificate))
+    }
 
     // One lock for the process: the settings screen and the monitor may both be first to ask.
     private fun entry(): KeyStore.PrivateKeyEntry = synchronized(LOCK) {
@@ -112,10 +122,11 @@ private object AnyClientCertificate : X509TrustManager {
 }
 
 /**
- * Serves one key. A key held by AndroidKeyStore is not exportable, so the
- * platform's KeyManagerFactory is not relied on to find it.
+ * Serves one key, as a server and as a client. A key held by AndroidKeyStore
+ * is not exportable, so the platform's KeyManagerFactory is not relied on to
+ * find it.
  */
-private class SingleKeyManager(
+internal class SingleKeyManager(
     private val key: PrivateKey,
     private val chain: Array<X509Certificate>,
 ) : X509ExtendedKeyManager() {
@@ -133,9 +144,15 @@ private class SingleKeyManager(
 
     override fun getPrivateKey(alias: String?) = key.takeIf { alias == ALIAS }
 
-    override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String? = null
+    // agentd's request names no issuer it trusts (the certificate is self-signed), so only the key type decides.
+    override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String? =
+        keyType?.firstNotNullOfOrNull(::aliasFor)
 
-    override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? = null
+    override fun chooseEngineClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, engine: SSLEngine?): String? =
+        keyType?.firstNotNullOfOrNull(::aliasFor)
+
+    override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? =
+        aliasFor(keyType)?.let { arrayOf(it) }
 
     private companion object {
         const val ALIAS = "phone"

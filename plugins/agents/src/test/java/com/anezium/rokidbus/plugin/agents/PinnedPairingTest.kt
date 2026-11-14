@@ -33,6 +33,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -41,6 +42,7 @@ import org.junit.Test
 class PinnedPairingTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val prefs = MemoryPrefs()
+    private val identity = FixturePhoneTlsIdentity()
 
     @After
     fun tearDown() {
@@ -76,6 +78,42 @@ class PinnedPairingTest {
     }
 
     @Test
+    fun line_without_fp_is_refused_with_copy() {
+        val older = AgentdPairingParseResult.Invalid("This pairing line is from an older agentd — run agentd pair again")
+        // A line from before pins carried neither; one from before steering secrets carried no steer.
+        assertEquals(older, AgentdPairingParser.parse(line(fp = null, steer = null)))
+        assertEquals(older, AgentdPairingParser.parse(line(fp = null)))
+        assertEquals(older, AgentdPairingParser.parse(line(steer = null)))
+        assertTrue(AgentdPairingParser.parse(line()) is AgentdPairingParseResult.Valid)
+    }
+
+    @Test
+    fun saved_slot_without_fp_is_never_dialled() {
+        // A slot saved before Plan 4: no pin, so nothing to dial but ws://, which no longer exists.
+        prefs.map["agentd.host"] = "127.0.0.1"
+        prefs.map["agentd.port"] = 8790
+        prefs.map["agentd.token"] = "tok"
+        val legacy = Harness()
+        legacy.client.start(checkNotNull(store().load().agentd))
+        legacy.awaitState(ConnectionState.AUTH_FAILED, "This pairing line is from an older agentd — run agentd pair again")
+        assertTrue(legacy.client.needsRepair.value)
+
+        // A pinned slot from before the steering secret cannot pass agentd's hello either.
+        prefs.map["agentd.fp"] = FP
+        val unsteered = Harness()
+        unsteered.client.start(checkNotNull(store().load().agentd))
+        unsteered.awaitState(ConnectionState.AUTH_FAILED, "This pairing line is from an older agentd — run agentd pair again")
+        assertTrue(unsteered.client.needsRepair.value)
+
+        Thread.sleep(300)
+        for (harness in listOf(legacy, unsteered)) {
+            assertEquals(0, harness.plain.connections.size)
+            assertEquals(0, harness.pinned.connections.size)
+            assertTrue(harness.events.isEmpty())
+        }
+    }
+
+    @Test
     fun fp_persists_across_store_reload() {
         val parsed = (AgentdPairingParser.parse(line(fp = FP.lowercase())) as AgentdPairingParseResult.Valid).config
         assertEquals(FP, parsed.fp)
@@ -94,18 +132,13 @@ class PinnedPairingTest {
         store().saveAgentd(null, enabled = true)
         assertNull(prefs.map["agentd.fp"])
         assertNull(prefs.map["agentd.steer"])
-
-        // Without a pin the secret has no wss to travel on, so it is not kept.
-        val legacy = (AgentdPairingParser.parse(line(fp = null)) as AgentdPairingParseResult.Valid).config
-        assertNull(legacy.fp)
-        assertNull(legacy.steer)
-        assertFalse(legacy.canSteer)
     }
 
     @Test
     fun pinned_slot_refuses_line_without_fp() {
         val pinned = (AgentdPairingParser.parse(line()) as AgentdPairingParseResult.Valid).config
-        val legacy = (AgentdPairingParser.parse(line(fp = null)) as AgentdPairingParseResult.Valid).config
+        // The parser refuses such a line now; the store still holds the pin against one built by hand.
+        val legacy = pinned.copy(fp = null, steer = null)
         // A legacy slot is re-paired with a pinned line freely.
         assertTrue(store().saveAgentd(legacy, enabled = true))
         assertTrue(store().saveAgentd(pinned, enabled = true))
@@ -124,116 +157,172 @@ class PinnedPairingTest {
     // ------------------------------------------------------ the hello and the binding
 
     @Test
-    fun steer_sent_only_in_wss_hello_never_in_ws_hello() {
+    fun steer_sent_in_the_wss_hello_and_plaintext_never_dialled() {
         val pinned = Harness()
         pinned.client.start(config(host = "ws://127.0.0.1"))
         val wss = pinned.pinnedConnection()
-        // Whatever the host was written with, a pinned pairing dials TLS.
+        // Whatever the host was written with, the dial is TLS.
         assertEquals("https", wss.request.url.scheme)
         wss.open()
         val hello = JSONObject(wss.sent.single())
         assertEquals(STEER, hello.getString("steer"))
         assertEquals("tok", hello.getString("token"))
+        wss.message(HELLO_ACK_STEERING)
+        assertTrue((pinned.events.single() as AgentdEvent.LinkUp).secure)
+        assertTrue(pinned.client.linkSecure.value)
+        assertFalse(pinned.client.needsRepair.value)
         assertEquals(0, pinned.plain.connections.size)
-
-        // A config that somehow holds the secret but no pin still never sends it.
-        val legacy = Harness()
-        legacy.client.start(config(fp = null))
-        val ws = legacy.plainConnection()
-        assertEquals("http", ws.request.url.scheme)
-        ws.open()
-        assertFalse(JSONObject(ws.sent.single()).has("steer"))
-        ws.message(HELLO_ACK)
-        assertFalse((legacy.events.single() as AgentdEvent.LinkUp).secure)
-        assertEquals(0, legacy.pinned.connections.size)
     }
 
     @Test
-    fun fp_without_steer_is_monitor_only() {
-        val harness = Harness()
-        val config = config(steer = null)
-        assertFalse(config.canSteer)
-        harness.client.start(config)
-        val wss = harness.pinnedConnection()
-        wss.open()
-        assertFalse(JSONObject(wss.sent.single()).has("steer"))
-        wss.message(HELLO_ACK)
-        assertFalse((harness.events.single() as AgentdEvent.LinkUp).secure)
-        assertFalse(harness.client.linkSecure.value)
-        assertEquals(
-            AgentdWire.Result.MonitorOnly,
-            harness.client.write(AgentdProtocolCodec.modeRevokeAll(UUID.randomUUID().toString())),
-        )
+    fun steering_false_ack_is_auth_failed_needs_repair() {
+        // agentd grants steering on every hello it accepts; an ack that does not is no link at all.
+        for (ack in listOf(HELLO_ACK_MONITOR, HELLO_ACK)) {
+            val harness = Harness()
+            harness.client.start(config())
+            val wss = harness.pinnedConnection()
+            wss.open()
+            wss.message(ack)
+            harness.awaitState(ConnectionState.AUTH_FAILED, "Pair again — this computer no longer trusts this phone")
+            assertTrue(ack, harness.client.needsRepair.value)
+            assertFalse(harness.client.linkSecure.value)
+            assertTrue(harness.events.isEmpty())
+            assertEquals(
+                AgentdWire.Result.NoLink,
+                harness.client.write(AgentdProtocolCodec.modeRevokeAll(UUID.randomUUID().toString())),
+            )
+            Thread.sleep(200)
+            assertEquals(1, harness.pinned.connections.size)
+        }
     }
 
     @Test
-    fun rotated_steer_shows_repair_and_keeps_v1_alerts() {
-        // agentd's steer was rotated: the redial with the old one is accepted as a monitor client only.
+    fun hello_reject_repair_needed_is_auth_failed_needs_repair() {
         val harness = Harness()
         harness.client.start(config())
         val wss = harness.pinnedConnection()
         wss.open()
-        assertEquals(STEER, JSONObject(wss.sent.single()).getString("steer"))
-        wss.message(HELLO_ACK_MONITOR)
-        assertFalse((harness.events.single() as AgentdEvent.LinkUp).secure)
-        assertFalse(harness.client.linkSecure.value)
-        harness.awaitState(ConnectionState.CONNECTED, "Re-pair to allow approvals")
-        assertEquals(
-            AgentdWire.Result.MonitorOnly,
-            harness.client.write(AgentdProtocolCodec.modeRevokeAll(UUID.randomUUID().toString())),
-        )
-        // A hello_ack from an agentd that states no grant grants nothing either.
-        val old = Harness()
-        old.client.start(config())
-        old.pinnedConnection().apply { open(); message(HELLO_ACK) }
-        assertFalse(old.client.linkSecure.value)
+        wss.message(HELLO_REJECT_REPAIR)
+        harness.awaitState(ConnectionState.AUTH_FAILED, "Pair again — this computer no longer trusts this phone")
+        assertTrue(harness.client.needsRepair.value)
+        assertTrue(harness.events.isEmpty())
 
-        // This computer spoke v2 before, but its link is up and cannot steer: v1 attention speaks for it.
-        val config = store()
-        config.markV2Seen(null)
-        val session = AgentSession(
-            provider = AgentProvider.CLAUDE,
-            id = "s1",
-            title = "s1",
-            status = AgentStatus.NEEDS_YOU,
-        )
-        assertFalse(config.v1AttentionSuppressed(session, linkSecure = false, monitorOnlyLinkUp = true))
-        // While the link is down, R92 still keeps it off.
-        assertTrue(config.v1AttentionSuppressed(session, linkSecure = false, monitorOnlyLinkUp = false))
+        // The 4403 close that follows a reject is final on its own too, as is a bad_token reject.
+        val closed = Harness()
+        closed.client.start(config())
+        closed.pinnedConnection().apply { open(); close(4403) }
+        closed.awaitState(ConnectionState.AUTH_FAILED, "Pair again — this computer no longer trusts this phone")
+        assertTrue(closed.client.needsRepair.value)
+        val badToken = Harness()
+        badToken.client.start(config())
+        badToken.pinnedConnection().apply { open(); message(HELLO_REJECT_BAD_TOKEN) }
+        badToken.awaitState(ConnectionState.AUTH_FAILED, "Pair again — this computer no longer trusts this phone")
+
+        // A new pairing starts clean.
+        harness.client.start(config())
+        assertFalse(harness.client.needsRepair.value)
     }
 
     @Test
-    fun link_trust_revocation_stops_steering_at_once() {
+    fun link_trust_revocation_is_auth_failed_needs_repair() {
         val harness = Harness()
         harness.client.start(config())
         val wss = harness.pinnedConnection()
         wss.open()
         wss.message(HELLO_ACK_STEERING)
         assertTrue(harness.client.linkSecure.value)
+        val up = harness.events.single() as AgentdEvent.LinkUp
 
         wss.message("""{"type":"link_trust","v":2,"steering":false}""")
         assertFalse(harness.client.linkSecure.value)
-        assertFalse((harness.events.last() as AgentdEvent.LinkUp).secure)
-        harness.awaitState(ConnectionState.CONNECTED, "Re-pair to allow approvals")
-        // It never comes back mid-link.
-        wss.message("""{"type":"link_trust","v":2,"steering":true}""")
-        assertFalse(harness.client.linkSecure.value)
-    }
-
-    @Test
-    fun monitor_only_ack_never_sets_v2_seen() {
-        val rejected = AgentdEvent.Action(AgentdAction.Ack("m1", "rejected", "monitor_only"))
-        assertFalse(marksV2Seen(rejected, linkSecure = false))
-        assertFalse(marksV2Seen(rejected, linkSecure = true))
-        assertFalse(marksV2Seen(AgentdEvent.Action(AgentdAction.Ack("m2", "applied", null)), linkSecure = true))
-        val alert = AgentdEvent.Action(
-            AgentdAction.Alert("a1", "claude:s1", AlertKind.APPROVAL, "Bash", "ls", emptyList(), null, 0, AlertReason.NEW),
-        )
-        assertFalse(marksV2Seen(alert, linkSecure = false))
-        assertTrue(marksV2Seen(alert, linkSecure = true))
+        assertEquals(AgentdEvent.LinkDown(up.generation), harness.events.last())
+        harness.awaitState(ConnectionState.AUTH_FAILED, "Pair again — this computer no longer trusts this phone")
+        assertTrue(harness.client.needsRepair.value)
+        Thread.sleep(200)
+        assertEquals(1, harness.pinned.connections.size)
     }
 
     // ------------------------------------------------------ a real TLS agentd
+
+    @Test
+    fun wss_client_presents_phone_identity() {
+        agentd(clientAuth = true) { server, held, received ->
+            val harness = Harness(real = true)
+            harness.client.start(config(port = server.port, fp = CertPins.fingerprint256(held.certificate.encoded)))
+            harness.awaitState(ConnectionState.CONNECTED, null)
+            assertEquals("hello", JSONObject(received.first()).getString("type"))
+            // The certificate agentd saw is the phone's own, the one it pins per phone.
+            val presented = checkNotNull(server.takeRequest().handshake).peerCertificates.first()
+            assertEquals(identity.fingerprint256(), CertPins.fingerprint256(presented.encoded))
+            assertEquals(FixturePhoneTlsIdentity.FINGERPRINT, identity.fingerprint256())
+            harness.client.stop(clearSessions = true)
+        }
+    }
+
+    @Test
+    fun pinned_client_still_rejects_wrong_server_cert() {
+        agentd(clientAuth = true) { server, _, received ->
+            val other = CertPins.fingerprint256(HeldCertificate.Builder().build().certificate.encoded)
+            val failure = open(pinnedOkHttpClient(OkHttpClient(), other, identity), "wss://127.0.0.1:${server.port}/")
+            assertNotNull(failure)
+            assertTrue(CertPins.isPinMismatch(checkNotNull(failure)))
+
+            val harness = Harness(real = true)
+            harness.client.start(config(port = server.port, fp = other))
+            harness.awaitState(ConnectionState.AUTH_FAILED, "Computer's certificate changed — re-pair")
+            assertTrue(harness.client.needsRepair.value)
+            // Refused in the handshake: no hello, so no token and no secret, went to the wrong peer.
+            assertTrue(received.isEmpty())
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
+    fun server_key_manager_unchanged_for_link_server() {
+        val keys = identity.keyManager()
+        // The link server's side, as PhoneTlsServerTest drives it end to end.
+        assertEquals("phone", keys.chooseServerAlias("EC", null, null))
+        assertEquals("phone", keys.chooseServerAlias("EC_EC", null, null))
+        assertNull(keys.chooseServerAlias("RSA", null, null))
+        assertEquals(listOf("phone"), keys.getServerAliases("EC", null)?.toList())
+        // The wss dial's side: offered for an EC key type, among others, and only then.
+        assertEquals("phone", keys.chooseClientAlias(arrayOf("RSA", "EC"), null, null))
+        assertEquals("phone", keys.chooseEngineClientAlias(arrayOf("EC"), null, null))
+        assertNull(keys.chooseClientAlias(arrayOf("RSA"), null, null))
+        assertNull(keys.chooseClientAlias(null, null, null))
+        assertEquals(listOf("phone"), keys.getClientAliases("EC", null)?.toList())
+        assertNull(keys.getClientAliases("RSA", null))
+        assertEquals(identity.fingerprint256(), CertPins.fingerprint256(keys.getCertificateChain("phone").first().encoded))
+        assertNotNull(keys.getPrivateKey("phone"))
+        assertNull(keys.getPrivateKey("other"))
+    }
+
+    @Test
+    fun pre_plan4_pairing_gets_pair_again_not_a_loop() {
+        // An agentd that has no pin for this phone's certificate refuses every hello it makes.
+        agentd(clientAuth = true, onHello = { socket ->
+            socket.send(HELLO_REJECT_REPAIR)
+            socket.close(4403, "repair_needed")
+        }) { server, held, received ->
+            val harness = Harness(real = true)
+            val pairing = config(port = server.port, fp = CertPins.fingerprint256(held.certificate.encoded))
+            harness.client.start(pairing)
+            harness.awaitState(ConnectionState.AUTH_FAILED, "Pair again — this computer no longer trusts this phone")
+            assertTrue(harness.client.needsRepair.value)
+            // AUTH_FAILED is final: well past the first backoff step there is still one dial.
+            Thread.sleep(1_500)
+            assertEquals(1, server.requestCount)
+            assertEquals(1, received.size)
+
+            // Each restart (the monitor's reconcile) dials once more and stops there again.
+            harness.client.start(pairing)
+            harness.awaitState(ConnectionState.AUTH_FAILED, "Pair again — this computer no longer trusts this phone")
+            Thread.sleep(1_500)
+            assertEquals(2, server.requestCount)
+            assertTrue(harness.events.isEmpty())
+            assertEquals(0, harness.plain.connections.size)
+        }
+    }
 
     @Test
     fun pinned_websocket_handshake_against_local_tls_server() {
@@ -260,7 +349,7 @@ class PinnedPairingTest {
             val url = "wss://127.0.0.1:${server.port}/"
 
             // The cert names no host, so only the pin can vouch for 127.0.0.1.
-            assertNull(open(pinnedOkHttpClient(base, pin), url))
+            assertNull(open(pinnedOkHttpClient(base, pin, identity), url))
             val trust = CertPins.trustManager(pin)
             val pinOnly = base.newBuilder()
                 .sslSocketFactory(SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }.socketFactory, trust)
@@ -334,7 +423,8 @@ class PinnedPairingTest {
             store,
             scope,
             "test",
-            pinnedClient = { pin -> if (real) pinnedOkHttpClient(OkHttpClient(), pin) else pinned },
+            identity,
+            pinnedClient = { pin -> if (real) pinnedOkHttpClient(OkHttpClient(), pin, identity) else pinned },
         ) { events += it }
 
         fun pinnedConnection(): FakeConnection {
@@ -353,18 +443,31 @@ class PinnedPairingTest {
         }
     }
 
-    /** A TLS agentd on loopback whose cert has no subject alternative names; it answers hello. */
-    private fun agentd(block: (MockWebServer, HeldCertificate, List<String>) -> Unit) {
+    /**
+     * A TLS agentd on loopback whose cert has no subject alternative names; it
+     * answers hello with [onHello]. With [clientAuth] the handshake needs a
+     * client certificate, and only the phone's fixture one is trusted.
+     */
+    private fun agentd(
+        clientAuth: Boolean = false,
+        onHello: (WebSocket) -> Unit = { it.send(HELLO_ACK_STEERING) },
+        block: (MockWebServer, HeldCertificate, List<String>) -> Unit,
+    ) {
         val held = HeldCertificate.Builder().commonName("rokid-coder-agentd").build()
         val received = CopyOnWriteArrayList<String>()
         val server = MockWebServer()
-        server.useHttps(HandshakeCertificates.Builder().heldCertificate(held).build().sslSocketFactory(), false)
+        val certificates = HandshakeCertificates.Builder()
+            .heldCertificate(held)
+            .apply { if (clientAuth) addTrustedCertificate(identity.certificate) }
+            .build()
+        server.useHttps(certificates.sslSocketFactory(), false)
+        if (clientAuth) server.requireClientAuth()
         repeat(4) {
             server.enqueue(
                 MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                     override fun onMessage(webSocket: WebSocket, text: String) {
                         received += text
-                        if (JSONObject(text).optString("type") == "hello") webSocket.send(HELLO_ACK_STEERING)
+                        if (JSONObject(text).optString("type") == "hello") onHello(webSocket)
                     }
 
                     override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -426,6 +529,11 @@ class PinnedPairingTest {
         )
 
         fun message(text: String) = listener.onMessage(socket, text)
+
+        fun close(code: Int) {
+            listener.onClosing(socket, code, "")
+            listener.onClosed(socket, code, "")
+        }
     }
 
     private class FakeWebSocketClient : OkHttpClient() {
@@ -449,5 +557,7 @@ class PinnedPairingTest {
         const val HELLO_ACK = """{"type":"hello_ack","v":1,"server":{"machineName":"Desk"}}"""
         const val HELLO_ACK_STEERING = """{"type":"hello_ack","v":1,"steering":true,"server":{"machineName":"Desk"}}"""
         const val HELLO_ACK_MONITOR = """{"type":"hello_ack","v":1,"steering":false,"server":{"machineName":"Desk"}}"""
+        const val HELLO_REJECT_REPAIR = """{"type":"hello_reject","v":2,"reason":"repair_needed"}"""
+        const val HELLO_REJECT_BAD_TOKEN = """{"type":"hello_reject","v":2,"reason":"bad_token"}"""
     }
 }

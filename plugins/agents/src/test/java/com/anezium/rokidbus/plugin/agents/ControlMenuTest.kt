@@ -151,7 +151,7 @@ class ControlMenuTest {
         assertEquals(5, steering.size)
         for (item in steering) {
             assertFalse(item.label, item.enabled)
-            assertEquals(item.label, "Monitor only — approve on laptop", item.sub)
+            assertEquals(item.label, "Computer not connected", item.sub)
         }
         // Reading is not steering.
         assertTrue(list.one<MenuItem.Context>().enabled)
@@ -159,7 +159,7 @@ class ControlMenuTest {
 
         // A greyed row says why and sends nothing.
         val pick = ControlMenu.pick(main(codex(), "Approval mode"), codex(), secure = false)
-        assertEquals(ControlMenu.Step.Say(ControlMenu.NOTICE_TITLE, "Monitor only — approve on laptop"), pick)
+        assertEquals(ControlMenu.Step.Say("Not sent", "Computer not connected"), pick)
     }
 
     @Test

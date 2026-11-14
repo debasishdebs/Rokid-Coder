@@ -42,15 +42,17 @@ class AgentsMonitorService : Service() {
             .pingInterval(30, TimeUnit.SECONDS)
             .build()
     }
+    // One identity for both links: agentd pins the same certificate on each (R168).
+    private val tlsIdentity by lazy { KeystorePhoneTlsIdentity() }
     private val agentdClient by lazy {
-        // A pinned pairing dials through its own client, built from this one (pinnedOkHttpClient).
-        AgentdClient(httpClient, AgentsRuntime.store, serviceScope, VERSION_NAME)
+        // The wss dial goes through its own client, built from this one (pinnedOkHttpClient).
+        AgentdClient(httpClient, AgentsRuntime.store, serviceScope, VERSION_NAME, tlsIdentity)
     }
     private val openClawClient by lazy {
         OpenClawClient(httpClient, AgentsRuntime.store, configStore, serviceScope, VERSION_NAME)
     }
     private val linkServer by lazy {
-        AgentdLinkServer(AgentsRuntime.store, configStore, serviceScope, KeystorePhoneTlsIdentity()) { machineName ->
+        AgentdLinkServer(AgentsRuntime.store, configStore, serviceScope, tlsIdentity) { machineName ->
             AgentsRuntime.announceLinkedMachine(machineName)
         }
     }
@@ -201,13 +203,6 @@ class AgentsMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    /** A v2 alert over a link that steers means v1 attention stays off for that computer for good (R92). */
-    private fun noteV2(event: AgentdEvent) {
-        if (marksV2Seen(event, linkSecure = AgentsRuntime.link.value?.secure == true)) {
-            configStore.markV2Seen(AgentsRuntime.store.linkMachine.value?.machineId)
-        }
-    }
-
     private fun startAlerts() {
         AgentsRuntime.alertDirector = alertDirector
         alertScope.launch {
@@ -220,9 +215,8 @@ class AgentsMonitorService : Service() {
         // Launched on Main.immediate, so each collector is subscribed before this returns.
         alertScope.launch {
             AgentsRuntime.events.collect { event ->
-                noteV2(event)
                 alertDirector.onEvent(event)
-                // Every secure link up carries the phone's settings; a plaintext one cannot steer, so sends none.
+                // Every secure link up carries the phone's settings; one not bound as secure cannot steer, so sends none.
                 if (event is AgentdEvent.LinkUp && event.secure) syncSettings()
             }
         }
@@ -236,7 +230,7 @@ class AgentsMonitorService : Service() {
 
     /**
      * `settings_sync` and `defaults_set`, both steering (R61): sent through the wire only,
-     * which refuses them on a plaintext link. Not sent here when the link is not secure,
+     * which refuses them on a link not bound as secure. Not sent here when the link is not secure,
      * since the next secure link up sends them.
      */
     private fun syncSettings() {
@@ -246,7 +240,8 @@ class AgentsMonitorService : Service() {
 
     /**
      * A prebuilt frame line to whichever transport holds the link. The wire of
-     * each one classifies it; a steering frame over plaintext is MonitorOnly.
+     * each one classifies it; a steering frame over a link not bound as secure
+     * comes back MonitorOnly, unsent.
      */
     private fun writeToAgentd(line: String): AgentdWire.Result =
         combined(listOf(agentdClient.write(line), linkServer.write(line)))
@@ -568,11 +563,3 @@ class AgentsMonitorService : Service() {
         }
     }
 }
-
-/**
- * Only an alert over a link bound as steering proves the computer speaks v2 to
- * this phone (R126). An ack, a `monitor_only` rejection above all, or any frame
- * over a monitor-only link proves nothing, and must not silence v1 for good.
- */
-internal fun marksV2Seen(event: AgentdEvent, linkSecure: Boolean): Boolean =
-    linkSecure && event is AgentdEvent.Action && event.action is AgentdAction.Alert

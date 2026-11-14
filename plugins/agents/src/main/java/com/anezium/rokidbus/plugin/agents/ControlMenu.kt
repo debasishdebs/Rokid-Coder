@@ -45,10 +45,11 @@ sealed interface MenuItem {
  * every rule of the brief is tested here without the glasses.
  *
  * Nothing here sends: a [Step.Send] hands the command back, and the wire still
- * classifies the frame itself, so a plaintext link can never steer from here.
+ * classifies the frame itself, so a link not bound as secure can never steer from here.
  */
 object ControlMenu {
-    const val MONITOR_ONLY = AlertNotices.MONITOR_ONLY_BODY
+    /** A steering row with no secure link: greyed, and a press says so instead of sending. */
+    const val NOT_CONNECTED = AlertCoordinator.NOT_CONNECTED
     const val NEEDS_LAUNCHER = "needs rk claude"
     const val NOT_AVAILABLE = "not available"
     const val MODELS_UNAVAILABLE = "Models unavailable"
@@ -87,7 +88,7 @@ object ControlMenu {
     ): List<MenuItem> {
         val v2 = session.v2 ?: return listOf(MenuItem.ReadOutput())
         fun steer(sub: String?, enabled: Boolean = true): Pair<String?, Boolean> =
-            if (!secure) MONITOR_ONLY to false else sub to enabled
+            if (!secure) NOT_CONNECTED to false else sub to enabled
         // `needs rk claude` is the way out for a Claude session only (R95).
         val missing = if (session.provider == AgentProvider.CLAUDE) NEEDS_LAUNCHER else NOT_AVAILABLE
         fun capability(can: Boolean, pending: String?): Pair<String?, Boolean> =
@@ -337,7 +338,10 @@ object ControlMenu {
             val act: () -> Step = when {
                 // A greyed row still answers: it says why, and sends nothing.
                 !item.enabled -> {
-                    { Step.Say(NOTICE_TITLE, item.sub ?: "not available") }
+                    {
+                        if (item.sub == NOT_CONNECTED) Step.Say(AlertCoordinator.NOT_SENT, NOT_CONNECTED)
+                        else Step.Say(NOTICE_TITLE, item.sub ?: "not available")
+                    }
                 }
                 item is MenuItem.ReplyByVoice -> {
                     { Step.Reply }

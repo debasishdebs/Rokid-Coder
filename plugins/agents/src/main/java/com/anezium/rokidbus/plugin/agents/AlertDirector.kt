@@ -283,11 +283,11 @@ class AlertDirector(
                     glasses()?.hideBand()
                 }
                 is AlertCoordinator.Effect.Send -> write(effect.line)
-                // The coordinator's refusal briefs are Monitor only and Not sent; their titles are ours, never agentd's.
+                // The coordinator's refusal briefs are Not sent; that title is ours, never agentd's.
                 is AlertCoordinator.Effect.Brief -> onBrief(
                     effect.title,
                     effect.body,
-                    safety = effect.title == AlertCoordinator.MONITOR_ONLY_TITLE || effect.title == AlertCoordinator.NOT_SENT,
+                    safety = effect.title == AlertCoordinator.NOT_SENT,
                 )
                 is AlertCoordinator.Effect.Invalidate -> glasses()?.invalidate(effect.alertId)
                 is AlertCoordinator.Effect.OpenDecision -> glasses()?.openDecision(effect.alert)
@@ -297,7 +297,7 @@ class AlertDirector(
     }
 
     private fun showBand(alert: AgentdAction.Alert, wake: Boolean, sound: Boolean = false) {
-        val taken = glasses()?.showBand(AlertNotices.build(alert, monitorOnly = !secure(), wake = wake)) == true
+        val taken = glasses()?.showBand(AlertNotices.build(alert, wake = wake)) == true
         if (!taken) {
             // No band is up for this alert, so the coordinator must not refresh one;
             // agentd's next retry shows it again.
@@ -328,7 +328,7 @@ class AlertDirector(
 
     private fun updateBand(alert: AgentdAction.Alert) {
         val refreshed = bandId == alert.id &&
-            glasses()?.updateBand(AlertNotices.update(alert, monitorOnly = !secure())) == true
+            glasses()?.updateBand(AlertNotices.update(alert)) == true
         // A band that is gone or overwritten is shown again, without waking anyone.
         if (!refreshed) showBand(alert, wake = false)
     }

@@ -19,8 +19,6 @@ import java.security.MessageDigest
  * must never carry one.
  */
 object AlertNotices {
-    const val MONITOR_ONLY_BODY = "Monitor only — approve on laptop"
-
     /** Where the glasses offer no Allow because agentd had to cut the command or path (R128). */
     const val COMMAND_CUT = "Command cut — review on laptop"
 
@@ -48,13 +46,13 @@ object AlertNotices {
     private const val READER_TITLE_CHARS = 110
     private const val READER_LINE_CHARS = 120
 
-    fun build(alert: AgentdAction.Alert, monitorOnly: Boolean, wake: Boolean): NexusNotice =
+    fun build(alert: AgentdAction.Alert, wake: Boolean): NexusNotice =
         NexusNotice(
             title = title(alert),
-            body = body(alert, monitorOnly),
+            body = body(alert),
             footer = footer(alert),
             interactive = alert.kind == AlertKind.DONE || alert.kind == AlertKind.ERROR,
-            actions = actions(alert, monitorOnly),
+            actions = actions(alert),
             ttlMs = ttl(alert.kind),
             wakeDisplay = wake && alert.kind != AlertKind.NOTICE,
         )
@@ -63,9 +61,9 @@ object AlertNotices {
      * The same band, refreshed in place. No actions: sending them would ask the
      * wearer the question again. An empty footer clears a stale `+N waiting`.
      */
-    fun update(alert: AgentdAction.Alert, monitorOnly: Boolean): NexusNoticeUpdate = NexusNoticeUpdate(
+    fun update(alert: AgentdAction.Alert): NexusNoticeUpdate = NexusNoticeUpdate(
         title = title(alert),
-        body = body(alert, monitorOnly),
+        body = body(alert),
         footer = footer(alert) ?: "",
     )
 
@@ -84,16 +82,14 @@ object AlertNotices {
     )
 
     /**
-     * The v1 band for a session that needs the wearer or failed, used for
-     * OpenClaw and on a link that cannot steer. [summary] is what the session
-     * is waiting on. A monitor-only waiting session says so and offers no action.
+     * The v1 band for an OpenClaw session that needs the wearer or failed.
+     * [summary] is what the session is waiting on.
      */
-    fun statusNotice(session: AgentSession, summary: String, monitorOnly: Boolean): NexusNotice {
+    fun statusNotice(session: AgentSession, summary: String): NexusNotice {
         val waiting = session.status == AgentStatus.NEEDS_YOU
         return NexusNotice(
             title = session.displayTitle.line(TITLE_CHARS),
             body = when {
-                waiting && monitorOnly -> MONITOR_ONLY_BODY
                 waiting -> summary.line(BRIEF_BODY_CHARS)
                 else -> (session.statusDetail ?: "stopped with an error").line(BRIEF_BODY_CHARS)
             },
@@ -188,18 +184,12 @@ object AlertNotices {
         return cut(text, TITLE_CHARS)
     }
 
-    private fun body(alert: AgentdAction.Alert, monitorOnly: Boolean): String? {
+    private fun body(alert: AgentdAction.Alert): String? {
         // A question the glasses cannot answer as sent says so, and where to answer it (R124).
         refusal(alert)?.let { return it }
-        val monitor = monitorOnly && alert.kind == AlertKind.APPROVAL
         val text = alert.body.line(Int.MAX_VALUE)
-        // The suffix is the wearer's way out, so it never pays for a long body.
-        val room = if (monitor) BODY_CHARS - LINE_CHARS else BODY_CHARS
-        val capped = if (text.length > room) cut(text, room - 1) + "…" else text
-        return when {
-            monitor -> if (capped.isEmpty()) MONITOR_ONLY_BODY else "$capped · $MONITOR_ONLY_BODY"
-            else -> capped.ifEmpty { null }
-        }
+        val capped = if (text.length > BODY_CHARS) cut(text, BODY_CHARS - 1) + "…" else text
+        return capped.ifEmpty { null }
     }
 
     private fun footer(alert: AgentdAction.Alert): String? {
@@ -208,14 +198,13 @@ object AlertNotices {
         return text?.let { cut(it, FOOTER_CHARS) }
     }
 
-    private fun actions(alert: AgentdAction.Alert, monitorOnly: Boolean): List<NexusNoticeAction> =
+    /** Allow and Deny are always offered: a press with no secure link is answered by its brief, not hidden. */
+    private fun actions(alert: AgentdAction.Alert): List<NexusNoticeAction> =
         when (alert.kind) {
             AlertKind.APPROVAL -> buildList {
-                if (!monitorOnly) {
-                    // A command the wearer cannot see whole is never allowed from the glasses (R128).
-                    if (!alert.truncated) add(NexusNoticeAction(AlertCoordinator.ALLOW, "check", "Allow"))
-                    add(NexusNoticeAction(AlertCoordinator.DENY, "close", "Deny"))
-                }
+                // A command the wearer cannot see whole is never allowed from the glasses (R128).
+                if (!alert.truncated) add(NexusNoticeAction(AlertCoordinator.ALLOW, "check", "Allow"))
+                add(NexusNoticeAction(AlertCoordinator.DENY, "close", "Deny"))
                 add(NexusNoticeAction(AlertCoordinator.MORE, "dot", "More"))
             }
             AlertKind.QUESTION -> listOfNotNull(

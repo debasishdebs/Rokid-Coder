@@ -10,7 +10,7 @@ data class AgentdConfig(
     val port: Int,
     val token: String,
     val name: String,
-    /** agentd's certificate pin (Node `fingerprint256`); null for a legacy plaintext pairing. */
+    /** agentd's certificate pin (Node `fingerprint256`); null only in a slot saved before Plan 4, never dialled. */
     val fp: String? = null,
     /** The steering secret (R44). Kept only with [fp], sent only in a pinned wss hello, never shown. */
     val steer: String? = null,
@@ -18,7 +18,7 @@ data class AgentdConfig(
     val configured: Boolean
         get() = host.isNotBlank() && port in 1..65535 && token.isNotBlank()
 
-    /** Only a pinned pairing that holds the steering secret can steer; agentd trusts nothing less. */
+    /** Only a pinned pairing that holds the steering secret is dialled; agentd admits nothing less. */
     val canSteer: Boolean
         get() = fp != null && steer != null
 
@@ -32,7 +32,10 @@ internal object PairingCopy {
     const val BAD_STEER = "Pairing line has a bad steering secret"
     const val PINNED_NEEDS_FINGERPRINT = "Pairing line has no fingerprint — this computer is pinned"
     const val CERT_CHANGED = "Computer's certificate changed — re-pair"
-    const val REPAIR_TO_STEER = "Re-pair to allow approvals"
+    const val REPAIR_TO_STEER = "Pair again — this computer no longer trusts this phone"
+
+    /** A line, or a slot saved from one, without a pin or a steering secret: agentd refuses its hello. */
+    const val OLDER_AGENTD = "This pairing line is from an older agentd — run agentd pair again"
 }
 
 data class OpenClawConfig(
@@ -99,10 +102,9 @@ object AgentdPairingParser {
             (json.opt("steer") as? String)?.takeIf(STEER::matches)
                 ?: return AgentdPairingParseResult.Invalid(PairingCopy.BAD_STEER)
         }
-        // Without a pin there is no wss to carry the secret, so it is not kept at all.
-        return AgentdPairingParseResult.Valid(
-            AgentdConfig(host, port, token, name, fp = fp, steer = steer?.takeIf { fp != null }),
-        )
+        // agentd admits only the pinned wss hello that carries the secret, so a line short of either is no pairing.
+        if (fp == null || steer == null) return AgentdPairingParseResult.Invalid(PairingCopy.OLDER_AGENTD)
+        return AgentdPairingParseResult.Valid(AgentdConfig(host, port, token, name, fp = fp, steer = steer))
     }
 
     /** base64url, as agentd's `randomBytes(32).toString("base64url")` writes it. */
@@ -453,33 +455,7 @@ class AgentsConfigStore internal constructor(
         prefs.edit().remove(KEY_WAS_SUSPENDED).remove(KEY_HEARTBEAT_AT).apply()
     }
 
-    /**
-     * Records that this computer has spoken protocol v2 over a link that can
-     * steer. Sticky (R92): v1 attention for its sessions stays off from then on,
-     * even while the link is down, until the pairing is forgotten.
-     */
-    fun markV2Seen(machineId: String?) {
-        prefs.edit().putBoolean(v2SeenKey(keyFor(machineId)), true).apply()
-    }
-
-    /**
-     * True when the v1 status band must stay silent for [session]: agentd's own
-     * providers on a link that steers, or on a computer that has shown v2 before
-     * while its link is down (R92). A link that is up but that agentd does not let
-     * steer ([monitorOnlyLinkUp]) gets no v2 alerts at all, so v1 speaks for it (R126).
-     */
-    fun v1AttentionSuppressed(
-        session: AgentSession,
-        linkSecure: Boolean,
-        monitorOnlyLinkUp: Boolean = false,
-    ): Boolean =
-        session.provider in AgentProvider.AGENTD_PROVIDERS &&
-            (linkSecure || (!monitorOnlyLinkUp && prefs.getBoolean(v2SeenKey(keyFor(session.machineId)), false)))
-
-    /** A LAN-linked computer is keyed by its id; the one this phone dials is a single pairing. */
-    private fun keyFor(machineId: String?): String =
-        machineId?.takeIf { prefs.getString(machineKey(it), null) != null } ?: DIALLED
-
+    /** The sticky v2-seen flags (R92) went with the monitor-only link; their keys are only cleared now. */
     private fun v2SeenKey(key: String) = "$KEY_V2_SEEN_PREFIX$key"
 
     fun forgetMachine(machineId: String) {

@@ -13,6 +13,9 @@ sealed interface AgentdAction {
     /** [steering] is agentd's own grant (R126); null from an agentd that predates it, which grants nothing. */
     data class HelloAcknowledged(val machineName: String?, val steering: Boolean? = null) : AgentdAction
 
+    /** agentd refused the wss hello (`repair_needed` or `bad_token`) and closes with 4403 next. */
+    data class HelloRejected(val reason: String) : AgentdAction
+
     /** agentd's live trust in this link changed (R126); `false` comes just before it drops the link. */
     data class LinkTrust(val steering: Boolean) : AgentdAction
     data class Snapshot(val seq: Long, val sessions: List<AgentSession>) : AgentdAction
@@ -99,7 +102,7 @@ class AgentdProtocolCodec {
         detailMessageCounts.clear()
     }
 
-    /** [steer] (R44) is for the hello of a pinned `wss://` link only; the caller decides that. */
+    /** [steer] (R44) is for the hello of a pinned `wss://` link only, the only link the phone dials. */
     fun hello(token: String, versionName: String, steer: String? = null): String = JSONObject()
         .put("type", "hello")
         .put("v", 1)
@@ -136,6 +139,10 @@ class AgentdProtocolCodec {
                         ?.nullableString("machineName", MAX_HUD_LABEL_CHARS),
                     steering = json.booleanOrNull("steering"),
                 )
+            }
+            "hello_reject" -> {
+                if (json.intOrNull("v") != 2) return AgentdAction.Ignore
+                AgentdAction.HelloRejected(json.nullableString("reason", MAX_WIRE_TYPE_CHARS).orEmpty())
             }
             "link_trust" -> {
                 if (json.intOrNull("v") != 2) return AgentdAction.Ignore

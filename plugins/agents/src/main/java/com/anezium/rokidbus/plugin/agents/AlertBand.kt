@@ -15,7 +15,6 @@ internal class AlertBand(
     private val client: () -> NexusPluginClient?,
     private val screen: GlassesScreen,
     private val attention: AttentionDecisionEngine,
-    private val configStore: AgentsConfigStore,
 ) {
     /** A v2 alert's band; true when the hub took it. */
     fun show(notice: NexusNotice): Boolean {
@@ -73,18 +72,12 @@ internal class AlertBand(
     fun raiseAttention(): String? {
         val client = client() ?: return null
         if (!client.supportsNoticeSurface) return null
-        // On a secure link agentd's own alerts speak for its providers (R40); the
-        // status path stays for OpenClaw, and for a link that cannot steer.
         // An approval's band is never replaced by this one; the wearer's answer comes first.
         if (screen.v2BandUp || AgentsRuntime.alertDirector?.slotBusy == true) return null
-        // A computer that has spoken v2 stays off this path even while its link is down (R92).
-        val link = AgentsRuntime.link.value
-        val steering = link?.secure == true
         val director = AgentsRuntime.alertDirector
         val pending = attention.pending(AgentsRuntime.store.sessions.value) { session ->
-            // A session that had a v2 alert on this link is the alerts' to announce, not v1's.
-            configStore.v1AttentionSuppressed(session, steering, monitorOnlyLinkUp = link != null && !steering) ||
-                director?.hadAlert(session.key) == true
+            // A session that had a v2 alert is the alerts' to announce, not v1's.
+            !v1AttentionApplies(session) || director?.hadAlert(session.key) == true
         }
         if (pending.isEmpty()) return null
         val notice = if (pending.size == 1) singleNotice(pending.single()) else groupNotice(pending)
@@ -93,16 +86,8 @@ internal class AlertBand(
         return pending.first().session.key
     }
 
-    private fun singleNotice(item: AgentAttention): NexusNotice {
-        val session = item.session
-        // Only a secure link steers, and this path runs for agentd's providers
-        // only when the link is not secure: the wearer decides on the laptop.
-        return AlertNotices.statusNotice(
-            session,
-            summary = BoardCards.pendingSummary(session),
-            monitorOnly = session.provider in AgentProvider.AGENTD_PROVIDERS,
-        )
-    }
+    private fun singleNotice(item: AgentAttention): NexusNotice =
+        AlertNotices.statusNotice(item.session, summary = BoardCards.pendingSummary(item.session))
 
     private fun groupNotice(items: List<AgentAttention>): NexusNotice {
         val waiting = items.count { it.session.status == AgentStatus.NEEDS_YOU }
@@ -125,3 +110,10 @@ internal class AlertBand(
         const val ATTENTION_TTL_MS = 12_000L
     }
 }
+
+/**
+ * The v1 status band is OpenClaw's only. agentd's own providers speak through
+ * their v2 alerts, which every link agentd accepts carries; with no link up
+ * the board shows the computer is not connected, and v1 does not stand in.
+ */
+internal fun v1AttentionApplies(session: AgentSession): Boolean = session.provider == AgentProvider.OPENCLAW

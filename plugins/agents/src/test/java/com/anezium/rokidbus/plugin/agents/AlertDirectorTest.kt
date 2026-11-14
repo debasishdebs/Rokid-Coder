@@ -205,7 +205,7 @@ class AlertDirectorTest {
     }
 
     @Test
-    fun a_press_with_the_link_down_writes_nothing_and_says_monitor_only() {
+    fun a_press_with_the_link_down_writes_nothing_and_says_not_sent() {
         up()
         feed(alert())
         director.onEvent(AgentdEvent.LinkDown(1L))
@@ -216,7 +216,7 @@ class AlertDirectorTest {
         // The band is still up, so the brief waits for it.
         assertTrue(glasses.log.none { it.startsWith("brief") })
         director.onBandClosed(NexusNoticeCloseReason.TIMEOUT)
-        assertEquals("brief Monitor only", glasses.log.last())
+        assertEquals("brief Not sent", glasses.log.last())
     }
 
     @Test

@@ -8,7 +8,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -18,17 +20,19 @@ import okhttp3.WebSocketListener
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The paired path: the phone dials agentd's WebSocket. A pairing with a pin
- * (`fp`) dials `wss://` through [pinnedClient] only, and never anything else;
- * one without is the legacy `ws://` link, monitor-only. Steering needs the pin
- * and the steering secret together, which only a pinned hello carries.
+ * The paired path: the phone dials agentd's WebSocket, `wss://` through
+ * [pinnedClient] only, presenting [identity] as its client certificate. A
+ * pairing without the pin (`fp`) and the steering secret is never dialled:
+ * agentd admits nothing less, and there is no plaintext link (U8). Every link
+ * agentd accepts steers; anything short of that is a pairing to make again.
  */
 class AgentdClient(
-    private val httpClient: OkHttpClient,
+    httpClient: OkHttpClient,
     private val store: AgentSessionStore,
     private val scope: CoroutineScope,
     private val versionName: String,
-    private val pinnedClient: (pin: String) -> OkHttpClient = { pin -> pinnedOkHttpClient(httpClient, pin) },
+    identity: PhoneTlsIdentity,
+    private val pinnedClient: (pin: String) -> OkHttpClient = { pin -> pinnedOkHttpClient(httpClient, pin, identity) },
     onEvent: (AgentdEvent) -> Unit = AgentsRuntime::emitEvent,
 ) {
     private var loopJob: Job? = null
@@ -40,6 +44,14 @@ class AgentdClient(
 
     /** Whether this transport may carry steering frames right now. */
     val linkSecure: StateFlow<Boolean> get() = wire.secure
+
+    private val _needsRepair = MutableStateFlow(false)
+
+    /**
+     * True once this pairing stopped at AUTH_FAILED: refused, distrusted or
+     * never dialled. Only a new pairing line connects again; [start] clears it.
+     */
+    val needsRepair: StateFlow<Boolean> = _needsRepair.asStateFlow()
 
     /** Survives reconnects: the daemon forgets, the wearer should not. */
     @Volatile private var openSessionId: String? = null
@@ -77,6 +89,7 @@ class AgentdClient(
     fun start(config: AgentdConfig) {
         loopJob?.cancel()
         val advance = sockets.advance()
+        _needsRepair.value = false
         // After the advance, so a hello_ack still in flight cannot bind behind us.
         link.downCurrent()
         advance.previous?.cancel()
@@ -92,6 +105,7 @@ class AgentdClient(
         loopJob?.cancel()
         loopJob = null
         val advance = sockets.advance()
+        _needsRepair.value = false
         link.downCurrent()
         advance.previous?.cancel()
         store.setConnection(AgentProvider.CLAUDE, ConnectionState.DISCONNECTED)
@@ -103,22 +117,18 @@ class AgentdClient(
 
     private suspend fun runConnectionLoop(config: AgentdConfig, generation: Long) {
         val pin = when (val parsed = CertPins.parse(config.fp)) {
-            PinParse.Absent -> null
             is PinParse.Valid -> parsed.fp
-            // A stored pin that no longer reads is still a pin: refused, never dialled as ws://.
-            PinParse.Malformed -> {
-                if (sockets.isCurrent(generation)) {
-                    store.setConnection(AgentProvider.CLAUDE, ConnectionState.AUTH_FAILED, PairingCopy.BAD_FINGERPRINT)
-                }
-                return
-            }
+            // A stored pin that no longer reads is still a pin: refused, never dialled.
+            PinParse.Malformed -> return authFailed(generation, PairingCopy.BAD_FINGERPRINT)
+            PinParse.Absent -> return authFailed(generation, PairingCopy.OLDER_AGENTD)
         }
-        val http = if (pin == null) httpClient else pinnedClient(pin)
+        val steer = config.steer ?: return authFailed(generation, PairingCopy.OLDER_AGENTD)
+        val http = pinnedClient(pin)
         val backoff = ReconnectBackoff()
         while (scope.isActive && sockets.isCurrent(generation)) {
             store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING)
             val result = try {
-                connectOnce(config, pin, http, generation, backoff)
+                connectOnce(config, steer, http, generation, backoff)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Throwable) {
@@ -128,14 +138,8 @@ class AgentdClient(
             }
             if (!sockets.isCurrent(generation)) return
             when (result) {
-                is ConnectionOutcome.AuthFailed -> {
-                    store.setConnection(
-                        AgentProvider.CLAUDE,
-                        ConnectionState.AUTH_FAILED,
-                        result.detail,
-                    )
-                    return
-                }
+                // Final: no backoff, no redial, until a new pairing restarts the client.
+                is ConnectionOutcome.AuthFailed -> return authFailed(generation, result.detail)
                 is ConnectionOutcome.RetryWithDetail -> {
                     store.setConnection(
                         AgentProvider.CLAUDE,
@@ -155,9 +159,15 @@ class AgentdClient(
         }
     }
 
+    private fun authFailed(generation: Long, detail: String) {
+        if (!sockets.isCurrent(generation)) return
+        _needsRepair.value = true
+        store.setConnection(AgentProvider.CLAUDE, ConnectionState.AUTH_FAILED, detail)
+    }
+
     private suspend fun connectOnce(
         config: AgentdConfig,
-        pin: String?,
+        steer: String,
         http: OkHttpClient,
         generation: Long,
         backoff: ReconnectBackoff,
@@ -183,7 +193,7 @@ class AgentdClient(
             }
         }
         val request = Request.Builder()
-            .url(webSocketUrl(config.host, config.port, secure = pin != null))
+            .url(webSocketUrl(config.host, config.port, secure = true))
             .build()
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -192,11 +202,10 @@ class AgentdClient(
                     return
                 }
                 // The handshake precedes the binding, so it is written to this
-                // socket directly; every later line goes through the wire. On a
-                // pinned link OkHttp opens only after the pinned trust manager and
-                // hostname check passed on the TLS session itself, so neither the
-                // token nor the secret leaves before the pin is verified.
-                val steer = config.steer.takeIf { pin != null }
+                // socket directly; every later line goes through the wire. OkHttp
+                // opens only after the pinned trust manager and hostname check
+                // passed on the TLS session itself, so neither the token nor the
+                // secret leaves before the pin is verified.
                 if (!webSocket.send(codec.hello(config.token, versionName, steer))) {
                     finish(ConnectionOutcome.Retry)
                     return
@@ -208,26 +217,26 @@ class AgentdClient(
                 if (!isLive()) return
                 when (val action = codec.parse(text)) {
                     is AgentdAction.HelloAcknowledged -> {
+                        // agentd grants steering on every hello it accepts (R169). An ack
+                        // without the grant is an agentd from before Plan 4, which would take
+                        // this phone as a monitor client: no such link exists any more.
+                        if (action.steering != true) {
+                            finish(ConnectionOutcome.AuthFailed(REPAIR_TO_STEER))
+                            return
+                        }
                         if (!connected.compareAndSet(false, true)) return
-                        // Steering only over the pinned wss whose hello carried the secret, and
-                        // only when agentd says it granted it (R126): a rotated or stale secret
-                        // is accepted as a monitor client, so the phone's own config is not proof.
-                        val steering = pin != null && config.steer != null && action.steering == true
-                        link.up(owner, secure = steering, stillLive = ::isLive) ?: return
+                        link.up(owner, secure = true, stillLive = ::isLive) ?: return
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()
-                        store.setConnection(
-                            AgentProvider.CLAUDE,
-                            ConnectionState.CONNECTED,
-                            if (pin != null && !steering) REPAIR_TO_STEER else action.machineName,
-                        )
+                        store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTED, action.machineName)
                     }
+                    // The token, the secret or this phone's certificate is not agentd's any more.
+                    is AgentdAction.HelloRejected -> finish(ConnectionOutcome.AuthFailed(REPAIR_TO_STEER))
                     is AgentdAction.LinkTrust -> {
-                        // A trust that went is final for this connection; one never comes back mid-link.
+                        // A trust that went ends the link now, before agentd's 4403 arrives.
                         if (!connected.get() || action.steering) return
-                        link.up(owner, secure = false, stillLive = ::isLive) ?: return
-                        store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTED, REPAIR_TO_STEER)
+                        finish(ConnectionOutcome.AuthFailed(REPAIR_TO_STEER))
                     }
                     is AgentdAction.Snapshot -> {
                         if (!connected.get()) return
@@ -307,24 +316,16 @@ class AgentdClient(
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 if (!sockets.isCurrent(generation)) return
-                if (code == BAD_TOKEN_CLOSE_CODE) {
-                    finish(ConnectionOutcome.AuthFailed("Pairing invalid"))
-                } else {
-                    finish(ConnectionOutcome.Retry)
-                }
+                finish(refusal(code) ?: ConnectionOutcome.Retry)
                 webSocket.close(code, "")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (!sockets.isCurrent(generation)) return
-                if (code == BAD_TOKEN_CLOSE_CODE) {
-                    finish(ConnectionOutcome.AuthFailed("Pairing invalid"))
-                } else {
-                    finish(
-                        if (connected.get()) ConnectionOutcome.Retry
-                        else ConnectionOutcome.RetryWithDetail("Connection closed"),
-                    )
-                }
+                finish(
+                    refusal(code) ?: if (connected.get()) ConnectionOutcome.Retry
+                    else ConnectionOutcome.RetryWithDetail("Connection closed"),
+                )
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -332,9 +333,9 @@ class AgentdClient(
                     finish(
                         when {
                             // Final until re-paired: another certificate is another computer, or someone in between.
-                            pin != null && CertPins.isPinMismatch(t) -> ConnectionOutcome.AuthFailed(PairingCopy.CERT_CHANGED)
-                            // Retried over wss again, and said so; never over ws://.
-                            pin != null && CertPins.isTlsFailure(t) -> ConnectionOutcome.RetryWithDetail(SECURE_LINK_FAILED)
+                            CertPins.isPinMismatch(t) -> ConnectionOutcome.AuthFailed(PairingCopy.CERT_CHANGED)
+                            // Retried over wss again, and said so.
+                            CertPins.isTlsFailure(t) -> ConnectionOutcome.RetryWithDetail(SECURE_LINK_FAILED)
                             else -> ConnectionOutcome.Retry
                         },
                     )
@@ -358,9 +359,18 @@ class AgentdClient(
     }
 
     companion object {
-        /** A pinned link agentd does not let steer: the pairing line's secret is stale (R126). */
-        const val REPAIR_TO_STEER = "Re-pair to allow approvals"
+        /** agentd refused or dropped this phone's pairing: its pin, token or secret is no longer trusted. */
+        const val REPAIR_TO_STEER = PairingCopy.REPAIR_TO_STEER
         private const val BAD_TOKEN_CLOSE_CODE = 4401
+
+        /** agentd's close after a `hello_reject`, and after a live link loses its trust. */
+        private const val UNTRUSTED_CLOSE_CODE = 4403
+
+        private fun refusal(code: Int): ConnectionOutcome.AuthFailed? = when (code) {
+            BAD_TOKEN_CLOSE_CODE -> ConnectionOutcome.AuthFailed("Pairing invalid")
+            UNTRUSTED_CLOSE_CODE -> ConnectionOutcome.AuthFailed(REPAIR_TO_STEER)
+            else -> null
+        }
         private const val SECURE_LINK_FAILED = "Secure link failed"
         private const val DEADLINE_HELLO = "hello"
         private const val DEADLINE_SNAPSHOT = "snapshot"

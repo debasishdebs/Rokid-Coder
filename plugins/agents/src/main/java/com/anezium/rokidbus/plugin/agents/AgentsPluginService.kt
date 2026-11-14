@@ -137,7 +137,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         )
     }
 
-    private val band by lazy { AlertBand({ nexusClient }, screen, attention, configStore) }
+    private val band by lazy { AlertBand({ nexusClient }, screen, attention) }
 
     /** The Done or error alert whose summary heads the open conversation. */
     private var outputAlert: AgentdAction.Alert? = null
@@ -736,7 +736,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     /**
      * Every write leaves through the monitor service, which hands it to
-     * [AgentdWire.write]: a steering frame over a link that cannot steer comes
+     * [AgentdWire.write]: a steering frame over a link not bound as secure comes
      * back MonitorOnly and is never sent. The menu has already greyed those
      * rows, so this is the second lock, not the first.
      */
@@ -759,7 +759,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     /** The reply card's text, as a v2 `followup`. Nothing about the text is logged. */
     private fun sendFollowup(sessionKey: String, text: String) {
         if (!secureLink) {
-            showBriefNotice(ControlMenu.NOTICE_TITLE, ControlMenu.MONITOR_ONLY, safety = true)
+            showBriefNotice(AlertCoordinator.NOT_SENT, AlertCoordinator.NOT_CONNECTED, safety = true)
             return
         }
         val msgId = UUID.randomUUID().toString()
@@ -959,7 +959,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             ActiveCard.Kind.QUESTION -> screen.questionFlow?.let { return answers.questionCard(it) }
             ActiveCard.Kind.ALERT_DECISION -> screen.decidingAlert?.let { alert ->
                 val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
-                return BoardCards.alertDecisionCard(alert, session, screen.alertRows(alert), screen.alertRow, secureLink)
+                return BoardCards.alertDecisionCard(alert, session, screen.alertRows(alert), screen.alertRow)
             }
             ActiveCard.Kind.REQUEST_DECISION -> screen.decidingRequestId?.let { requestId ->
                 val approval = AgentsRuntime.store.approvals.value.firstOrNull { it.requestId == requestId }

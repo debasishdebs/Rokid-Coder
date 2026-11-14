@@ -142,7 +142,7 @@ class GlassesScreenTest {
         assertTrue(cut.truncated)
 
         // The band: Deny and More, no Allow.
-        val band = AlertNotices.build(cut, monitorOnly = false, wake = false)
+        val band = AlertNotices.build(cut, wake = false)
         assertEquals(listOf(AlertCoordinator.DENY, AlertCoordinator.MORE), band.actions.map { it.id })
 
         // More's reader says the command was cut.
@@ -152,7 +152,7 @@ class GlassesScreenTest {
         // The decision card: no Allow row, and no walk of it reaches one.
         screen.openAlertDecision(cut)
         assertEquals(listOf(GlassesScreen.AlertRow.DENY, GlassesScreen.AlertRow.VOICE), screen.alertRows(cut))
-        val card = BoardCards.alertDecisionCard(cut, null, screen.alertRows(cut), 0, secure = true)
+        val card = BoardCards.alertDecisionCard(cut, null, screen.alertRows(cut), 0)
         assertTrue(card.richLines!!.none { it.text == "Allow" })
         assertTrue(card.richLines!!.any { it.text == AlertNotices.COMMAND_CUT })
         now = 1_000L

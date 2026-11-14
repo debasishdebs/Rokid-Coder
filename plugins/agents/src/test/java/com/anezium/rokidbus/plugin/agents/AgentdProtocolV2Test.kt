@@ -194,6 +194,20 @@ class AgentdProtocolV2Test {
     }
 
     @Test
+    fun parses_every_hello_reject_fixture() {
+        // agentd's refusal of a wss hello, just before its 4403 close: kept apart from agent_to_phone.
+        val rejects = fixtures.getJSONObject("hello_reject")
+        val reasons = rejects.keys().asSequence().filterNot { it.startsWith("_") }.toSet()
+        assertEquals(setOf("repair_needed", "bad_token"), reasons)
+        for (reason in reasons) {
+            assertEquals(AgentdAction.HelloRejected(reason), parse(AgentdProtocolCodec(), rejects.getJSONObject(reason)))
+        }
+        // Some other version is not this frame.
+        val v1 = JSONObject(rejects.getJSONObject("repair_needed").toString()).put("v", 1)
+        assertEquals(AgentdAction.Ignore, parse(AgentdProtocolCodec(), v1))
+    }
+
+    @Test
     fun a_missing_or_unknown_alert_reason_parses_as_new() {
         val codec = AgentdProtocolCodec()
         val missing = codec.parse(alertJson { remove("reason") }) as AgentdAction.Alert
@@ -289,7 +303,7 @@ class AgentdProtocolV2Test {
         }
         val refused = AgentdProtocolCodec().parse(tooLong.toString()) as AgentdAction.Alert
         assertEquals("Question too long — answer on laptop", refused.question!!.refusal)
-        val band = AlertNotices.build(refused, monitorOnly = false, wake = false)
+        val band = AlertNotices.build(refused, wake = false)
         assertEquals("Question too long — answer on laptop", band.body)
         assertEquals(listOf(AlertCoordinator.LATER), band.actions.map { it.id })
 
@@ -409,17 +423,17 @@ class AgentdProtocolV2Test {
     @Test
     fun session_upsert_v2_fields_parse_whatever_the_link_and_the_menu_opens_greyed() {
         // The codec knows nothing of link trust, and agentd decorates every session_upsert,
-        // so a monitor-only (plaintext) link carries the same v2 fields as a secure one.
+        // so a link that is down or not yet secure parses the same v2 fields as a secure one.
         val frame = JSONObject(fixture("session_upsert").toString()).put("seq", 7)
         frame.getJSONObject("session").put("provider", "claude").put("mode", "plugin")
         val session = (syncedCodec().parse(frame.toString()) as AgentdAction.Upsert).session
         assertNotNull(session.v2)
 
-        // ENTER opens the menu for it, and with no steering link every steering row is greyed.
+        // ENTER opens the menu for it, and with no secure link every steering row is greyed.
         val items = ControlMenu.items(session, secure = false)
         val steering = items.filter { it.label != "Context" && it.label != "Read output" }
         assertTrue(steering.isNotEmpty())
-        assertTrue(steering.all { !it.enabled && it.sub == "Monitor only — approve on laptop" })
+        assertTrue(steering.all { !it.enabled && it.sub == "Computer not connected" })
         assertTrue(items.first { it.label == "Read output" }.enabled)
     }
 

@@ -16,69 +16,14 @@ class AgentsConfigStoreV2SeenTest {
     private val pairing = AgentdConfig(host = "100.1.2.3", port = 8792, token = "t", name = "laptop")
 
     @Test
-    fun no_v1_band_while_link_down_after_v2_seen() {
-        val config = store().apply { trustMachine("m1", "tok", "Laptop"); markV2Seen("m1") }
+    fun v1_attention_is_openclaw_only() {
         val engine = AttentionDecisionEngine({ null }, { _, _ -> })
-        val waiting = listOf(session("m1"), session("m1", AgentProvider.CODEX), session("m1", AgentProvider.OPENCLAW))
+        val waiting = listOf(session("m1"), session("m1", AgentProvider.CODEX), session(null, AgentProvider.OPENCLAW))
 
-        // The link is down: not secure. Claude and Codex of that computer stay off the v1 path.
-        val pending = engine.pending(waiting) { config.v1AttentionSuppressed(it, linkSecure = false) }
+        // agentd's own providers speak through v2 alerts only, whatever the link is doing.
+        val pending = engine.pending(waiting) { !v1AttentionApplies(it) }
 
-        assertTrue(pending.map { it.session.provider } == listOf(AgentProvider.OPENCLAW))
-    }
-
-    @Test
-    fun v1_still_alerts_for_a_computer_that_never_spoke_v2() {
-        val config = store().apply { trustMachine("m1", "tok", "Laptop"); trustMachine("m2", "tok", "Desk") }
-        config.markV2Seen("m1")
-
-        assertTrue(config.v1AttentionSuppressed(session("m1"), linkSecure = false))
-        assertFalse(config.v1AttentionSuppressed(session("m2"), linkSecure = false))
-        // A live steering link needs no history.
-        assertTrue(config.v1AttentionSuppressed(session("m2"), linkSecure = true))
-    }
-
-    @Test
-    fun v2_seen_survives_restart() {
-        store().apply { trustMachine("m1", "tok", "Laptop"); markV2Seen("m1"); saveAgentd(pairing, true); markV2Seen(null) }
-
-        val restarted = store()
-
-        assertTrue(restarted.v1AttentionSuppressed(session("m1"), linkSecure = false))
-        assertTrue(restarted.v1AttentionSuppressed(session(null), linkSecure = false))
-    }
-
-    @Test
-    fun forget_pairing_clears_v2_seen() {
-        val config = store().apply { trustMachine("m1", "tok", "Laptop"); markV2Seen("m1") }
-        assertTrue(config.v1AttentionSuppressed(session("m1"), linkSecure = false))
-
-        config.forgetMachine("m1")
-        assertFalse(config.v1AttentionSuppressed(session("m1"), linkSecure = false))
-
-        // The pairing this phone dials is forgotten by saving none.
-        config.saveAgentd(pairing, true)
-        config.markV2Seen(null)
-        assertTrue(config.v1AttentionSuppressed(session(null), linkSecure = false))
-        config.saveAgentd(null, false)
-        assertFalse(config.v1AttentionSuppressed(session(null), linkSecure = false))
-
-        // Forgetting every machine clears them all.
-        config.trustMachine("m2", "tok", "Desk")
-        config.markV2Seen("m2")
-        config.forgetMachines()
-        assertFalse(config.v1AttentionSuppressed(session("m2"), linkSecure = false))
-    }
-
-    @Test
-    fun re_pairing_a_different_computer_starts_clean() {
-        val config = store().apply { saveAgentd(pairing, true); markV2Seen(null) }
-
-        config.saveAgentd(pairing.copy(name = "renamed"), true)
-        assertTrue(config.v1AttentionSuppressed(session(null), linkSecure = false))
-
-        config.saveAgentd(pairing.copy(host = "100.9.9.9"), true)
-        assertFalse(config.v1AttentionSuppressed(session(null), linkSecure = false))
+        assertEquals(listOf(AgentProvider.OPENCLAW), pending.map { it.session.provider })
     }
 
     @Test

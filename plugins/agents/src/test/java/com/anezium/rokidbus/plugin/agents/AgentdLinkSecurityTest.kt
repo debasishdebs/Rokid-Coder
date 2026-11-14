@@ -130,15 +130,24 @@ class AgentdLinkSecurityTest {
 
     @Test
     fun pairingParserRejectsCoercedScalarTypes() {
+        // Complete lines but for the one coerced field, so the refusal is that field's.
+        val pinned = "\",\"fp\":\"${FixturePhoneTlsIdentity.FINGERPRINT}\",\"steer\":\"abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJ-0123\"}"
         assertTrue(
             AgentdPairingParser.parse(
-                """{"v":1,"kind":"nexus-agentd","host":7,"port":8792,"token":"secret"}""",
-            ) is AgentdPairingParseResult.Invalid,
+                """{"v":1,"kind":"nexus-agentd","host":"desk","port":8792,"token":"secret$pinned""",
+            ) is AgentdPairingParseResult.Valid,
         )
-        assertTrue(
+        assertEquals(
+            AgentdPairingParseResult.Invalid("Host is missing."),
             AgentdPairingParser.parse(
-                """{"v":"1","kind":"nexus-agentd","host":"desk","port":8792,"token":"secret"}""",
-            ) is AgentdPairingParseResult.Invalid,
+                """{"v":1,"kind":"nexus-agentd","host":7,"port":8792,"token":"secret$pinned""",
+            ),
+        )
+        assertEquals(
+            AgentdPairingParseResult.Invalid("Unsupported pairing version."),
+            AgentdPairingParser.parse(
+                """{"v":"1","kind":"nexus-agentd","host":"desk","port":8792,"token":"secret$pinned""",
+            ),
         )
     }
 }

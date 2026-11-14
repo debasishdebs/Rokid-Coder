@@ -314,7 +314,6 @@ internal object BoardCards {
         session: AgentSession?,
         choices: List<GlassesScreen.AlertRow>,
         row: Int,
-        secure: Boolean,
     ): NexusCard {
         val rows = buildList {
             add(
@@ -326,20 +325,17 @@ internal object BoardCards {
                     tone = NexusRowTone.BODY,
                 ),
             )
-            if (secure) {
-                if (alert.truncated) add(NexusCardLine(text = AlertNotices.COMMAND_CUT, tone = NexusRowTone.ALERT))
-                choices.forEachIndexed { index, choice ->
-                    add(
-                        when (choice) {
-                            GlassesScreen.AlertRow.ALLOW -> choiceRow("Allow", "let it run", row == index)
-                            GlassesScreen.AlertRow.DENY -> choiceRow("Deny", "tell the agent no", row == index)
-                            GlassesScreen.AlertRow.VOICE ->
-                                choiceRow(VoiceApproval.PROMPT, "asks you to confirm", row == index)
-                        },
-                    )
-                }
-            } else {
-                add(NexusCardLine(text = AlertNotices.MONITOR_ONLY_BODY, tone = NexusRowTone.DIM))
+            // Always offered: a confirm with no secure link is answered by the Not sent brief.
+            if (alert.truncated) add(NexusCardLine(text = AlertNotices.COMMAND_CUT, tone = NexusRowTone.ALERT))
+            choices.forEachIndexed { index, choice ->
+                add(
+                    when (choice) {
+                        GlassesScreen.AlertRow.ALLOW -> choiceRow("Allow", "let it run", row == index)
+                        GlassesScreen.AlertRow.DENY -> choiceRow("Deny", "tell the agent no", row == index)
+                        GlassesScreen.AlertRow.VOICE ->
+                            choiceRow(VoiceApproval.PROMPT, "asks you to confirm", row == index)
+                    },
+                )
             }
         }
         return card(
@@ -349,7 +345,7 @@ internal object BoardCards {
                 "waiting for you",
             ).joinToString(" · ").take(120),
             rows = rows,
-            footer = if (secure) "swipe choose · tap confirm · 2-tap later" else "2-tap back",
+            footer = "swipe choose · tap confirm · 2-tap later",
         )
     }
 

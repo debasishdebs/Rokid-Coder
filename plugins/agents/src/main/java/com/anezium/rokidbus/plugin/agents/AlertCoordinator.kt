@@ -171,7 +171,7 @@ class AlertCoordinator(
         if (alert == null || alert.kind != AlertKind.QUESTION || question == null) {
             return listOf(noLongerWaiting())
         }
-        if (!secure) return listOf(Effect.Brief(MONITOR_ONLY_TITLE, MONITOR_ONLY_BODY))
+        if (!secure) return listOf(notConnected())
         val line = try {
             AgentdProtocolCodec.questionAnswer(
                 sessionKey = alert.sessionKey,
@@ -240,7 +240,7 @@ class AlertCoordinator(
     private fun shown(id: String): Effect = Effect.Send(AgentdProtocolCodec.alertShown(id))
 
     private fun answer(id: String, action: String, secure: Boolean): Effect = when {
-        !secure -> Effect.Brief(MONITOR_ONLY_TITLE, MONITOR_ONLY_BODY)
+        !secure -> notConnected()
         // The last lock: no glasses path allows a command agentd had to cut (R128).
         action == ALLOW && alertOf(id)?.truncated == true -> Effect.Brief(NOT_SENT, AlertNotices.COMMAND_CUT)
         else -> Effect.Send(AgentdProtocolCodec.alertAction(id, action, msgIdFor(id, action)))
@@ -249,6 +249,9 @@ class AlertCoordinator(
     private fun alertOf(id: String): AgentdAction.Alert? = episode?.alert?.takeIf { it.id == id } ?: cards[id]
 
     private fun noLongerWaiting(): Effect = Effect.Brief(NO_LONGER_WAITING, NO_LONGER_WAITING_BODY)
+
+    /** A steering press with no secure link up: the wire would refuse it, so it is not tried. */
+    private fun notConnected(): Effect = Effect.Brief(NOT_SENT, NOT_CONNECTED)
 
     /** One msgId per (alert, action), reused when the wearer presses it again, so agentd applies it once. */
     private fun msgIdFor(id: String, action: String): String =
@@ -278,11 +281,9 @@ class AlertCoordinator(
         const val WAKE_INTERVAL_MS = 60_000L
         const val NO_LONGER_WAITING = "No longer waiting"
         const val NO_LONGER_WAITING_BODY = "Answer on laptop if still needed"
-        const val MONITOR_ONLY_TITLE = "Monitor only"
-        const val MONITOR_ONLY_BODY = "approve on laptop"
-
         const val NOT_SENT = "Not sent"
         const val NOT_SENT_BODY = "Answer on laptop"
+        const val NOT_CONNECTED = "Computer not connected"
         private const val QUESTION_ANSWER = "question_answer"
         private const val REJECTION_CHARS = 120
 

@@ -205,8 +205,8 @@ class AgentsSettingsActivity : ComponentActivity() {
         val pairedSub = "Paired by hand · ${paired.host}:${paired.port}"
         return rows + ComputerRow(
             title = paired.name,
-            // agentd lets only a pinned link with the steering secret approve.
-            sub = if (paired.canSteer) pairedSub else "$pairedSub · ${PairingCopy.REPAIR_TO_STEER}",
+            // agentd admits only a pinned link with the steering secret; a slot without them is never dialled.
+            sub = if (paired.canSteer) pairedSub else "$pairedSub · ${PairingCopy.OLDER_AGENTD}",
             connected = false,
             machineId = null,
         )

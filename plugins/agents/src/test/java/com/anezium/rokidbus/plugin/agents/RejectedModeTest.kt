@@ -90,10 +90,10 @@ class RejectedModeTest {
     }
 
     @Test
-    fun a_monitor_only_link_still_says_monitor_only_not_the_rejection() {
+    fun no_secure_link_says_computer_not_connected_not_the_rejection() {
         store.noteReplyNotSent(session.key, "x")
         val state = ControlMenu.open(session.key).copy(replyNotSent = "x")
         val sub = ControlMenu.page(state, session, secure = false).rows.first { it.text == "Reply by voice" }.sub
-        assertEquals(ControlMenu.MONITOR_ONLY, sub)
+        assertEquals("Computer not connected", sub)
     }
 }

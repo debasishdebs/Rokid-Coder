@@ -26,9 +26,10 @@ class SettingsScreenTest {
     }
 
     @Test
-    fun link_trust_is_secure_or_monitor_only_and_absent_when_not_connected() {
+    fun link_trust_is_secure_or_pair_again_and_absent_when_not_connected() {
         assertEquals("Secure (TLS)", trustLabel(connected = true, secure = true))
-        assertEquals("Monitor only — approve on laptop", trustLabel(connected = true, secure = false))
+        // There is no monitor-only link: a link that cannot steer is one to pair again.
+        assertEquals("Not connected — pair again", trustLabel(connected = true, secure = false))
         assertNull(trustLabel(connected = false, secure = false))
         // A stale secure flag on a dropped link says nothing.
         assertNull(trustLabel(connected = false, secure = true))

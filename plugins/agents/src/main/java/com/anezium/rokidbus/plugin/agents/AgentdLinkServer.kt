@@ -333,6 +333,7 @@ class AgentdLinkServer internal constructor(
             is AgentdAction.LinkTrust -> if (!action.steering) revokeSteering(connection)
             is AgentdAction.Hello,
             is AgentdAction.HelloAcknowledged,
+            is AgentdAction.HelloRejected,
             AgentdAction.Ignore,
             -> Unit
         }

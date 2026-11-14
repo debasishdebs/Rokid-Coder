@@ -40,7 +40,7 @@ class AlertNoticesTest {
 
     @Test
     fun approval_band_wakes_with_allow_deny_more_and_45s_ttl() {
-        val notice = AlertNotices.build(alert(), monitorOnly = false, wake = true)
+        val notice = AlertNotices.build(alert(), wake = true)
 
         assertEquals("CLAUDE · approve", notice.title)
         assertEquals("Run npm test", notice.body)
@@ -51,18 +51,18 @@ class AlertNoticesTest {
         assertEquals(45_000L, notice.ttlMs)
         assertEquals(
             "CODEX · approve",
-            AlertNotices.build(alert(sessionKey = "codex:s9"), monitorOnly = false, wake = true).title,
+            AlertNotices.build(alert(sessionKey = "codex:s9"), wake = true).title,
         )
     }
 
     @Test
     fun approval_band_stays_dark_when_the_coordinator_asks_for_no_wake() {
-        assertFalse(AlertNotices.build(alert(), monitorOnly = false, wake = false).wakeDisplay)
+        assertFalse(AlertNotices.build(alert(), wake = false).wakeDisplay)
     }
 
     @Test
     fun question_band_has_answer_later() {
-        val notice = AlertNotices.build(alert(kind = AlertKind.QUESTION), monitorOnly = false, wake = true)
+        val notice = AlertNotices.build(alert(kind = AlertKind.QUESTION), wake = true)
 
         assertEquals(listOf("answer", "later"), notice.actionIds())
         assertEquals(listOf("Answer", "Later"), notice.actions.map { it.label })
@@ -73,7 +73,7 @@ class AlertNoticesTest {
     @Test
     fun done_band_is_interactive_without_actions_and_12s() {
         for (kind in listOf(AlertKind.DONE, AlertKind.ERROR)) {
-            val notice = AlertNotices.build(alert(kind = kind), monitorOnly = false, wake = true)
+            val notice = AlertNotices.build(alert(kind = kind), wake = true)
 
             assertTrue("$kind", notice.interactive)
             assertTrue("$kind", notice.actions.isEmpty())
@@ -85,7 +85,7 @@ class AlertNoticesTest {
 
     @Test
     fun notice_kind_does_not_wake() {
-        val notice = AlertNotices.build(alert(kind = AlertKind.NOTICE), monitorOnly = false, wake = true)
+        val notice = AlertNotices.build(alert(kind = AlertKind.NOTICE), wake = true)
 
         assertFalse(notice.wakeDisplay)
         assertEquals(8_000L, notice.ttlMs)
@@ -95,16 +95,16 @@ class AlertNoticesTest {
 
     @Test
     fun footer_shows_plus_n_waiting() {
-        assertEquals("+2 waiting", AlertNotices.build(alert(waiting = 2), false, true).footer)
+        assertEquals("+2 waiting", AlertNotices.build(alert(waiting = 2), wake = true).footer)
         assertEquals(
             "+1 waiting",
-            AlertNotices.build(alert(kind = AlertKind.DONE, waiting = 1), false, true).footer,
+            AlertNotices.build(alert(kind = AlertKind.DONE, waiting = 1), wake = true).footer,
         )
-        assertNull(AlertNotices.build(alert(waiting = 0), false, true).footer)
+        assertNull(AlertNotices.build(alert(waiting = 0), wake = true).footer)
         // A refresh clears a count that no longer holds, instead of leaving it on screen.
-        assertEquals("+3 waiting", AlertNotices.update(alert(waiting = 3), false).footer)
-        assertEquals("", AlertNotices.update(alert(waiting = 0), false).footer)
-        assertEquals("TAP read", AlertNotices.update(alert(kind = AlertKind.DONE), false).footer)
+        assertEquals("+3 waiting", AlertNotices.update(alert(waiting = 3)).footer)
+        assertEquals("", AlertNotices.update(alert(waiting = 0)).footer)
+        assertEquals("TAP read", AlertNotices.update(alert(kind = AlertKind.DONE)).footer)
     }
 
     @Test
@@ -114,29 +114,27 @@ class AlertNoticesTest {
         val emoji = "😀".repeat(5_000)
         for (text in listOf(long, emoji)) {
             for (kind in AlertKind.values()) {
-                for (monitorOnly in listOf(false, true)) {
-                    val big = alert(
-                        kind = kind,
-                        waiting = Int.MAX_VALUE,
-                        sessionKey = "claude:" + text,
-                        title = text,
-                        body = text,
-                    )
-                    val notice = AlertNotices.build(big, monitorOnly, wake = true)
-                    assertTrue(notice.title!!.length <= 32)
-                    assertTrue(notice.footer!!.length <= 40)
-                    assertTrue(notice.body!!.length <= 8 * 44)
-                    assertTrue(notice.actions.size <= 3)
-                    assertTrue(notice.actions.all { it.label.length <= 16 })
-                    val update = AlertNotices.update(big, monitorOnly)
-                    assertTrue(update.title!!.length <= 32)
-                    assertTrue(update.footer!!.length <= 40)
-                }
+                val big = alert(
+                    kind = kind,
+                    waiting = Int.MAX_VALUE,
+                    sessionKey = "claude:" + text,
+                    title = text,
+                    body = text,
+                )
+                val notice = AlertNotices.build(big, wake = true)
+                assertTrue(notice.title!!.length <= 32)
+                assertTrue(notice.footer!!.length <= 40)
+                assertTrue(notice.body!!.length <= 8 * 44)
+                assertTrue(notice.actions.size <= 3)
+                assertTrue(notice.actions.all { it.label.length <= 16 })
+                val update = AlertNotices.update(big)
+                assertTrue(update.title!!.length <= 32)
+                assertTrue(update.footer!!.length <= 40)
             }
             AlertNotices.brief(text, text)
-            AlertNotices.statusNotice(session(AgentStatus.NEEDS_YOU).copy(title = text), text, monitorOnly = false)
+            AlertNotices.statusNotice(session(AgentStatus.NEEDS_YOU).copy(title = text), text)
             AlertNotices.statusNotice(
-                session(AgentStatus.ERROR).copy(title = text, statusDetail = text), text, monitorOnly = false,
+                session(AgentStatus.ERROR).copy(title = text, statusDetail = text), text,
             )
             val reader = AlertNotices.outputReader(
                 alert(kind = AlertKind.DONE, title = text, body = text),
@@ -149,47 +147,33 @@ class AlertNoticesTest {
     }
 
     @Test
-    fun monitor_only_approval_has_no_allow_deny() {
-        val notice = AlertNotices.build(alert(), monitorOnly = true, wake = true)
-
-        assertEquals(listOf("more"), notice.actionIds())
-        assertEquals("Run npm test · Monitor only — approve on laptop", notice.body)
+    fun approval_always_offers_allow_and_deny_unless_cut() {
+        // There is no monitor-only band: with no secure link the press says so, the band does not.
+        val notice = AlertNotices.build(alert(), wake = true)
+        assertEquals(listOf("allow", "deny", "more"), notice.actionIds())
+        assertEquals("Run npm test", notice.body)
         assertTrue(notice.wakeDisplay)
         assertEquals(45_000L, notice.ttlMs)
+
+        // Only a command agentd had to cut loses Allow (R128).
+        assertEquals(listOf("deny", "more"), AlertNotices.build(alert().copy(truncated = true), wake = true).actionIds())
     }
 
     @Test
-    fun monitor_only_suffix_survives_a_long_body() {
-        val notice = AlertNotices.build(alert(body = "x".repeat(10_000)), monitorOnly = true, wake = true)
-
-        assertTrue(notice.body!!.endsWith("Monitor only — approve on laptop"))
-        assertTrue(notice.body!!.length <= 8 * 44)
-    }
-
-    @Test
-    fun monitor_only_link_keeps_v1_status_attention_with_approve_on_laptop_copy() {
+    fun v1_status_notice_keeps_the_summary_and_offers_no_action() {
         val needs = session(AgentStatus.NEEDS_YOU).copy(
+            provider = AgentProvider.OPENCLAW,
             pendingRequest = AgentPendingRequest(PendingRequestKind.PERMISSION, "Run command", 42),
         )
-        val stored = mutableMapOf<String, String>()
-        val engine = AttentionDecisionEngine(stored::get) { key, value -> stored[key] = value }
+        val notice = AlertNotices.statusNotice(needs, summary = "wants to run Bash")
 
-        // The v1 engine still fires for the session on a link that cannot steer.
-        val pending = engine.pending(listOf(needs)).single()
-        val notice = AlertNotices.statusNotice(pending.session, summary = "wants to run Bash", monitorOnly = true)
-
-        assertEquals("Monitor only — approve on laptop", notice.body)
+        assertEquals("wants to run Bash", notice.body)
         assertTrue(notice.actions.isEmpty())
         assertTrue(notice.interactive)
         assertEquals("TAP open", notice.footer)
-        assertEquals("my-repo", notice.title)
-
-        // OpenClaw, which is not agentd's to steer, keeps its own summary.
-        val own = AlertNotices.statusNotice(needs, summary = "wants to run Bash", monitorOnly = false)
-        assertEquals("wants to run Bash", own.body)
         // An error has nothing to approve, so it says what failed.
         val failed = AlertNotices.statusNotice(
-            session(AgentStatus.ERROR).copy(statusDetail = "Process failed"), summary = "", monitorOnly = true,
+            session(AgentStatus.ERROR).copy(statusDetail = "Process failed"), summary = "",
         )
         assertEquals("Process failed", failed.body)
     }
@@ -280,9 +264,9 @@ class AlertNoticesTest {
     fun cuts_never_end_on_half_a_surrogate_pair() {
         val emoji = "\uD83D\uDE00".repeat(40)
         val titles = listOf(
-            AlertNotices.build(alert(kind = AlertKind.NOTICE, title = emoji), false, false).title!!,
+            AlertNotices.build(alert(kind = AlertKind.NOTICE, title = emoji), wake = false).title!!,
             AlertNotices.brief(emoji, "x").title!!,
-            AlertNotices.statusNotice(session(AgentStatus.ERROR).copy(title = emoji), "", false).title!!,
+            AlertNotices.statusNotice(session(AgentStatus.ERROR).copy(title = emoji), "").title!!,
         )
         for (title in titles) assertFalse(title, Character.isHighSurrogate(title.last()))
     }

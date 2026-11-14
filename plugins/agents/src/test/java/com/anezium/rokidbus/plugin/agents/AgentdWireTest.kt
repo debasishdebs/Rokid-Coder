@@ -279,13 +279,14 @@ class AgentdWireTest {
         conn.message(HELLO_ACK)
         conn.message(alertLine)
         val up = harness.events[0] as AgentdEvent.LinkUp
-        assertFalse(up.secure)
+        // The dialled link is wss only, so once bound it steers.
+        assertTrue(up.secure)
         assertTrue((harness.events[1] as AgentdEvent.Action).action is AgentdAction.Alert)
         assertEquals(2, harness.events.size)
 
         val sentBefore = conn.sent.size
-        assertEquals(AgentdWire.Result.MonitorOnly, harness.client.decideApproval("r1", ApprovalDecision.ALLOW))
-        assertEquals(sentBefore, conn.sent.size)
+        assertEquals(AgentdWire.Result.Sent, harness.client.decideApproval("r1", ApprovalDecision.ALLOW))
+        assertEquals(sentBefore + 1, conn.sent.size)
 
         harness.client.stop(clearSessions = false)
         assertEquals(AgentdEvent.LinkDown(up.generation), harness.events.last())
@@ -471,13 +472,29 @@ class AgentdWireTest {
         val events = CopyOnWriteArrayList<AgentdEvent>()
         @Volatile var onEvent: (AgentdEvent) -> Unit = {}
         private val http = FakeWebSocketClient()
-        val client = AgentdClient(http, AgentSessionStore(), scope, "test") { event ->
+        val client = AgentdClient(
+            OkHttpClient(),
+            AgentSessionStore(),
+            scope,
+            "test",
+            FixturePhoneTlsIdentity(),
+            pinnedClient = { http },
+        ) { event ->
             events += event
             onEvent(event)
         }
 
         init {
-            client.start(AgentdConfig(host = "127.0.0.1", port = 8790, token = "secret", name = "Desk"))
+            client.start(
+                AgentdConfig(
+                    host = "127.0.0.1",
+                    port = 8790,
+                    token = "secret",
+                    name = "Desk",
+                    fp = FixturePhoneTlsIdentity.FINGERPRINT,
+                    steer = "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJ-0123",
+                ),
+            )
         }
 
         fun connection(index: Int): FakeConnection {
@@ -529,6 +546,6 @@ class AgentdWireTest {
     }
 
     private companion object {
-        const val HELLO_ACK = """{"type":"hello_ack","v":1,"server":{"machineName":"Desk"}}"""
+        const val HELLO_ACK = """{"type":"hello_ack","v":1,"steering":true,"server":{"machineName":"Desk"}}"""
     }
 }

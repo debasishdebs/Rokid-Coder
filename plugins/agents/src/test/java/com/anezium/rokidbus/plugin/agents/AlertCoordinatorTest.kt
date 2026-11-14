@@ -375,23 +375,23 @@ class AlertCoordinatorTest {
     }
 
     @Test
-    fun allow_on_insecure_briefs_monitor_only_and_writes_nothing() {
-        // On a fresh band the press is still display evidence; only the monitor ack goes out.
+    fun no_secure_link_press_shows_computer_not_connected() {
+        // On a fresh band the press is still display evidence; only that monitor ack goes out.
         val fresh = AlertCoordinator(clock = { 0L })
         fresh.onAlert(alert())
         val first = fresh.onAction("A", "allow", secure = false)
         assertEquals(listOf("alert_shown"), types(first))
-        assertTrue(Effect.Brief("Monitor only", "approve on laptop") in first)
+        assertTrue(Effect.Brief("Not sent", "Computer not connected") in first)
 
         val coordinator = AlertCoordinator(clock = { 0L })
         coordinator.onAlert(alert())
         coordinator.onShownEvidence("A")
         assertEquals(
-            listOf(Effect.Brief("Monitor only", "approve on laptop")),
+            listOf(Effect.Brief("Not sent", "Computer not connected")),
             coordinator.onAction("A", "allow", secure = false),
         )
         assertEquals(
-            listOf(Effect.Brief("Monitor only", "approve on laptop")),
+            listOf(Effect.Brief("Not sent", "Computer not connected")),
             coordinator.onAction("A", "deny", secure = false),
         )
     }
@@ -567,11 +567,11 @@ class AlertCoordinatorTest {
     }
 
     @Test
-    fun question_confirm_over_a_plaintext_link_briefs_monitor_only() {
+    fun question_confirm_with_no_secure_link_briefs_computer_not_connected() {
         val coordinator = AlertCoordinator(clock = { 0L })
         openQuestion(coordinator)
         assertEquals(
-            listOf(Effect.Brief("Monitor only", "approve on laptop")),
+            listOf(Effect.Brief("Not sent", "Computer not connected")),
             coordinator.onQuestionConfirm("Q", answers, secure = false),
         )
     }

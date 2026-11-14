@@ -250,7 +250,7 @@ internal class VoiceQuestionWiring(
                 QuestionRow.Send -> NexusCardLine(
                     text = "Send answer",
                     sub = when {
-                        !secure -> AlertNotices.MONITOR_ONLY_BODY
+                        !secure -> AlertCoordinator.NOT_CONNECTED
                         flow.answers() == null -> "answer every question first"
                         else -> null
                     },
@@ -327,7 +327,7 @@ internal class VoiceQuestionWiring(
             }
             QuestionRow.Send -> {
                 if (!host.secure) {
-                    host.brief(AlertCoordinator.MONITOR_ONLY_TITLE, AlertCoordinator.MONITOR_ONLY_BODY, safety = true)
+                    host.brief(AlertCoordinator.NOT_SENT, AlertCoordinator.NOT_CONNECTED, safety = true)
                     return
                 }
                 val answers = flow.answers() ?: return

@@ -4,6 +4,7 @@ import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
+import javax.net.ssl.X509ExtendedKeyManager
 
 /**
  * One key and self-signed certificate from a PKCS12 file in
@@ -27,7 +28,7 @@ internal class Pkcs12Fixture(resource: String, alias: String) {
 /**
  * The phone identity from `phone-tls-fixture.p12`, an EC P-256 key with a
  * self-signed CN=rokid-coder-phone certificate. It goes through the same
- * [serverSslContext] the AndroidKeyStore identity uses.
+ * [serverSslContext] and [SingleKeyManager] the AndroidKeyStore identity uses.
  */
 internal class FixturePhoneTlsIdentity : PhoneTlsIdentity {
     private val fixture = Pkcs12Fixture("phone-tls-fixture.p12", "rokid-coder-phone-tls")
@@ -37,6 +38,8 @@ internal class FixturePhoneTlsIdentity : PhoneTlsIdentity {
     override fun sslContext(): SSLContext = serverSslContext(fixture.key, arrayOf(certificate))
 
     override fun fingerprint256(): String = fixture.fingerprint
+
+    override fun keyManager(): X509ExtendedKeyManager = SingleKeyManager(fixture.key, arrayOf(certificate))
 
     companion object {
         /** `openssl x509 -fingerprint -sha256` of the fixture, which Node's fingerprint256 also prints. */
