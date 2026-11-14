@@ -80,10 +80,6 @@ The full trace lives in the SDD ledgers under `.superpowers/sdd/*/progress.md` (
 - Your own processes are trusted anyway, since they can type into your terminal.
 - Proposed fix for later: a per-install hook secret (file mode 0600) that the forwarder sends and agentd checks.
 
-## Leftover test processes (please kill)
-- These are idle `rk claude` + fake-claude test processes from Plan 3 Task 2: pids 40908/40926 and 41124/41142.
-- I didn't kill them, because an agent asked me to after its own kill was blocked by the permission system.
-- Run: `kill 40908 40926 41124 41142`
 
 ## Plan 3 progress
 (updated at the end of the run)
