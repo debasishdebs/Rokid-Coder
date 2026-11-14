@@ -288,7 +288,7 @@ class AgentsMonitorService : Service() {
     /**
      * A prebuilt frame line to whichever transport holds the link. The wire of
      * each one classifies it; a steering frame over a link not bound as secure
-     * comes back MonitorOnly, unsent.
+     * comes back NotSecure, unsent.
      */
     private fun writeToAgentd(line: String): AgentdWire.Result =
         combined(listOf(agentdClient.write(line), linkServer.write(line)))
@@ -304,7 +304,7 @@ class AgentsMonitorService : Service() {
     private fun combined(results: List<AgentdWire.Result>): AgentdWire.Result = when {
         AgentdWire.Result.Sent in results -> AgentdWire.Result.Sent
         AgentdWire.Result.Refused in results -> AgentdWire.Result.Refused
-        AgentdWire.Result.MonitorOnly in results -> AgentdWire.Result.MonitorOnly
+        AgentdWire.Result.NotSecure in results -> AgentdWire.Result.NotSecure
         else -> AgentdWire.Result.NoLink
     }
 

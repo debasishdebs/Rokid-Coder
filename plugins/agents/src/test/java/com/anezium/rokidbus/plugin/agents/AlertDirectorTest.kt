@@ -713,7 +713,7 @@ class AlertDirectorTest {
     fun send_without_link_records_nothing() {
         up()
         feed(alert(id = "A"))
-        writeResult = AgentdWire.Result.MonitorOnly
+        writeResult = AgentdWire.Result.NotSecure
         director.onBandAction(AlertCoordinator.DENY)
         assertEquals(null, entry().actionLabel)
 

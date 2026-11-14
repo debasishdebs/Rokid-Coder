@@ -831,7 +831,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     /**
      * Every write leaves through the monitor service, which hands it to
      * [AgentdWire.write]: a steering frame over a link not bound as secure comes
-     * back MonitorOnly and is never sent. The menu has already greyed those
+     * back NotSecure and is never sent. The menu has already greyed those
      * rows, so this is the second lock, not the first.
      */
     private fun sendControl(command: ControlMenu.Command, sessionKey: String) {

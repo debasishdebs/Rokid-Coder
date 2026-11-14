@@ -68,7 +68,7 @@ class AgentdWireTest {
     // ------------------------------------------------------------ the gate
 
     @Test
-    fun steering_types_on_insecure_binding_return_MonitorOnly_and_write_nothing() {
+    fun steering_types_on_insecure_binding_return_NotSecure_and_write_nothing() {
         assertEquals(
             setOf(
                 "approval_decision", "session_input", "thread_start", "alert_action", "followup",
@@ -80,14 +80,14 @@ class AgentdWireTest {
         wire.bind(1L, secure = false)
 
         steeringTypes.forEach { type ->
-            assertEquals(type, AgentdWire.Result.MonitorOnly, wire.write(frameOf(type)))
+            assertEquals(type, AgentdWire.Result.NotSecure, wire.write(frameOf(type)))
         }
         // The v1 builders the transports already used are classified the same way.
         listOf(
             AgentdProtocolCodec.approvalDecision("r1", ApprovalDecision.ALLOW),
             AgentdProtocolCodec.sessionInput("r2", "s1", "ls"),
             AgentdProtocolCodec.threadStart("r3", AgentProvider.CLAUDE, "/tmp", "hi"),
-        ).forEach { line -> assertEquals(line, AgentdWire.Result.MonitorOnly, wire.write(line)) }
+        ).forEach { line -> assertEquals(line, AgentdWire.Result.NotSecure, wire.write(line)) }
         assertTrue(written.isEmpty())
         assertFalse(wire.secure.value)
     }
@@ -96,10 +96,10 @@ class AgentdWireTest {
     fun unknown_type_is_steering() {
         assertTrue(FrameClass.isSteering("not_a_frame"))
         wire.bind(1L, secure = false)
-        assertEquals(AgentdWire.Result.MonitorOnly, wire.write("""{"type":"not_a_frame"}"""))
+        assertEquals(AgentdWire.Result.NotSecure, wire.write("""{"type":"not_a_frame"}"""))
         // A frame whose type cannot be read is no more trusted than an unknown one.
-        assertEquals(AgentdWire.Result.MonitorOnly, wire.write("""{"v":2}"""))
-        assertEquals(AgentdWire.Result.MonitorOnly, wire.write("""{"type":7,"v":2}"""))
+        assertEquals(AgentdWire.Result.NotSecure, wire.write("""{"v":2}"""))
+        assertEquals(AgentdWire.Result.NotSecure, wire.write("""{"type":7,"v":2}"""))
         assertTrue(written.isEmpty())
 
         wire.bind(2L, secure = true)
@@ -117,7 +117,7 @@ class AgentdWireTest {
     }
 
     @Test
-    fun unbind_then_write_steering_is_NoLink_or_MonitorOnly_never_Sent() {
+    fun unbind_then_write_steering_is_NoLink_or_NotSecure_never_Sent() {
         assertEquals(AgentdWire.Result.NoLink, wire.write(frameOf("alert_action")))
         assertEquals(AgentdWire.Result.NoLink, wire.write(frameOf("alert_shown")))
 
@@ -154,7 +154,7 @@ class AgentdWireTest {
         wire.bind(2L, secure = false)
 
         assertFalse(wire.secure.value)
-        assertEquals(AgentdWire.Result.MonitorOnly, wire.write(frameOf("alert_action")))
+        assertEquals(AgentdWire.Result.NotSecure, wire.write(frameOf("alert_action")))
         assertTrue(written.isEmpty())
     }
 
@@ -220,7 +220,7 @@ class AgentdWireTest {
         wire.bind(1L, secure = false)
         listOf(" alert_shown", "alert_shown ", "\talert_shown", "ALERT_SHOWN").forEach { type ->
             val line = JSONObject().put("type", type).put("v", 2).put("id", "a").toString()
-            assertEquals(type, AgentdWire.Result.MonitorOnly, wire.write(line))
+            assertEquals(type, AgentdWire.Result.NotSecure, wire.write(line))
         }
         assertTrue(written.isEmpty())
 

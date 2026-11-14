@@ -31,7 +31,7 @@ class AgentdWire(private val raw: (String) -> Boolean) {
 
     sealed interface Result {
         object Sent : Result
-        object MonitorOnly : Result
+        object NotSecure : Result
         object NoLink : Result
 
         /** Not one JSON object on one line: nothing was written. */
@@ -66,7 +66,7 @@ class AgentdWire(private val raw: (String) -> Boolean) {
         return synchronized(lock) {
             when {
                 boundGeneration == null -> Result.NoLink
-                steering && !_secure.value -> Result.MonitorOnly
+                steering && !_secure.value -> Result.NotSecure
                 raw(bytes) -> Result.Sent
                 else -> Result.NoLink
             }
