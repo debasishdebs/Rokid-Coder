@@ -48,7 +48,6 @@ class AlertDirectorTest {
         secure = { secure },
         glasses = { glasses },
         post = { it() },
-        clock = { now },
     )
 
     private fun alert(
@@ -125,6 +124,9 @@ class AlertDirectorTest {
         director.onBandAction("deny")
 
         assertFalse("alert_action" in types())
+        // The band is still up, so the brief waits for it.
+        assertTrue(glasses.log.none { it.startsWith("brief") })
+        director.onBandClosed(NexusNoticeCloseReason.TIMEOUT)
         assertEquals("brief Monitor only", glasses.log.last())
     }
 
@@ -148,6 +150,8 @@ class AlertDirectorTest {
         director.onCardConfirm("B", "allow")
 
         assertTrue("invalidate B" in glasses.log)
+        assertTrue(glasses.log.none { it.startsWith("brief") })
+        director.onBandClosed(NexusNoticeCloseReason.TIMEOUT)
         assertEquals("brief No longer waiting", glasses.log.last())
         assertFalse("alert_action" in types())
     }
@@ -189,25 +193,81 @@ class AlertDirectorTest {
     }
 
     @Test
-    fun the_close_of_a_band_we_just_replaced_is_not_the_new_bands() {
+    fun replaced_by_other_plugin_then_retry_reshows() {
         up()
         feed(alert(id = "A"))
         feed(alert(id = "B", sessionKey = "claude:s2"))
-        // A legacy hub reports the replaced band's close after the new show.
+        // Another plugin takes the band right after our own show: no grace, it is a takeover.
         director.onBandClosed(NexusNoticeCloseReason.REPLACED)
         director.onBandAction("allow")
+        assertEquals("a press on a band that is gone writes nothing", emptyList<String>(), types())
 
+        feed(alert(id = "B", reason = "retry", sessionKey = "claude:s2"))
+
+        assertEquals("show CLAUDE · approve", glasses.log.last())
+        assertFalse("never an update to a band that is gone", glasses.log.last().startsWith("update"))
+        assertFalse(glasses.bands.last().wakeDisplay)
+
+        // The band is up again, so a press answers it.
+        director.onBandAction("allow")
         assertEquals("B", written.last().getString("id"))
-        assertEquals(listOf("alert_shown", "alert_action"), types())
+    }
 
-        // Past the grace window a REPLACED close is another plugin taking the band.
-        now = 10_000L
-        feed(alert(id = "C", sessionKey = "claude:s3"))
-        now = 20_000L
-        director.onBandClosed(NexusNoticeCloseReason.REPLACED)
+    @Test
+    fun a_timed_out_band_is_shown_again_even_for_an_update_frame() {
+        up()
+        feed(alert(waiting = 1))
+        director.onBandClosed(NexusNoticeCloseReason.TIMEOUT)
+        feed(alert(reason = "update", waiting = 2))
+
+        assertEquals("show CLAUDE · approve", glasses.log.last())
+        assertEquals("+2 waiting", glasses.bands.last().footer)
+    }
+
+    @Test
+    fun brief_never_replaces_up_band() {
+        up()
+        feed(alert())
+        director.onBrief("Not applied", "try again")
+        director.onBandAction("allow")
+        // The coordinator's own brief, from an answer it refuses, waits too.
+        secure = false
         director.onBandAction("allow")
 
-        assertEquals(2, written.size)
+        assertEquals(listOf("hide", "show CLAUDE · approve"), glasses.log)
+    }
+
+    @Test
+    fun queued_brief_shows_after_band_closes() {
+        up()
+        feed(alert())
+        director.onBrief("Mode reset", "first")
+        director.onBrief("Not applied", "newest")
+        assertEquals(listOf("hide", "show CLAUDE · approve"), glasses.log)
+
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+
+        // Newest wins: each brief would replace the one before it.
+        assertEquals("brief Not applied", glasses.log.last())
+        assertEquals(3, glasses.log.size)
+    }
+
+    @Test
+    fun a_brief_with_no_band_up_shows_at_once() {
+        up()
+        director.onBrief("Not applied", "x")
+
+        assertEquals("brief Not applied", glasses.log.last())
+    }
+
+    @Test
+    fun a_brief_queued_behind_a_band_shows_when_agentd_closes_it() {
+        up()
+        feed(alert())
+        director.onBrief("Followup closed", "x")
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("A", "answered")))
+
+        assertEquals(listOf("hide", "show CLAUDE · approve", "hide", "brief Followup closed"), glasses.log)
     }
 
     @Test

@@ -67,8 +67,8 @@ object AlertNotices {
 
     /** A one-line message about what the wearer just did or could not do. */
     fun brief(title: String, body: String): NexusNotice = NexusNotice(
-        title = title.singleLine(TITLE_CHARS).ifEmpty { "Agents" },
-        body = body.singleLine(BRIEF_BODY_CHARS).ifEmpty { null },
+        title = title.line(TITLE_CHARS).ifEmpty { "Agents" },
+        body = body.line(BRIEF_BODY_CHARS).ifEmpty { null },
         ttlMs = NOTICE_TTL_MS,
     )
 
@@ -80,11 +80,11 @@ object AlertNotices {
     fun statusNotice(session: AgentSession, summary: String, monitorOnly: Boolean): NexusNotice {
         val waiting = session.status == AgentStatus.NEEDS_YOU
         return NexusNotice(
-            title = session.displayTitle.singleLine(TITLE_CHARS),
+            title = session.displayTitle.line(TITLE_CHARS),
             body = when {
                 waiting && monitorOnly -> MONITOR_ONLY_BODY
-                waiting -> summary.singleLine(BRIEF_BODY_CHARS)
-                else -> (session.statusDetail ?: "stopped with an error").singleLine(BRIEF_BODY_CHARS)
+                waiting -> summary.line(BRIEF_BODY_CHARS)
+                else -> (session.statusDetail ?: "stopped with an error").line(BRIEF_BODY_CHARS)
             },
             footer = "TAP open",
             interactive = true,
@@ -104,15 +104,19 @@ object AlertNotices {
     ): NexusReader {
         val summary = alert.body.trim().ifEmpty { alert.title.trim() }.ifEmpty { providerLabel(alert) }
         val header = NexusReaderSegment(NexusReaderSegmentKind.HEADER, cut(summary, READER_SEGMENT_CHARS))
-        val full = conversation.ifEmpty {
-            session?.lastAssistantText?.let(::proseSegments).orEmpty()
+        val room = READER_TOTAL_CHARS - header.text.length
+        // A conversation keeps its newest turns; one message read from the top keeps its start.
+        val rest = if (conversation.isNotEmpty()) {
+            fitNewest(conversation, room)
+        } else {
+            fitOldest(session?.lastAssistantText?.let(::proseSegments).orEmpty(), room)
         }
-        val segments = listOf(header) + fit(full, READER_TOTAL_CHARS - header.text.length)
+        val segments = listOf(header) + rest
         return NexusReader(
-            title = (session?.displayTitle ?: alert.title).singleLine(READER_TITLE_CHARS).ifEmpty { "Agents" },
+            title = (session?.displayTitle ?: alert.title).line(READER_TITLE_CHARS).ifEmpty { "Agents" },
             subtitle = "${providerLabel(alert)} · ${alert.kind.wire}".take(READER_LINE_CHARS),
             footer = "swipe scroll · 2-tap back",
-            contentKey = digest("${alert.id}:${segments.size}:${segments.sumOf { it.text.length }}"),
+            contentKey = digest(alert.id + segments.joinToString("\u0000") { it.text }),
             handlesBack = true,
             segments = segments,
             anchor = NexusReaderAnchor.TOP,
@@ -135,14 +139,14 @@ object AlertNotices {
             AlertKind.QUESTION -> "$label · question"
             AlertKind.DONE -> "$label · done"
             AlertKind.ERROR -> "$label · error"
-            AlertKind.NOTICE -> alert.title.singleLine(TITLE_CHARS).ifEmpty { "$label · notice" }
+            AlertKind.NOTICE -> alert.title.line(TITLE_CHARS).ifEmpty { "$label · notice" }
         }
         return cut(text, TITLE_CHARS)
     }
 
     private fun body(alert: AgentdAction.Alert, monitorOnly: Boolean): String? {
         val monitor = monitorOnly && alert.kind == AlertKind.APPROVAL
-        val text = alert.body.singleLine(Int.MAX_VALUE)
+        val text = alert.body.line(Int.MAX_VALUE)
         // The suffix is the wearer's way out, so it never pays for a long body.
         val room = if (monitor) BODY_CHARS - LINE_CHARS else BODY_CHARS
         val capped = if (text.length > room) cut(text, room - 1) + "…" else text
@@ -185,8 +189,20 @@ object AlertNotices {
             .filter { it.isNotBlank() }
             .map { NexusReaderSegment(NexusReaderSegmentKind.PROSE, it) }
 
+    private fun fitOldest(segments: List<NexusReaderSegment>, chars: Int): List<NexusReaderSegment> {
+        val kept = mutableListOf<NexusReaderSegment>()
+        var used = 0
+        for (segment in segments) {
+            val text = cut(segment.text, READER_SEGMENT_CHARS)
+            if (kept.size >= READER_MAX_SEGMENTS - 1 || used + text.length > chars) break
+            kept += segment.copy(text = text)
+            used += text.length
+        }
+        return kept
+    }
+
     /** Keeps the newest segments that fit the reader's caps, each cut to the segment cap. */
-    private fun fit(segments: List<NexusReaderSegment>, chars: Int): List<NexusReaderSegment> {
+    private fun fitNewest(segments: List<NexusReaderSegment>, chars: Int): List<NexusReaderSegment> {
         val room = chars.coerceAtLeast(0)
         val kept = ArrayDeque<NexusReaderSegment>()
         var used = 0
@@ -198,6 +214,11 @@ object AlertNotices {
         }
         return kept.toList()
     }
+
+    /** Whitespace collapsed to single spaces and cut surrogate-safely. */
+    private fun String.line(max: Int): String = cut(replace(WHITESPACE, " ").trim(), max)
+
+    private val WHITESPACE = Regex("\\s+")
 
     /** Never ends on half a surrogate pair. */
     private fun cut(text: String, max: Int): String {

@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.plugin.agents
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.SystemClock
 import org.json.JSONObject
 
@@ -105,11 +106,14 @@ internal fun linkWindowDeadline(now: Long): Long =
 internal fun isLinkWindowDeadlineOpen(deadline: Long, now: Long): Boolean =
     deadline - now in 1L..LINK_WINDOW_DURATION_MS
 
-class AgentsConfigStore(
-    context: Context,
-    private val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
+class AgentsConfigStore internal constructor(
+    private val prefs: SharedPreferences,
+    private val elapsedRealtime: () -> Long,
 ) {
-    private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    constructor(
+        context: Context,
+        elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
+    ) : this(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE), elapsedRealtime)
 
     fun load(): AgentsConfig {
         val agentdHost = prefs.getString(KEY_AGENTD_HOST, null)
@@ -138,8 +142,15 @@ class AgentsConfigStore(
     }
 
     fun saveAgentd(config: AgentdConfig?, enabled: Boolean) {
+        val current = load().agentd
         prefs.edit().apply {
             putBoolean(KEY_AGENTD_ENABLED, enabled)
+            // A different computer, or none: what the old one proved is not this one's.
+            if (config == null ||
+                (current != null && (current.host != config.host || current.port != config.port || current.token != config.token))
+            ) {
+                remove(v2SeenKey(DIALLED))
+            }
             if (config == null) {
                 remove(KEY_AGENTD_HOST)
                 remove(KEY_AGENTD_PORT)
@@ -309,8 +320,32 @@ class AgentsConfigStore(
         prefs.edit().remove(KEY_WAS_SUSPENDED).remove(KEY_HEARTBEAT_AT).apply()
     }
 
+    /**
+     * Records that this computer has spoken protocol v2 over a link that can
+     * steer. Sticky (R92): v1 attention for its sessions stays off from then on,
+     * even while the link is down, until the pairing is forgotten.
+     */
+    fun markV2Seen(machineId: String?) {
+        prefs.edit().putBoolean(v2SeenKey(keyFor(machineId)), true).apply()
+    }
+
+    /**
+     * True when the v1 status band must stay silent for [session]: agentd's own
+     * providers on a link that steers, or on a computer that has shown v2 before.
+     */
+    fun v1AttentionSuppressed(session: AgentSession, linkSecure: Boolean): Boolean =
+        session.provider in AgentProvider.AGENTD_PROVIDERS &&
+            (linkSecure || prefs.getBoolean(v2SeenKey(keyFor(session.machineId)), false))
+
+    /** A LAN-linked computer is keyed by its id; the one this phone dials is a single pairing. */
+    private fun keyFor(machineId: String?): String =
+        machineId?.takeIf { prefs.getString(machineKey(it), null) != null } ?: DIALLED
+
+    private fun v2SeenKey(key: String) = "$KEY_V2_SEEN_PREFIX$key"
+
     fun forgetMachine(machineId: String) {
         prefs.edit()
+            .remove(v2SeenKey(machineId))
             .remove(machineKey(machineId))
             .remove("$KEY_MACHINE_NAME_PREFIX$machineId")
             .remove("$KEY_MACHINE_SEEN_PREFIX$machineId")
@@ -363,7 +398,8 @@ class AgentsConfigStore(
                 .filter {
                     it.startsWith(KEY_MACHINE_PREFIX) ||
                         it.startsWith(KEY_MACHINE_NAME_PREFIX) ||
-                        it.startsWith(KEY_MACHINE_SEEN_PREFIX)
+                        it.startsWith(KEY_MACHINE_SEEN_PREFIX) ||
+                        it.startsWith(KEY_V2_SEEN_PREFIX)
                 }
                 .forEach(::remove)
         }.apply()
@@ -411,6 +447,8 @@ class AgentsConfigStore(
         const val KEY_PROJECTS_PREFIX = "machine.projects."
         const val MAX_PROJECTS_PER_MACHINE = 30
         const val KEY_LINK_WINDOW_DEADLINE = "machine.link_window_deadline"
+        const val KEY_V2_SEEN_PREFIX = "machine.v2seen."
+        const val DIALLED = "dialled"
     }
 }
 

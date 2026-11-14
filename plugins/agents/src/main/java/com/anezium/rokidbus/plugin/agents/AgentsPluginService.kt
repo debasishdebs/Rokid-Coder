@@ -214,18 +214,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
         serviceScope.launch {
             AgentsRuntime.linkedMachines.collect { machineName ->
-                val client = nexusClient ?: return@collect
-                if (!client.supportsNoticeSurface) return@collect
-                showOtherNotice(
-                    client,
-                    NexusNotice(
-                        title = "Computer linked",
-                        body = "$machineName · its sessions appear here".singleLine(
-                            NOTICE_BODY_CHARS,
-                        ),
-                        ttlMs = SHORT_TTL_MS,
-                    ),
-                )
+                showBriefNotice("Computer linked", "$machineName · its sessions appear here")
             }
         }
     }
@@ -346,10 +335,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     override fun onNexusNoticeClosed(reason: NexusNoticeCloseReason) {
         if (!v2BandUp) return
         AgentsRuntime.alertDirector?.onBandClosed(reason)
-        // A close of a band this plugin replaced says nothing about the band now up.
-        if (reason != NexusNoticeCloseReason.OWNER && reason != NexusNoticeCloseReason.REPLACED) {
-            v2BandUp = false
-        }
+        // Our own hide already cleared it; any other close means no band of ours is up.
+        if (reason != NexusNoticeCloseReason.OWNER) v2BandUp = false
     }
 
     override fun onDestroy() {
@@ -376,9 +363,13 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         if (!client.supportsNoticeSurface) return
         // On a secure link agentd's own alerts speak for its providers (R40); the
         // status path stays for OpenClaw, and for a link that cannot steer.
+        // An approval's band is never replaced by this one; the wearer's answer comes first.
+        if (v2BandUp) return
+        // A computer that has spoken v2 stays off this path even while its link is down (R92).
         val steering = AgentsRuntime.link.value?.secure == true
-        val pending = attention.pending(AgentsRuntime.store.sessions.value)
-            .filter { !steering || it.session.provider !in AgentProvider.AGENTD_PROVIDERS }
+        val pending = attention.pending(AgentsRuntime.store.sessions.value) { session ->
+            configStore.v1AttentionSuppressed(session, steering)
+        }
         if (pending.isEmpty()) return
         val notice = if (pending.size == 1) singleNotice(pending.single()) else groupNotice(pending)
         if (showOtherNotice(client, notice) != NexusSdkResult.SENT) return
@@ -442,7 +433,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         nexusClient?.hideNotice()
     }
 
-    override fun brief(title: String, body: String) = showBriefNotice(title, body)
+    override fun brief(title: String, body: String) = showBriefNow(title, body)
 
     override fun openOutput(alert: AgentdAction.Alert) {
         val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
@@ -879,7 +870,13 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     private fun thinkingVerb(): String = THINKING_VERBS[thinkingVerbIndex % THINKING_VERBS.size]
 
+    /** Every brief goes through the director, which holds it back while an alert band is up (R94). */
     private fun showBriefNotice(title: String, body: String) {
+        val director = AgentsRuntime.alertDirector
+        if (director != null) director.onBrief(title, body) else showBriefNow(title, body)
+    }
+
+    private fun showBriefNow(title: String, body: String) {
         val client = nexusClient ?: return
         if (!client.supportsNoticeSurface) return
         showOtherNotice(client, AlertNotices.brief(title, body))
@@ -1005,8 +1002,12 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                     tone = NexusRowTone.BODY,
                 ),
             )
-            add(choiceRow("Allow", "let it run", ApprovalDecision.ALLOW))
-            add(choiceRow("Deny", "tell the agent no", ApprovalDecision.DENY))
+            if (AgentsRuntime.link.value?.secure == true) {
+                add(choiceRow("Allow", "let it run", ApprovalDecision.ALLOW))
+                add(choiceRow("Deny", "tell the agent no", ApprovalDecision.DENY))
+            } else {
+                add(NexusCardLine(text = AlertNotices.MONITOR_ONLY_BODY, tone = NexusRowTone.DIM))
+            }
         }
         return card(
             title = session?.displayTitle?.singleLine(110) ?: alert.title.singleLine(110).ifEmpty { "Permission" },

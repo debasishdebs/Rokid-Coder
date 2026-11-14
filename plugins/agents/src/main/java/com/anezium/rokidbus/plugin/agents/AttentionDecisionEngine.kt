@@ -25,9 +25,12 @@ class AttentionDecisionEngine(
     private val readFingerprint: (String) -> String?,
     private val writeFingerprint: (String, String) -> Unit,
 ) {
-    fun pending(sessions: List<AgentSession>): List<AgentAttention> =
+    fun pending(
+        sessions: List<AgentSession>,
+        suppressed: (AgentSession) -> Boolean = { false },
+    ): List<AgentAttention> =
         sessions.mapNotNull { session ->
-            if (!session.status.deservesAttention) return@mapNotNull null
+            if (!session.status.deservesAttention || suppressed(session)) return@mapNotNull null
             val fingerprint = fingerprint(session)
             if (readFingerprint(session.key) == fingerprint) return@mapNotNull null
             AgentAttention(session, fingerprint)

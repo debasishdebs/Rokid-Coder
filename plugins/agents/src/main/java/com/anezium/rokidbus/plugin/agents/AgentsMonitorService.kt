@@ -171,11 +171,29 @@ class AgentsMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** Any v2 frame over a link that steers means v1 attention stays off for that computer for good (R92). */
+    private fun noteV2(event: AgentdEvent) {
+        val v2 = event is AgentdEvent.Action && when (event.action) {
+            is AgentdAction.Alert, is AgentdAction.AlertClosed, is AgentdAction.FollowupClosed,
+            is AgentdAction.ModeReset, is AgentdAction.Models, is AgentdAction.Ack,
+            -> true
+            else -> false
+        }
+        if (v2 && AgentsRuntime.link.value?.secure == true) {
+            configStore.markV2Seen(AgentsRuntime.store.linkMachine.value?.machineId)
+        }
+    }
+
     private fun startAlerts() {
         AgentsRuntime.alertDirector = alertDirector
         alertScope.launch { for (work in alertWork) work() }
         // Launched on Main.immediate, so each collector is subscribed before this returns.
-        alertScope.launch { AgentsRuntime.events.collect(alertDirector::onEvent) }
+        alertScope.launch {
+            AgentsRuntime.events.collect { event ->
+                noteV2(event)
+                alertDirector.onEvent(event)
+            }
+        }
         alertScope.launch {
             AgentsRuntime.store.sessions
                 .map { sessions -> sessions.mapTo(HashSet()) { it.key } as Set<String> }

@@ -32,8 +32,8 @@ interface AlertGlasses {
  *
  * It keeps what the SDK does not tell it. A notice close carries no identity, so
  * the director remembers which alert's band it put up last and passes that id to
- * the coordinator; a close that belongs to a band of its own it just replaced
- * is not the new band's.
+ * the coordinator. It also owns the band slot: a brief message never replaces an
+ * alert band that is up.
  */
 class AlertDirector(
     private val coordinator: AlertCoordinator,
@@ -41,11 +41,15 @@ class AlertDirector(
     private val secure: () -> Boolean,
     private val glasses: () -> AlertGlasses?,
     private val post: (() -> Unit) -> Unit,
-    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     /** The alert whose band the director put up and has not seen end. Only [post]ed work touches it. */
     private var bandId: String? = null
-    private var ignoreReplacedUntil = 0L
+
+    /** An alert whose band the hub took from us (REPLACED) or timed out: its next frame re-shows it. */
+    private var goneId: String? = null
+
+    /** The newest brief that arrived while a band was up; a brief never replaces an alert band (R94). */
+    private var pendingBrief: Pair<String, String>? = null
     private var boardKeys: Set<String> = emptySet()
 
     /** The current alert's `+N waiting`, for the board's own row; read on the main thread, where [post]ed work runs. */
@@ -54,12 +58,12 @@ class AlertDirector(
     fun onEvent(event: AgentdEvent) = post {
         when (event) {
             is AgentdEvent.LinkUp -> {
-                ignoreReplacedUntil = 0L
+                goneId = null
                 apply(coordinator.onLinkUp())
             }
             is AgentdEvent.LinkDown -> apply(coordinator.onLinkDown())
             is AgentdEvent.Action -> when (val action = event.action) {
-                is AgentdAction.Alert -> apply(coordinator.onAlert(action))
+                is AgentdAction.Alert -> apply(coordinator.onAlert(reshowIfGone(action)))
                 is AgentdAction.AlertClosed -> apply(coordinator.onAlertClosed(action.id, action.reason))
                 is AgentdAction.FollowupClosed -> apply(coordinator.invalidateSession(action.sessionKey))
                 else -> Unit
@@ -90,14 +94,24 @@ class AlertDirector(
 
     fun onBandClosed(reason: NexusNoticeCloseReason) = post {
         val id = bandId ?: return@post
-        // This plugin's own hide, or a band it replaced: the coordinator already moved on.
+        // This plugin's own hide: the coordinator already moved on.
         if (reason == NexusNoticeCloseReason.OWNER) return@post
-        if (reason == NexusNoticeCloseReason.REPLACED && clock() < ignoreReplacedUntil) {
-            ignoreReplacedUntil = 0L
-            return@post
-        }
         bandId = null
+        // Another plugin took the band, or it ran out: either way no band of ours is
+        // up, and the next frame for this alert must show it again (R93).
+        goneId = id.takeIf {
+            reason == NexusNoticeCloseReason.REPLACED || reason == NexusNoticeCloseReason.TIMEOUT
+        }
         apply(coordinator.onBandClosed(id, reason))
+    }
+
+    /**
+     * A message for the wearer that is not an alert. While an alert band is up it
+     * waits, the newest one alone since each would replace the last, and shows
+     * once the band is gone.
+     */
+    fun onBrief(title: String, body: String) = post {
+        if (bandId == null) glasses()?.brief(title, body) else pendingBrief = title to body
     }
 
     /** A confirm from a decision or question card bound to [alertId]. */
@@ -106,16 +120,26 @@ class AlertDirector(
     }
 
     private fun apply(effects: List<AlertCoordinator.Effect>) {
+        applyEffects(effects)
+        val brief = pendingBrief
+        if (brief != null && bandId == null) {
+            pendingBrief = null
+            glasses()?.brief(brief.first, brief.second)
+        }
+    }
+
+    private fun applyEffects(effects: List<AlertCoordinator.Effect>) {
         for (effect in effects) {
             when (effect) {
                 is AlertCoordinator.Effect.Show -> showBand(effect.alert, effect.wake)
                 is AlertCoordinator.Effect.Update -> updateBand(effect.alert)
                 AlertCoordinator.Effect.Hide -> {
                     bandId = null
+                    goneId = null
                     glasses()?.hideBand()
                 }
                 is AlertCoordinator.Effect.Send -> write(effect.line)
-                is AlertCoordinator.Effect.Brief -> glasses()?.brief(effect.title, effect.body)
+                is AlertCoordinator.Effect.Brief -> onBrief(effect.title, effect.body)
                 is AlertCoordinator.Effect.Invalidate -> glasses()?.invalidate(effect.alertId)
                 is AlertCoordinator.Effect.OpenDecision -> glasses()?.openDecision(effect.alert)
                 is AlertCoordinator.Effect.OpenQuestion -> glasses()?.openQuestion(effect.alert)
@@ -124,7 +148,6 @@ class AlertDirector(
     }
 
     private fun showBand(alert: AgentdAction.Alert, wake: Boolean) {
-        val replacing = bandId != null
         val taken = glasses()?.showBand(AlertNotices.build(alert, monitorOnly = !secure(), wake = wake)) == true
         if (!taken) {
             // No band is up for this alert, so the coordinator must not refresh one;
@@ -134,18 +157,25 @@ class AlertDirector(
             return
         }
         bandId = alert.id
-        // A hub that still reports the replaced band's close does so a moment later.
-        if (replacing) ignoreReplacedUntil = clock() + REPLACED_GRACE_MS
+        goneId = null
     }
+
+    /**
+     * A frame for an alert whose band was taken or timed out is a retry of it,
+     * whatever agentd called it: the coordinator ignores an update for a band that
+     * is not up, and the wearer would never see the alert again.
+     */
+    private fun reshowIfGone(alert: AgentdAction.Alert): AgentdAction.Alert =
+        if (alert.id == goneId && alert.reason == AlertReason.UPDATE) {
+            alert.copy(reason = AlertReason.RETRY)
+        } else {
+            alert
+        }
 
     private fun updateBand(alert: AgentdAction.Alert) {
         val refreshed = bandId == alert.id &&
             glasses()?.updateBand(AlertNotices.update(alert, monitorOnly = !secure())) == true
         // A band that is gone or overwritten is shown again, without waking anyone.
         if (!refreshed) showBand(alert, wake = false)
-    }
-
-    private companion object {
-        const val REPLACED_GRACE_MS = 2_000L
     }
 }

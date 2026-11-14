@@ -125,7 +125,7 @@ class AlertNoticesTest {
                     val notice = AlertNotices.build(big, monitorOnly, wake = true)
                     assertTrue(notice.title!!.length <= 32)
                     assertTrue(notice.footer!!.length <= 40)
-                    assertTrue(notice.body!!.length <= 8 * 44 + 40)
+                    assertTrue(notice.body!!.length <= 8 * 44)
                     assertTrue(notice.actions.size <= 3)
                     assertTrue(notice.actions.all { it.label.length <= 16 })
                     val update = AlertNotices.update(big, monitorOnly)
@@ -274,5 +274,41 @@ class AlertNoticesTest {
             listOf(NexusReaderSegmentKind.HEADER to "All 12 tests pass", NexusReaderSegmentKind.PROSE to "Full output here"),
             reader.segments.map { it.kind to it.text },
         )
+    }
+
+    @Test
+    fun cuts_never_end_on_half_a_surrogate_pair() {
+        val emoji = "\uD83D\uDE00".repeat(40)
+        val titles = listOf(
+            AlertNotices.build(alert(kind = AlertKind.NOTICE, title = emoji), false, false).title!!,
+            AlertNotices.brief(emoji, "x").title!!,
+            AlertNotices.statusNotice(session(AgentStatus.ERROR).copy(title = emoji), "", false).title!!,
+        )
+        for (title in titles) assertFalse(title, Character.isHighSurrogate(title.last()))
+    }
+
+    @Test
+    fun one_long_message_is_read_from_its_start() {
+        val text = (1..60).joinToString("") { "$it".padEnd(1_000, '.') }
+        val reader = AlertNotices.outputReader(
+            alert(kind = AlertKind.DONE),
+            session(AgentStatus.DONE).copy(lastAssistantText = text),
+            emptyList(),
+        )
+
+        assertTrue(reader.segments[1].text.startsWith("1."))
+        assertTrue(reader.segments.sumOf { it.text.length } <= 40_000)
+    }
+
+    @Test
+    fun reader_content_key_follows_the_text() {
+        val a = AlertNotices.outputReader(alert(kind = AlertKind.DONE), null, listOf(
+            NexusReaderSegment(NexusReaderSegmentKind.PROSE, "aaaa"),
+        ))
+        val b = AlertNotices.outputReader(alert(kind = AlertKind.DONE), null, listOf(
+            NexusReaderSegment(NexusReaderSegmentKind.PROSE, "bbbb"),
+        ))
+
+        assertTrue(a.contentKey != b.contentKey)
     }
 }
