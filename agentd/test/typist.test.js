@@ -1029,6 +1029,52 @@ test("link_drop_after_compact_ok_releases_keyboard", async () => {
   });
 });
 
+// N3: a non-Latin layout reports Ctrl-C by its own codepoint, with 99 only as
+// the base-layout key; report-all-keys mode (flag 8) sends Enter as CSI 13 u.
+test("kitty_base_layout_ctrl_c_and_report_all_keys_enter", async () => {
+  for (const key of ["\x1b[1089::99;5u", "\x1b[1089:1057:99;5:1u", "\x1b[1089::99;69u"]) {
+    const t = setup();
+    await t.run({ command: "compact" }, 600);
+    t.session.status = "busy";
+    t.session.statusUpdatedAt = t.clock.now();
+    assert.equal(t.type("x"), "hold");
+    assert.equal(t.type(key), "pass", `${JSON.stringify(key)} takes over`);
+    t.typist.dispose();
+    const input = bareInput();
+    input.key("abc");
+    input.key(key);
+    assert.equal(input.draft, false, `${JSON.stringify(key)} clears like Ctrl-C`);
+  }
+  // A base-layout Esc is an Esc too.
+  const esc = setup();
+  await esc.run({ command: "compact" }, 600);
+  assert.equal(esc.type("\x1b[1093::27u"), "pass");
+  esc.typist.dispose();
+  // On a Latin layout the key's own code decides: Ctrl-J there is no clear, though it may take over.
+  const latin = bareInput();
+  latin.key("abc");
+  latin.key("\x1b[106::99;5u");
+  assert.equal(latin.draft, true, "an ambiguous Ctrl-C never clears the draft");
+
+  // Flag 8: Enter as CSI 13 u arms the submit proof as "\r" does, and is cleared by R149.
+  for (const enter of ["\x1b[13u", "\x1b[13;1u", "\x1b[13;1:1u", "\x1b[13;65u"]) {
+    const input = bareInput();
+    input.key("\x1b[104u\x1b[105u");
+    input.key(enter);
+    assert.equal(input.draft, true);
+    input.promptSubmitted(Number.MAX_SAFE_INTEGER);
+    assert.equal(input.draft, false, `${JSON.stringify(enter)} is an Enter`);
+  }
+  // Shift-Enter is a newline, and an Enter release is nothing.
+  for (const other of ["\x1b[13;2u", "\x1b[13;1:3u"]) {
+    const input = bareInput();
+    input.key("hi");
+    input.key(other);
+    input.promptSubmitted(Number.MAX_SAFE_INTEGER);
+    assert.equal(input.draft, true, `${JSON.stringify(other)} is no submit`);
+  }
+});
+
 // N1: an unbound launcher still clears its own uncertainty from Claude's file.
 test("unbound_launcher_clears_uncertainty_from_its_polled_session_file", async () => {
   await withTempDir(async (dir) => {

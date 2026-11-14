@@ -11,9 +11,10 @@ const NEUTRAL_CONTROLS = new Set(["\x01", "\x02", "\x04", "\x05", "\x06", "\x0b"
 const NEUTRAL_FINALS = new Set(["C", "D", "H", "F", "I", "O"]);
 /** CSI parameter and intermediate bytes, private prefixes (`<`, `=`, `>`, `?`) included. */
 const CSI_BODY = /^[0-?]*[ -/]*$/;
-/** The key code, its modifiers and its event type; alternate codes and text are allowed and ignored. */
-const KITTY_KEY = /^(\d+)(?::\d*)*(?:;(\d*)(?::(\d+))?(?:;[\d:]*)?)?$/;
+/** The key code, its shifted and base-layout codes, its modifiers and its event type; text is allowed and ignored. */
+const KITTY_KEY = /^(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d*)(?::(\d+))?(?:;[\d:]*)?)?$/;
 const KITTY_ESC = 27;
+const KITTY_ENTER = 13;
 const KITTY_C = 99;
 const KITTY_CTRL = 4;
 /** Caps Lock and Num Lock: reported as modifiers, they change nothing about Ctrl-C. */
@@ -102,12 +103,7 @@ class DraftTracker {
         continue;
       }
       if (ch === "\r") {
-        // An Enter on an empty prompt proves nothing and leaves nothing.
-        this.enterPending = this.draft;
-        this.enterLast = this.draft;
-        if (this.enterPending) {
-          this.enters += 1;
-        }
+        this.enter();
       } else if (ch === "\x03") {
         this.clear();
         takeover = true;
@@ -118,6 +114,15 @@ class DraftTracker {
       i += 1;
     }
     return { takeover };
+  }
+
+  /** An Enter on an empty prompt proves nothing and leaves nothing. */
+  private enter(): void {
+    this.enterPending = this.draft;
+    this.enterLast = this.draft;
+    if (this.enterPending) {
+      this.enters += 1;
+    }
   }
 
   /** The prompt may hold text, and any Enter before this is no longer the last word. */
@@ -158,9 +163,10 @@ class DraftTracker {
   }
 
   /**
-   * R164: a key in the kitty keyboard protocol, `CSI code[:alt…][;mods[:event][;text]] u`.
-   * Esc and Ctrl-C are takeovers exactly as their legacy bytes are; anything
-   * else that is pressed may type. Returns whether it was a takeover.
+   * R164: a key in the kitty keyboard protocol, `CSI code[:shifted[:base]][;mods[:event][;text]] u`.
+   * Esc and Ctrl-C are takeovers exactly as their legacy bytes are, and a
+   * plain Enter (flag 8 reports it so) is an Enter; anything else that is
+   * pressed may type. Returns whether it was a takeover.
    */
   private kittyKey(params: string): boolean {
     if (params.startsWith("?")) {
@@ -172,16 +178,28 @@ class DraftTracker {
       return false;
     }
     const code = Number(match[1]);
-    const mods = match[2] ? Number(match[2]) - 1 : 0;
-    if (match[3] === "3") {
+    const base = match[3] ? Number(match[3]) : undefined;
+    const mods = (match[4] ? Number(match[4]) - 1 : 0) & ~KITTY_LOCKS;
+    if (match[5] === "3") {
       return false; // a release types nothing
     }
-    if (code === KITTY_ESC) {
+    if (code === KITTY_ESC || base === KITTY_ESC) {
       this.mark();
       return true;
     }
-    if (code === KITTY_C && (mods & ~KITTY_LOCKS) === KITTY_CTRL) {
-      this.clear();
+    if (code === KITTY_ENTER && mods === 0) {
+      this.enter();
+      return false;
+    }
+    if (mods === KITTY_CTRL && (code === KITTY_C || base === KITTY_C)) {
+      // N3: a non-Latin layout names Ctrl-C only by its base-layout key. On
+      // another Latin layout the key's own code may be what Claude reads, so
+      // that one takes over but never clears the draft.
+      if (code === KITTY_C || code > 0x7f) {
+        this.clear();
+      } else {
+        this.mark();
+      }
       return true;
     }
     this.mark();
