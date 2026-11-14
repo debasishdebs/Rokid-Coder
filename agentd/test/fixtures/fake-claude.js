@@ -16,6 +16,8 @@
 //   - at start it hides the cursor (\x1b[?25l) and enables bracketed paste (\x1b[?2004h);
 //     FAKE_TUI_MODES=1 also enters the alternate screen, mouse and focus reporting and a kitty push
 //   - SIGUSR2: writes {line, dialogOpen, model, status, sessionId} to FAKE_STATE_FILE
+//   - FAKE_INPUT_ACK_FILE: rewritten with the count of input chars processed so
+//     far, so a test can wait for its keys before it signals for a dump
 // Other test hooks: /exit [n], /signal NAME, /clear (new session id), and the env
 // FAKE_SESSION_ID, FAKE_SESSION_DELAY_MS, FAKE_ARGV_FILE, FAKE_PIDFILE,
 // FAKE_GRANDCHILD (1 | stubborn), FAKE_IGNORE_SIGNALS, FAKE_EXIT_ON_EOT, FAKE_HOOK_FORWARD.
@@ -37,6 +39,7 @@ let lastSubmitted = "";
 let lastStatusAt = 0;
 let inPaste = false;
 let sessionFileWritten = false;
+let consumed = 0;
 
 const out = (text) => process.stdout.write(text);
 
@@ -222,6 +225,8 @@ function onInput(data) {
     }
   }
   pending = pending.slice(i);
+  consumed += i;
+  if (env.FAKE_INPUT_ACK_FILE) fs.writeFileSync(env.FAKE_INPUT_ACK_FILE, String(consumed));
 }
 
 process.on("SIGUSR2", () => {
