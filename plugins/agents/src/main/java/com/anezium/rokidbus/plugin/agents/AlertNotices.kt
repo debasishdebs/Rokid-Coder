@@ -21,6 +21,9 @@ import java.security.MessageDigest
 object AlertNotices {
     const val MONITOR_ONLY_BODY = "Monitor only — approve on laptop"
 
+    /** Where the glasses offer no Allow because agentd had to cut the command or path (R128). */
+    const val COMMAND_CUT = "Command cut — review on laptop"
+
     private const val TITLE_CHARS = 32
     private const val FOOTER_CHARS = 40
     private const val BRIEF_BODY_CHARS = 240
@@ -144,7 +147,9 @@ object AlertNotices {
         val extra = held?.detail?.trim()?.takeIf { it.isNotEmpty() && !body.contains(it) }
         val segments = buildList {
             add(NexusReaderSegment(NexusReaderSegmentKind.HEADER, cut(summary, READER_SEGMENT_CHARS)))
+            if (alert.truncated) add(NexusReaderSegment(NexusReaderSegmentKind.HEADER, COMMAND_CUT, emphasis = true))
             addAll(proseSegments(body))
+            if (alert.truncated) add(NexusReaderSegment(NexusReaderSegmentKind.ASIDE, "… $COMMAND_CUT"))
             extra?.let { addAll(proseSegments(it)) }
             add(NexusReaderSegment(NexusReaderSegmentKind.ASIDE, "tap to decide"))
         }.take(READER_MAX_SEGMENTS)
@@ -207,7 +212,8 @@ object AlertNotices {
         when (alert.kind) {
             AlertKind.APPROVAL -> buildList {
                 if (!monitorOnly) {
-                    add(NexusNoticeAction(AlertCoordinator.ALLOW, "check", "Allow"))
+                    // A command the wearer cannot see whole is never allowed from the glasses (R128).
+                    if (!alert.truncated) add(NexusNoticeAction(AlertCoordinator.ALLOW, "check", "Allow"))
                     add(NexusNoticeAction(AlertCoordinator.DENY, "close", "Deny"))
                 }
                 add(NexusNoticeAction(AlertCoordinator.MORE, "dot", "More"))

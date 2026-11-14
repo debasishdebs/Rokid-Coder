@@ -239,11 +239,14 @@ class AlertCoordinator(
 
     private fun shown(id: String): Effect = Effect.Send(AgentdProtocolCodec.alertShown(id))
 
-    private fun answer(id: String, action: String, secure: Boolean): Effect = if (secure) {
-        Effect.Send(AgentdProtocolCodec.alertAction(id, action, msgIdFor(id, action)))
-    } else {
-        Effect.Brief(MONITOR_ONLY_TITLE, MONITOR_ONLY_BODY)
+    private fun answer(id: String, action: String, secure: Boolean): Effect = when {
+        !secure -> Effect.Brief(MONITOR_ONLY_TITLE, MONITOR_ONLY_BODY)
+        // The last lock: no glasses path allows a command agentd had to cut (R128).
+        action == ALLOW && alertOf(id)?.truncated == true -> Effect.Brief(NOT_SENT, AlertNotices.COMMAND_CUT)
+        else -> Effect.Send(AgentdProtocolCodec.alertAction(id, action, msgIdFor(id, action)))
     }
+
+    private fun alertOf(id: String): AgentdAction.Alert? = episode?.alert?.takeIf { it.id == id } ?: cards[id]
 
     private fun noLongerWaiting(): Effect = Effect.Brief(NO_LONGER_WAITING, NO_LONGER_WAITING_BODY)
 

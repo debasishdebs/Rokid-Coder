@@ -242,6 +242,9 @@ again, so a double tap aimed at a band never lands on the card under it.
 An approval band leads with what will run: the command (then the agent's
 description), or the file an edit changes. More opens the whole request in a
 reader, summary first; a tap there moves on to the Allow and Deny card.
+agentd carries a command or path whole up to 4,000 characters. One it had to
+cut is marked `truncated`, and then the band, the card and voice offer no
+Allow, only Deny ("Command cut — review on laptop").
 
 On a hub that does not echo notice correlations (phone hub without
 `noticeInteractionVersion: 1`), a band press can be credited to whichever band

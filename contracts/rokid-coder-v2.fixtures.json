@@ -184,6 +184,19 @@
       "actions": ["allow", "deny"],
       "waiting": 0,
       "reason": "new"
+    },
+    "alert_approval_truncated": {
+      "type": "alert",
+      "v": 2,
+      "id": "fx-alert",
+      "sessionKey": "claude:fx-claude",
+      "kind": "approval",
+      "title": "Bash",
+      "body": "npm test -- --grep slow …",
+      "actions": ["allow", "deny"],
+      "truncated": true,
+      "waiting": 0,
+      "reason": "new"
     }
   },
   "phone_to_agent": {

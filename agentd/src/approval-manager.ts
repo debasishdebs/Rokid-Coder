@@ -30,6 +30,8 @@ export interface ApprovalRequest {
   summary: string;
   detail: string;
   createdAt: number;
+  /** The command or path in [detail] was cut at MAX_APPROVAL_ACTION_CHARS (R128). Policy side only, like approvalKind. */
+  truncated?: boolean;
 }
 
 const CLAUDE_FILE_CHANGE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
@@ -51,6 +53,7 @@ function toWireFrame(request: ApprovalRequest): ApprovalRequest {
     provider: _provider,
     sessionKey: _sessionKey,
     approvalKind: _approvalKind,
+    truncated: _truncated,
     ...wire
   } = request;
   return wire as ApprovalRequest;
@@ -156,10 +159,36 @@ function argumentFields(input: Record<string, unknown> | undefined): string[] {
   ];
 }
 
+/**
+ * The most of a command or a path an approval carries (R128). The wearer allows
+ * on what they read, so the action travels whole up to this; past it the request
+ * says `truncated`, and the glasses offer no Allow for it.
+ */
+export const MAX_APPROVAL_ACTION_CHARS = 4000;
+
+/** The fields whose value is the thing an edit acts on: carried whole, like a command. */
+const PATH_FIELDS: ReadonlySet<string> = new Set(["file_path", "path", "notebook_path"]);
+
+/** Room for the request's other fields after the command or path. */
+const OTHER_DETAIL_CHARS = 400;
+
+/** [value] as an action: whole up to the cap, and whether it had to be cut. */
+function actionValue(value: unknown): { text?: string; truncated: boolean } {
+  const whole = usefulValue(value, Number.MAX_SAFE_INTEGER);
+  if (whole === undefined) {
+    return { truncated: false };
+  }
+  return {
+    text: whole.slice(0, MAX_APPROVAL_ACTION_CHARS),
+    truncated: whole.length > MAX_APPROVAL_ACTION_CHARS,
+  };
+}
+
 export function describeTool(payload: HookPayload): {
   tool?: string;
   summary: string;
   detail: string;
+  truncated: boolean;
 } {
   const tool = typeof payload.tool_name === "string" && payload.tool_name.trim()
     ? payload.tool_name.trim().slice(0, 120)
@@ -169,7 +198,7 @@ export function describeTool(payload: HookPayload): {
       ? payload.tool_input as Record<string, unknown>
       : undefined;
 
-  const command = usefulValue(input?.command, 400);
+  const command = actionValue(input?.command);
   const description = usefulValue(input?.description, 120);
   const fields = argumentFields(input);
   const firstArgument = fields
@@ -181,14 +210,26 @@ export function describeTool(payload: HookPayload): {
     120,
   );
 
-  if (command) {
-    return { tool, summary, detail: command.slice(0, 400) };
+  if (command.text) {
+    return { tool, summary, detail: command.text, truncated: command.truncated };
   }
 
   const parts: string[] = [];
+  let truncated = false;
+  let budget = OTHER_DETAIL_CHARS;
   for (const field of fields) {
     if (field === "description") {
       continue;
+    }
+    if (PATH_FIELDS.has(field) && parts.length === 0) {
+      // What an edit acts on leads the detail, whole; the rest shares the usual room after it.
+      const path = actionValue(input?.[field]);
+      if (path.text) {
+        parts.push(`${field}: ${path.text}`);
+        truncated = path.truncated;
+        budget = Math.max(OTHER_DETAIL_CHARS, parts[0].length);
+        continue;
+      }
     }
     const value = usefulValue(input?.[field], 180);
     if (!value) {
@@ -196,12 +237,12 @@ export function describeTool(payload: HookPayload): {
     }
     const part = `${field}: ${value}`;
     const separatorLength = parts.length === 0 ? 0 : 2;
-    const remaining = 400 - parts.join("; ").length - separatorLength;
+    const remaining = budget - parts.join("; ").length - separatorLength;
     if (remaining <= 0) {
       break;
     }
     parts.push(part.slice(0, remaining));
-    if (parts.join("; ").length >= 400) {
+    if (parts.join("; ").length >= budget) {
       break;
     }
   }
@@ -209,7 +250,8 @@ export function describeTool(payload: HookPayload): {
   return {
     tool,
     summary,
-    detail: (parts.join("; ") || description || summary).slice(0, 400),
+    detail: (parts.join("; ") || description || summary).slice(0, budget),
+    truncated,
   };
 }
 
@@ -300,6 +342,7 @@ export class ApprovalManager {
       summary: description.summary,
       detail: description.detail,
       createdAt: this.now(),
+      ...(description.truncated ? { truncated: true } : {}),
     };
 
     const call = { toolName: payload.tool_name, toolInput: payload.tool_input };

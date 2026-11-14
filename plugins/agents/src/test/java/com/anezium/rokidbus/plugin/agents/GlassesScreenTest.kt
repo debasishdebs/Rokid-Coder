@@ -4,6 +4,7 @@ import android.view.KeyEvent
 import com.anezium.rokidbus.client.plugin.NexusNoticeCloseReason
 import com.anezium.rokidbus.shared.plugin.NexusInputEvent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -12,6 +13,7 @@ class GlassesScreenTest {
     private var now = 0L
     private val confirms = mutableListOf<Pair<String, String>>()
     private val decided = mutableListOf<String>()
+    private val decisions = mutableListOf<ApprovalDecision>()
     private var menuEnters = 0
 
     private val screen = GlassesScreen(
@@ -32,6 +34,7 @@ class GlassesScreenTest {
             }
             override fun decideRequest(requestId: String, decision: ApprovalDecision): Boolean {
                 decided += requestId
+                decisions += decision
                 return true
             }
         },
@@ -128,6 +131,90 @@ class GlassesScreenTest {
         now += 600L
         enter()
         assertEquals(listOf("a1" to AlertCoordinator.ALLOW), confirms)
+    }
+
+    @Test
+    fun truncated_approval_has_no_allow_anywhere() {
+        // R128: what agentd sends for a command it had to cut, parsed as the phone reads it.
+        val fixture = org.json.JSONObject(java.io.File("../../contracts/rokid-coder-v2.fixtures.json").readText())
+            .getJSONObject("agent_to_phone_variants").getJSONObject("alert_approval_truncated")
+        val cut = AgentdProtocolCodec().parse(fixture.toString()) as AgentdAction.Alert
+        assertTrue(cut.truncated)
+
+        // The band: Deny and More, no Allow.
+        val band = AlertNotices.build(cut, monitorOnly = false, wake = false)
+        assertEquals(listOf(AlertCoordinator.DENY, AlertCoordinator.MORE), band.actions.map { it.id })
+
+        // More's reader says the command was cut.
+        val reader = AlertNotices.approvalReader(cut, session = null, held = null)
+        assertTrue(reader.segments.any { it.text.contains(AlertNotices.COMMAND_CUT) })
+
+        // The decision card: no Allow row, and no walk of it reaches one.
+        screen.openAlertDecision(cut)
+        assertEquals(listOf(GlassesScreen.AlertRow.DENY, GlassesScreen.AlertRow.VOICE), screen.alertRows(cut))
+        val card = BoardCards.alertDecisionCard(cut, null, screen.alertRows(cut), 0, secure = true)
+        assertTrue(card.richLines!!.none { it.text == "Allow" })
+        assertTrue(card.richLines!!.any { it.text == AlertNotices.COMMAND_CUT })
+        now = 1_000L
+        enter() // past the reader
+        now = 2_000L
+        enter()
+        assertEquals(listOf("fx-alert" to AlertCoordinator.DENY), confirms)
+
+        // The coordinator refuses an Allow for it, whatever path asked.
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(cut)
+        val effects = coordinator.onAction(cut.id, AlertCoordinator.ALLOW, secure = true)
+        assertTrue(effects.none { it is AlertCoordinator.Effect.Send && it.line.contains("alert_action") })
+        assertTrue(effects.any { it is AlertCoordinator.Effect.Brief && it.body == AlertNotices.COMMAND_CUT })
+
+        // A held v1 call whose detail does not fit its card offers Deny only, and ENTER denies.
+        val long = AgentApproval("r9", "s1", AgentProvider.CLAUDE, "Bash", "Run it", detail = "x".repeat(500))
+        assertFalse(BoardCards.requestShowsWhole(long))
+        val v1 = BoardCards.decisionCard(long, null, ApprovalDecision.DENY)
+        assertTrue(v1.richLines!!.none { it.text == "Allow" })
+        screen.openRequestDecision("r9", allowOffered = false)
+        now = 10_000L
+        screen.onInput(NexusInputEvent("agents", KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.ACTION_DOWN))
+        enter()
+        assertEquals(listOf(ApprovalDecision.DENY), decisions)
+    }
+
+    @Test
+    fun voice_allow_refused_for_truncated() {
+        val heardAllow = VoiceCapture.State.Heard("allow")
+        val refused = VoiceCard.view(VoiceKind.APPROVAL, heardAllow, allowRefused = true)
+        assertEquals(AlertNotices.COMMAND_CUT, refused.body)
+        assertTrue(refused.rows.none { it.act == VoiceAct.CONFIRM })
+        assertEquals(null, refused.decision)
+        // Deny still goes through its own confirm card.
+        val deny = VoiceCard.view(VoiceKind.APPROVAL, VoiceCapture.State.Heard("deny"), allowRefused = true)
+        assertEquals(ApprovalDecision.DENY, deny.decision)
+        // The decision card's voice row starts an utterance that carries the refusal.
+        val started = mutableListOf<VoiceTarget>()
+        val voiceScreen = GlassesScreen(
+            clock = { now },
+            guardMs = 600L,
+            host = object : GlassesScreen.Host {
+                override val secure = true
+                override fun render() = Unit
+                override fun voiceInput(run: VoiceRun, event: NexusInputEvent) = Unit
+                override fun questionInput(flow: QuestionFlow, event: NexusInputEvent) = Unit
+                override fun menuInput(event: NexusInputEvent) = Unit
+                override fun boardInput(event: NexusInputEvent) = Unit
+                override fun startVoice(target: VoiceTarget) { started += target }
+                override fun confirmAlert(alertId: String, action: String) = Unit
+                override fun decideRequest(requestId: String, decision: ApprovalDecision) = false
+            },
+        )
+        val cut = alert.copy(truncated = true)
+        voiceScreen.openAlertDecision(cut)
+        now = 1_000L
+        voiceScreen.onInput(NexusInputEvent("agents", KeyEvent.KEYCODE_ENTER, KeyEvent.ACTION_DOWN))
+        now = 2_000L
+        voiceScreen.onInput(NexusInputEvent("agents", KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.ACTION_DOWN))
+        voiceScreen.onInput(NexusInputEvent("agents", KeyEvent.KEYCODE_ENTER, KeyEvent.ACTION_DOWN))
+        assertEquals(listOf<VoiceTarget>(VoiceTarget.Approval("a1", allowRefused = true)), started)
     }
 
     @Test

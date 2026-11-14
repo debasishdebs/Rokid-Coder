@@ -15,7 +15,8 @@ import com.anezium.rokidbus.shared.plugin.NexusInputEvent
 internal sealed interface VoiceTarget {
     data class Followup(val sessionKey: String) : VoiceTarget
     data class Answer(val alertId: String, val itemIndex: Int) : VoiceTarget
-    data class Approval(val alertId: String) : VoiceTarget
+    /** [allowRefused]: the approval's command was cut (R128), so a heard "allow" proposes nothing. */
+    data class Approval(val alertId: String, val allowRefused: Boolean = false) : VoiceTarget
 }
 
 /** One utterance: its target, the state machine over the hub's callbacks, and where the card's selection is. */
@@ -94,14 +95,17 @@ internal class VoiceQuestionWiring(
     }
 
     /** A new card state: the selection starts over, and a tap aimed at the old one cannot land on it. */
+    private fun view(run: VoiceRun): VoiceView =
+        VoiceCard.view(run.kind, run.capture.state, allowRefused = (run.target as? VoiceTarget.Approval)?.allowRefused == true)
+
     private fun voiceChanged(run: VoiceRun) {
-        run.row = VoiceCard.view(run.kind, run.capture.state).initial
+        run.row = view(run).initial
         screen.rearm()
         if (host.surfaceShown) host.render()
     }
 
     fun onVoiceInput(run: VoiceRun, event: NexusInputEvent) {
-        val view = VoiceCard.view(run.kind, run.capture.state)
+        val view = view(run)
         when {
             event.keyCode in GlassesKeys.BACKWARD -> {
                 run.row = (run.row - 1 + view.rows.size) % view.rows.size
@@ -160,7 +164,7 @@ internal class VoiceQuestionWiring(
 
     fun voiceCard(run: VoiceRun): NexusCard {
         val state = run.capture.state
-        val view = VoiceCard.view(run.kind, state)
+        val view = view(run)
         val rows = buildList {
             view.body?.let { body ->
                 val parts = VoiceCard.bodyRows(body)

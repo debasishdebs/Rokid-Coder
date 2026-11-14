@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import WebSocket from "ws";
 import {
+  MAX_APPROVAL_ACTION_CHARS,
   type ApprovalDecision,
   type ApprovalKind,
   type ApprovalManager,
@@ -316,11 +317,21 @@ function permissionDetail(params: PermissionsApprovalParams): string {
   return parts.join("; ");
 }
 
+/** A Codex action carried whole up to MAX_APPROVAL_ACTION_CHARS, and whether it had to be cut (R128). */
+function codexAction(text: string): { detail: string; truncated?: true } {
+  const whole = text.replace(/\s+/g, " ").trim();
+  return {
+    detail: whole.slice(0, MAX_APPROVAL_ACTION_CHARS),
+    ...(whole.length > MAX_APPROVAL_ACTION_CHARS ? { truncated: true as const } : {}),
+  };
+}
+
 export function describeCodexApproval(request: ApprovalServerRequest): {
   tool: string;
   summary: string;
   detail: string;
   createdAt: number;
+  truncated?: true;
 } {
   switch (request.method) {
     case "item/commandExecution/requestApproval": {
@@ -330,7 +341,7 @@ export function describeCodexApproval(request: ApprovalServerRequest): {
       return {
         tool: "Command",
         summary: truncateText(reason || command || "Run a command", 120),
-        detail: truncateText(command || reason || normalizeCwd(params.cwd ?? undefined), 400),
+        ...codexAction(command || reason || normalizeCwd(params.cwd ?? undefined)),
         createdAt: params.startedAtMs,
       };
     }
@@ -341,7 +352,7 @@ export function describeCodexApproval(request: ApprovalServerRequest): {
       return {
         tool: "File change",
         summary: truncateText(reason || (root ? `Change files under ${root}` : "Change files"), 120),
-        detail: truncateText(root || reason || "Codex requested permission to change files.", 400),
+        ...codexAction(root || reason || "Codex requested permission to change files."),
         createdAt: params.startedAtMs,
       };
     }
@@ -352,7 +363,7 @@ export function describeCodexApproval(request: ApprovalServerRequest): {
       return {
         tool: "Permissions",
         summary: truncateText(reason || detail || "Grant additional permissions", 120),
-        detail: truncateText(detail || reason || normalizeCwd(params.cwd), 400),
+        ...codexAction(detail || reason || normalizeCwd(params.cwd)),
         createdAt: params.startedAtMs,
       };
     }
@@ -388,6 +399,7 @@ export function buildCodexApprovalRequest(
     summary: described.summary,
     detail: described.detail,
     createdAt: described.createdAt,
+    ...(described.truncated ? { truncated: true } : {}),
   };
 }
 

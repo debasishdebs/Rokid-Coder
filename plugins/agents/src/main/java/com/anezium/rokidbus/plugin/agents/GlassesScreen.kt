@@ -165,10 +165,26 @@ internal class GlassesScreen(
         alertRow = 0
     }
 
-    fun openRequestDecision(requestId: String) {
+    /** False when the held call's card cannot show what will run whole: it then offers Deny only (R128). */
+    var requestAllowOffered = true
+        private set
+
+    fun openRequestDecision(requestId: String, allowOffered: Boolean = true) {
         open(ActiveCard.Kind.REQUEST_DECISION)
         decidingRequestId = requestId
-        decisionChoice = ApprovalDecision.ALLOW
+        requestAllowOffered = allowOffered
+        decisionChoice = if (allowOffered) ApprovalDecision.ALLOW else ApprovalDecision.DENY
+    }
+
+    /**
+     * The alert decision card's rows. Allow is there only for what the wearer saw
+     * whole: an approval agentd had to cut (`truncated`, R128) offers Deny only,
+     * and its voice row will not take "allow" either.
+     */
+    fun alertRows(alert: AgentdAction.Alert): List<AlertRow> = buildList {
+        if (!alert.truncated) add(AlertRow.ALLOW)
+        add(AlertRow.DENY)
+        if (host.secure) add(AlertRow.VOICE)
     }
 
     fun openQuestion(flow: QuestionFlow) {
@@ -295,6 +311,7 @@ internal class GlassesScreen(
     private fun onRequestDecisionInput(requestId: String, event: NexusInputEvent) {
         when {
             event.keyCode in GlassesKeys.BACKWARD || event.keyCode in GlassesKeys.FORWARD -> {
+                if (!requestAllowOffered) return
                 decisionChoice = when (decisionChoice) {
                     ApprovalDecision.ALLOW -> ApprovalDecision.DENY
                     ApprovalDecision.DENY -> ApprovalDecision.ALLOW
@@ -302,6 +319,7 @@ internal class GlassesScreen(
                 host.render()
             }
             GlassesKeys.isEnter(event) -> {
+                if (decisionChoice == ApprovalDecision.ALLOW && !requestAllowOffered) return
                 if (!host.decideRequest(requestId, decisionChoice)) return
                 close(ActiveCard.Kind.REQUEST_DECISION)
                 host.render()
@@ -313,7 +331,7 @@ internal class GlassesScreen(
         }
     }
 
-    /** The alert's decision card walks three rows: Allow, Deny and, on a steering link, the voice row. */
+    /** The alert's decision card walks its [alertRows]: Allow, Deny and, on a steering link, the voice row. */
     private fun onAlertDecisionInput(alert: AgentdAction.Alert, event: NexusInputEvent) {
         if (alertReading) {
             // The hub scrolls the reader; a tap moves on to the decision, with a fresh guard.
@@ -330,25 +348,29 @@ internal class GlassesScreen(
             }
             return
         }
-        val rows = if (host.secure) ALERT_DECISION_ROWS else 2
+        val rows = alertRows(alert)
         when {
             event.keyCode in GlassesKeys.BACKWARD -> {
-                alertRow = (alertRow - 1 + rows) % rows
+                alertRow = (alertRow - 1 + rows.size) % rows.size
                 host.render()
             }
             event.keyCode in GlassesKeys.FORWARD -> {
-                alertRow = (alertRow + 1) % rows
+                alertRow = (alertRow + 1) % rows.size
                 host.render()
             }
             GlassesKeys.isEnter(event) -> {
-                if (alertRow == VOICE_ROW) {
-                    // Hearing is not deciding: the utterance still needs its own confirm card.
-                    if (host.secure) host.startVoice(VoiceTarget.Approval(alert.id))
-                    return
+                val action = when (rows[alertRow.coerceIn(0, rows.lastIndex)]) {
+                    AlertRow.VOICE -> {
+                        // Hearing is not deciding: the utterance still needs its own confirm card.
+                        host.startVoice(VoiceTarget.Approval(alert.id, allowRefused = alert.truncated))
+                        return
+                    }
+                    AlertRow.ALLOW -> AlertCoordinator.ALLOW
+                    AlertRow.DENY -> AlertCoordinator.DENY
                 }
                 close(ActiveCard.Kind.ALERT_DECISION)
                 host.render()
-                host.confirmAlert(alert.id, if (alertRow == 0) AlertCoordinator.ALLOW else AlertCoordinator.DENY)
+                host.confirmAlert(alert.id, action)
             }
             event.keyCode == KeyEvent.KEYCODE_BACK -> {
                 close(ActiveCard.Kind.ALERT_DECISION)
@@ -357,10 +379,9 @@ internal class GlassesScreen(
         }
     }
 
-    companion object {
-        const val ALERT_DECISION_ROWS = 3
-        const val VOICE_ROW = 2
+    enum class AlertRow { ALLOW, DENY, VOICE }
 
+    companion object {
         /** The cards whose ENTER confirms or picks something, and so waits out the guard. */
         private val GUARDED = setOf(
             ActiveCard.Kind.VOICE,

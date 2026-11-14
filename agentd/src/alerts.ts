@@ -21,6 +21,8 @@ export interface Alert {
   body: string;
   actions?: string[];
   question?: QuestionPayload;
+  /** An approval whose action was cut (R128); sent as the frame's `truncated`. */
+  truncated?: boolean;
   createdAt: number;
   state: AlertState;
   attempts: number;
@@ -387,6 +389,7 @@ export class AlertQueue {
       body: alert.body,
       ...(alert.actions ? { actions: [...alert.actions] } : {}),
       ...(alert.question ? { question: alert.question } : {}),
+      ...(alert.truncated ? { truncated: true } : {}),
       waiting,
       reason,
     };

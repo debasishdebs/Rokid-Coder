@@ -264,8 +264,16 @@ internal object BoardCards {
      * exactly two answers — no third path, no "always allow", nothing that turns
      * a glance into a standing permission.
      */
+    /** The most of a held call's detail its card shows whole: two rows. Past it the card offers Deny only (R128). */
+    private const val REQUEST_DETAIL_CHARS = 2 * MENU_LINE_CHARS
+
+    /** True when the held call's card shows what will run whole, so it may offer Allow. */
+    fun requestShowsWhole(approval: AgentApproval): Boolean =
+        (approval.detail?.singleLine(Int.MAX_VALUE)?.length ?: 0) <= REQUEST_DETAIL_CHARS
+
     fun decisionCard(approval: AgentApproval?, session: AgentSession?, choice: ApprovalDecision): NexusCard {
         if (approval == null) return expiredDecisionCard()
+        val whole = requestShowsWhole(approval)
         val rows = buildList {
             add(
                 NexusCardLine(
@@ -274,13 +282,18 @@ internal object BoardCards {
                     tone = NexusRowTone.BODY,
                 ),
             )
-            // What will run, whole: agentd caps it at 400 chars, two rows at most.
+            // What will run, whole, in two rows at most; one that does not fit is cut, said, and cannot be allowed.
             approval.detail
                 ?.takeIf { it.isNotBlank() && it != approval.summary }
                 ?.singleLine(Int.MAX_VALUE)
+                ?.let { if (whole) it else it.take(REQUEST_DETAIL_CHARS - 1) + "…" }
                 ?.chunked(MENU_LINE_CHARS)
                 ?.forEach { add(NexusCardLine(text = it, tone = NexusRowTone.BODY)) }
-            add(choiceRow("Allow", "let it run", choice == ApprovalDecision.ALLOW))
+            if (whole) {
+                add(choiceRow("Allow", "let it run", choice == ApprovalDecision.ALLOW))
+            } else {
+                add(NexusCardLine(text = AlertNotices.COMMAND_CUT, tone = NexusRowTone.ALERT))
+            }
             add(choiceRow("Deny", "tell the agent no", choice == ApprovalDecision.DENY))
         }
         return card(
@@ -299,6 +312,7 @@ internal object BoardCards {
     fun alertDecisionCard(
         alert: AgentdAction.Alert,
         session: AgentSession?,
+        choices: List<GlassesScreen.AlertRow>,
         row: Int,
         secure: Boolean,
     ): NexusCard {
@@ -313,9 +327,17 @@ internal object BoardCards {
                 ),
             )
             if (secure) {
-                add(choiceRow("Allow", "let it run", row == 0))
-                add(choiceRow("Deny", "tell the agent no", row == 1))
-                add(choiceRow(VoiceApproval.PROMPT, "asks you to confirm", row == GlassesScreen.VOICE_ROW))
+                if (alert.truncated) add(NexusCardLine(text = AlertNotices.COMMAND_CUT, tone = NexusRowTone.ALERT))
+                choices.forEachIndexed { index, choice ->
+                    add(
+                        when (choice) {
+                            GlassesScreen.AlertRow.ALLOW -> choiceRow("Allow", "let it run", row == index)
+                            GlassesScreen.AlertRow.DENY -> choiceRow("Deny", "tell the agent no", row == index)
+                            GlassesScreen.AlertRow.VOICE ->
+                                choiceRow(VoiceApproval.PROMPT, "asks you to confirm", row == index)
+                        },
+                    )
+                }
             } else {
                 add(NexusCardLine(text = AlertNotices.MONITOR_ONLY_BODY, tone = NexusRowTone.DIM))
             }

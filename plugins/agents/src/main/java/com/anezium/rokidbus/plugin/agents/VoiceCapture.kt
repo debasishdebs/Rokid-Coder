@@ -222,7 +222,8 @@ object VoiceCard {
     /** [body] as the card's rows, each within the SDK's line cap; together they are all of it. */
     fun bodyRows(body: String): List<String> = body.chunked(ROW_CHARS)
 
-    fun view(kind: VoiceKind, state: VoiceCapture.State): VoiceView {
+    /** [allowRefused]: an approval whose command agentd cut (R128); a heard "allow" is refused, "deny" still works. */
+    fun view(kind: VoiceKind, state: VoiceCapture.State, allowRefused: Boolean = false): VoiceView {
         val title = when (kind) {
             VoiceKind.FOLLOWUP -> "Reply by voice"
             VoiceKind.ANSWER -> "Answer by voice"
@@ -257,6 +258,8 @@ object VoiceCard {
                 )
                 VoiceKind.APPROVAL -> when (val decision = VoiceApproval.match(state.text)) {
                     null -> VoiceView(title, VoiceApproval.PROMPT, listOf(again, cancel), 0)
+                    ApprovalDecision.ALLOW.takeIf { allowRefused } ->
+                        VoiceView(title, AlertNotices.COMMAND_CUT, listOf(again, cancel), 0)
                     else -> VoiceView(
                         title = if (decision == ApprovalDecision.ALLOW) "Allow?" else "Deny?",
                         body = "Nothing is sent until you confirm",

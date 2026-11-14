@@ -51,6 +51,8 @@ sealed interface AgentdAction {
         val question: QuestionPayload?,
         val waiting: Int,
         val reason: AlertReason,
+        /** agentd had to cut the command or path (R128): the glasses offer no Allow for it. */
+        val truncated: Boolean = false,
     ) : AgentdAction
 
     /** An alert left agentd's queue for a reason the glasses did not cause. */
@@ -372,6 +374,7 @@ class AgentdProtocolCodec {
             question = question,
             waiting = json.intOrNull("waiting")?.coerceAtLeast(0) ?: 0,
             reason = AlertReason.fromWire(json.nullableString("reason", MAX_WIRE_TYPE_CHARS)),
+            truncated = json.booleanOrNull("truncated") == true,
         )
     }
 

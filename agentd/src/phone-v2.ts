@@ -6,6 +6,7 @@ import type {
   ApprovalOutcome,
   ApprovalRequest,
 } from "./approval-manager";
+import { MAX_APPROVAL_ACTION_CHARS } from "./approval-manager";
 import type { ApprovalPolicy, ResetNotice } from "./approval-policy";
 import type { AttachRegistry } from "./attach-registry";
 import type { CodexMonitor } from "./codex/monitor";
@@ -68,7 +69,9 @@ export function approvalAlertBody(request: Pick<ApprovalRequest, "tool" | "appro
   const detail = request.detail.trim();
   const fileEdit = request.approvalKind === "fileChange" || CLAUDE_FILE_TOOLS.has(request.tool);
   const action = (fileEdit ? FILE_PATH_PART.exec(detail)?.[1]?.trim() : undefined) || detail || summary;
-  if (!summary || action === summary || action.startsWith(summary)) {
+  // The action is never cut for the description's sake: past the cap the description goes.
+  if (!summary || action === summary || action.startsWith(summary) ||
+    action.length + 1 + summary.length > MAX_APPROVAL_ACTION_CHARS) {
     return action;
   }
   return `${action}\n${summary}`;
@@ -394,6 +397,7 @@ export class PhoneV2 {
       title: request.tool,
       body: approvalAlertBody(request),
       actions: ["allow", "deny"],
+      ...(request.truncated ? { truncated: true } : {}),
     }, { kind: "approval", requestId: request.requestId });
     this.approvalAlerts.set(request.requestId, id);
   }
@@ -422,7 +426,7 @@ export class PhoneV2 {
   private pushAlert(
     sessionKey: SessionKey,
     kind: AlertFrame["kind"],
-    fields: { title: string; body: string; actions?: string[]; question?: QuestionPayload },
+    fields: { title: string; body: string; actions?: string[]; question?: QuestionPayload; truncated?: boolean },
     binding: Binding = { kind: kind as "done" | "error" | "notice" },
   ): string {
     const id = this.alerts.push({ sessionKey, kind, createdAt: this.now(), ...fields });

@@ -549,7 +549,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         val approval = AgentsRuntime.store.approvalFor(session.key)
         when {
             approval != null -> {
-                screen.openRequestDecision(approval.requestId)
+                screen.openRequestDecision(approval.requestId, allowOffered = BoardCards.requestShowsWhole(approval))
                 render(show = false)
             }
             // A session that speaks v2 is steered from its menu, and its conversation is the
@@ -959,7 +959,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             ActiveCard.Kind.QUESTION -> screen.questionFlow?.let { return answers.questionCard(it) }
             ActiveCard.Kind.ALERT_DECISION -> screen.decidingAlert?.let { alert ->
                 val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
-                return BoardCards.alertDecisionCard(alert, session, screen.alertRow, secureLink)
+                return BoardCards.alertDecisionCard(alert, session, screen.alertRows(alert), screen.alertRow, secureLink)
             }
             ActiveCard.Kind.REQUEST_DECISION -> screen.decidingRequestId?.let { requestId ->
                 val approval = AgentsRuntime.store.approvals.value.firstOrNull { it.requestId == requestId }
