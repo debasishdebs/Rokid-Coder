@@ -147,6 +147,11 @@ class AlertDirector(
         apply(coordinator.onCardConfirm(alertId, action, secure()))
     }
 
+    /** The answers from the question card bound to [alertId]; the coordinator builds the frame and gates it. */
+    fun onQuestionConfirm(alertId: String, answers: Map<String, Any>) = post {
+        apply(coordinator.onQuestionConfirm(alertId, answers, secure()))
+    }
+
     private fun apply(effects: List<AlertCoordinator.Effect>) {
         applyEffects(effects)
         _waiting.value = coordinator.current?.waiting ?: 0

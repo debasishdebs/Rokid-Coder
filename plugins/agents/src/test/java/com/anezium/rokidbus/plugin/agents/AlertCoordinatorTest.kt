@@ -492,6 +492,95 @@ class AlertCoordinatorTest {
         assertNull(coordinator.current)
     }
 
+    // ------------------------------------------------- the question card's answer (Task 7)
+
+    private val answers = mapOf<String, Any>("Pick?" to "Blue")
+
+    private fun openQuestion(coordinator: AlertCoordinator, id: String = "Q") {
+        coordinator.onAlert(alert(id = id, kind = AlertKind.QUESTION))
+        coordinator.onAction(id, "answer", secure = true)
+    }
+
+    @Test
+    fun question_confirm_sends_one_question_answer_for_the_bound_alert() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        openQuestion(coordinator)
+        val sent = sends(coordinator.onQuestionConfirm("Q", answers, secure = true)).single()
+        assertEquals("question_answer", sent.getString("type"))
+        assertEquals("Q", sent.getString("alertId"))
+        assertEquals("ref-Q", sent.getString("requestRef"))
+        assertEquals("claude:s1", sent.getString("sessionKey"))
+        assertEquals("Blue", sent.getJSONObject("answers").getString("Pick?"))
+        // A second press reuses the msgId, so agentd applies it once.
+        val again = sends(coordinator.onQuestionConfirm("Q", answers, secure = true)).single()
+        assertEquals(sent.getString("msgId"), again.getString("msgId"))
+    }
+
+    @Test
+    fun stale_question_card_sends_nothing_after_each_invalidation() {
+        // alert_closed
+        var coordinator = AlertCoordinator(clock = { 0L })
+        openQuestion(coordinator)
+        coordinator.onAlertClosed("Q", "answered")
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onQuestionConfirm("Q", answers, secure = true))
+        // LinkDown, with the band still up
+        coordinator = AlertCoordinator(clock = { 0L })
+        openQuestion(coordinator)
+        coordinator.onLinkDown()
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onQuestionConfirm("Q", answers, secure = true))
+        // LinkUp
+        coordinator = AlertCoordinator(clock = { 0L })
+        openQuestion(coordinator)
+        coordinator.onLinkUp()
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onQuestionConfirm("Q", answers, secure = true))
+        // the session left the board, or its follow-up closed
+        coordinator = AlertCoordinator(clock = { 0L })
+        openQuestion(coordinator)
+        coordinator.invalidateSession("claude:s1")
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onQuestionConfirm("Q", answers, secure = true))
+    }
+
+    @Test
+    fun question_confirm_needs_a_card_opened_for_a_question() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        // Never opened.
+        coordinator.onAlert(alert(id = "Q", kind = AlertKind.QUESTION))
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onQuestionConfirm("Q", answers, secure = true))
+        // An approval's card cannot carry an answer.
+        coordinator.onAlert(alert(id = "A"))
+        coordinator.onAction("A", "more", secure = true)
+        assertEquals(listOf(NO_LONGER_WAITING), coordinator.onQuestionConfirm("A", answers, secure = true))
+    }
+
+    @Test
+    fun question_confirm_over_a_plaintext_link_briefs_monitor_only() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        openQuestion(coordinator)
+        assertEquals(
+            listOf(Effect.Brief("Monitor only", "approve on laptop")),
+            coordinator.onQuestionConfirm("Q", answers, secure = false),
+        )
+    }
+
+    @Test
+    fun an_answer_over_the_wire_limits_is_refused_not_sent() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        openQuestion(coordinator)
+        val tooLong = mapOf<String, Any>("Pick?" to "x".repeat(4_001))
+        assertEquals(
+            listOf(Effect.Brief("Not sent", "Answer on laptop")),
+            coordinator.onQuestionConfirm("Q", tooLong, secure = true),
+        )
+    }
+
+    @Test
+    fun question_confirm_is_not_band_evidence() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        openQuestion(coordinator)
+        // The answer button was pressed on the band (evidence, alert_shown); the card's send adds none.
+        assertEquals(listOf("question_answer"), types(coordinator.onQuestionConfirm("Q", answers, secure = true)))
+    }
+
     @Test
     fun approval_queued_while_unlinked_arrives_new_with_sound() {
         // R83: it took agentd's empty slot while no link took the frame, so link up sends it as new.

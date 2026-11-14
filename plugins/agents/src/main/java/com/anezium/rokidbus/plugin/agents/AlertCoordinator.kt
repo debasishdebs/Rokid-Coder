@@ -157,6 +157,34 @@ class AlertCoordinator(
         }
     }
 
+    /**
+     * The wearer's answers from the question card bound to [id]. It goes through
+     * the same live-binding gate as [onCardConfirm]: a card invalidated since it
+     * opened (alert closed, link down, session gone, follow-up closed) sends
+     * nothing. The frame is built here from the bound alert, so a card can only
+     * answer the question it was opened for.
+     */
+    fun onQuestionConfirm(id: String, answers: Map<String, Any>, secure: Boolean): List<Effect> {
+        val alert = cards[id]
+        val question = alert?.question
+        if (alert == null || alert.kind != AlertKind.QUESTION || question == null) {
+            return listOf(noLongerWaiting())
+        }
+        if (!secure) return listOf(Effect.Brief(MONITOR_ONLY_TITLE, MONITOR_ONLY_BODY))
+        val line = try {
+            AgentdProtocolCodec.questionAnswer(
+                sessionKey = alert.sessionKey,
+                alertId = id,
+                requestRef = question.requestRef,
+                answers = answers,
+                msgId = msgIdFor(id, QUESTION_ANSWER),
+            )
+        } catch (_: IllegalArgumentException) {
+            return listOf(Effect.Brief(NOT_SENT, NOT_SENT_BODY))
+        }
+        return listOf(Effect.Send(line))
+    }
+
     /** The band for [id] closed. Only the wearer's close is evidence; any close ends the episode. */
     fun onBandClosed(id: String, reason: NexusNoticeCloseReason): List<Effect> {
         if (episode?.alert?.id != id) return emptyList()
@@ -224,6 +252,10 @@ class AlertCoordinator(
         const val NO_LONGER_WAITING_BODY = "Answer on laptop if still needed"
         const val MONITOR_ONLY_TITLE = "Monitor only"
         const val MONITOR_ONLY_BODY = "approve on laptop"
+
+        const val NOT_SENT = "Not sent"
+        const val NOT_SENT_BODY = "Answer on laptop"
+        private const val QUESTION_ANSWER = "question_answer"
 
         const val ALLOW = "allow"
         const val DENY = "deny"

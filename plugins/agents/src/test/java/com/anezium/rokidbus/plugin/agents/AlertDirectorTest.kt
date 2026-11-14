@@ -65,6 +65,18 @@ class AlertDirectorTest {
             .put("kind", kind).put("title", "t").put("body", "body $id")
             .put("waiting", waiting).put("reason", reason)
         if (kind == "approval") frame.put("actions", JSONArray(listOf("allow", "deny")))
+        if (kind == "question") {
+            frame.put(
+                "question",
+                JSONObject().put("requestRef", "ref-$id").put("source", "claude_tool").put(
+                    "items",
+                    JSONArray().put(
+                        JSONObject().put("text", "Pick?").put("options", JSONArray())
+                            .put("multiSelect", false).put("allowFreeText", true),
+                    ),
+                ),
+            )
+        }
         return AgentdProtocolCodec().parse(frame.toString()) as AgentdAction.Alert
     }
 
@@ -167,6 +179,36 @@ class AlertDirectorTest {
         director.onEvent(AgentdEvent.Action(AgentdAction.FollowupClosed("claude:s1", "ended")))
 
         assertEquals("invalidate A", glasses.log.last())
+    }
+
+    @Test
+    fun a_question_answer_goes_out_once_through_the_live_card_and_never_after_followup_closed() {
+        val answers = mapOf<String, Any>("Pick?" to "Blue")
+        up()
+        feed(alert(id = "Q", kind = "question"))
+        director.onBandAction("answer")
+        director.onQuestionConfirm("Q", answers)
+
+        assertTrue("question Q" in glasses.log)
+        assertEquals(listOf("alert_shown", "question_answer"), types())
+        assertEquals("Q", written.last().getString("alertId"))
+
+        written.clear()
+        director.onEvent(AgentdEvent.Action(AgentdAction.FollowupClosed("claude:s1", "ended")))
+        director.onQuestionConfirm("Q", answers)
+        assertEquals(emptyList<String>(), types())
+        assertTrue("invalidate Q" in glasses.log)
+    }
+
+    @Test
+    fun a_question_answer_over_a_plaintext_link_writes_nothing() {
+        up()
+        feed(alert(id = "Q", kind = "question"))
+        director.onBandAction("answer")
+        written.clear()
+        secure = false
+        director.onQuestionConfirm("Q", mapOf("Pick?" to "Blue"))
+        assertEquals(emptyList<String>(), types())
     }
 
     @Test
