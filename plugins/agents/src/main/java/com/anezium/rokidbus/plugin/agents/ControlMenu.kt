@@ -62,6 +62,18 @@ object ControlMenu {
     const val MODEL_WARNING = "This also changes the default for new sessions"
     const val NOTICE_TITLE = "Session control"
 
+    /** R152: agentd already has this command, so it is not typed again. */
+    const val ALREADY_SENT = "Already sent — check laptop"
+
+    /** R152: typed into the session, then the launcher failed; the id stays spent. */
+    const val SENT_MAYBE_UNFINISHED = "Sent, but may not have finished — check laptop"
+
+    /** R152: a kept id is too old for agentd to still know, so the tap sends nothing and arms the retry. */
+    const val MAY_ALREADY_BE_SENT = "May already have been sent — tap again to send"
+
+    /** The row's sub while the next tap is an informed resend. */
+    const val TAP_TO_SEND_AGAIN = "Tap to send again"
+
     /** The launcher's fixed model list (design §12.6); Codex asks agentd for its own. */
     val CLAUDE_MODELS = listOf("opus", "sonnet", "haiku")
 
@@ -194,6 +206,8 @@ object ControlMenu {
         val notApplied: String? = null,
         /** A follow-up agentd rejected, shown on the Reply by voice row until the next one (R106). */
         val replyNotSent: String? = null,
+        /** Launcher commands whose next tap is an informed resend (R152); their rows say so. */
+        val retryArmed: Set<Command> = emptySet(),
     )
 
     /**
@@ -330,9 +344,10 @@ object ControlMenu {
         val codex = session.provider == AgentProvider.CODEX
         return items(session, secure, state.notApplied, state.replyNotSent).map { item ->
             val tone = if (item.enabled) NexusRowTone.NORMAL else NexusRowTone.DIM
+            val armed = item is MenuItem.Compact && item.enabled && !codex && Command.LauncherCompact in state.retryArmed
             val row = Row(
                 text = item.label,
-                sub = item.sub?.singleLine(LINE_CHARS),
+                sub = if (armed) TAP_TO_SEND_AGAIN else item.sub?.singleLine(LINE_CHARS),
                 tone = tone,
             )
             val act: () -> Step = when {
@@ -474,7 +489,14 @@ object ControlMenu {
         }
         return options.map { option ->
             Entry(
-                Row(option.singleLine(120), sub = if (option == current) "current" else null),
+                Row(
+                    option.singleLine(120),
+                    sub = when {
+                        !codex && Command.LauncherModel(option) in state.retryArmed -> TAP_TO_SEND_AGAIN
+                        option == current -> "current"
+                        else -> null
+                    },
+                ),
             ) {
                 val main = state.copy(screen = Screen.Main, index = 0)
                 when {
@@ -508,7 +530,13 @@ object ControlMenu {
             add(Entry(Row(it, tone = NexusRowTone.ALERT, selectable = false), null))
         }
         add(
-            Entry(Row(screen.yes, tone = NexusRowTone.ALERT)) {
+            Entry(
+                Row(
+                    screen.yes,
+                    sub = if (screen.command in state.retryArmed) TAP_TO_SEND_AGAIN else null,
+                    tone = NexusRowTone.ALERT,
+                ),
+            ) {
                 Step.Send(screen.command, state.copy(screen = Screen.Main, index = 0))
             },
         )
@@ -540,9 +568,14 @@ object ControlMenu {
 
     // ------------------------------------------------------------------ copy
 
-    /** `ack rejected` with any error; an applied or duplicate ack says nothing. */
+    /**
+     * A duplicate says it was already sent, a consumed rejection says it may not have finished (R152),
+     * any other `rejected` names its error; an applied ack says nothing.
+     */
     fun ackNotice(ack: AgentdAction.Ack): String? {
+        if (ack.result == "duplicate") return ALREADY_SENT
         if (ack.result != "rejected") return null
+        if (ack.consumed) return SENT_MAYBE_UNFINISHED
         val error = ack.error?.singleLine(NOTICE_CHARS)?.takeIf(String::isNotBlank)
         return error?.let { "Not applied: $it" } ?: "Not applied"
     }

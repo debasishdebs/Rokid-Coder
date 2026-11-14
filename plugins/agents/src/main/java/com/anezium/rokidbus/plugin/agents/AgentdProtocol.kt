@@ -61,8 +61,11 @@ sealed interface AgentdAction {
     /** An alert left agentd's queue for a reason the glasses did not cause. */
     data class AlertClosed(val id: String, val reason: String) : AgentdAction
 
-    /** The answer to a steering frame; [msgId] is empty when agentd refused a frame that had none. */
-    data class Ack(val msgId: String, val result: String, val error: String?) : AgentdAction
+    /**
+     * The answer to a steering frame; [msgId] is empty when agentd refused a frame that had none.
+     * [consumed]: a rejection that spent its msgId (a launcher command already typed), so the phone keeps the id (R152).
+     */
+    data class Ack(val msgId: String, val result: String, val error: String?, val consumed: Boolean = false) : AgentdAction
     data class FollowupClosed(val sessionKey: String, val reason: String) : AgentdAction
     data class ModeReset(val sessionKey: String, val from: TempMode, val reason: String) : AgentdAction
     data class Models(
@@ -314,6 +317,7 @@ class AgentdProtocolCodec {
                     msgId = (json.opt("msgId") as? String).orEmpty().take(MAX_MSG_ID_CHARS),
                     result = result,
                     error = json.nullableString("error", MAX_WIRE_TYPE_CHARS),
+                    consumed = json.opt("consumed") == true,
                 )
             }
             "followup_closed" -> {

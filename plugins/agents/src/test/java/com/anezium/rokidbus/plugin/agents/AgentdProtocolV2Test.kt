@@ -173,6 +173,11 @@ class AgentdProtocolV2Test {
             AgentdAction.Ack("fx-msg-followup", "rejected", "not_waiting"),
             parse(codec, fixture("ack")),
         )
+        // R152: a rejection that spent its msgId says so.
+        assertEquals(
+            AgentdAction.Ack("fx-msg-launcher-consumed", "rejected", "dialog_not_seen", consumed = true),
+            parse(codec, fixture("ack_consumed")),
+        )
         assertEquals(
             AgentdAction.FollowupClosed("claude:fx-claude", "delivered"),
             parse(codec, fixture("followup_closed")),

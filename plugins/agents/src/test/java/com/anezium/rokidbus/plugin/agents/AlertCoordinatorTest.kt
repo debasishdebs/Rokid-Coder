@@ -632,4 +632,18 @@ class AlertCoordinatorTest {
         assertEquals(Effect.Rejected("A", "wrong_request"), effects.first())
         assertEquals(emptyList<Effect>(), coordinator.onAck(AgentdAction.Ack("elsewhere", "rejected", "x")))
     }
+
+    @Test
+    fun duplicate_alert_ack_shows_already_answered() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(alert())
+        val frame = sends(coordinator.onAction("A", "allow", secure = true)).single { it.getString("type") == "alert_action" }
+        assertEquals(
+            listOf<Effect>(Effect.Brief("Already answered", "")),
+            coordinator.onAck(AgentdAction.Ack(frame.getString("msgId"), "duplicate", null)),
+        )
+        // An applied ack, or a duplicate for an id this coordinator never sent, says nothing.
+        assertEquals(emptyList<Effect>(), coordinator.onAck(AgentdAction.Ack(frame.getString("msgId"), "applied", null)))
+        assertEquals(emptyList<Effect>(), coordinator.onAck(AgentdAction.Ack("elsewhere", "duplicate", null)))
+    }
 }

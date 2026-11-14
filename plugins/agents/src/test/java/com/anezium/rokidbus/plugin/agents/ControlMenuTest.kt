@@ -234,7 +234,29 @@ class ControlMenuTest {
         )
         assertEquals("Not applied", ControlMenu.ackNotice(AgentdAction.Ack("m", "rejected", null)))
         assertNull(ControlMenu.ackNotice(AgentdAction.Ack("m", "applied", null)))
-        assertNull(ControlMenu.ackNotice(AgentdAction.Ack("m", "duplicate", null)))
+        // A duplicate is no longer silent: the wearer is told it was already sent.
+        assertEquals("Already sent — check laptop", ControlMenu.ackNotice(AgentdAction.Ack("m", "duplicate", null)))
+        assertEquals(
+            "Sent, but may not have finished — check laptop",
+            ControlMenu.ackNotice(AgentdAction.Ack("m", "rejected", "typed_after_cancel", consumed = true)),
+        )
+    }
+
+    @Test
+    fun an_armed_retry_puts_tap_to_send_again_on_the_launcher_rows() {
+        val launcher = session(v2 = v2(mode = "launcher", canCompact = true, canModel = true))
+        val armed = setOf<ControlMenu.Command>(
+            ControlMenu.Command.LauncherCompact,
+            ControlMenu.Command.LauncherModel("sonnet"),
+        )
+        val base = ControlMenu.open("claude:s1").copy(retryArmed = armed)
+        val main = ControlMenu.page(base, launcher, secure = true)
+        assertEquals("Tap to send again", main.rows.single { it.text == "Compact" }.sub)
+        assertNull(ControlMenu.page(ControlMenu.open("claude:s1"), launcher, secure = true).rows.single { it.text == "Compact" }.sub)
+
+        val choose = base.copy(screen = ControlMenu.Screen.Choose(ControlMenu.Setting.MODEL))
+        val chooser = ControlMenu.page(choose, launcher, secure = true)
+        assertEquals(listOf(null, "Tap to send again", null), chooser.rows.map { it.sub })
     }
 
     @Test

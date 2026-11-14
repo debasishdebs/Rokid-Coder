@@ -210,8 +210,10 @@ class AlertCoordinator(
      * the only word: an approval or a question has no menu line to keep it on.
      */
     fun onAck(ack: AgentdAction.Ack): List<Effect> {
-        if (ack.result != "rejected" || ack.msgId.isEmpty()) return emptyList()
+        if (ack.msgId.isEmpty() || (ack.result != "rejected" && ack.result != "duplicate")) return emptyList()
         val id = seen.entries.firstOrNull { ack.msgId in it.value.msgIds.values }?.key ?: return emptyList()
+        // The answer already reached agentd (a re-tap after a lost ack): say so; nothing was refused.
+        if (ack.result == "duplicate") return listOf(Effect.Brief(ALREADY_ANSWERED, ""))
         val why = ack.error?.singleLine(REJECTION_CHARS)?.takeIf(String::isNotBlank)
         return listOf(
             Effect.Rejected(id, why ?: REFUSED),
@@ -306,6 +308,7 @@ class AlertCoordinator(
         const val NO_LONGER_WAITING = "No longer waiting"
         const val NO_LONGER_WAITING_BODY = "Answer on laptop if still needed"
         const val NOT_SENT = "Not sent"
+        const val ALREADY_ANSWERED = "Already answered"
         const val NOT_SENT_BODY = "Answer on laptop"
         const val NOT_CONNECTED = "Computer not connected"
         private const val QUESTION_ANSWER = "question_answer"

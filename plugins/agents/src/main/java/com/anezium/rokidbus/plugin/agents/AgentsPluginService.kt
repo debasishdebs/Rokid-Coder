@@ -206,6 +206,14 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private var modelsTimeout: Job? = null
     private val controlMsgIds = ArrayDeque<String>()
 
+    /**
+     * Every control-menu send leaves through here: launcher commands keep their msgId until agentd
+     * frees it, so a re-tap after a lost ack is a duplicate there and never types twice (R152).
+     */
+    private val controlSender = ControlSender(
+        write = { frame -> AgentsMonitorService.sendV2(applicationContext, frame) },
+    )
+
     /** The mode_set frames among them, with their session: a rejection of one is shown on that session's menu. */
     private val modeSetMsgIds = LinkedHashMap<String, String>()
 
@@ -295,6 +303,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         serviceScope.launch {
             // A reply for a session that left the board would send into nothing.
             AgentsRuntime.store.sessions.collect { sessions ->
+                // A kept launcher msgId goes with its session (R152).
+                controlSender.retainSessions(sessions.mapTo(HashSet()) { it.key })
                 val target = screen.voice?.target as? VoiceTarget.Followup ?: return@collect
                 if (sessions.none { it.key == target.sessionKey }) {
                     screen.stopVoice()
@@ -743,6 +753,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         val withNotice = shown.copy(
             notApplied = AgentsRuntime.store.notApplied(state.sessionKey),
             replyNotSent = AgentsRuntime.store.replyNotSent(state.sessionKey),
+            retryArmed = controlSender.armed(state.sessionKey),
         )
         return BoardCards.menuCard(
             ControlMenu.page(withNotice, session, secure = secureLink, now = System.currentTimeMillis()),
@@ -816,19 +827,33 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
      * rows, so this is the second lock, not the first.
      */
     private fun sendControl(command: ControlMenu.Command, sessionKey: String) {
-        val msgId = UUID.randomUUID().toString()
-        val frame = try {
-            ControlMenu.frame(command, sessionKey, msgId)
-        } catch (_: IllegalArgumentException) {
-            showBriefNotice(ControlMenu.NOTICE_TITLE, "Not sent")
-            return
+        // The write is an intent to the monitor service and acks come back on this thread, so an ack
+        // cannot be handled before the id is remembered below.
+        val sent = controlSender.send(command, sessionKey)
+        when (sent) {
+            ControlSender.Sent.Unframeable -> showBriefNotice(ControlMenu.NOTICE_TITLE, "Not sent")
+            // A kept id too old for agentd to know: nothing was sent, and the next tap is the informed resend (R152).
+            ControlSender.Sent.Held -> {
+                showBriefNotice(ControlMenu.NOTICE_TITLE, ControlMenu.MAY_ALREADY_BE_SENT, safety = true)
+                scheduleRetryExpiry()
+            }
+            is ControlSender.Sent.Written -> {
+                if (sent.steers) rememberControlMsgId(sent.msgId) else scheduleModelsTimeout()
+                if (command is ControlMenu.Command.ModeSet) {
+                    modeSetMsgIds[sent.msgId] = sessionKey
+                    while (modeSetMsgIds.size > CONTROL_MSG_IDS) modeSetMsgIds.remove(modeSetMsgIds.keys.first())
+                }
+            }
         }
-        if (ControlMenu.steers(command)) rememberControlMsgId(msgId) else scheduleModelsTimeout()
-        if (command is ControlMenu.Command.ModeSet) {
-            modeSetMsgIds[msgId] = sessionKey
-            while (modeSetMsgIds.size > CONTROL_MSG_IDS) modeSetMsgIds.remove(modeSetMsgIds.keys.first())
+    }
+
+    /** The menu's "Tap to send again" lapses with the retry window, so draw it once more when it does. */
+    private fun scheduleRetryExpiry() {
+        serviceScope.launch {
+            delay(LauncherCommandTracker.RETRY_WINDOW_MS + 50L)
+            if (surfaceShown && screen.menu != null) render(show = false)
         }
-        AgentsMonitorService.sendV2(applicationContext, frame)
+        if (surfaceShown && screen.menu != null) render(show = false)
     }
 
     /** The reply card's text, as a v2 `followup`. Nothing about the text is logged. */
@@ -862,6 +887,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     private fun rememberControlMsgId(msgId: String) {
+        // A launcher command re-sent after a lost ack carries the same id: one entry answers it.
+        if (msgId in controlMsgIds) return
         controlMsgIds.addLast(msgId)
         while (controlMsgIds.size > CONTROL_MSG_IDS) controlMsgIds.removeFirst()
     }
@@ -885,6 +912,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private fun onControlAction(action: AgentdAction) {
         when (action) {
             is AgentdAction.Ack -> {
+                // The tracker's state follows the ack whether or not a notice is wanted for it (R152).
+                val launcher = controlSender.onAck(action)
+                if (launcher == LauncherCommandTracker.AckOutcome.DUPLICATE) scheduleRetryExpiry()
                 if (!controlMsgIds.remove(action.msgId)) return
                 val followupSession = followupMsgIds.remove(action.msgId)
                 if (followupSession != null && action.result == "rejected") {
