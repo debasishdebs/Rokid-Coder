@@ -62,6 +62,8 @@ data class AgentSession(
     val lastAssistantText: String? = null,
     val turn: AgentTurn? = null,
     val pendingRequest: AgentPendingRequest? = null,
+    /** The protocol v2 fields; null for a daemon (or provider) that sends none. */
+    val v2: SessionV2? = null,
 ) {
     val key: String
         get() = "${provider.wireValue}:$id"
@@ -72,6 +74,106 @@ data class AgentSession(
             ?: cwd?.substringAfterLast('/')?.substringAfterLast('\\')?.takeIf(String::isNotBlank)
             ?: id
 }
+
+/** The temporary approval mode agentd applies to one session; `wire` is the frame's value. */
+enum class TempMode(val wire: String) {
+    ASK("ask"),
+    ACCEPT_EDITS("acceptEdits"),
+    APPROVE_ALL("approveAll"),
+    ;
+
+    companion object {
+        fun fromWire(value: String?): TempMode? = values().firstOrNull { it.wire == value }
+    }
+}
+
+/** Whether a typed follow-up can be delivered into the session right now. */
+enum class FollowupState(val wire: String) {
+    WAITING("waiting"),
+    UNAVAILABLE("unavailable"),
+    CAP_REACHED("cap_reached"),
+    READY("ready"),
+    ;
+
+    companion object {
+        fun fromWire(value: String?): FollowupState? = values().firstOrNull { it.wire == value }
+    }
+}
+
+/**
+ * What protocol v2 adds to a published session. [mode] is `plugin` or
+ * `launcher`; [nativeMode] is the provider's own approval mode, read-only.
+ */
+data class SessionV2(
+    val mode: String,
+    val canCompact: Boolean,
+    val canModel: Boolean,
+    val followup: FollowupState,
+    val tempMode: TempMode,
+    val nativeMode: String?,
+    val heading: String,
+    val currentFile: String?,
+    val step: String?,
+    val contextUsed: Long?,
+    val contextWindow: Long?,
+    val pendingModel: String?,
+    val pendingEffort: String?,
+    val sandbox: String?,
+)
+
+enum class AlertKind(val wire: String) {
+    APPROVAL("approval"),
+    QUESTION("question"),
+    ERROR("error"),
+    DONE("done"),
+    NOTICE("notice"),
+    ;
+
+    companion object {
+        fun fromWire(value: String?): AlertKind? = values().firstOrNull { it.wire == value }
+    }
+}
+
+/** Why agentd sent this alert frame; a missing or unknown reason counts as [NEW]. */
+enum class AlertReason(val wire: String) {
+    NEW("new"),
+    RETRY("retry"),
+    REMINDER("reminder"),
+    RESUME("resume"),
+    UPDATE("update"),
+    ;
+
+    companion object {
+        fun fromWire(value: String?): AlertReason = values().firstOrNull { it.wire == value } ?: NEW
+    }
+}
+
+data class QuestionOption(val label: String, val description: String? = null)
+
+data class QuestionItem(
+    val text: String,
+    val options: List<QuestionOption>,
+    val multiSelect: Boolean,
+    val allowFreeText: Boolean,
+)
+
+data class QuestionPayload(
+    val requestRef: String,
+    val source: String,
+    val items: List<QuestionItem>,
+)
+
+/**
+ * The alert thresholds the phone owns and syncs to agentd. There is no expiry:
+ * agentd derives it from the wait limit, so an alert never ends before its hold.
+ */
+data class AlertTimings(
+    val ageBoostMs: Long,
+    val dwellMs: Long,
+    val ackTimeoutMs: Long,
+    val retryBackoffMs: List<Long>,
+    val reminderMs: Long,
+)
 
 enum class ApprovalDecision(val wireValue: String) {
     ALLOW("allow"),

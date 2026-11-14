@@ -1,0 +1,301 @@
+{
+  "_comment": "Rokid-Coder wire protocol v2 examples, shared by the agentd contract test (agentd/test/fixtures-contract.test.js) and the Agents plugin codec test (AgentdProtocolV2Test.kt). Authority: agentd/src/protocol-v2.ts. Ids are placeholders: the agentd test attaches claude:fx-claude and codex:fx-codex, and swaps the alert and request ids below for the real ones.",
+  "_classes": {
+    "approval_decision": "steering",
+    "session_input": "steering",
+    "thread_start": "steering",
+    "alert_action": "steering",
+    "followup": "steering",
+    "question_answer": "steering",
+    "mode_set": "steering",
+    "mode_revoke_all": "steering",
+    "codex_settings": "steering",
+    "codex_compact": "steering",
+    "launcher_command": "steering",
+    "defaults_set": "steering",
+    "settings_sync": "steering",
+    "hello": "monitor",
+    "hello_ack": "monitor",
+    "hello_reject": "monitor",
+    "refresh": "monitor",
+    "detail_open": "monitor",
+    "detail_close": "monitor",
+    "ping": "monitor",
+    "pong": "monitor",
+    "fs_list": "monitor",
+    "alert_shown": "monitor",
+    "alert_dismissed": "monitor",
+    "models_request": "monitor"
+  },
+  "agent_to_phone": {
+    "snapshot": {
+      "type": "snapshot",
+      "v": 2,
+      "seq": 6,
+      "sessions": [
+        {
+          "id": "fx-claude",
+          "provider": "claude",
+          "machineId": "fx-machine",
+          "machineName": "Laptop",
+          "title": "Fix the flaky billing test",
+          "cwd": "/work/demo",
+          "project": "demo",
+          "status": "needs_you",
+          "stale": false,
+          "lastActivityAt": 1760000000000,
+          "mode": "plugin",
+          "capabilities": { "compact": false, "model": false, "followup": "waiting" },
+          "tempMode": "ask",
+          "heading": "Fix the flaky billing test"
+        }
+      ]
+    },
+    "session_upsert": {
+      "type": "session_upsert",
+      "v": 2,
+      "seq": 7,
+      "session": {
+        "id": "fx-codex",
+        "provider": "codex",
+        "machineId": "fx-machine",
+        "machineName": "Laptop",
+        "title": "Refactor the parser",
+        "cwd": "/work/parser",
+        "project": "parser",
+        "status": "working",
+        "stale": false,
+        "lastActivityAt": 1760000005000,
+        "turn": { "lastTool": "apply_patch", "activeSince": 1760000001000 },
+        "mode": "launcher",
+        "capabilities": { "compact": true, "model": true, "followup": "ready" },
+        "tempMode": "acceptEdits",
+        "nativeMode": "on-request",
+        "heading": "Refactor the parser",
+        "currentFile": "/work/parser/lexer.ts",
+        "step": "Split the tokenizer",
+        "context": { "used": 48000, "window": 200000 },
+        "pendingSettings": { "model": "gpt-6-luna", "effort": "low" },
+        "sandbox": "workspace-write"
+      }
+    },
+    "approval_request": {
+      "type": "approval_request",
+      "v": 1,
+      "requestId": "fx-request-id",
+      "sessionId": "fx-claude",
+      "provider": "claude",
+      "sessionKey": "claude:fx-claude",
+      "approvalKind": "tool",
+      "tool": "Bash",
+      "summary": "npm test",
+      "detail": "npm test -- --runInBand",
+      "createdAt": 1760000010000
+    },
+    "approval_resolved": {
+      "type": "approval_resolved",
+      "v": 1,
+      "requestId": "fx-request-id",
+      "outcome": "allow"
+    },
+    "alert": {
+      "type": "alert",
+      "v": 2,
+      "id": "fx-alert",
+      "sessionKey": "claude:fx-claude",
+      "kind": "question",
+      "title": "Question",
+      "body": "Which test runner?",
+      "question": {
+        "requestRef": "fx-request-ref",
+        "source": "claude_tool",
+        "items": [
+          {
+            "text": "Which test runner?",
+            "options": [
+              { "label": "node:test", "description": "Built in" },
+              { "label": "vitest" }
+            ],
+            "multiSelect": false,
+            "allowFreeText": true
+          },
+          {
+            "text": "Which suites?",
+            "options": [{ "label": "unit" }, { "label": "contract" }],
+            "multiSelect": true,
+            "allowFreeText": true
+          }
+        ]
+      },
+      "waiting": 2,
+      "reason": "retry"
+    },
+    "alert_closed": {
+      "type": "alert_closed",
+      "v": 2,
+      "id": "fx-alert",
+      "reason": "withdrawn"
+    },
+    "detail_rejected": {
+      "type": "detail_rejected",
+      "sessionId": "fx-claude",
+      "error": "not_attached"
+    },
+    "ack": {
+      "type": "ack",
+      "v": 2,
+      "msgId": "fx-msg-followup",
+      "result": "rejected",
+      "error": "not_waiting"
+    },
+    "followup_closed": {
+      "type": "followup_closed",
+      "v": 2,
+      "sessionKey": "claude:fx-claude",
+      "reason": "delivered"
+    },
+    "mode_reset": {
+      "type": "mode_reset",
+      "v": 2,
+      "sessionKey": "claude:fx-claude",
+      "from": "approveAll",
+      "reason": "helper_restarted"
+    },
+    "models": {
+      "type": "models",
+      "v": 2,
+      "sessionKey": "codex:fx-codex",
+      "models": ["gpt-6-luna", "gpt-6"],
+      "efforts": ["low", "medium", "high"],
+      "current": { "model": "gpt-6-luna", "effort": "low" }
+    }
+  },
+  "agent_to_phone_variants": {
+    "alert_approval": {
+      "type": "alert",
+      "v": 2,
+      "id": "fx-alert",
+      "sessionKey": "claude:fx-claude",
+      "kind": "approval",
+      "title": "Bash",
+      "body": "npm test",
+      "actions": ["allow", "deny"],
+      "waiting": 0,
+      "reason": "new"
+    }
+  },
+  "phone_to_agent": {
+    "approval_decision": {
+      "type": "approval_decision",
+      "v": 1,
+      "requestId": "fx-request-id",
+      "decision": "allow"
+    },
+    "session_input": {
+      "type": "session_input",
+      "v": 1,
+      "id": "fx-input",
+      "sessionId": "fx-claude",
+      "text": "yes, go ahead"
+    },
+    "thread_start": {
+      "type": "thread_start",
+      "id": "fx-thread",
+      "provider": "claude",
+      "path": "/nonexistent/rokid-coder-fixture",
+      "prompt": "Add a README"
+    },
+    "alert_shown": {
+      "type": "alert_shown",
+      "v": 2,
+      "id": "fx-alert"
+    },
+    "alert_dismissed": {
+      "type": "alert_dismissed",
+      "v": 2,
+      "id": "fx-alert"
+    },
+    "alert_action": {
+      "type": "alert_action",
+      "v": 2,
+      "id": "fx-alert",
+      "action": "allow",
+      "msgId": "fx-msg-alert_action"
+    },
+    "followup": {
+      "type": "followup",
+      "v": 2,
+      "sessionKey": "claude:fx-claude",
+      "text": "run the tests again",
+      "msgId": "fx-msg-followup"
+    },
+    "question_answer": {
+      "type": "question_answer",
+      "v": 2,
+      "sessionKey": "claude:fx-claude",
+      "alertId": "fx-alert",
+      "requestRef": "fx-request-ref",
+      "answers": { "Which test runner?": "node:test", "Which suites?": ["unit", "contract"] },
+      "msgId": "fx-msg-question_answer"
+    },
+    "mode_set": {
+      "type": "mode_set",
+      "v": 2,
+      "sessionKey": "claude:fx-claude",
+      "mode": "approveAll",
+      "confirmed": true,
+      "msgId": "fx-msg-mode_set"
+    },
+    "mode_revoke_all": {
+      "type": "mode_revoke_all",
+      "v": 2,
+      "msgId": "fx-msg-mode_revoke_all"
+    },
+    "codex_settings": {
+      "type": "codex_settings",
+      "v": 2,
+      "sessionKey": "codex:fx-codex",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "msgId": "fx-msg-codex_settings"
+    },
+    "codex_compact": {
+      "type": "codex_compact",
+      "v": 2,
+      "sessionKey": "codex:fx-codex",
+      "msgId": "fx-msg-codex_compact"
+    },
+    "launcher_command": {
+      "type": "launcher_command",
+      "v": 2,
+      "sessionKey": "claude:fx-claude",
+      "command": "model",
+      "model": "opus",
+      "msgId": "fx-msg-launcher_command"
+    },
+    "defaults_set": {
+      "type": "defaults_set",
+      "v": 2,
+      "defaultModes": { "claude": "acceptEdits", "codex": "ask" },
+      "msgId": "fx-msg-defaults_set"
+    },
+    "settings_sync": {
+      "type": "settings_sync",
+      "v": 2,
+      "timings": {
+        "ageBoostMs": 30000,
+        "dwellMs": 8000,
+        "ackTimeoutMs": 5000,
+        "retryBackoffMs": [5000, 10000, 20000],
+        "reminderMs": 300000
+      },
+      "waitLimitMs": 1800000,
+      "msgId": "fx-msg-settings_sync"
+    },
+    "models_request": {
+      "type": "models_request",
+      "v": 2,
+      "sessionKey": "codex:fx-codex"
+    }
+  }
+}

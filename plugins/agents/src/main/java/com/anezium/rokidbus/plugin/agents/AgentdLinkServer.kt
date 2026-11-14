@@ -238,8 +238,16 @@ class AgentdLinkServer(
             is AgentdAction.ThreadStarted -> store.setThreadStart(action.result)
             is AgentdAction.SessionInputAnswered -> store.setSessionInputResult(action.result)
             is AgentdAction.Send -> connection.send(action.text)
+            // The v2 frames are parsed here and acted on by the alert layer (Plan 2, Task 2).
             is AgentdAction.Hello,
             is AgentdAction.HelloAcknowledged,
+            is AgentdAction.Alert,
+            is AgentdAction.AlertClosed,
+            is AgentdAction.Ack,
+            is AgentdAction.FollowupClosed,
+            is AgentdAction.ModeReset,
+            is AgentdAction.Models,
+            is AgentdAction.DetailRejected,
             AgentdAction.Ignore,
             -> Unit
         }

@@ -228,7 +228,17 @@ class AgentdClient(
                         }
                     }
                     // Only the LAN link sees a daemon hello: here we are the client.
-                    is AgentdAction.Hello, AgentdAction.Ignore -> Unit
+                    // The v2 frames are parsed here and acted on by the alert layer (Plan 2, Task 2).
+                    is AgentdAction.Hello,
+                    is AgentdAction.Alert,
+                    is AgentdAction.AlertClosed,
+                    is AgentdAction.Ack,
+                    is AgentdAction.FollowupClosed,
+                    is AgentdAction.ModeReset,
+                    is AgentdAction.Models,
+                    is AgentdAction.DetailRejected,
+                    AgentdAction.Ignore,
+                    -> Unit
                 }
             }
 

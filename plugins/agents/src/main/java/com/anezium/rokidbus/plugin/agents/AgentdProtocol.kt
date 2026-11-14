@@ -35,6 +35,37 @@ sealed interface AgentdAction {
     data class FolderListing(val listing: FsListing) : AgentdAction
     data class ThreadStarted(val result: ThreadStartResult) : AgentdAction
     data class SessionInputAnswered(val result: SessionInputResult) : AgentdAction
+
+    /** A v2 alert for the glasses. [reason] says why agentd sent it; it never changes what the alert is. */
+    data class Alert(
+        val id: String,
+        val sessionKey: String,
+        val kind: AlertKind,
+        val title: String,
+        val body: String,
+        val actions: List<String>,
+        val question: QuestionPayload?,
+        val waiting: Int,
+        val reason: AlertReason,
+    ) : AgentdAction
+
+    /** An alert left agentd's queue for a reason the glasses did not cause. */
+    data class AlertClosed(val id: String, val reason: String) : AgentdAction
+
+    /** The answer to a steering frame; [msgId] is empty when agentd refused a frame that had none. */
+    data class Ack(val msgId: String, val result: String, val error: String?) : AgentdAction
+    data class FollowupClosed(val sessionKey: String, val reason: String) : AgentdAction
+    data class ModeReset(val sessionKey: String, val from: TempMode, val reason: String) : AgentdAction
+    data class Models(
+        val sessionKey: String,
+        val models: List<String>,
+        val efforts: List<String>,
+        val currentModel: String?,
+        val currentEffort: String?,
+    ) : AgentdAction
+
+    /** The reply to a detail_open for a session agentd does not have attached. */
+    data class DetailRejected(val sessionId: String) : AgentdAction
     data class Send(val text: String) : AgentdAction
     data object Ignore : AgentdAction
 }
@@ -243,6 +274,61 @@ class AgentdProtocolCodec {
                     ),
                 )
             }
+            // The v2 frames carry no seq either: they are replies and pushes
+            // about the alert queue, not part of the session stream.
+            "alert" -> parseAlert(json)
+            "alert_closed" -> {
+                if (json.intOrNull("v") != 2) return AgentdAction.Ignore
+                val id = json.identifierOrNull("id") ?: return AgentdAction.Ignore
+                AgentdAction.AlertClosed(id, json.nullableString("reason", MAX_WIRE_TYPE_CHARS).orEmpty())
+            }
+            "ack" -> {
+                if (json.intOrNull("v") != 2) return AgentdAction.Ignore
+                val result = json.nullableString("result", MAX_WIRE_TYPE_CHARS)
+                    ?.takeIf { it in ACK_RESULTS }
+                    ?: return AgentdAction.Ignore
+                AgentdAction.Ack(
+                    // Empty on purpose: agentd refuses a frame without an id and has none to echo.
+                    msgId = (json.opt("msgId") as? String).orEmpty().take(MAX_MSG_ID_CHARS),
+                    result = result,
+                    error = json.nullableString("error", MAX_WIRE_TYPE_CHARS),
+                )
+            }
+            "followup_closed" -> {
+                if (json.intOrNull("v") != 2) return AgentdAction.Ignore
+                val sessionKey = json.sessionKeyOrNull("sessionKey") ?: return AgentdAction.Ignore
+                AgentdAction.FollowupClosed(
+                    sessionKey,
+                    json.nullableString("reason", MAX_WIRE_TYPE_CHARS).orEmpty(),
+                )
+            }
+            "mode_reset" -> {
+                if (json.intOrNull("v") != 2) return AgentdAction.Ignore
+                val sessionKey = json.sessionKeyOrNull("sessionKey") ?: return AgentdAction.Ignore
+                val from = TempMode.fromWire(json.nullableString("from", MAX_WIRE_TYPE_CHARS))
+                    ?: return AgentdAction.Ignore
+                AgentdAction.ModeReset(
+                    sessionKey,
+                    from,
+                    json.nullableString("reason", MAX_WIRE_TYPE_CHARS).orEmpty(),
+                )
+            }
+            "models" -> {
+                if (json.intOrNull("v") != 2) return AgentdAction.Ignore
+                val sessionKey = json.sessionKeyOrNull("sessionKey") ?: return AgentdAction.Ignore
+                val current = json.optJSONObject("current")
+                AgentdAction.Models(
+                    sessionKey = sessionKey,
+                    models = json.optJSONArray("models").toStrings(),
+                    efforts = json.optJSONArray("efforts").toStrings(),
+                    currentModel = current?.nullableString("model", MAX_HUD_LABEL_CHARS),
+                    currentEffort = current?.nullableString("effort", MAX_HUD_LABEL_CHARS),
+                )
+            }
+            "detail_rejected" -> {
+                val sessionId = json.identifierOrNull("sessionId") ?: return AgentdAction.Ignore
+                AgentdAction.DetailRejected(sessionId)
+            }
             "ping" -> AgentdAction.Send(
                 JSONObject()
                     .put("type", "pong")
@@ -251,6 +337,29 @@ class AgentdProtocolCodec {
             )
             else -> AgentdAction.Ignore
         }
+    }
+
+    /** An alert of a kind this plugin does not know is dropped: showing it as something else would mislead. */
+    private fun parseAlert(json: JSONObject): AgentdAction {
+        if (json.intOrNull("v") != 2) return AgentdAction.Ignore
+        val id = json.identifierOrNull("id") ?: return AgentdAction.Ignore
+        val sessionKey = json.sessionKeyOrNull("sessionKey") ?: return AgentdAction.Ignore
+        val kind = AlertKind.fromWire(json.nullableString("kind", MAX_WIRE_TYPE_CHARS))
+            ?: return AgentdAction.Ignore
+        val question = json.optJSONObject("question")?.toQuestionPayload()
+        // A question nobody can answer is not worth a glance at the glasses.
+        if (kind == AlertKind.QUESTION && question == null) return AgentdAction.Ignore
+        return AgentdAction.Alert(
+            id = id,
+            sessionKey = sessionKey,
+            kind = kind,
+            title = json.nullableString("title", MAX_HUD_LABEL_CHARS).orEmpty(),
+            body = json.nullableString("body", MAX_HUD_TEXT_CHARS).orEmpty(),
+            actions = json.optJSONArray("actions").toStrings(MAX_ALERT_ACTIONS, MAX_WIRE_TYPE_CHARS),
+            question = question,
+            waiting = json.intOrNull("waiting")?.coerceAtLeast(0) ?: 0,
+            reason = AlertReason.fromWire(json.nullableString("reason", MAX_WIRE_TYPE_CHARS)),
+        )
     }
 
     private fun acceptDelta(seq: Long): Boolean =
@@ -325,6 +434,139 @@ class AgentdProtocolCodec {
             .put("v", 1)
             .put("reason", reason)
             .toString()
+
+        // ---- protocol v2, phone to agentd. Monitor frames carry no msgId; every steering
+        // frame carries one, made once per user action by the caller and reused on resend.
+
+        /** The glasses showed the alert. */
+        fun alertShown(id: String): String = v2Frame("alert_shown").put("id", id).toString()
+
+        /** The glasses dismissed the alert; agentd only parks an approval or question. */
+        fun alertDismissed(id: String): String = v2Frame("alert_dismissed").put("id", id).toString()
+
+        fun alertAction(id: String, action: String, msgId: String): String =
+            steering("alert_action", msgId).put("id", id).put("action", action).toString()
+
+        /** Callers truncate or refuse before calling: agentd rejects text over 16 KiB of UTF-8. */
+        fun followup(sessionKey: String, text: String, msgId: String): String {
+            require(text.toByteArray(Charsets.UTF_8).size <= MAX_FOLLOWUP_BYTES) {
+                "follow-up text is over $MAX_FOLLOWUP_BYTES bytes"
+            }
+            return steering("followup", msgId, sessionKey).put("text", text).toString()
+        }
+
+        /** [answers] maps each question's text to a `String`, or a `List<String>` for a multi-select. */
+        fun questionAnswer(
+            sessionKey: String,
+            alertId: String,
+            requestRef: String,
+            answers: Map<String, Any>,
+            msgId: String,
+        ): String {
+            require(answers.isNotEmpty() && answers.size <= MAX_ANSWER_ENTRIES) {
+                "answers must hold 1..$MAX_ANSWER_ENTRIES entries"
+            }
+            val answersJson = JSONObject()
+            for ((question, answer) in answers) {
+                require(question.length <= MAX_ANSWER_CHARS) { "question text is over $MAX_ANSWER_CHARS chars" }
+                val parts = when (answer) {
+                    is String -> listOf(answer)
+                    is List<*> -> answer.map { requireNotNull(it as? String) { "answers hold strings only" } }
+                    else -> throw IllegalArgumentException("an answer is a String or a List<String>")
+                }
+                require(parts.size <= MAX_ANSWER_ENTRIES && parts.all { it.length <= MAX_ANSWER_CHARS }) {
+                    "an answer is over the limits"
+                }
+                answersJson.put(question, if (answer is String) answer else JSONArray(parts))
+            }
+            return steering("question_answer", msgId, sessionKey)
+                .put("alertId", alertId)
+                .put("requestRef", requestRef)
+                .put("answers", answersJson)
+                .toString()
+        }
+
+        /** Approve-all must be confirmed by the wearer; agentd refuses it otherwise. */
+        fun modeSet(sessionKey: String, mode: TempMode, confirmed: Boolean, msgId: String): String {
+            require(mode != TempMode.APPROVE_ALL || confirmed) { "approve-all needs the wearer's confirmation" }
+            return steering("mode_set", msgId, sessionKey)
+                .put("mode", mode.wire)
+                .put("confirmed", confirmed)
+                .toString()
+        }
+
+        fun modeRevokeAll(msgId: String): String = steering("mode_revoke_all", msgId).toString()
+
+        fun codexSettings(sessionKey: String, model: String?, effort: String?, msgId: String): String {
+            require(model != null || effort != null) { "a settings change names a model or an effort" }
+            require(listOfNotNull(model, effort).all { it.isNotBlank() && it.length <= MAX_SETTING_CHARS }) {
+                "a model or effort is blank or over $MAX_SETTING_CHARS chars"
+            }
+            return steering("codex_settings", msgId, sessionKey)
+                .apply {
+                    if (model != null) put("model", model)
+                    if (effort != null) put("effort", effort)
+                }
+                .toString()
+        }
+
+        fun codexCompact(sessionKey: String, msgId: String): String =
+            steering("codex_compact", msgId, sessionKey).toString()
+
+        /** The mode new sessions start in; approve-all is never a default. */
+        fun defaultsSet(claude: TempMode, codex: TempMode, msgId: String): String {
+            require(claude != TempMode.APPROVE_ALL && codex != TempMode.APPROVE_ALL) {
+                "approve-all is never a default mode"
+            }
+            return steering("defaults_set", msgId)
+                .put("defaultModes", JSONObject().put("claude", claude.wire).put("codex", codex.wire))
+                .toString()
+        }
+
+        /** The thresholds and the wait limit the phone owns; agentd derives the alert expiry from the limit. */
+        fun settingsSync(timings: AlertTimings, waitLimitMs: Long, msgId: String): String =
+            steering("settings_sync", msgId)
+                .put(
+                    "timings",
+                    JSONObject()
+                        .put("ageBoostMs", timings.ageBoostMs)
+                        .put("dwellMs", timings.dwellMs)
+                        .put("ackTimeoutMs", timings.ackTimeoutMs)
+                        .put("retryBackoffMs", JSONArray(timings.retryBackoffMs))
+                        .put("reminderMs", timings.reminderMs),
+                )
+                .put("waitLimitMs", waitLimitMs)
+                .toString()
+
+        fun modelsRequest(sessionKey: String): String =
+            v2Frame("models_request").put("sessionKey", requireSessionKey(sessionKey)).toString()
+
+        /** Reserved for the launcher (Plan 3); until then agentd answers every one `rejected not_launcher`. */
+        fun launcherCommand(sessionKey: String, command: String, model: String?, msgId: String): String {
+            require(command == "compact" || command == "model") { "unknown launcher command: $command" }
+            require(model == null || command == "model") { "only the model command takes a model" }
+            return steering("launcher_command", msgId, sessionKey)
+                .put("command", command)
+                .apply { if (model != null) put("model", model) }
+                .toString()
+        }
+
+        private fun v2Frame(type: String): JSONObject = JSONObject().put("type", type).put("v", 2)
+
+        private fun steering(type: String, msgId: String, sessionKey: String? = null): JSONObject {
+            require(msgId.isNotEmpty() && msgId.length <= MAX_MSG_ID_CHARS) {
+                "msgId must be 1..$MAX_MSG_ID_CHARS chars"
+            }
+            return v2Frame(type).apply {
+                if (sessionKey != null) put("sessionKey", requireSessionKey(sessionKey))
+                put("msgId", msgId)
+            }
+        }
+
+        private fun requireSessionKey(sessionKey: String): String {
+            require(isSessionKey(sessionKey)) { "not a session key: $sessionKey" }
+            return sessionKey
+        }
 
         const val REJECT_UNKNOWN_MACHINE = "unknown_machine"
         const val REJECT_BAD_TOKEN = "bad_token"
@@ -422,8 +664,147 @@ private fun JSONObject.toAgentSession(): AgentSession? {
         } else {
             null
         },
+        v2 = toSessionV2(fallbackHeading = nullableString("title", MAX_HUD_LABEL_CHARS) ?: id),
     )
 }
+
+/**
+ * The v2 fields of a published session. A session from a v1 daemon has none of
+ * them, and one that is only half v2 is treated as v1 rather than guessed at.
+ */
+private fun JSONObject.toSessionV2(fallbackHeading: String): SessionV2? {
+    val mode = nullableString("mode", MAX_WIRE_TYPE_CHARS)
+        ?.takeIf { it == "plugin" || it == "launcher" }
+        ?: return null
+    val capabilities = optJSONObject("capabilities") ?: return null
+    val tempMode = TempMode.fromWire(nullableString("tempMode", MAX_WIRE_TYPE_CHARS)) ?: return null
+    val context = optJSONObject("context")
+    val used = context?.longOrNull("used")?.takeIf { it >= 0 }
+    val window = context?.longOrNull("window")?.takeIf { it > 0 }
+    val pending = optJSONObject("pendingSettings")
+    return SessionV2(
+        mode = mode,
+        canCompact = capabilities.booleanOrNull("compact") ?: false,
+        canModel = capabilities.booleanOrNull("model") ?: false,
+        // A state this plugin does not know is the one that promises nothing.
+        followup = FollowupState.fromWire(capabilities.nullableString("followup", MAX_WIRE_TYPE_CHARS))
+            ?: FollowupState.UNAVAILABLE,
+        tempMode = tempMode,
+        nativeMode = nullableString("nativeMode", MAX_WIRE_TYPE_CHARS),
+        heading = nullableString("heading", MAX_HUD_LABEL_CHARS) ?: fallbackHeading,
+        currentFile = nullableString("currentFile", MAX_PATH_CHARS),
+        step = nullableString("step", MAX_HUD_LABEL_CHARS),
+        // Half a fill is no fill.
+        contextUsed = if (used != null && window != null) used else null,
+        contextWindow = if (used != null && window != null) window else null,
+        pendingModel = pending?.nullableString("model", MAX_HUD_LABEL_CHARS),
+        pendingEffort = pending?.nullableString("effort", MAX_HUD_LABEL_CHARS),
+        sandbox = nullableString("sandbox", MAX_HUD_LABEL_CHARS),
+    )
+}
+
+private fun JSONObject.toQuestionPayload(): QuestionPayload? {
+    val requestRef = identifierOrNull("requestRef", MAX_REQUEST_REF_CHARS) ?: return null
+    val source = nullableString("source", MAX_WIRE_TYPE_CHARS) ?: return null
+    val itemsJson = optJSONArray("items") ?: return null
+    val items = buildList {
+        for (index in 0 until minOf(itemsJson.length(), MAX_QUESTION_ITEMS)) {
+            itemsJson.optJSONObject(index)?.toQuestionItem()?.let(::add)
+        }
+    }
+    return items.takeIf { it.isNotEmpty() }?.let { QuestionPayload(requestRef, source, it) }
+}
+
+private fun JSONObject.toQuestionItem(): QuestionItem? {
+    val text = nullableString("text", MAX_HUD_TEXT_CHARS) ?: return null
+    val optionsJson = optJSONArray("options")
+    val options = buildList {
+        if (optionsJson != null) {
+            for (index in 0 until minOf(optionsJson.length(), MAX_QUESTION_OPTIONS)) {
+                val option = optionsJson.optJSONObject(index) ?: continue
+                val label = option.nullableString("label", MAX_HUD_LABEL_CHARS) ?: continue
+                add(QuestionOption(label, option.nullableString("description", MAX_STATUS_DETAIL_CHARS)))
+            }
+        }
+    }
+    return QuestionItem(
+        text = text,
+        options = options,
+        multiSelect = booleanOrNull("multiSelect") ?: false,
+        allowFreeText = booleanOrNull("allowFreeText") ?: false,
+    )
+}
+
+/** Strings only, trimmed and capped; anything else in the array is skipped. */
+private fun JSONArray?.toStrings(
+    maxEntries: Int = MAX_LIST_ENTRIES,
+    maxChars: Int = MAX_HUD_LABEL_CHARS,
+): List<String> {
+    if (this == null) return emptyList()
+    return buildList {
+        for (index in 0 until minOf(length(), maxEntries)) {
+            (opt(index) as? String)?.trim()?.take(maxChars)?.takeIf(String::isNotEmpty)?.let(::add)
+        }
+    }
+}
+
+/** `provider:id` for a provider the daemon link speaks for, exactly as agentd's `parseSessionKey` takes it. */
+private fun isSessionKey(value: String): Boolean {
+    val separator = value.indexOf(':')
+    if (separator <= 0 || separator == value.lastIndex) return false
+    val provider = AgentProvider.fromWire(value.substring(0, separator))
+    return provider != null && provider in AgentProvider.AGENTD_PROVIDERS
+}
+
+private fun JSONObject.sessionKeyOrNull(key: String): String? =
+    identifierOrNull(key, MAX_SESSION_KEY_CHARS)?.takeIf(::isSessionKey)
+
+/**
+ * Whether a frame type changes what a session does (steering) or only reads or
+ * acknowledges state (monitor). The exact copy of `FRAME_CLASS` in agentd's
+ * `protocol-v2.ts`; the shared fixtures' `_classes` map is checked against it
+ * on both sides. Anything not listed counts as steering, so a frame this plugin
+ * has not been taught is closed by default.
+ */
+object FrameClass {
+    private const val STEERING = true
+    private const val MONITOR = false
+
+    private val TABLE: Map<String, Boolean> = mapOf(
+        "approval_decision" to STEERING,
+        "session_input" to STEERING,
+        "thread_start" to STEERING,
+        "alert_action" to STEERING,
+        "followup" to STEERING,
+        "question_answer" to STEERING,
+        "mode_set" to STEERING,
+        "mode_revoke_all" to STEERING,
+        "codex_settings" to STEERING,
+        "codex_compact" to STEERING,
+        "launcher_command" to STEERING,
+        "defaults_set" to STEERING,
+        "settings_sync" to STEERING,
+        "hello" to MONITOR,
+        "hello_ack" to MONITOR,
+        "hello_reject" to MONITOR,
+        "refresh" to MONITOR,
+        "detail_open" to MONITOR,
+        "detail_close" to MONITOR,
+        "ping" to MONITOR,
+        "pong" to MONITOR,
+        "fs_list" to MONITOR,
+        "alert_shown" to MONITOR,
+        "alert_dismissed" to MONITOR,
+        "models_request" to MONITOR,
+    )
+
+    /** The types the table lists, for the tests that check it against the shared fixtures. */
+    internal val listedTypes: Set<String> get() = TABLE.keys
+
+    fun isSteering(type: String): Boolean = TABLE[type] ?: true
+}
+
+private val ACK_RESULTS = setOf("applied", "duplicate", "rejected")
 
 internal const val MAX_SESSIONS_PER_PROVIDER = 200
 internal const val MAX_PENDING_APPROVALS = 200
@@ -439,6 +820,19 @@ internal const val MAX_PATH_CHARS = 1_024
 internal const val MAX_FS_ENTRIES = 300
 internal const val MAX_FS_REQUEST_ID_CHARS = 64
 internal const val MAX_HUD_TEXT_CHARS = 4_096
+internal const val MAX_MSG_ID_CHARS = 128
+internal const val MAX_SESSION_KEY_CHARS = 512
+internal const val MAX_REQUEST_REF_CHARS = 512
+internal const val MAX_ALERT_ACTIONS = 8
+internal const val MAX_QUESTION_ITEMS = 16
+internal const val MAX_QUESTION_OPTIONS = 32
+internal const val MAX_LIST_ENTRIES = 64
+
+/** What agentd takes: 16 KiB of UTF-8 for a follow-up, and these bounds on a question's answers. */
+internal const val MAX_FOLLOWUP_BYTES = 16 * 1024
+internal const val MAX_ANSWER_ENTRIES = 32
+internal const val MAX_ANSWER_CHARS = 4_000
+internal const val MAX_SETTING_CHARS = 100
 
 internal fun JSONObject.nullableString(
     key: String,
