@@ -602,6 +602,23 @@ async function runCodex(args: string[]): Promise<void> {
     process.exit(127);
   }
   const saved = saveTerminal();
+  // Until Codex runs, a kill or an error of rk's own ends rk here. The hint
+  // holds the terminal raw, and only SIGTERM's default would give it back.
+  const abortBeforeCodex = (status: number, note?: string): void => {
+    restoreTerminal(saved);
+    if (note) {
+      fs.writeSync(2, note);
+    }
+    process.exit(status);
+  };
+  const preTerm = (): void => abortBeforeCodex(128 + (signalNumber("SIGTERM") ?? 15));
+  const preHup = (): void => abortBeforeCodex(128 + (signalNumber("SIGHUP") ?? 1));
+  const preFatal = (error: unknown): void =>
+    abortBeforeCodex(128 + 15, `rk: unexpected error: ${errorMessage(error)}\n`);
+  process.on("SIGTERM", preTerm);
+  process.on("SIGHUP", preHup);
+  process.on("uncaughtException", preFatal);
+  process.on("unhandledRejection", preFatal);
   const status = await probeStatus();
   process.stderr.write(codexHint(status, Boolean(process.stderr.isTTY)));
   if (status.agentd === "up" && !status.paired) {
@@ -617,6 +634,11 @@ async function runCodex(args: string[]): Promise<void> {
       process.exit(128 + (signalNumber("SIGINT") ?? 2));
     }
   }
+
+  process.off("SIGTERM", preTerm);
+  process.off("SIGHUP", preHup);
+  process.off("uncaughtException", preFatal);
+  process.off("unhandledRejection", preFatal);
 
   // Codex shares rk's process group and owns the terminal while it runs, so a
   // terminal Ctrl-C or Ctrl-\ must reach Codex and not take rk down with it.

@@ -277,6 +277,34 @@ test("ctrl_c_at_the_codex_hint_aborts_with_130", async () => {
   });
 });
 
+// The hint holds the terminal raw: a kill sent to rk then must still give it back cooked.
+test("term_or_hup_at_the_codex_hint_restores_the_terminal_and_never_starts_codex", async () => {
+  for (const signal of ["SIGTERM", "SIGHUP"]) {
+    await withTempDir(async (dir) => {
+      const argvFile = path.join(dir, "argv.json");
+      const pidFile = path.join(dir, "rk.pid");
+      const preload = path.join(dir, "pid.js");
+      fs.writeFileSync(preload, `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`);
+      const { env } = await rkEnv(dir, { ROKID_RK_CODEX_HINT_WAIT_MS: "5000", FAKE_ARGV_FILE: argvFile });
+      const script = [
+        `stty -g > "${dir}/before"`,
+        `"${process.execPath}" --require "${preload}" "${RK}" codex`,
+        `echo $? > "${dir}/rc"`,
+        `stty -g > "${dir}/after"`,
+      ].join("\n");
+      const run = inPty("/bin/sh", ["-c", script], env);
+      await run.until("press any key to start it now");
+      process.kill(Number(fs.readFileSync(pidFile, "utf8")), signal);
+      await run.exited;
+      const read = (name) => fs.readFileSync(path.join(dir, name), "utf8").trim();
+      assert.equal(Number(read("rc")), 128 + SIG[signal], `${signal}: exit status`);
+      assert.equal(sttyState(read("after")), sttyState(read("before")), `${signal}: stty -g restored after the hint`);
+      assert.equal(run.out.includes("fake-codex ready"), false, run.out);
+      assert.equal(fs.existsSync(argvFile), false, `${signal}: Codex was never started`);
+    });
+  }
+});
+
 test("rk_codex_fatal_error_ends_codex_and_restores_terminal", async () => {
   await withTempDir(async (dir) => {
     const events = path.join(dir, "events");
