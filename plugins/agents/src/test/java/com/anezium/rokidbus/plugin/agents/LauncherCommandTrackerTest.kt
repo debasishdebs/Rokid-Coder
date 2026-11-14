@@ -1,5 +1,9 @@
 package com.anezium.rokidbus.plugin.agents
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -127,7 +131,7 @@ class LauncherCommandTrackerTest {
         assertEquals(LauncherCommandTracker.AckOutcome.UNKNOWN, ack("nobody", "duplicate", now = 0))
         val kept = id(0)
         val other = id(0, key = "claude:s2")
-        tracker.retainSessions(setOf("claude:s2"))
+        tracker.forgetSession(session)
         assertNotEquals(kept, id(1_000))
         assertEquals(other, id(1_000, key = "claude:s2"))
         assertEquals(LauncherCommandTracker.AckOutcome.UNKNOWN, ack(kept, "duplicate", now = 1_500))
@@ -173,5 +177,73 @@ class LauncherCommandTrackerTest {
         assertEquals(ControlSender.Sent.Held, sender.send(ControlMenu.Command.LauncherModel("opus"), session))
         assertEquals(before + 1, wire.size)
         assertNotNull(sender.armed(session).firstOrNull { it == ControlMenu.Command.LauncherModel("opus") })
+    }
+
+    /** The service's wiring: a real store, a [ControlSender] following it, and the frames it wrote. */
+    private class Wired(scope: CoroutineScope) {
+        var ids = 0
+        val wire = mutableListOf<String>()
+        val store = AgentSessionStore()
+        val sender = ControlSender(write = { wire += it }, clock = { 0L }, newId = { "m${++ids}" })
+        val board = AgentSession(id = "s1", provider = AgentProvider.CLAUDE, title = "s1", status = AgentStatus.WORKING)
+
+        init {
+            sender.follow(store, scope)
+        }
+
+        fun msgIdOf(index: Int): String = JSONObject(wire[index]).getString("msgId")
+
+        fun tap() = sender.send(ControlMenu.Command.LauncherCompact, board.key) as ControlSender.Sent.Written
+
+        /** agentd's snapshot over a fresh link. */
+        fun snapshot(vararg sessions: AgentSession) =
+            store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, sessions.toList())
+
+        /** An inbound disconnect, a monitoring stop or a link drop: the transport empties the board. */
+        fun transportClear() = store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
+    }
+
+    @Test
+    fun consumed_rejection_survives_disconnect_reconnect_retap_is_duplicate() = runBlocking {
+        val w = Wired(this)
+        w.snapshot(w.board)
+        yield()
+        val sent = w.tap()
+        assertEquals(
+            LauncherCommandTracker.AckOutcome.KEPT_CONSUMED,
+            w.sender.onAck(AgentdAction.Ack(sent.msgId, "rejected", "typed_after_cancel", consumed = true)),
+        )
+        // The link drops and comes back with the same session: the kept id was never agentd's to free.
+        w.transportClear()
+        yield()
+        w.snapshot(w.board)
+        yield()
+        w.tap()
+        assertEquals("a re-tap must carry the consumed id, so agentd answers duplicate", w.msgIdOf(0), w.msgIdOf(1))
+
+        // agentd itself reports the session removed: now the id goes with it.
+        w.store.remove(AgentProvider.CLAUDE, "s1")
+        yield()
+        w.snapshot(w.board)
+        yield()
+        w.tap()
+        assertNotEquals(w.msgIdOf(1), w.msgIdOf(2))
+        coroutineContext.cancelChildren()
+    }
+
+    @Test
+    fun lost_ack_survives_disconnect_reconnect_retap_reuses_id() = runBlocking {
+        val w = Wired(this)
+        w.snapshot(w.board)
+        yield()
+        w.tap()
+        // No ack: the link drops before it lands, and comes back.
+        w.transportClear()
+        yield()
+        w.snapshot(w.board)
+        yield()
+        w.tap()
+        assertEquals("a re-tap after a lost ack must reuse the id, never compact twice", w.msgIdOf(0), w.msgIdOf(1))
+        coroutineContext.cancelChildren()
     }
 }

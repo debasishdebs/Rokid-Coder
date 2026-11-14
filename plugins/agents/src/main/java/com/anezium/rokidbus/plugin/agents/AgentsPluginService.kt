@@ -300,11 +300,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             // do with whether the daemon is currently answering.
             AgentsRuntime.store.sessions.collectLatest { raiseAttention() }
         }
+        controlSender.follow(AgentsRuntime.store, serviceScope)
         serviceScope.launch {
             // A reply for a session that left the board would send into nothing.
             AgentsRuntime.store.sessions.collect { sessions ->
-                // A kept launcher msgId goes with its session (R152).
-                controlSender.retainSessions(sessions.mapTo(HashSet()) { it.key })
                 val target = screen.voice?.target as? VoiceTarget.Followup ?: return@collect
                 if (sessions.none { it.key == target.sessionKey }) {
                     screen.stopVoice()

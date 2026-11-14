@@ -1,5 +1,8 @@
 package com.anezium.rokidbus.plugin.agents
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
@@ -100,10 +103,14 @@ internal class LauncherCommandTracker(private val newId: () -> String = { UUID.r
                 }
             }
 
-    /** Kept ids go with their session when it leaves the board. */
-    fun retainSessions(sessionKeys: Set<String>) {
-        kept.keys.removeAll { it.sessionKey !in sessionKeys }
-        retryUntil.keys.removeAll { it.sessionKey !in sessionKeys }
+    /**
+     * Kept ids go with their session once agentd says it ended. A board a
+     * transport emptied is not that: the session may well be back on the next
+     * link, and a fresh id there could type the command twice.
+     */
+    fun forgetSession(sessionKey: String) {
+        kept.keys.removeAll { it.sessionKey == sessionKey }
+        retryUntil.keys.removeAll { it.sessionKey == sessionKey }
     }
 
     private fun fresh(key: CommandKey, now: Long): String {
@@ -177,5 +184,8 @@ internal class ControlSender(
     /** The launcher commands of [sessionKey] the wearer may now send again on purpose. */
     fun armed(sessionKey: String): Set<ControlMenu.Command> = tracker.armedCommands(sessionKey, clock())
 
-    fun retainSessions(sessionKeys: Set<String>) = tracker.retainSessions(sessionKeys)
+    /** Drops the kept ids of each session [store] reports ended (R152), on [scope]'s thread. */
+    fun follow(store: AgentSessionStore, scope: CoroutineScope): Job = scope.launch {
+        store.sessionEnded.collect(tracker::forgetSession)
+    }
 }
