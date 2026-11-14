@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.plugin.agents
 
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -400,6 +401,30 @@ object AgentsRuntime {
 
     fun announceLinkedMachine(machineName: String) {
         _linkedMachines.tryEmit(machineName)
+    }
+
+    private val _needsRepair = MutableStateFlow(false)
+
+    /**
+     * True while the dialled pairing stopped at AUTH_FAILED (the client's `needsRepair`): the glasses'
+     * board and the phone's Add a computer screen offer to pair again. Fed by the monitor service.
+     */
+    val needsRepair: StateFlow<Boolean> = _needsRepair.asStateFlow()
+
+    internal fun setNeedsRepair(needed: Boolean) {
+        _needsRepair.value = needed
+    }
+
+    /** The guided pairing attempt both the phone screen and the glasses card show. */
+    internal val guidedPairing: GuidedPairing by lazy { GuidedPairing(clock = SystemClock::elapsedRealtime) }
+
+    /**
+     * A transport bound a secure link to a computer. Fed by the secure outbound hello_ack and the
+     * secure inbound bind, and nothing else, so only a connection that really steers can end a guided
+     * attempt. Stamped on the clock the attempt starts on.
+     */
+    internal fun announceSecureConnection(machineId: String, name: String) {
+        guidedPairing.onSecureConnected(machineId, name, SystemClock.elapsedRealtime())
     }
 
     private val _linkSecure = MutableStateFlow(false)

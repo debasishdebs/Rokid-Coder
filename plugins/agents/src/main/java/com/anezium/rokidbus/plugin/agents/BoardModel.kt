@@ -112,6 +112,9 @@ object BoardModel {
     /** Virtual board row: the quiet toggle, first on the board. */
     const val QUIET_KEY = "!quiet"
 
+    /** Virtual board row: Pair a computer, under Quiet, while no computer is paired, one is signed out or refused. */
+    const val PAIR_KEY = "!pair-a-computer"
+
     /** Virtual board row: the door into the start-an-agent walk, last on the board. */
     const val START_KEY = "!start-an-agent"
 
@@ -124,14 +127,18 @@ object BoardModel {
     )
 
     /**
-     * The row [delta] steps from [selected] on the ring Quiet, each session, Start.
-     * A selection that is gone (a session that left the board, or none yet) counts
-     * as the first session, or Start on an empty board.
+     * The row [delta] steps from [selected] on the ring Quiet, [pair] when the board offers it,
+     * each session, Start. A selection that is gone (a session that left the board, or none yet)
+     * counts as the first session, or on an empty board the pair row, else Start.
      */
-    fun step(sessionKeys: List<String>, selected: String?, delta: Int): String {
-        val ring = listOf(QUIET_KEY) + sessionKeys + START_KEY
+    fun step(sessionKeys: List<String>, selected: String?, delta: Int, pair: Boolean = false): String {
+        val ring = listOf(QUIET_KEY) + listOfNotNull(PAIR_KEY.takeIf { pair }) + sessionKeys + START_KEY
         val at = ring.indexOf(selected).takeIf { it >= 0 }
-            ?: if (sessionKeys.isEmpty()) ring.lastIndex else 1
+            ?: when {
+                sessionKeys.isNotEmpty() -> if (pair) 2 else 1
+                pair -> 1
+                else -> ring.lastIndex
+            }
         return ring[((at + delta) % ring.size + ring.size) % ring.size]
     }
 

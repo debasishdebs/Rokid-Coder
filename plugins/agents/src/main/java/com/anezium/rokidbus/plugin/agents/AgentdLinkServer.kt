@@ -48,6 +48,8 @@ class AgentdLinkServer internal constructor(
     private val scope: CoroutineScope,
     private val onMachineTrusted: (String) -> Unit,
     private val tlsIdentity: PhoneTlsIdentity,
+    /** A secure bind just happened: the computer's id and name. */
+    private val onSecureConnected: (machineId: String, machineName: String) -> Unit = { _, _ -> },
     onEvent: (AgentdEvent) -> Unit,
 ) {
     constructor(
@@ -55,6 +57,7 @@ class AgentdLinkServer internal constructor(
         configStore: AgentsConfigStore,
         scope: CoroutineScope,
         tlsIdentity: PhoneTlsIdentity,
+        onSecureConnected: (machineId: String, machineName: String) -> Unit = { _, _ -> },
         onMachineTrusted: (String) -> Unit = {},
     ) : this(
         store = store,
@@ -71,6 +74,7 @@ class AgentdLinkServer internal constructor(
         scope = scope,
         onMachineTrusted = onMachineTrusted,
         tlsIdentity = tlsIdentity,
+        onSecureConnected = onSecureConnected,
         onEvent = AgentsRuntime::emitEvent,
     )
 
@@ -212,6 +216,7 @@ class AgentdLinkServer internal constructor(
                         if (!bind(connection)) return@lines false
                         bound = true
                         touchMachineSeen(decision.hello.machineId)
+                        onSecureConnected(decision.hello.machineId, decision.hello.machineName)
                         store.setLinkMachine(
                             LinkMachine(
                                 machineId = decision.hello.machineId,

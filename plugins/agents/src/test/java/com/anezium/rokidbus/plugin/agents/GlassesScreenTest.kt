@@ -15,6 +15,7 @@ class GlassesScreenTest {
     private val decided = mutableListOf<String>()
     private val decisions = mutableListOf<ApprovalDecision>()
     private var menuEnters = 0
+    private var pairingCancels = 0
 
     private val screen = GlassesScreen(
         clock = { now },
@@ -36,6 +37,9 @@ class GlassesScreenTest {
                 decided += requestId
                 decisions += decision
                 return true
+            }
+            override fun cancelPairing() {
+                pairingCancels++
             }
         },
     )
@@ -263,5 +267,137 @@ class GlassesScreenTest {
         enter()
         assertTrue(confirms.isEmpty())
         assertEquals(null, screen.decidingAlert)
+    }
+
+    private fun key(code: Int) = screen.onInput(NexusInputEvent("agents", code, KeyEvent.ACTION_DOWN))
+
+    // ------------------------------------------------------------- pairing card
+
+    /** The window and the brief, as the service wires them to the phone's store and the hub. */
+    private inner class PairingHarness {
+        var windowOpen = false
+        var arms = 0
+        var cancels = 0
+        var renders = 0
+        val briefs = mutableListOf<Pair<String, String>>()
+        val guided = GuidedPairing(clock = { now })
+        val snapshot = PairingSnapshot(baseline = setOf("desk"), repairing = emptySet(), needed = true)
+        val card = GlassesPairingCard(
+            pairing = guided,
+            clock = { now },
+            host = object : GlassesPairingCard.Host {
+                override fun snapshot() = snapshot
+                override fun armWindow() {
+                    arms++
+                    windowOpen = true
+                }
+                override fun cancelWindow() {
+                    cancels++
+                    windowOpen = false
+                }
+                override fun openCard() = screen.openPairing()
+                override fun closeCard() = screen.close(ActiveCard.Kind.PAIRING)
+                override fun onScreen() = screen.kind == ActiveCard.Kind.PAIRING
+                override fun render() {
+                    renders++
+                }
+                override fun brief(title: String, body: String) {
+                    briefs += title to body
+                }
+            },
+        )
+    }
+
+    @Test
+    fun glasses_pair_row_arms_window_and_counts_down() {
+        val harness = PairingHarness()
+        harness.card.start()
+
+        assertEquals(1, harness.arms)
+        assertTrue(harness.windowOpen)
+        assertEquals(ActiveCard.Kind.PAIRING, screen.kind)
+        var card = harness.card.card()
+        assertEquals("Pairing · 2:00", card.title)
+        assertEquals(
+            listOf("On your computer: type /rokid:pair in Claude, or run agentd pair"),
+            card.richLines.orEmpty().map { it.text },
+        )
+
+        // Once per second, and the same second twice draws the same card.
+        now += 1_000L
+        val before = harness.renders
+        harness.card.tick()
+        card = harness.card.card()
+        assertEquals("Pairing · 1:59", card.title)
+        assertEquals(before + 1, harness.renders)
+
+        now += 118_000L
+        harness.card.tick()
+        assertEquals("Pairing · 0:01", harness.card.card().title)
+        assertTrue(harness.briefs.isEmpty())
+        assertEquals(ActiveCard.Kind.PAIRING, screen.kind)
+    }
+
+    @Test
+    fun pairing_card_ends_with_the_paired_brief() {
+        val harness = PairingHarness()
+        harness.card.start()
+        now += 5_000L
+
+        // The computer that was already trusted reconnecting is not the answer.
+        harness.guided.onSecureConnected("desk", "Desk", atMs = now)
+        harness.card.sync()
+        assertTrue(harness.briefs.isEmpty())
+
+        harness.guided.onSecureConnected("laptop", "Laptop", atMs = now)
+        harness.card.sync()
+        assertEquals(listOf("Paired with Laptop ✓" to ""), harness.briefs)
+        assertEquals(ActiveCard.Kind.NONE, screen.kind)
+    }
+
+    @Test
+    fun pairing_card_ends_with_the_times_up_brief() {
+        val harness = PairingHarness()
+        harness.card.start()
+        now += LINK_WINDOW_DURATION_MS
+        harness.card.tick()
+
+        assertEquals(listOf("Time's up — try again" to ""), harness.briefs)
+        assertEquals(ActiveCard.Kind.NONE, screen.kind)
+        // Nothing more is said once it has ended.
+        harness.card.tick()
+        assertEquals(1, harness.briefs.size)
+    }
+
+    @Test
+    fun back_on_pairing_card_cancels_window() {
+        val harness = PairingHarness()
+        harness.card.start()
+        assertTrue(harness.windowOpen)
+
+        key(KeyEvent.KEYCODE_BACK)
+        // The screen routes BACK to the pairing card's cancel, which the service points at the card.
+        assertEquals(1, pairingCancels)
+        assertEquals(ActiveCard.Kind.NONE, screen.kind)
+
+        harness.card.cancel()
+        assertFalse(harness.windowOpen)
+        assertEquals(1, harness.cancels)
+        assertEquals(GuidedPairing.State.Idle, harness.guided.state.value)
+        // A cancelled attempt never briefs, whatever connects afterwards.
+        harness.guided.onSecureConnected("laptop", "Laptop", atMs = now)
+        harness.card.sync()
+        assertTrue(harness.briefs.isEmpty())
+    }
+
+    @Test
+    fun enter_on_pairing_card_does_nothing() {
+        val harness = PairingHarness()
+        harness.card.start()
+        now += 5_000L
+        key(KeyEvent.KEYCODE_ENTER)
+        assertEquals(0, pairingCancels)
+        assertEquals(ActiveCard.Kind.PAIRING, screen.kind)
+        assertTrue(harness.windowOpen)
     }
 }

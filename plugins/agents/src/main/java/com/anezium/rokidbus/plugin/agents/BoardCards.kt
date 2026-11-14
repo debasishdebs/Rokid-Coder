@@ -85,13 +85,25 @@ internal object BoardCards {
         quiet: Boolean,
         now: Long,
         signedOut: List<SignedOut> = emptyList(),
+        /** No computer is paired, one is signed out, or one was refused: the board offers Pair a computer. */
+        pairing: Boolean = false,
     ): Board {
         val waitingRow = BoardModel.waitingRow(waiting)
+        // Monitoring that is off has nothing to pair with: that row says to set up a provider first.
+        val pairRow = pairing && config.agentdEnabled
         val quietSelected = selectedKey == BoardModel.QUIET_KEY
-        val startSelected = !quietSelected && (selectedKey == BoardModel.START_KEY || sessions.isEmpty())
-        val onSession = !quietSelected && !startSelected
+        val startPicked = selectedKey == BoardModel.START_KEY
+        // An empty board has nothing else to rest on: the pair row, or Start when there is no pair row.
+        val pairSelected = pairRow && !quietSelected && !startPicked &&
+            (selectedKey == BoardModel.PAIR_KEY || sessions.isEmpty())
+        val startSelected = !quietSelected && !pairSelected && (startPicked || sessions.isEmpty())
+        val onSession = !quietSelected && !startSelected && !pairSelected
         val selectedIndex = if (onSession) selectedIndexIn(sessions, selectedKey) else -1
-        val resolvedKey = if (onSession) sessions.getOrNull(selectedIndex)?.key else selectedKey
+        val resolvedKey = when {
+            onSession -> sessions.getOrNull(selectedIndex)?.key
+            pairSelected -> BoardModel.PAIR_KEY
+            else -> selectedKey
+        }
 
         val alerts = buildList {
             waitingRow?.let(::add)
@@ -110,10 +122,11 @@ internal object BoardCards {
         }
 
         // The HUD does not scroll: keep a window around the selection.
-        val windowSize = (VISIBLE_SESSION_ROWS - alerts.size - 1).coerceAtLeast(MIN_SESSION_ROWS)
+        val windowSize = (VISIBLE_SESSION_ROWS - alerts.size - 1 - if (pairRow) 1 else 0)
+            .coerceAtLeast(MIN_SESSION_ROWS)
         val anchor = when {
             startSelected -> sessions.lastIndex.coerceAtLeast(0)
-            quietSelected -> 0
+            quietSelected || pairSelected -> 0
             else -> selectedIndex
         }
         val windowStart = (anchor - windowSize / 2)
@@ -122,8 +135,10 @@ internal object BoardCards {
         val rows = buildList {
             addAll(alerts)
             add(BoardModel.quietRow(quiet, quietSelected))
+            if (pairRow) add(pairRow(pairSelected))
             if (sessions.isEmpty()) {
-                add(emptyRow(config))
+                // The pair row already says what to do about an empty board.
+                if (!pairRow) add(emptyRow(config))
             } else {
                 sessions.drop(windowStart).take(windowSize).forEachIndexed { offset, session ->
                     add(sessionRow(session, windowStart + offset == selectedIndex, now))
@@ -145,7 +160,7 @@ internal object BoardCards {
                 subtitle = sessionsSubtitle(sessions, connections, config),
                 rows = rows,
                 footer = if (sessions.isEmpty()) {
-                    "tap start an agent · 2-tap exit"
+                    if (pairRow) "tap pair a computer · 2-tap exit" else "tap start an agent · 2-tap exit"
                 } else {
                     "swipe move · tap open · 2-tap exit"
                 },
@@ -225,6 +240,13 @@ internal object BoardCards {
             null
         },
         tone = NexusRowTone.DIM,
+    )
+
+    private fun pairRow(selected: Boolean): NexusCardLine = NexusCardLine(
+        text = "Pair a computer",
+        sub = "tap to start",
+        tone = NexusRowTone.NORMAL,
+        selected = selected,
     )
 
     private fun problemRow(text: String, sub: String): NexusCardLine =

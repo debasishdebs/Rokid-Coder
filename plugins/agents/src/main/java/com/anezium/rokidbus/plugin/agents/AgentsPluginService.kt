@@ -116,8 +116,52 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 AgentsMonitorService.decideApproval(applicationContext, requestId, decision)
                 return true
             }
+            override fun cancelPairing() = glassesPairing.cancel()
         },
     )
+
+    /** The Pair a computer card: arms the phone's door, counts it down, ends with a brief (U6). */
+    private val glassesPairing: GlassesPairingCard by lazy {
+        GlassesPairingCard(
+            pairing = AgentsRuntime.guidedPairing,
+            clock = SystemClock::elapsedRealtime,
+            host = object : GlassesPairingCard.Host {
+                override fun snapshot() = currentPairing()
+                override fun armWindow() {
+                    configStore.armLinkWindow()
+                    AgentsMonitorService.reconcile(applicationContext)
+                }
+                override fun cancelWindow() = configStore.cancelLinkWindow()
+                override fun openCard() = screen.openPairing()
+                override fun closeCard() = screen.close(ActiveCard.Kind.PAIRING)
+                override fun onScreen() = screen.kind == ActiveCard.Kind.PAIRING
+                override fun render() {
+                    if (surfaceShown) render(show = false)
+                }
+                override fun brief(title: String, body: String) = showBriefNotice(title, body)
+            },
+        )
+    }
+    private var pairingTicker: Job? = null
+
+    /** What the phone knows of its computers now, and whether the board should offer to pair one. */
+    private fun currentPairing(): PairingSnapshot = pairingSnapshot(
+        machines = configStore.trustedMachines(),
+        agentd = configStore.load().agentd,
+        signedOut = configStore.signedOut(),
+        needsRepair = AgentsRuntime.needsRepair.value,
+    )
+
+    private fun beginPairing() {
+        glassesPairing.start()
+        pairingTicker?.cancel()
+        pairingTicker = serviceScope.launch {
+            while (isActive && glassesPairing.active) {
+                delay(PAIRING_TICK_MS)
+                glassesPairing.tick()
+            }
+        }
+    }
 
     /** The voice card and the question card. */
     private val answers: VoiceQuestionWiring by lazy {
@@ -271,6 +315,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             AgentsRuntime.events.collect(::onAgentdEvent)
         }
         serviceScope.launch {
+            // A computer that connected, or a door shut from the phone, ends the card.
+            AgentsRuntime.guidedPairing.state.collect { glassesPairing.sync() }
+        }
+        serviceScope.launch {
             AgentsRuntime.store.sessionInputResult.collectLatest { result ->
                 if (result == null || result.requestId != pendingReplyRequestId) return@collectLatest
                 pendingReplyRequestId = null
@@ -334,6 +382,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         awaitingReplyForKey = null
         surfaceShown = false
         AgentsRuntime.hudOpen = false
+        // The door stays as the phone has it; the card has nobody left to tell.
+        glassesPairing.detach()
+        pairingTicker?.cancel()
+        pairingTicker = null
         screen.clear()
         leaveConversation()
         launch = null
@@ -526,6 +578,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             AgentsRuntime.store.sessions.value.map { it.key },
             selectedKey,
             delta,
+            pair = pairRowShown(),
         )
         render(show = false)
     }
@@ -536,6 +589,14 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         if (selectedKey == BoardModel.QUIET_KEY) {
             configStore.setQuiet(!configStore.isQuiet())
             render(show = false)
+            return
+        }
+        // The same rule the board draws by: the pair row is chosen, or it is all an empty board has to rest on.
+        if (selectedKey != BoardModel.START_KEY &&
+            (selectedKey == BoardModel.PAIR_KEY || sessions.isEmpty()) &&
+            pairRowShown()
+        ) {
+            beginPairing()
             return
         }
         if (selectedKey == BoardModel.START_KEY || sessions.isEmpty()) {
@@ -558,6 +619,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             else -> openConversation(session)
         }
     }
+
+    /** The board offers Pair a computer: monitoring is on and no computer is paired, or one is signed out or refused. */
+    private fun pairRowShown(): Boolean = configStore.load().agentdEnabled && currentPairing().needed
 
     /** The conversation takes the screen from the board, the menu or the launcher, which wait under it. */
     private fun openConversation(session: AgentSession) {
@@ -972,6 +1036,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 // The session vanished mid-type: nothing left to send this to.
                 screen.close(ActiveCard.Kind.REPLY)
             }
+            ActiveCard.Kind.PAIRING -> return glassesPairing.card()
             ActiveCard.Kind.MENU, ActiveCard.Kind.NONE -> Unit
         }
         AgentsRuntime.store.conversation.value?.let { return conversationCard(it) }
@@ -999,6 +1064,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             quiet = configStore.isQuiet(),
             now = System.currentTimeMillis(),
             signedOut = configStore.signedOut(),
+            pairing = currentPairing().needed,
         )
         selectedKey = board.selectedKey
         return board.card
@@ -1386,6 +1452,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         private const val READER_TOTAL_CHARS = 24_000
         private const val READER_MAX_SEGMENTS = 236
         private const val AGE_TICK_MS = 60_000L
+        private const val PAIRING_TICK_MS = 1_000L
 
         /** Long enough to swallow a double tap, short enough to never be felt. */
         private const val DECISION_GUARD_MS = 600L

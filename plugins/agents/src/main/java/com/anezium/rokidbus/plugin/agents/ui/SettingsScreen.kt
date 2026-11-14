@@ -49,9 +49,9 @@ internal object SettingsCopy {
             "replies only while the session waits."
     const val LAUNCHER_LIMITS = "Launcher mode (rk claude): everything, including after the wait."
 
-    /** R60: a second computer joins steering only when the laptop lets it in. */
-    const val PAIR_HINT =
-        "To approve from this phone, run agentd pair (or agentd phones allow-next) on the computer."
+    /** U6: with no computer yet, the way in is one button that walks through pairing. */
+    const val ADD_FIRST_COMPUTER = "Add your first computer"
+    const val PAIR_HINT = "Pairing takes two minutes — tap Add your first computer."
 
     const val TTL_HINT =
         "A computer this phone has not used for this long is signed out, and has to be added again."
@@ -129,6 +129,8 @@ internal class SettingsActions(
     val onOpenComputer: (ComputerRow) -> Unit,
     val onForgetPaired: () -> Unit,
     val onAddComputer: () -> Unit,
+    /** Opens Add a computer in guided mode, for a phone with no computer yet. */
+    val onAddFirstComputer: () -> Unit = onAddComputer,
     val onAlerts: (AlertSettings.() -> AlertSettings) -> Unit,
     val onQuiet: (Boolean) -> Unit,
     val onRevokeAll: () -> Unit,
@@ -217,7 +219,9 @@ private fun ComputersCard(state: SettingsUiState, actions: SettingsActions) {
     var expanded by remember { mutableStateOf<String?>(null) }
     SettingsCard {
         if (state.computers.isEmpty()) {
-            NoticeText("No computer linked yet — add one below", tag = "computers_empty")
+            NoticeText("No computer linked yet", tag = "computers_empty")
+            PrimaryAction(SettingsCopy.ADD_FIRST_COMPUTER, actions.onAddFirstComputer, tag = "add_first_computer")
+            NoticeText(SettingsCopy.PAIR_HINT, tag = "pair_hint")
         }
         state.computers.forEachIndexed { index, row ->
             val handPaired = row.machineId == null
@@ -250,7 +254,6 @@ private fun ComputersCard(state: SettingsUiState, actions: SettingsActions) {
             }
         }
         SecondaryAction("Add a computer", actions.onAddComputer, tag = "add_computer")
-        NoticeText(SettingsCopy.PAIR_HINT, tag = "pair_hint")
     }
 }
 

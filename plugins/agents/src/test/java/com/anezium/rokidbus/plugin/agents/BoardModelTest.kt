@@ -279,4 +279,86 @@ class BoardModelTest {
         assertEquals(listOf("pair again: Add a computer"), rows.map { it.sub }.distinct())
         assertEquals(listOf(NexusRowTone.ALERT), rows.map { it.tone }.distinct())
     }
+
+    private fun board(
+        config: AgentsConfig,
+        pairing: Boolean = false,
+        sessions: List<AgentSession> = emptyList(),
+        selectedKey: String? = null,
+    ) = BoardCards.sessionsCard(
+        sessions = sessions,
+        connections = emptyMap(),
+        config = config,
+        selectedKey = selectedKey,
+        waiting = 0,
+        quiet = false,
+        now = 0L,
+        pairing = pairing,
+    )
+
+    private val monitoringOn = AgentsConfig(agentdEnabled = true, agentd = null, openClawEnabled = false, openClaw = null)
+    private val monitoringOff = AgentsConfig(agentdEnabled = false, agentd = null, openClawEnabled = false, openClaw = null)
+
+    @Test
+    fun board_shows_pair_a_computer_when_none_trusted() {
+        val board = board(monitoringOn, pairing = true)
+        val rows = board.card.richLines.orEmpty()
+
+        val pair = rows.single { it.text == "Pair a computer" }
+        assertEquals("tap to start", pair.sub)
+        // With nothing running the row is the one under the wearer's thumb, and Tap opens the guide.
+        assertTrue(pair.selected)
+        assertEquals(BoardModel.PAIR_KEY, board.selectedKey)
+        assertTrue(rows.none { it.text == "Nothing running" || it.text == "Set up a provider in the phone app" })
+        assertFalse(rows.single { it.text == "+ Start an agent" }.selected)
+    }
+
+    @Test
+    fun board_shows_setup_provider_when_monitoring_off() {
+        // Monitoring off outranks a missing computer: there is nothing to pair with yet.
+        val rows = board(monitoringOff, pairing = true).card.richLines.orEmpty()
+
+        assertTrue(rows.any { it.text == "Set up a provider in the phone app" })
+        assertTrue(rows.none { it.text == "Pair a computer" })
+    }
+
+    @Test
+    fun board_keeps_signed_out_rows_beside_the_pair_row() {
+        val rows = BoardCards.sessionsCard(
+            sessions = emptyList(),
+            connections = emptyMap(),
+            config = monitoringOn,
+            selectedKey = null,
+            waiting = 0,
+            quiet = false,
+            now = 0L,
+            signedOut = listOf(SignedOut("Desk", 1L, 14)),
+            pairing = true,
+        ).card.richLines.orEmpty()
+
+        assertTrue(rows.any { it.text == "Signed out of Desk" })
+        assertTrue(rows.any { it.text == "Pair a computer" })
+    }
+
+    @Test
+    fun board_pair_row_is_not_selected_over_a_session_the_wearer_chose() {
+        val running = AgentSession(id = "s1", provider = AgentProvider.CLAUDE, status = AgentStatus.WORKING)
+        val board = board(monitoringOn, pairing = true, sessions = listOf(running), selectedKey = running.key)
+
+        assertEquals(running.key, board.selectedKey)
+        assertFalse(board.card.richLines.orEmpty().single { it.text == "Pair a computer" }.selected)
+    }
+
+    @Test
+    fun selection_ring_includes_the_pair_row_only_when_pairing_is_needed() {
+        val keys = listOf("a")
+        assertEquals(BoardModel.PAIR_KEY, BoardModel.step(keys, BoardModel.QUIET_KEY, +1, pair = true))
+        assertEquals("a", BoardModel.step(keys, BoardModel.PAIR_KEY, +1, pair = true))
+        assertEquals(BoardModel.QUIET_KEY, BoardModel.step(keys, BoardModel.PAIR_KEY, -1, pair = true))
+        // An empty board with nothing chosen starts on the pair row.
+        assertEquals(BoardModel.START_KEY, BoardModel.step(emptyList(), null, +1, pair = true))
+        // Without it the ring is the one it always was, and a stale pair key falls back like any gone row.
+        assertEquals("a", BoardModel.step(keys, BoardModel.QUIET_KEY, +1))
+        assertEquals(BoardModel.START_KEY, BoardModel.step(keys, BoardModel.PAIR_KEY, +1))
+    }
 }

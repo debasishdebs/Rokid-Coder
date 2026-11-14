@@ -37,6 +37,8 @@ class AgentdClient(
     private val dialAllowed: () -> Boolean = { true },
     /** The pairing was just used: a secure hello_ack, or a link still up. */
     private val touchUsed: () -> Unit = {},
+    /** A secure hello_ack bound the link: the computer's name, as it announced it. */
+    private val onSecureConnected: (machineName: String) -> Unit = {},
     onEvent: (AgentdEvent) -> Unit = AgentsRuntime::emitEvent,
 ) {
     private var loopJob: Job? = null
@@ -238,6 +240,7 @@ class AgentdClient(
                         if (!connected.compareAndSet(false, true)) return
                         link.up(owner, secure = true, stillLive = ::isLive) ?: return
                         touchUsed()
+                        onSecureConnected(action.machineName?.takeIf(String::isNotBlank) ?: config.name)
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()

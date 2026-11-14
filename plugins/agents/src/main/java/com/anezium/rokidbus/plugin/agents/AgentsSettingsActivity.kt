@@ -105,6 +105,9 @@ class AgentsSettingsActivity : ComponentActivity() {
             if (name != null) toast("$name forgotten.")
         },
         onAddComputer = { startActivity(Intent(this, AddComputerActivity::class.java)) },
+        onAddFirstComputer = {
+            startActivity(Intent(this, AddComputerActivity::class.java).putExtra(AddComputerActivity.EXTRA_GUIDED, true))
+        },
         onAlerts = ::changeAlerts,
         onPairingTtl = { days ->
             configStore.setPairingTtlDays(days)

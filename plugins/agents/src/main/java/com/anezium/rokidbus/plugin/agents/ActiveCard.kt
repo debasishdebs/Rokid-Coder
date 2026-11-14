@@ -17,7 +17,7 @@ package com.anezium.rokidbus.plugin.agents
  * this one.
  */
 class ActiveCard(private val guardMs: Long = 600L) {
-    enum class Kind { NONE, VOICE, QUESTION, ALERT_DECISION, REQUEST_DECISION, REPLY, MENU }
+    enum class Kind { NONE, VOICE, QUESTION, ALERT_DECISION, REQUEST_DECISION, REPLY, MENU, PAIRING }
 
     var kind: Kind = Kind.NONE
         private set

@@ -37,6 +37,9 @@ internal class GlassesScreen(
 
         /** Sends the decision for a held tool call; false when the call is gone and nothing was sent. */
         fun decideRequest(requestId: String, decision: ApprovalDecision): Boolean
+
+        /** BACK on the pairing card: the phone's door shuts and the attempt ends. */
+        fun cancelPairing() = Unit
     }
 
     private val active = ActiveCard(guardMs)
@@ -144,7 +147,7 @@ internal class GlassesScreen(
                 menu = null
                 menuReading = null
             }
-            ActiveCard.Kind.VOICE, ActiveCard.Kind.NONE -> Unit
+            ActiveCard.Kind.VOICE, ActiveCard.Kind.PAIRING, ActiveCard.Kind.NONE -> Unit
         }
         active.close(kind, clock())
     }
@@ -199,6 +202,9 @@ internal class GlassesScreen(
         replyTargetKey = sessionKey
         replySessionId = sessionId
     }
+
+    /** The pairing card: a countdown with nothing to pick, so it has no data of its own. */
+    fun openPairing() = open(ActiveCard.Kind.PAIRING)
 
     fun openMenu(state: ControlMenu.MenuState) {
         open(ActiveCard.Kind.MENU)
@@ -304,8 +310,17 @@ internal class GlassesScreen(
             ActiveCard.Kind.REQUEST_DECISION -> decidingRequestId?.let { onRequestDecisionInput(it, event) }
             ActiveCard.Kind.REPLY -> Unit
             ActiveCard.Kind.MENU -> host.menuInput(event)
+            ActiveCard.Kind.PAIRING -> onPairingInput(event)
             ActiveCard.Kind.NONE -> host.boardInput(event)
         }
+    }
+
+    /** Nothing on the card is tapped: BACK is the one key, and it shuts the door. */
+    private fun onPairingInput(event: NexusInputEvent) {
+        if (event.keyCode != KeyEvent.KEYCODE_BACK) return
+        close(ActiveCard.Kind.PAIRING)
+        host.cancelPairing()
+        host.render()
     }
 
     private fun onRequestDecisionInput(requestId: String, event: NexusInputEvent) {

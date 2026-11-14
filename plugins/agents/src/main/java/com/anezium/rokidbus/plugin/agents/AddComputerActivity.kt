@@ -3,6 +3,7 @@ package com.anezium.rokidbus.plugin.agents
 import android.app.Activity
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -29,15 +30,17 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * The three roads to a linked computer, as equals: automatic on the home
- * Wi-Fi, Tailscale for everywhere else, and a pasted pairing line for whoever
- * wants neither.
+ * The roads to a linked computer. A phone with no computer, or with one signed out or
+ * refused, opens on a guided section: run one command on the computer, open the door, watch
+ * it say Paired. Below it, as equals under "Other ways": automatic on the home Wi-Fi,
+ * Tailscale for everywhere else, and a pasted pairing line for whoever wants neither.
  */
 class AddComputerActivity : Activity() {
     private val configStore by lazy { AgentsConfigStore(applicationContext) }
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var doorStatus: TextView
     private lateinit var doorDot: View
+    private lateinit var guidedStatus: TextView
     private lateinit var doorOpen: Button
     private lateinit var doorArmed: LinearLayout
     private lateinit var tailscaleStatus: TextView
@@ -51,13 +54,20 @@ class AddComputerActivity : Activity() {
     private lateinit var openClawToken: EditText
     private lateinit var openClawConnection: TextView
     private lateinit var openClawDot: View
-    private var countdown: Job? = null
+    private var ticker: Job? = null
     private var knownMachines = 0
+    private var guided = false
+    private val pairing get() = AgentsRuntime.guidedPairing
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         knownMachines = configStore.trustedMachines().size
+        // Guided when Settings asked for it, or when this phone has no computer, or one to pair again.
+        guided = intent.getBooleanExtra(EXTRA_GUIDED, false) || currentPairing().needed
+        // A finished attempt from before is not news on a screen opened now; an open one is.
+        pairing.acknowledge()
         buildUi()
+        uiScope.launch { pairing.state.collect(::renderDoorState) }
         uiScope.launch {
             AgentsRuntime.store.connections.collectLatest { states ->
                 val state = states.getValue(AgentProvider.OPENCLAW)
@@ -81,7 +91,6 @@ class AddComputerActivity : Activity() {
                 if (count > knownMachines) {
                     knownMachines = count
                     toast("$machineName is linked.")
-                    renderDoorState()
                 }
             }
         }
@@ -89,7 +98,8 @@ class AddComputerActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        renderDoorState()
+        pairing.tick(SystemClock.elapsedRealtime())
+        renderDoorState(pairing.state.value)
         renderTailscaleState()
     }
 
@@ -103,11 +113,13 @@ class AddComputerActivity : Activity() {
         window.navigationBarColor = NexusUi.BG
         doorDot = NexusUi.dot(this)
         doorStatus = NexusUi.statusLine(this)
-        doorOpen = NexusUi.pillButton(this, "Open the door for two minutes").apply {
+        guidedStatus = NexusUi.cardBody(this, "").apply { visibility = View.GONE }
+        doorOpen = NexusUi.pillButton(this, if (guided) GuidedPairingCopy.STEP_TWO else "Open the door for two minutes").apply {
             setOnClickListener {
+                val snapshot = currentPairing()
                 configStore.armLinkWindow()
                 AgentsMonitorService.reconcile(applicationContext)
-                renderDoorState()
+                pairing.start(snapshot.baseline, snapshot.repairing)
             }
         }
         doorArmed = LinearLayout(this).apply {
@@ -119,7 +131,7 @@ class AddComputerActivity : Activity() {
                 NexusUi.outlinePillButton(this@AddComputerActivity, "Cancel").apply {
                     setOnClickListener {
                         configStore.cancelLinkWindow()
-                        renderDoorState()
+                        pairing.cancel()
                     }
                 },
                 NexusUi.block(),
@@ -172,6 +184,12 @@ class AddComputerActivity : Activity() {
         }
 
         val content = NexusUi.contentColumn(this).apply {
+            if (guided) {
+                addView(guidedCard(), NexusUi.block())
+                addView(BusTheme.gap(this@AddComputerActivity, 20))
+                addView(NexusUi.sectionLabel(this@AddComputerActivity, GuidedPairingCopy.OTHER_WAYS), NexusUi.block())
+                addView(BusTheme.gap(this@AddComputerActivity, 10))
+            }
             addView(daemonCard(), NexusUi.block())
             addView(BusTheme.gap(this@AddComputerActivity, 14))
             addView(wifiCard(), NexusUi.block())
@@ -216,6 +234,18 @@ class AddComputerActivity : Activity() {
         )
     }
 
+    /** Step 1 is on the computer, step 2 is the door; the status line says what happened. */
+    private fun guidedCard() = NexusUi.card(this).apply {
+        addView(NexusUi.rowTitle(this@AddComputerActivity, "Pair a computer"), NexusUi.block())
+        addView(BusTheme.gap(this@AddComputerActivity, 8))
+        addView(NexusUi.cardBody(this@AddComputerActivity, GuidedPairingCopy.STEP_ONE), NexusUi.block())
+        addView(BusTheme.gap(this@AddComputerActivity, 12))
+        addView(doorOpen, NexusUi.block())
+        addView(doorArmed, NexusUi.block())
+        addView(BusTheme.gap(this@AddComputerActivity, 10))
+        addView(guidedStatus, NexusUi.block())
+    }
+
     /**
      * Every road below assumes the daemon exists on the computer, so the how
      * of getting it comes before any of them.
@@ -244,15 +274,17 @@ class AddComputerActivity : Activity() {
         addView(
             NexusUi.cardBody(
                 this@AddComputerActivity,
-                "Run nexus-agentd on the computer, then open the door below. " +
+                "Run nexus-agentd on the computer, then open the door ${if (guided) "above" else "below"}. " +
                     "A computer this phone does not know yet, the first one " +
                     "included, can only get in while the door is open.",
             ),
             NexusUi.block(),
         )
-        addView(BusTheme.gap(this@AddComputerActivity, 12))
-        addView(doorOpen, NexusUi.block())
-        addView(doorArmed, NexusUi.block())
+        if (!guided) {
+            addView(BusTheme.gap(this@AddComputerActivity, 12))
+            addView(doorOpen, NexusUi.block())
+            addView(doorArmed, NexusUi.block())
+        }
     }
 
     private fun tailscaleCard() = NexusUi.card(this).apply {
@@ -355,23 +387,34 @@ class AddComputerActivity : Activity() {
         }
     }
 
-    private fun renderDoorState() {
-        countdown?.cancel()
-        if (!configStore.isLinkWindowOpen()) {
-            doorOpen.visibility = View.VISIBLE
-            doorArmed.visibility = View.GONE
-            return
+    private fun currentPairing(): PairingSnapshot = pairingSnapshot(
+        machines = configStore.trustedMachines(),
+        agentd = configStore.load().agentd,
+        signedOut = configStore.signedOut(),
+        needsRepair = AgentsRuntime.needsRepair.value,
+    )
+
+    private fun renderDoorState(state: GuidedPairing.State) {
+        val open = state as? GuidedPairing.State.DoorOpen
+        doorOpen.visibility = if (open == null) View.VISIBLE else View.GONE
+        doorArmed.visibility = if (open == null) View.GONE else View.VISIBLE
+        if (open != null) {
+            NexusUi.setDotColor(doorDot, NexusUi.AMBER)
+            doorStatus.text = GuidedPairingCopy.doorOpen(open.remainingMs)
+            keepCounting()
         }
-        doorOpen.visibility = View.GONE
-        doorArmed.visibility = View.VISIBLE
-        NexusUi.setDotColor(doorDot, NexusUi.AMBER)
-        countdown = uiScope.launch {
-            while (isActive && configStore.isLinkWindowOpen()) {
-                val left = configStore.linkWindowRemainingMs() / 1000L
-                doorStatus.text = "DOOR OPEN · %d:%02d".format(left / 60, left % 60)
+        guidedStatus.text = GuidedPairingCopy.status(state).orEmpty()
+        guidedStatus.visibility = if (guided && guidedStatus.text.isNotEmpty()) View.VISIBLE else View.GONE
+    }
+
+    /** One tick a second while the door is open, on the same clock the attempt started on. */
+    private fun keepCounting() {
+        if (ticker?.isActive == true) return
+        ticker = uiScope.launch {
+            while (isActive && pairing.state.value is GuidedPairing.State.DoorOpen) {
                 delay(1_000L)
+                pairing.tick(SystemClock.elapsedRealtime())
             }
-            renderDoorState()
         }
     }
 
@@ -432,5 +475,10 @@ class AddComputerActivity : Activity() {
 
     private fun toast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    companion object {
+        /** Open on the guided section even when a computer is already paired (Settings' Add your first computer). */
+        const val EXTRA_GUIDED = "guided"
     }
 }

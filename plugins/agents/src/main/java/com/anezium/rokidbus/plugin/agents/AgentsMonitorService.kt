@@ -54,15 +54,20 @@ class AgentsMonitorService : Service() {
                 configStore.outboundAdmitted().also { admitted -> if (!admitted) alertScope.launch { reconcile() } }
             },
             touchUsed = configStore::touchAgentdUsed,
+            onSecureConnected = { name ->
+                AgentsRuntime.announceSecureConnection(GuidedPairing.dialledId(name), name)
+            },
         )
     }
     private val openClawClient by lazy {
         OpenClawClient(httpClient, AgentsRuntime.store, configStore, serviceScope, VERSION_NAME)
     }
     private val linkServer by lazy {
-        AgentdLinkServer(AgentsRuntime.store, configStore, serviceScope, tlsIdentity) { machineName ->
-            AgentsRuntime.announceLinkedMachine(machineName)
-        }
+        AgentdLinkServer(
+            AgentsRuntime.store, configStore, serviceScope, tlsIdentity,
+            onSecureConnected = AgentsRuntime::announceSecureConnection,
+            onMachineTrusted = { machineName -> AgentsRuntime.announceLinkedMachine(machineName) },
+        )
     }
     private var runningAgentd: AgentdConfig? = null
     private var runningOpenClaw: OpenClawConfig? = null
@@ -113,6 +118,9 @@ class AgentsMonitorService : Service() {
             combine(agentdClient.linkSecure, linkServer.linkSecure) { dialled, listened ->
                 dialled || listened
             }.collect(AgentsRuntime::setLinkSecure)
+        }
+        serviceScope.launch {
+            agentdClient.needsRepair.collect(AgentsRuntime::setNeedsRepair)
         }
         // Before the first reconcile: whatever went unused while the service was down is signed out first.
         ttlTick()
@@ -283,6 +291,7 @@ class AgentsMonitorService : Service() {
         alertScope.cancel()
         alertWork.close()
         AgentsRuntime.setLinkSecure(false)
+        AgentsRuntime.setNeedsRepair(false)
         super.onDestroy()
     }
 

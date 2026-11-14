@@ -74,4 +74,10 @@ class SettingsScreenTest {
             SettingsCopy.signedOut("Desk", 14),
         )
     }
+
+    @Test
+    fun first_computer_copy_is_exact() {
+        assertEquals("Pairing takes two minutes — tap Add your first computer.", SettingsCopy.PAIR_HINT)
+        assertEquals("Add your first computer", SettingsCopy.ADD_FIRST_COMPUTER)
+    }
 }
