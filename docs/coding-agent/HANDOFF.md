@@ -49,8 +49,10 @@ Last updated 2026-11-15. The detailed SDD ledgers exist only on the original Mac
   - A weekly GitHub Action pulls upstream, runs every suite and opens a PR.
 - U31: ONE phone app, with Nexus embedded. Reasons: two installs add friction, and the open Nexus plugin host would let unvetted third-party plugins draw on the glasses. The merged app exposes no plugin host.
 
-## Open Plan 6 question (ask the user)
-What has to be true for 1.0 to count as "done"?
+## Plan 6
+- The design is `docs/coding-agent/claude/design/2026-11-15-v1-product-design.md`: "done" is §3, my calls are §8, the user's answers U32–U34 are §9.
+- Next step: the user approves the design, then the plan is written (writing-plans), then the tasks are built in parallel with one Codex review.
+- **Windows requires WSL (U34).** Settle where agentd runs (preferably inside WSL with mirrored networking) at the start of the Windows session.
 
 ## Windows work list (for the fresh Windows conversation)
 **Plugin mode (target v1.0):**
