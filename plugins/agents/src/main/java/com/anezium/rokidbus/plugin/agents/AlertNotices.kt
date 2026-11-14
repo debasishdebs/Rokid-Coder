@@ -24,6 +24,7 @@ object AlertNotices {
     private const val TITLE_CHARS = 32
     private const val FOOTER_CHARS = 40
     private const val BRIEF_BODY_CHARS = 240
+    private const val BRIEF_MAX_LINES = 16
 
     /**
      * The hub measures and pages the band; the plugin cannot. An approval has
@@ -66,11 +67,20 @@ object AlertNotices {
     )
 
     /** A one-line message about what the wearer just did or could not do. */
-    fun brief(title: String, body: String): NexusNotice = NexusNotice(
-        title = title.line(TITLE_CHARS).ifEmpty { "Agents" },
-        body = body.line(BRIEF_BODY_CHARS).ifEmpty { null },
-        ttlMs = NOTICE_TTL_MS,
-    )
+    fun brief(title: String, body: String): NexusNotice {
+        // Several briefs merged into one band arrive one per line.
+        val lines = if ('\n' in body) {
+            body.split('\n').map { it.line(BRIEF_BODY_CHARS) }.filter(String::isNotEmpty).take(BRIEF_MAX_LINES)
+        } else {
+            emptyList()
+        }
+        return NexusNotice(
+            title = title.line(TITLE_CHARS).ifEmpty { "Agents" },
+            body = if (lines.isEmpty()) body.line(BRIEF_BODY_CHARS).ifEmpty { null } else null,
+            lines = lines,
+            ttlMs = NOTICE_TTL_MS,
+        )
+    }
 
     /**
      * The v1 band for a session that needs the wearer or failed, used for

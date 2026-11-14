@@ -31,7 +31,9 @@ class AlertDirectorTest {
         }
 
         override fun hideBand() { log += "hide" }
-        override fun brief(title: String, body: String) { log += "brief $title" }
+        val briefs = mutableListOf<Pair<String, String>>()
+        override fun brief(title: String, body: String) { log += "brief $title"; briefs += title to body }
+        override fun slotFree() { log += "free" }
         override fun openOutput(alert: AgentdAction.Alert) { log += "output ${alert.id}" }
         override fun openDecision(alert: AgentdAction.Alert) { log += "decision ${alert.id}" }
         override fun openQuestion(alert: AgentdAction.Alert) { log += "question ${alert.id}" }
@@ -48,6 +50,7 @@ class AlertDirectorTest {
         secure = { secure },
         glasses = { glasses },
         post = { it() },
+        clock = { now },
     )
 
     private fun alert(
@@ -173,7 +176,7 @@ class AlertDirectorTest {
         up()
         director.onBandAction("allow")
 
-        assertEquals(listOf("hide", "show CLAUDE · approve", "hide"), glasses.log)
+        assertEquals(listOf("hide", "show CLAUDE · approve", "hide", "free"), glasses.log)
         assertEquals(emptyList<String>(), types())
     }
 
@@ -242,14 +245,110 @@ class AlertDirectorTest {
         up()
         feed(alert())
         director.onBrief("Mode reset", "first")
-        director.onBrief("Not applied", "newest")
         assertEquals(listOf("hide", "show CLAUDE · approve"), glasses.log)
 
         director.onBandClosed(NexusNoticeCloseReason.USER)
 
-        // Newest wins: each brief would replace the one before it.
-        assertEquals("brief Not applied", glasses.log.last())
-        assertEquals(3, glasses.log.size)
+        assertEquals("brief Mode reset", glasses.log.last())
+    }
+
+    @Test
+    fun briefs_shown_in_order_after_band_closes() {
+        up()
+        feed(alert())
+        director.onBrief("One", "a")
+        director.onBrief("Two", "b")
+        director.onBrief("Three", "c")
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+
+        // One at a time: the next waits for the brief on screen to close.
+        assertEquals(listOf("brief One"), glasses.log.filter { it.startsWith("brief") })
+        director.onBriefClosed()
+        assertEquals(listOf("brief One", "brief Two"), glasses.log.filter { it.startsWith("brief") })
+        director.onBriefClosed()
+        director.onBriefClosed()
+        assertEquals(listOf("brief One", "brief Two", "brief Three"), glasses.log.filter { it.startsWith("brief") })
+    }
+
+    @Test
+    fun a_lost_brief_close_does_not_stall_the_queue() {
+        up()
+        director.onBrief("One", "a")
+        director.onBrief("Two", "b")
+        assertEquals(listOf("hide", "brief One"), glasses.log)
+
+        now = 11_000L
+        director.onBrief("Three", "c")
+
+        assertEquals(listOf("hide", "brief One", "brief Two"), glasses.log)
+    }
+
+    @Test
+    fun duplicate_brief_not_queued_twice() {
+        up()
+        feed(alert())
+        director.onBrief("Session control", "Not sent")
+        director.onBrief("Session control", "Not sent")
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+        director.onBriefClosed()
+
+        assertEquals(1, glasses.log.count { it.startsWith("brief") })
+    }
+
+    @Test
+    fun safety_brief_never_evicted() {
+        up()
+        feed(alert())
+        director.onBrief("Session control", "Not applied: busy")
+        director.onBrief("Reply too long", "1")
+        director.onBrief("Still working", "2")
+        director.onBrief("Computer linked", "3")
+        // Full: the oldest ordinary brief goes, never the refused change.
+        director.onBrief("Can't type here", "4")
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+        repeat(6) { director.onBriefClosed() }
+
+        val shown = glasses.log.filter { it.startsWith("brief") }
+        assertEquals(
+            listOf("brief Session control", "brief Still working", "brief Computer linked", "brief Can't type here"),
+            shown,
+        )
+    }
+
+    @Test
+    fun a_queue_of_only_safety_briefs_merges_into_one_band_and_drops_none() {
+        up()
+        feed(alert())
+        director.onBrief("Session control", "Not applied: a")
+        director.onBrief("Monitor only", "approve on laptop")
+        director.onBrief("Session control", "Approve-all off — x: session ended")
+        director.onBrief("Session control", "Accept edits off — y: helper restarted")
+        director.onBrief("Session control", "Not applied: b")
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+        repeat(3) { director.onBriefClosed() }
+
+        // One merged band carries the first four, then the fifth follows on its own.
+        assertEquals(2, glasses.briefs.size)
+        assertEquals(4, glasses.briefs[0].second.lines().size)
+        assertTrue(glasses.briefs[0].second.contains("Not applied: a"))
+        assertTrue(glasses.briefs[0].second.contains("Accept edits off"))
+        assertEquals("Not applied: b", glasses.briefs[1].second)
+    }
+
+    @Test
+    fun attention_retriggered_after_band_close() {
+        up()
+        feed(alert())
+        assertFalse("free" in glasses.log)
+
+        director.onBrief("One", "a")
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+        // The queued brief still holds the slot.
+        assertFalse("free" in glasses.log)
+
+        director.onBriefClosed()
+        assertEquals("free", glasses.log.last())
+        assertEquals(1, glasses.log.count { it == "free" })
     }
 
     @Test

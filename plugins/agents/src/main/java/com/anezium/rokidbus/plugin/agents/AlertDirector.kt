@@ -17,6 +17,9 @@ interface AlertGlasses {
     fun hideBand()
     fun brief(title: String, body: String)
 
+    /** Nothing of the alerts' is on the band slot any more: a deferred v1 attention may take it. */
+    fun slotFree() = Unit
+
     /** A Done or error band was tapped: open the output reader, summary first. */
     fun openOutput(alert: AgentdAction.Alert)
     fun openDecision(alert: AgentdAction.Alert)
@@ -44,6 +47,7 @@ class AlertDirector(
     private val secure: () -> Boolean,
     private val glasses: () -> AlertGlasses?,
     private val post: (() -> Unit) -> Unit,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     /** The alert whose band the director put up and has not seen end. Only [post]ed work touches it. */
     private var bandId: String? = null
@@ -51,8 +55,18 @@ class AlertDirector(
     /** An alert whose band the hub took from us (REPLACED) or timed out: its next frame re-shows it. */
     private var goneId: String? = null
 
-    /** The newest brief that arrived while a band was up; a brief never replaces an alert band (R94). */
-    private var pendingBrief: Pair<String, String>? = null
+    /**
+     * Briefs wait here while an alert band is up or an earlier brief is on screen:
+     * a brief never replaces either (R94, R100). They show one at a time, oldest first.
+     */
+    private class Brief(val title: String, val body: String, val safety: Boolean)
+
+    private val briefs = ArrayDeque<Brief>()
+    private var briefShownAt: Long? = null
+    private var busy = false
+
+    /** True while an alert band, a brief or a queued brief holds the slot. Read where [post]ed work runs. */
+    val slotBusy: Boolean get() = bandId != null || briefOnScreen() || briefs.isNotEmpty()
     private var boardKeys: Set<String> = emptySet()
 
     private val _waiting = MutableStateFlow(0)
@@ -111,12 +125,21 @@ class AlertDirector(
     }
 
     /**
-     * A message for the wearer that is not an alert. While an alert band is up it
-     * waits, the newest one alone since each would replace the last, and shows
-     * once the band is gone.
+     * A message for the wearer that is not an alert. It waits while an alert band
+     * is up or an earlier brief is showing. The queue holds [MAX_BRIEFS], the same
+     * text only once. A full queue drops its oldest ordinary brief; a safety brief
+     * (a refused change, a monitor-only refusal, a mode switched off) is never
+     * dropped, and if only safety briefs fill it they merge into one band of lines.
      */
     fun onBrief(title: String, body: String) = post {
-        if (bandId == null) glasses()?.brief(title, body) else pendingBrief = title to body
+        enqueue(Brief(title, body, isSafety(title, body)))
+        settle()
+    }
+
+    /** The band a brief was shown on is gone: its turn is over, the next one may show. */
+    fun onBriefClosed() = post {
+        briefShownAt = null
+        settle()
     }
 
     /** A confirm from a decision or question card bound to [alertId]. */
@@ -127,12 +150,60 @@ class AlertDirector(
     private fun apply(effects: List<AlertCoordinator.Effect>) {
         applyEffects(effects)
         _waiting.value = coordinator.current?.waiting ?: 0
-        val brief = pendingBrief
-        if (brief != null && bandId == null) {
-            pendingBrief = null
-            glasses()?.brief(brief.first, brief.second)
-        }
+        settle()
     }
+
+    /** Shows the next brief when the slot is free, and says so once it has emptied. */
+    private fun settle() {
+        if (bandId == null && !briefOnScreen()) {
+            val next = briefs.removeFirstOrNull()
+            if (next != null && glasses()?.also { it.brief(next.title, next.body) } != null) {
+                briefShownAt = clock()
+            }
+        }
+        val nowBusy = slotBusy
+        if (busy && !nowBusy) glasses()?.slotFree()
+        busy = nowBusy
+    }
+
+    /** A brief's band closes on its own deadline; a lost close must not stall the queue behind it. */
+    private fun briefOnScreen(): Boolean {
+        val at = briefShownAt ?: return false
+        if (clock() - at > BRIEF_STALE_MS) {
+            briefShownAt = null
+            return false
+        }
+        return true
+    }
+
+    private fun enqueue(brief: Brief) {
+        if (briefs.any { it.title == brief.title && it.body == brief.body }) return
+        if (briefs.size >= MAX_BRIEFS) {
+            val ordinary = briefs.indexOfFirst { !it.safety }
+            if (ordinary >= 0) {
+                briefs.removeAt(ordinary)
+            } else {
+                // Every slot holds a safety brief: one band carries them all.
+                val merged = Brief(
+                    title = briefs.first().title,
+                    body = briefs.joinToString("\n") { line(it) },
+                    safety = true,
+                )
+                briefs.clear()
+                briefs.addLast(merged)
+            }
+        }
+        briefs.addLast(brief)
+    }
+
+    private fun line(brief: Brief): String = when {
+        brief.body.isBlank() -> brief.title
+        brief.title.isBlank() -> brief.body
+        else -> "${brief.title} — ${brief.body}"
+    }
+
+    private fun isSafety(title: String, body: String): Boolean =
+        SAFETY_PREFIXES.any { title.startsWith(it) || body.startsWith(it) }
 
     private fun applyEffects(effects: List<AlertCoordinator.Effect>) {
         for (effect in effects) {
@@ -164,6 +235,8 @@ class AlertDirector(
         }
         bandId = alert.id
         goneId = null
+        // The alert took the slot from whatever brief was on it.
+        briefShownAt = null
     }
 
     /**
@@ -183,5 +256,14 @@ class AlertDirector(
             glasses()?.updateBand(AlertNotices.update(alert, monitorOnly = !secure())) == true
         // A band that is gone or overwritten is shown again, without waking anyone.
         if (!refreshed) showBand(alert, wake = false)
+    }
+
+    private companion object {
+        const val MAX_BRIEFS = 4
+
+        /** A brief's own ttl is 8 s; past this a missing close is assumed lost. */
+        const val BRIEF_STALE_MS = 10_000L
+
+        val SAFETY_PREFIXES = listOf("Not applied", "Monitor only", "Approve-all off", "Accept edits off")
     }
 }

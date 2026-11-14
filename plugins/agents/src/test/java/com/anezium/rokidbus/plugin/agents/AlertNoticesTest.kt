@@ -311,4 +311,13 @@ class AlertNoticesTest {
 
         assertTrue(a.contentKey != b.contentKey)
     }
+
+    @Test
+    fun merged_briefs_arrive_as_lines() {
+        val notice = AlertNotices.brief("Session control", "Not applied: a\nApprove-all off — x: session ended\n\n" + "y".repeat(10_000))
+
+        assertNull(notice.body)
+        assertEquals(3, notice.lines.size)
+        assertTrue(notice.lines.all { it.length <= 240 })
+    }
 }

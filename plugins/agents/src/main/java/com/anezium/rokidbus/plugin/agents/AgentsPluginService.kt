@@ -352,7 +352,11 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     override fun onNexusNoticeClosed(reason: NexusNoticeCloseReason) {
-        if (!v2BandUp) return
+        if (!v2BandUp) {
+            // A brief's band ending: the next queued brief may show.
+            AgentsRuntime.alertDirector?.onBriefClosed()
+            return
+        }
         AgentsRuntime.alertDirector?.onBandClosed(reason)
         // Our own hide already cleared it; any other close means no band of ours is up.
         if (reason != NexusNoticeCloseReason.OWNER) v2BandUp = false
@@ -383,7 +387,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         // On a secure link agentd's own alerts speak for its providers (R40); the
         // status path stays for OpenClaw, and for a link that cannot steer.
         // An approval's band is never replaced by this one; the wearer's answer comes first.
-        if (v2BandUp) return
+        if (v2BandUp || AgentsRuntime.alertDirector?.slotBusy == true) return
         // A computer that has spoken v2 stays off this path even while its link is down (R92).
         val steering = AgentsRuntime.link.value?.secure == true
         val pending = attention.pending(AgentsRuntime.store.sessions.value) { session ->
@@ -457,6 +461,11 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     override fun brief(title: String, body: String) = showBriefNow(title, body)
+
+    /** What kept a v1 or OpenClaw attention waiting is gone: offer it again. */
+    override fun slotFree() {
+        serviceScope.launch { raiseAttention() }
+    }
 
     override fun openOutput(alert: AgentdAction.Alert) {
         val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
@@ -1063,7 +1072,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 "waiting for you",
             ).joinToString(" · ").take(120),
             rows = rows,
-            footer = "swipe choose · tap confirm · 2-tap later",
+            footer = if (AgentsRuntime.link.value?.secure == true) "swipe choose · tap confirm · 2-tap later" else "2-tap back",
         )
     }
 
