@@ -46,7 +46,7 @@ async function waitForDaemon(child) {
   throw new Error("daemon did not become healthy");
 }
 
-function postWithCurl(payload) {
+function postWithCurl(payload, expected = "{}") {
   const curl = process.platform === "win32" ? "curl.exe" : "curl";
   const result = spawnSync(
     curl,
@@ -63,7 +63,9 @@ function postWithCurl(payload) {
     { encoding: "utf8" },
   );
   assert.equal(result.status, 0, result.stderr || "curl failed");
-  assert.equal(result.stdout, "{}");
+  // `expected` null: the caller reads the reply itself.
+  if (expected !== null) assert.equal(result.stdout, expected);
+  return result.stdout;
 }
 
 function waitForFrame(frames, predicate, timeoutMs = 5000) {
@@ -133,6 +135,13 @@ async function main() {
       transcript_path: transcriptPath,
       cwd: "E:/smoke/project",
     };
+    // Hooks of a session nobody opted in leave no trace, so it is attached the
+    // way the plugin's /rokid:on does: UserPromptExpansion, answered with a block.
+    const attached = JSON.parse(
+      postWithCurl({ ...base, hook_event_name: "UserPromptExpansion", command_name: "rokid:on" }, null),
+    );
+    assert.equal(attached.decision, "block");
+    assert.match(attached.reason, /^Attached to Rokid-Coder/);
     postWithCurl({ ...base, hook_event_name: "SessionStart", source: "startup" });
 
     // The phone port is wss only, and admits a pinned client cert with the steering secret.
