@@ -1,5 +1,7 @@
 plugins {
     id("com.android.application") version "9.2.0"
+    // AGP 9.2.0 compiles Kotlin with its built-in KGP 2.2.10 (see :buildEnvironment); the Compose compiler must match.
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.10"
 }
 
 apply(from = rootProject.file("../../gradle/plugin-release-signing.gradle"))
@@ -23,6 +25,7 @@ android {
 
     buildFeatures {
         buildConfig = true
+        compose = true
     }
 
     compileOptions {
@@ -36,6 +39,12 @@ dependencies {
     implementation("androidx.core:core:1.13.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Phone screens only: the PCA light mint theme and settings widgets (R31).
+    implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.activity:activity-compose:1.9.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.5")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
