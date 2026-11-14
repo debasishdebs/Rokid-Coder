@@ -298,7 +298,12 @@ export class SessionStore {
         activeSince: record.session.turn?.activeSince ?? update.activityAt,
       };
     }
-    if (update.error) {
+    if (update.interrupted) {
+      // The person stopped it, so it waits for them: idle, and no prompt left open.
+      record.session.status = "idle";
+      record.session.statusDetail = undefined;
+      record.session.pendingRequest = undefined;
+    } else if (update.error) {
       record.session.status = "error";
       record.session.statusDetail = truncateText(update.error, 140);
     }

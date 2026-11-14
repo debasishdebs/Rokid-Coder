@@ -1018,3 +1018,100 @@ test("an_upsert_identical_to_the_last_one_sent_is_skipped", async () => {
     );
   }
 });
+
+// The lines Claude 2.1.285 wrote when the person chose "No" in a permission
+// dialog (live laptop-No check); Esc or Ctrl+C mid-turn leaves the second.
+const rejectedToolUse = (at) => ({
+  type: "user",
+  timestamp: at,
+  message: {
+    role: "user",
+    content: [{
+      type: "tool_result",
+      tool_use_id: "toolu_live",
+      is_error: true,
+      content: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+    }],
+  },
+  toolUseResult: "User rejected tool use",
+});
+const interruptedByUser = (at) => ({
+  type: "user",
+  timestamp: at,
+  message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user for tool use]" }] },
+});
+const assistantSays = (at, text) => ({
+  type: "assistant",
+  timestamp: at,
+  message: { role: "assistant", content: [{ type: "text", text }] },
+});
+
+async function tailedSession(httpPort, claudeDir) {
+  const file = path.join(claudeDir, "projects", "-work-demo", "s1.jsonl");
+  await postHook(httpPort, {
+    hook_event_name: "UserPromptSubmit",
+    session_id: "s1",
+    cwd: "/work/demo",
+    transcript_path: file,
+    prompt: "echo hi > x.txt",
+  });
+  await settle(150);
+  return (entries) => fsp.appendFile(file, entries.map((e) => `${JSON.stringify(e)}\n`).join(""));
+}
+
+async function eventually(predicate, message, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(message);
+    await settle(20);
+  }
+}
+
+test("user_interrupt_is_not_an_error_alert", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }], discovered: ["s1"] },
+    async ({ daemon, phone, httpPort, claudeDir }) => {
+      const append = await tailedSession(httpPort, claudeDir);
+      await postHook(httpPort, {
+        hook_event_name: "Notification",
+        session_id: "s1",
+        message: "Claude needs your permission",
+      });
+      const now = new Date().toISOString();
+      await append([rejectedToolUse(now), interruptedByUser(now), assistantSays(now, "tail caught up")]);
+      await eventually(() => daemon.sessions.get("s1").lastAssistantText === "tail caught up", "the tail did not read the lines");
+      await settle(100);
+      const session = daemon.sessions.get("s1");
+      assert.equal(session.status, "idle", "stopped by the person: waiting for them, not failed");
+      assert.equal(session.statusDetail, undefined);
+      assert.equal(session.pendingRequest, undefined);
+      assert.equal(phone.frames.some((f) => f.type === "alert" && f.kind === "error"), false, "no error alert");
+    },
+  );
+});
+
+test("real_error_still_alerts", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }], discovered: ["s1"] },
+    async ({ daemon, phone, httpPort, claudeDir }) => {
+      const append = await tailedSession(httpPort, claudeDir);
+      const now = new Date().toISOString();
+      await append([
+        // A tool that really failed is still an error, as is an API failure.
+        {
+          type: "user",
+          timestamp: now,
+          message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_x", is_error: true, content: "Exit code 1\nmake: *** [test] Error 2" }] },
+        },
+      ]);
+      const toolAlert = await phone.waitFor("alert", (f) => f.kind === "error", 4000);
+      assert.equal(toolAlert.sessionKey, "claude:s1");
+      await append([{ type: "api_error", timestamp: now, is_error: true, error: { message: "API Error: overloaded" } }]);
+      // Queued behind the first, which still holds the glasses for its dwell.
+      const queued = () => [...daemon.phoneV2.alerts.entries.values()]
+        .some((e) => e.alert.kind === "error" && e.alert.body === "API Error: overloaded");
+      await eventually(queued, "the API error raised no alert");
+      assert.equal(daemon.sessions.get("s1").status, "error");
+    },
+  );
+});

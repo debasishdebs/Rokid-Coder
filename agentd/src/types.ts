@@ -124,6 +124,8 @@ export interface TranscriptUpdate {
   lastAssistantText?: string;
   lastTool?: string;
   error?: string;
+  /** The person stopped the turn at the laptop (a dialog "No", Esc, Ctrl+C): not an error. */
+  interrupted?: boolean;
   /** Claude's own session title (`ai-title` record). */
   heading?: string;
   /** From the last assistant `usage`. */

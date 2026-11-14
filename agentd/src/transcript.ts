@@ -76,6 +76,35 @@ function hasErrorFlag(entry: Record<string, unknown>, message: Record<string, un
   return false;
 }
 
+// What Claude writes when the person stops a turn: a dialog "No" leaves a
+// tool_result with is_error and `toolUseResult: "User rejected tool use"`,
+// followed (as does Esc or Ctrl+C) by a "[Request interrupted by user...]" text.
+const USER_REJECTED_TOOL = "User rejected tool use";
+const INTERRUPT_TEXTS = ["[Request interrupted by user", "The user doesn't want to proceed with this tool use"];
+
+function isUserInterrupt(entry: Record<string, unknown>, message: Record<string, unknown> | undefined): boolean {
+  if (entry.toolUseResult === USER_REJECTED_TOOL) {
+    return true;
+  }
+  for (const content of [entry.content, message?.content]) {
+    const blocks = typeof content === "string" ? [content] : Array.isArray(content) ? content : [];
+    for (const block of blocks) {
+      const record = recordValue(block);
+      const text = typeof block === "string"
+        ? block
+        : typeof record?.text === "string"
+          ? record.text
+          : typeof record?.content === "string"
+            ? record.content
+            : "";
+      if (INTERRUPT_TEXTS.some((marker) => text.startsWith(marker))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function errorText(entry: Record<string, unknown>, message: Record<string, unknown> | undefined): string {
   const error = entry.error;
   if (typeof error === "string") {
@@ -162,7 +191,9 @@ export function extractTranscriptUpdate(
     update.lastTool = toolName;
   }
 
-  if (type.includes("error") || subtype.includes("error") || hasErrorFlag(entry, message)) {
+  if (isUserInterrupt(entry, message)) {
+    update.interrupted = true;
+  } else if (type.includes("error") || subtype.includes("error") || hasErrorFlag(entry, message)) {
     update.error = truncateText(errorText(entry, message), 140);
   }
   return update;
