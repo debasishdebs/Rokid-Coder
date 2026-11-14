@@ -70,23 +70,19 @@ class AgentdLinkSecurityTest {
     fun trustDecisionNeverReplacesKnownWrongToken() {
         assertEquals(
             MachineTrustResult.TRUSTED,
-            decideMachineTrust("secret", true, false, "secret"),
+            decideMachineTrust("secret", false, "secret"),
         )
         assertEquals(
             MachineTrustResult.REJECTED_BAD_TOKEN,
-            decideMachineTrust("secret", true, true, "attacker"),
+            decideMachineTrust("secret", true, "attacker"),
         )
         assertEquals(
             MachineTrustResult.NEWLY_TRUSTED,
-            decideMachineTrust(null, false, false, "first-use"),
-        )
-        assertEquals(
-            MachineTrustResult.NEWLY_TRUSTED,
-            decideMachineTrust(null, true, true, "armed"),
+            decideMachineTrust(null, true, "armed"),
         )
         assertEquals(
             MachineTrustResult.REJECTED_NOT_INVITED,
-            decideMachineTrust(null, true, false, "not-armed"),
+            decideMachineTrust(null, false, "not-armed"),
         )
     }
 

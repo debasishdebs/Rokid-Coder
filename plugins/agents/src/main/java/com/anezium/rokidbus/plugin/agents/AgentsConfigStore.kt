@@ -137,15 +137,19 @@ internal enum class MachineTrustResult(val rejectionReason: String? = null) {
         get() = rejectionReason != null
 }
 
+/**
+ * A machine is trusted only inside the window the wearer armed with Add a
+ * computer (R121), the first one ever included: no machine is enrolled on
+ * first use, so a LAN host cannot pin itself before the wearer's own does.
+ */
 internal fun decideMachineTrust(
     knownToken: String?,
-    hasAnyTrustedMachine: Boolean,
     linkWindowOpen: Boolean,
     presentedToken: String,
 ): MachineTrustResult = when {
     knownToken != null && knownToken == presentedToken -> MachineTrustResult.TRUSTED
     knownToken != null -> MachineTrustResult.REJECTED_BAD_TOKEN
-    !hasAnyTrustedMachine || linkWindowOpen -> MachineTrustResult.NEWLY_TRUSTED
+    linkWindowOpen -> MachineTrustResult.NEWLY_TRUSTED
     else -> MachineTrustResult.REJECTED_NOT_INVITED
 }
 
@@ -315,9 +319,9 @@ class AgentsConfigStore internal constructor(
     }
 
     /**
-     * Trust on first use: the first computer that dials in is remembered with its
-     * token, and later connections must present the same one. No code to type,
-     * and a stranger on the network cannot take over a known machine's identity.
+     * A computer linked inside the wearer's window is remembered with its token,
+     * and later connections must present the same one: a stranger on the network
+     * cannot take over a known machine's identity.
      */
     fun isMachineTrusted(machineId: String, token: String): Boolean {
         val known = prefs.getString(machineKey(machineId), null) ?: return false
@@ -325,7 +329,8 @@ class AgentsConfigStore internal constructor(
     }
 
     /**
-     * Atomically applies the LAN trust-on-first-use/link-window policy.
+     * Atomically applies the link-window policy (R121): a machine not yet known is
+     * trusted only while the wearer's Add a computer window is open.
      * Existing machine tokens are never changed by this operation.
      *
      * [clientCert] is the fingerprint of the certificate the computer presented
@@ -344,10 +349,8 @@ class AgentsConfigStore internal constructor(
     ): MachineTrustResult {
         val key = machineKey(machineId)
         val knownToken = prefs.getString(key, null)
-        val hasAnyTrustedMachine = prefs.all.keys.any { it.startsWith(KEY_MACHINE_PREFIX) }
         val result = decideMachineTrust(
             knownToken = knownToken,
-            hasAnyTrustedMachine = hasAnyTrustedMachine,
             linkWindowOpen = isLinkWindowOpen(),
             presentedToken = token,
         )

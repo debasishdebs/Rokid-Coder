@@ -226,25 +226,41 @@ internal class GlassesScreen(
 
     // ----------------------------------------------------------------- band
 
+    /*
+     * Every band coming, being touched or going, and the surface opening again,
+     * re-arms the card on screen (R109): the taps of a double tap aimed at a band
+     * ("Later", BACK, a tap on a brief) must never land on the card under it,
+     * however long that card has been open.
+     */
+
     /** A v2 alert's band ([v2]) or any other band was taken by the hub. */
     fun bandTaken(v2: Boolean) {
         v2BandUp = v2
         // An alert took the screen's attention: no confirm survives it (R96).
         if (v2) coverMenu()
+        rearm()
     }
 
     /** This plugin hid its own v2 band. */
     fun bandHidden() {
         v2BandUp = false
+        rearm()
     }
+
+    /** A tap or an action on the band itself. */
+    fun bandTouched() = rearm()
 
     fun noticeClosed(
         reason: NexusNoticeCloseReason,
         band: (NexusNoticeCloseReason) -> Unit,
         brief: (NexusNoticeCloseReason) -> Unit,
     ) {
+        rearm()
         routeNoticeClose(reason, v2BandUp, clearV2 = { v2BandUp = false }, band = band, brief = brief)
     }
+
+    /** The plugin's surface opened again over whatever card it holds. */
+    fun surfaceOpened() = rearm()
 
     // ---------------------------------------------------------------- input
 

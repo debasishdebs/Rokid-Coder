@@ -77,7 +77,17 @@ class VoiceCapture {
     fun onFinal(text: String?) {
         if (invalidated || state != State.Listening) return
         val heard = text?.takeIf { it.isNotBlank() } ?: lastPartial
-        state = if (heard != null) State.Heard(heard.trim()) else State.Failed(DIDNT_CATCH)
+        state = if (heard != null) heardOrRefused(heard) else State.Failed(DIDNT_CATCH)
+    }
+
+    /**
+     * What is sent is exactly what the heard card shows (R123): the transcript with
+     * its whitespace collapsed, and only if all of it fits on the card. A longer one
+     * is refused, never cut, so no unreviewed tail can reach the agent.
+     */
+    private fun heardOrRefused(text: String): State {
+        val clean = text.singleLine(Int.MAX_VALUE)
+        return if (clean.length > MAX_REVIEW_CHARS) State.Failed(TOO_LONG) else State.Heard(clean)
     }
 
     fun onStopped(reason: NexusSpeechStopReason) {
@@ -89,7 +99,7 @@ class VoiceCapture {
             NexusSpeechStopReason.CANCELLED -> State.Idle
             // The session ended without a final: the partial is all there is.
             NexusSpeechStopReason.COMPLETED ->
-                lastPartial?.let { State.Heard(it.trim()) } ?: State.Failed(DIDNT_CATCH)
+                lastPartial?.let(::heardOrRefused) ?: State.Failed(DIDNT_CATCH)
             NexusSpeechStopReason.NO_SPEECH -> State.Failed(DIDNT_CATCH)
             NexusSpeechStopReason.DENIED_BUSY -> State.Failed(MIC_BUSY)
             NexusSpeechStopReason.DENIED_NO_LINK,
@@ -133,6 +143,14 @@ class VoiceCapture {
         const val DIDNT_CATCH = "Didn't catch that"
         const val UNAVAILABLE = "Voice unavailable"
         const val VOICE_ERROR = "Voice failed — try again"
+        const val TOO_LONG = "Too long to review — say a shorter reply"
+
+        /**
+         * The longest transcript the heard card shows whole: [VoiceCard.BODY_ROWS]
+         * BODY rows of the SDK's 240-char line, 960 chars. It leaves the card room
+         * for its three choice rows.
+         */
+        const val MAX_REVIEW_CHARS = VoiceCard.BODY_ROWS * VoiceCard.ROW_CHARS
     }
 }
 
@@ -197,7 +215,12 @@ data class VoiceView(
  * and that card opens on `Cancel`.
  */
 object VoiceCard {
-    private const val TEXT_CHARS = 238
+    /** The heard card's transcript is drawn in at most this many BODY rows of [ROW_CHARS] each. */
+    const val BODY_ROWS = 4
+    const val ROW_CHARS = 240
+
+    /** [body] as the card's rows, each within the SDK's line cap; together they are all of it. */
+    fun bodyRows(body: String): List<String> = body.chunked(ROW_CHARS)
 
     fun view(kind: VoiceKind, state: VoiceCapture.State): VoiceView {
         val title = when (kind) {
@@ -219,15 +242,16 @@ object VoiceCard {
                 0,
             )
             is VoiceCapture.State.Heard -> when (kind) {
+                // The whole transcript: it is exactly what Send sends.
                 VoiceKind.FOLLOWUP -> VoiceView(
                     title,
-                    state.text.singleLine(TEXT_CHARS),
+                    state.text,
                     listOf(VoiceRow("Send", null, VoiceAct.SEND), again, cancel),
                     0,
                 )
                 VoiceKind.ANSWER -> VoiceView(
                     title,
-                    state.text.singleLine(TEXT_CHARS),
+                    state.text,
                     listOf(VoiceRow("Use answer", "sent with Send answer", VoiceAct.USE), again, cancel),
                     0,
                 )

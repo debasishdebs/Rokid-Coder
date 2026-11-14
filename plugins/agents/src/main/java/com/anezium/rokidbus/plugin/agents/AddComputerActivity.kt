@@ -244,9 +244,9 @@ class AddComputerActivity : Activity() {
         addView(
             NexusUi.cardBody(
                 this@AddComputerActivity,
-                "Run nexus-agentd on the computer. Your first computer links " +
-                    "itself the moment it finds this phone; every one after it " +
-                    "can only get in while the door below is open.",
+                "Run nexus-agentd on the computer, then open the door below. " +
+                    "A computer this phone does not know yet, the first one " +
+                    "included, can only get in while the door is open.",
             ),
             NexusUi.block(),
         )

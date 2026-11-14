@@ -61,6 +61,8 @@ class PhoneTlsServerTest {
 
     @Test
     fun tls_server_accepts_tls_client_and_line_protocol_unchanged() {
+        // The wearer opened the door for this computer (R121).
+        config.armLinkWindow()
         listen { listener ->
             dial(listener, agentA).use { agentd ->
                 // agentd's dial: chain validation off, its pinned set is the identity check.
@@ -114,7 +116,44 @@ class PhoneTlsServerTest {
     }
 
     @Test
+    fun first_machine_without_window_refused() {
+        // No computer is trusted yet, and the wearer has not opened the door: no first-use trust (R121).
+        listen { listener ->
+            dial(listener, agentA).use { agentd ->
+                agentd.hello()
+                val reply = agentd.next()
+                assertEquals("hello_reject", reply?.getString("type"))
+                assertEquals(AgentdProtocolCodec.REJECT_UNKNOWN_MACHINE, reply?.getString("reason"))
+            }
+            awaitServed()
+            assertTrue(events.filterIsInstance<AgentdEvent.LinkUp>().isEmpty())
+            assertFalse(server.linkSecure.value)
+            assertFalse(prefs.map.keys.any { it.startsWith("machine.") })
+        }
+        assertEquals(MachineTrustResult.REJECTED_NOT_INVITED, config.authorizeMachine("pc-9", "t", "Other", agentB.fingerprint))
+    }
+
+    @Test
+    fun first_machine_inside_window_trusted() {
+        config.armLinkWindow()
+        listen { listener ->
+            dial(listener, agentA).use { agentd ->
+                agentd.hello()
+                assertEquals("hello_ack", agentd.next()?.getString("type"))
+            }
+            awaitServed()
+            assertEquals(agentA.fingerprint, prefs.map["machine.cert.pc-1"])
+            assertTrue((events.first() as AgentdEvent.LinkUp).secure)
+        }
+        // The window closes with the trust it allowed: the next stranger needs the door again.
+        assertFalse(config.isLinkWindowOpen())
+        assertEquals(MachineTrustResult.REJECTED_NOT_INVITED, config.authorizeMachine("pc-2", "t", "Laptop", agentB.fingerprint))
+    }
+
+    @Test
     fun inbound_pins_client_cert_on_first_trust() {
+        // The wearer opened the door for this computer (R121).
+        config.armLinkWindow()
         listen { listener ->
             dial(listener, agentA).use { agentd ->
                 agentd.hello()
@@ -151,6 +190,8 @@ class PhoneTlsServerTest {
 
     @Test
     fun inbound_mismatched_client_cert_refused_before_hello_ack() {
+        // The wearer opened the door for this computer (R121).
+        config.armLinkWindow()
         listen { listener ->
             dial(listener, agentA).use { agentd ->
                 agentd.hello()
@@ -178,6 +219,8 @@ class PhoneTlsServerTest {
 
     @Test
     fun replayed_token_with_other_cert_never_secure() {
+        // The wearer opened the door for this computer (R121).
+        config.armLinkWindow()
         listen { listener ->
             dial(listener, agentA).use { live ->
                 live.hello()
@@ -200,6 +243,7 @@ class PhoneTlsServerTest {
 
     @Test
     fun forget_machine_clears_client_pin() {
+        config.armLinkWindow()
         assertEquals(MachineTrustResult.NEWLY_TRUSTED, config.authorizeMachine("pc-1", "secret", "Desk", agentA.fingerprint))
         assertTrue(config.isClientCertPinned("pc-1", agentA.fingerprint))
         config.forgetMachine("pc-1")
@@ -207,6 +251,7 @@ class PhoneTlsServerTest {
         assertFalse(config.isClientCertPinned("pc-1", agentA.fingerprint))
 
         // Linked again inside the window, the pin is the new cert's.
+        config.armLinkWindow()
         config.authorizeMachine("pc-2", "other", "Laptop", agentA.fingerprint)
         config.armLinkWindow()
         assertEquals(MachineTrustResult.NEWLY_TRUSTED, config.authorizeMachine("pc-1", "secret", "Desk", agentB.fingerprint))

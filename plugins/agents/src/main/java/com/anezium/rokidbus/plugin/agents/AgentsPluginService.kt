@@ -292,6 +292,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         surface = nexusSurfaceSession(SURFACE_ID)
         surfaceShown = true
         AgentsRuntime.hudOpen = true
+        screen.surfaceOpened()
         render(show = true)
         ageTicker?.cancel()
         ageTicker = serviceScope.launch {
@@ -372,6 +373,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     override fun onNexusNoticeInput(event: NexusInputEvent) {
         if (event.action != KeyEvent.ACTION_DOWN) return
         if (!GlassesKeys.isEnter(event)) return
+        screen.bandTouched()
         if (screen.v2BandUp) {
             AgentsRuntime.alertDirector?.onBandInput()
             return
@@ -381,7 +383,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     override fun onNexusNoticeAction(id: String) {
-        if (screen.v2BandUp) AgentsRuntime.alertDirector?.onBandAction(id)
+        screen.bandTouched()
+        if (screen.v2BandUp)AgentsRuntime.alertDirector?.onBandAction(id)
     }
 
     /** Display evidence belongs to an alert's band; a brief or v1 attention band has no alert to credit. */

@@ -30,14 +30,20 @@ class QuestionFlow(val alertId: String, val sessionKey: String, val payload: Que
         }
     }
 
-    /** Only an item that allows free text takes any; blank text clears it. */
-    fun setFreeText(itemIndex: Int, text: String) {
-        val item = payload.items.getOrNull(itemIndex) ?: return
-        if (!item.allowFreeText) return
-        val clean = text.trim().take(MAX_ANSWER_CHARS).takeIf { it.isNotEmpty() }
-        if (clean != null && item.multiSelect && picked[itemIndex].size >= MAX_ANSWER_ENTRIES) return
+    /**
+     * Only an item that allows free text takes any; blank text clears it. A text
+     * longer than the card can show whole is refused, never cut (R123): false
+     * when the text was not taken.
+     */
+    fun setFreeText(itemIndex: Int, text: String): Boolean {
+        val item = payload.items.getOrNull(itemIndex) ?: return false
+        if (!item.allowFreeText) return false
+        val clean = text.trim().takeIf { it.isNotEmpty() }
+        if (clean != null && clean.length > VoiceCapture.MAX_REVIEW_CHARS) return false
+        if (clean != null && item.multiSelect && picked[itemIndex].size >= MAX_ANSWER_ENTRIES) return false
         typed[itemIndex] = clean
         if (clean != null && !item.multiSelect) picked[itemIndex].clear()
+        return true
     }
 
     fun isPicked(itemIndex: Int, optionIndex: Int): Boolean = optionIndex in picked.getOrNull(itemIndex).orEmpty()

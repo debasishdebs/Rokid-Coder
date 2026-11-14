@@ -55,11 +55,18 @@ internal object BoardCards {
         items: List<T>,
         selected: Int,
         row: (T, Boolean) -> NexusCardLine,
+    ): List<NexusCardLine> = windowedRowGroups(items, selected) { item, isSelected -> listOf(row(item, isSelected)) }
+
+    /** The same window, where one item may take several lines (a long text that must be shown whole). */
+    fun <T> windowedRowGroups(
+        items: List<T>,
+        selected: Int,
+        rows: (T, Boolean) -> List<NexusCardLine>,
     ): List<NexusCardLine> {
         val start = (selected - VISIBLE_SESSION_ROWS / 2)
             .coerceIn(0, (items.size - VISIBLE_SESSION_ROWS).coerceAtLeast(0))
-        return items.drop(start).take(VISIBLE_SESSION_ROWS).mapIndexed { offset, item ->
-            row(item, start + offset == selected)
+        return items.drop(start).take(VISIBLE_SESSION_ROWS).flatMapIndexed { offset, item ->
+            rows(item, start + offset == selected)
         }
     }
 

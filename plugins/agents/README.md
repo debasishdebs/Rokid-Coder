@@ -36,14 +36,14 @@ End to end, computer to phone to glasses:
    prints the pairing line) or `agentd phones allow-next` (`node dist/cli.js
    ...` from the source tree). Run one of them before the phone connects.
    Then, whichever applies:
-   - Same Wi-Fi, first computer ever paired: turn on **Monitor sessions** in
-     Settings and the phone finds the computer on its own, with no line to
-     paste (the phone-side half is zero-setup; agentd's window above is still
-     needed).
-   - Anything else (a second computer, different networks, automatic
-     discovery failing): run `agentd pair` on the computer, then **Add a
-     computer → paste pairing line** on the phone. A computer after the first
-     needs the wearer to hold the door open for it on that screen.
+   - Same Wi-Fi: turn on **Monitor sessions** in Settings, then **Add a
+     computer → Open the door** on the phone. The computer finds the phone on
+     its own, with no line to paste, but only while that two-minute window is
+     open. This holds for the first computer too: the phone never trusts a
+     computer on first use (agentd's window above is still needed).
+   - Anything else (different networks, automatic discovery failing): run
+     `agentd pair` on the computer, then **Add a computer → paste pairing
+     line** on the phone.
    - **What turns on steering** (allow, deny, answer, reply) depends on who
      dials:
      - *Phone dials the computer (outbound `wss`, the pairing line):* the line
@@ -134,12 +134,13 @@ pattern; no token or pairing payload is logged.
 
 The daemon dials the phone, so the phone decides who is allowed in:
 
-- The **first** computer ever links itself on the phone's side — nothing exists
-  yet to impersonate. agentd still has to trust the phone first, inside the
-  window opened by `agentd pair` or `agentd phones allow-next`.
-- Every computer **after** that must arrive while the wearer holds the door
-  open: *Open the door* on the Add a computer screen opens a two-minute
-  window, counts it down on screen, and can be cancelled at any moment.
+- Every computer the phone does not know yet, **the first one included**, must
+  arrive while the wearer holds the door open: *Open the door* on the Add a
+  computer screen opens a two-minute window, counts it down on screen, and can
+  be cancelled at any moment. Outside it a stranger is refused, so no LAN host
+  can enrol itself before the wearer's own computer (R121). agentd still has to
+  trust the phone too, inside the window opened by `agentd pair` or `agentd
+  phones allow-next`.
 - A known computer presenting the **wrong token is refused**, and its stored
   token is never overwritten.
 - Forgetting a machine is per machine, takes two deliberate taps, and drops

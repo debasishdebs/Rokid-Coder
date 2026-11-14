@@ -162,7 +162,13 @@ internal class VoiceQuestionWiring(
         val state = run.capture.state
         val view = VoiceCard.view(run.kind, state)
         val rows = buildList {
-            view.body?.let { add(NexusCardLine(text = it, sub = VoiceCard.hint(state), tone = NexusRowTone.BODY)) }
+            view.body?.let { body ->
+                val parts = VoiceCard.bodyRows(body)
+                parts.forEachIndexed { index, part ->
+                    val last = index == parts.lastIndex
+                    add(NexusCardLine(text = part, sub = if (last) VoiceCard.hint(state) else null, tone = NexusRowTone.BODY))
+                }
+            }
             view.rows.forEachIndexed { index, row ->
                 add(
                     NexusCardLine(
@@ -213,8 +219,9 @@ internal class VoiceQuestionWiring(
         val rows = questionRows(flow, page)
         val selected = screen.questionRow.coerceIn(0, rows.lastIndex)
         val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == flow.sessionKey }
-        val lines = BoardCards.windowedRows(rows, selected) { row, isSelected ->
-            when (row) {
+        val lines = BoardCards.windowedRowGroups(rows, selected) { row, isSelected ->
+            if (row == QuestionRow.AnswerBox) return@windowedRowGroups answerBoxLines(flow.freeText(page), isSelected)
+            val line = when (row) {
                 is QuestionRow.Option -> {
                     val picked = flow.isPicked(page, row.index)
                     val mark = when {
@@ -229,12 +236,7 @@ internal class VoiceQuestionWiring(
                         selected = isSelected,
                     )
                 }
-                QuestionRow.AnswerBox -> NexusCardLine(
-                    text = "Answer box (voice)",
-                    sub = flow.freeText(page)?.singleLine(BoardCards.MENU_LINE_CHARS) ?: "tap to speak",
-                    tone = if (flow.freeText(page) != null) NexusRowTone.ALERT else NexusRowTone.NORMAL,
-                    selected = isSelected,
-                )
+                QuestionRow.AnswerBox -> error("drawn by answerBoxLines")
                 QuestionRow.Next -> NexusCardLine(
                     text = "Next question",
                     sub = if (flow.isAnswered(page)) null else "answer this one first",
@@ -252,6 +254,7 @@ internal class VoiceQuestionWiring(
                     selected = isSelected,
                 )
             }
+            listOf(line)
         }
         val heading = session?.displayTitle?.singleLine(100) ?: flow.payload.source
         return BoardCards.card(
@@ -260,6 +263,22 @@ internal class VoiceQuestionWiring(
             rows = lines,
             footer = if (page > 0) "swipe move · tap pick · 2-tap previous" else "swipe move · tap pick · 2-tap close",
         )
+    }
+
+    /** The answer box shows the whole answer that Send answer sends, over as many BODY rows as it takes (R123). */
+    private fun answerBoxLines(text: String?, selected: Boolean): List<NexusCardLine> {
+        val parts = text?.let(VoiceCard::bodyRows).orEmpty()
+        return buildList {
+            add(
+                NexusCardLine(
+                    text = "Answer box (voice)",
+                    sub = parts.firstOrNull() ?: "tap to speak",
+                    tone = if (text != null) NexusRowTone.ALERT else NexusRowTone.NORMAL,
+                    selected = selected,
+                ),
+            )
+            parts.drop(1).forEach { add(NexusCardLine(text = it, tone = NexusRowTone.BODY)) }
+        }
     }
 
     fun onQuestionInput(flow: QuestionFlow, event: NexusInputEvent) {
