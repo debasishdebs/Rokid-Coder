@@ -8,6 +8,12 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.KeyStore
+import java.security.cert.X509Certificate
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLServerSocket
+import javax.net.ssl.X509TrustManager
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
 import kotlinx.coroutines.CoroutineScope
@@ -247,15 +253,13 @@ class AgentdWireTest {
             lan.handshake(pipelined = alertLine)
 
             val up = lan.events[0] as AgentdEvent.LinkUp
-            assertFalse(up.secure)
+            // Mutual TLS with both pins: the only inbound link there is, and it steers.
+            assertTrue(up.secure)
             awaitCondition { lan.events.size >= 2 }
             assertTrue((lan.events[1] as AgentdEvent.Action).action is AgentdAction.Alert)
 
-            // The writes go through the gate: plaintext refuses steering, passes monitor frames.
-            assertEquals(
-                AgentdWire.Result.MonitorOnly,
-                lan.server.decideApproval("r1", ApprovalDecision.ALLOW),
-            )
+            assertEquals(AgentdWire.Result.Sent, lan.server.decideApproval("r1", ApprovalDecision.ALLOW))
+            assertEquals("approval_decision", JSONObject(lan.fromPhone.readLine()).getString("type"))
             assertEquals(AgentdWire.Result.Sent, lan.server.openDetail("s1"))
             assertEquals("detail_open", JSONObject(lan.fromPhone.readLine()).getString("type"))
 
@@ -423,19 +427,20 @@ class AgentdWireTest {
     // ------------------------------------------------------------ harnesses
 
     /** The LAN link: the computer dials us, over a real loopback socket. */
-    private inner class LanLink(listener: ServerSocket) {
+    /** The inbound link as agentd dials it: mutual TLS, its client cert taken as the machine's pin. */
+    private inner class LanLink(listener: SSLServerSocket) {
         val events = CopyOnWriteArrayList<AgentdEvent>()
         val server = AgentdLinkServer(
             store = AgentSessionStore(),
             authorizeMachine = { _, _ -> MachineTrustResult.TRUSTED },
-            clientCertPinned = { _, _ -> false },
+            clientCertPinned = { _, _ -> true },
             touchMachineSeen = {},
             scope = scope,
             onMachineTrusted = {},
             tlsIdentity = FixturePhoneTlsIdentity(),
             onEvent = { events += it },
         )
-        val dialer = Socket(listener.inetAddress, listener.localPort)
+        val dialer: Socket = agentdContext().socketFactory.createSocket(InetAddress.getLoopbackAddress(), listener.localPort)
         private val connection = LinkConnection(listener.accept())
         private val serving = thread { server.serve(connection) }
         val fromPhone = BufferedReader(InputStreamReader(dialer.getInputStream(), Charsets.UTF_8))
@@ -457,7 +462,7 @@ class AgentdWireTest {
     }
 
     private fun lanLink(block: (LanLink) -> Unit) {
-        ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { listener ->
+        tlsServerSocket(FixturePhoneTlsIdentity(), 0).use { listener ->
             val lan = LanLink(listener)
             try {
                 block(lan)
@@ -465,6 +470,54 @@ class AgentdWireTest {
                 lan.dialer.close()
             }
         }
+    }
+
+    @Test
+    fun plaintext_lan_link_is_refused_not_bound() {
+        ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { listener ->
+            val events = CopyOnWriteArrayList<AgentdEvent>()
+            val server = AgentdLinkServer(
+                store = AgentSessionStore(),
+                authorizeMachine = { _, _ -> MachineTrustResult.TRUSTED },
+                clientCertPinned = { _, _ -> true },
+                touchMachineSeen = {},
+                scope = scope,
+                onMachineTrusted = {},
+                tlsIdentity = FixturePhoneTlsIdentity(),
+                onEvent = { events += it },
+            )
+            Socket(listener.inetAddress, listener.localPort).use { dialer ->
+                val serving = thread { server.serve(LinkConnection(listener.accept())) }
+                val hello = """{"type":"hello","v":1,"machineId":"pc-1","machineName":"Desk","token":"secret"}"""
+                dialer.getOutputStream().write("$hello\n".toByteArray(Charsets.UTF_8))
+                val fromPhone = BufferedReader(InputStreamReader(dialer.getInputStream(), Charsets.UTF_8))
+                // Whatever the token says, a link without TLS is never acknowledged, let alone bound.
+                assertEquals("hello_reject", JSONObject(fromPhone.readLine()).getString("type"))
+                serving.join(5_000)
+                assertFalse(serving.isAlive)
+            }
+            assertTrue(events.isEmpty())
+            assertEquals(AgentdWire.Result.NoLink, server.openDetail("s1"))
+        }
+    }
+
+    /** agentd's side of the inbound link: its fixture client cert, and any phone cert (the pin is checked elsewhere). */
+    private fun agentdContext(): SSLContext {
+        val agentd = FixturePhoneTlsIdentity.agentdA()
+        val password = "fixture".toCharArray()
+        val keys = KeyStore.getInstance("PKCS12").apply {
+            load(null)
+            setKeyEntry("agentd", agentd.key, password, arrayOf(agentd.certificate))
+        }
+        val keyManagers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+            .apply { init(keys, password) }
+            .keyManagers
+        val anyServer = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+        return SSLContext.getInstance("TLS").apply { init(keyManagers, arrayOf(anyServer), null) }
     }
 
     /** The paired path: we dial agentd's WebSocket. The injected OkHttpClient is the seam. */

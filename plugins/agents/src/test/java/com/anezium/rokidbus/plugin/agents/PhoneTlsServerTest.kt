@@ -282,6 +282,61 @@ class PhoneTlsServerTest {
     }
 
     @Test
+    fun inbound_unpinned_cert_is_closed_not_bound() {
+        // A hello the token check accepts, from a certificate that is not the machine's pin.
+        val touched = CopyOnWriteArrayList<String>()
+        val unpinned = AgentdLinkServer(
+            store = sessions,
+            authorizeMachine = { _, _ -> MachineTrustResult.TRUSTED },
+            clientCertPinned = { _, _ -> false },
+            touchMachineSeen = { touched += it },
+            scope = scope,
+            onMachineTrusted = {},
+            tlsIdentity = identity,
+            onEvent = { events += it },
+        )
+        listen(unpinned) { listener ->
+            dial(listener, agentA).use { agentd ->
+                agentd.hello()
+                // Refused, never acknowledged: there is no link that cannot steer.
+                assertEquals("hello_reject", agentd.next()?.getString("type"))
+                assertNull(agentd.next())
+            }
+            awaitServed()
+        }
+        assertTrue(events.isEmpty())
+        assertFalse(unpinned.linkSecure.value)
+        assertNull(sessions.linkMachine.value)
+        assertTrue(touched.isEmpty())
+        assertNotEquals(ConnectionState.CONNECTED, sessions.connections.value.getValue(AgentProvider.CLAUDE).state)
+    }
+
+    @Test
+    fun inbound_trust_revoked_closes_link() {
+        config.armLinkWindow()
+        listen { listener ->
+            dial(listener, agentA).use { agentd ->
+                agentd.hello()
+                assertEquals("hello_ack", agentd.next()?.getString("type"))
+                awaitCondition { server.linkSecure.value }
+                val up = events.single() as AgentdEvent.LinkUp
+                agentd.send("""{"type":"link_trust","v":2,"steering":false}""")
+
+                // The phone hangs up at once: no link stays bound to show "Not connected — pair again".
+                assertNull(agentd.next())
+                awaitCondition { !server.linkSecure.value }
+                assertEquals(listOf(up, AgentdEvent.LinkDown(up.generation)), events.toList())
+            }
+            awaitServed()
+        }
+        assertTrue(events.filterIsInstance<AgentdEvent.LinkUp>().none { !it.secure })
+        assertNull(sessions.linkMachine.value)
+        val state = sessions.connections.value.getValue(AgentProvider.CLAUDE)
+        assertNotEquals(ConnectionState.CONNECTED, state.state)
+        assertNotEquals(AgentdClient.REPAIR_TO_STEER, state.detail)
+    }
+
+    @Test
     fun discovery_reply_has_tls_true() {
         val reply = JSONObject(AgentdLinkServer.discoveryReply("Pixel"))
         assertEquals("agents-phone", reply.getString("nexus"))
@@ -296,12 +351,12 @@ class PhoneTlsServerTest {
     private val served = CopyOnWriteArrayList<Thread>()
 
     /** The production listener; every accepted connection is served on its own thread. */
-    private fun listen(block: (SSLServerSocket) -> Unit) {
+    private fun listen(on: AgentdLinkServer = server, block: (SSLServerSocket) -> Unit) {
         tlsServerSocket(identity, 0).use { listener ->
             val acceptor = thread(isDaemon = true) {
                 while (true) {
                     val socket = runCatching { listener.accept() }.getOrNull() ?: break
-                    served += thread { server.serve(LinkConnection(socket)) }
+                    served += thread { on.serve(LinkConnection(socket)) }
                 }
             }
             block(listener)
@@ -318,8 +373,10 @@ class PhoneTlsServerTest {
     private class Agentd(val socket: SSLSocket) : AutoCloseable {
         val reader = BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8))
 
-        fun hello() {
-            socket.outputStream.write((HELLO + "\n").toByteArray(Charsets.UTF_8))
+        fun hello() = send(HELLO)
+
+        fun send(line: String) {
+            socket.outputStream.write((line + "\n").toByteArray(Charsets.UTF_8))
             socket.outputStream.flush()
         }
 

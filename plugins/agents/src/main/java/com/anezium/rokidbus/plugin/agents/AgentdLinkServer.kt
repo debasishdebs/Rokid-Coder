@@ -36,6 +36,8 @@ import javax.net.ssl.SSLSocket
  * hello; the phone holds agentd to the client certificate it pinned for that
  * machine when it first trusted it. A token that arrives with any other
  * certificate is refused before hello_ack, so a replayed token never steers.
+ * Every link bound here steers: one that would not is refused, and one whose
+ * trust agentd revokes is closed (U8, no monitor-only link).
  */
 class AgentdLinkServer internal constructor(
     private val store: AgentSessionStore,
@@ -186,6 +188,7 @@ class AgentdLinkServer internal constructor(
         val codec = AgentdProtocolCodec()
         val gate = AgentdInboundGate { hello -> authorizeMachine(hello, connection.clientCert) }
         codec.reset()
+        var bound = false
         try {
             // Before the writer and the first line: nothing is read or written until TLS is up.
             connection.handshake()
@@ -194,6 +197,11 @@ class AgentdLinkServer internal constructor(
                 when (val decision = gate.receive(codec.parse(line))) {
                     is AgentdInboundDecision.HelloAccepted -> {
                         connection.machineId = decision.hello.machineId
+                        // Before activate, so a hello that cannot steer never displaces a working link.
+                        if (!steers(connection)) {
+                            connection.send(AgentdProtocolCodec.helloReject(AgentdProtocolCodec.REJECT_BAD_TOKEN))
+                            return@lines false
+                        }
                         if (!activate(connection)) return@lines false
                         if (decision.newlyTrusted) {
                             onMachineTrusted(decision.hello.machineName)
@@ -202,6 +210,7 @@ class AgentdLinkServer internal constructor(
                         // candidate directly; every later line goes through the wire.
                         if (!connection.send(HELLO_ACK)) return@lines false
                         if (!bind(connection)) return@lines false
+                        bound = true
                         touchMachineSeen(decision.hello.machineId)
                         store.setLinkMachine(
                             LinkMachine(
@@ -255,7 +264,8 @@ class AgentdLinkServer internal constructor(
             }
             connection.close()
             if (wasActive) {
-                connection.machineId?.let(touchMachineSeen)
+                // A connection refused at bind was never this machine's use of the link.
+                if (bound) connection.machineId?.let(touchMachineSeen)
                 store.setLinkMachine(null)
                 store.setConnection(
                     AgentProvider.CLAUDE,
@@ -280,18 +290,24 @@ class AgentdLinkServer internal constructor(
     }
 
     /**
-     * After hello_ack: binds the wire to this connection and announces the link,
-     * before the next line is read. False when the connection was replaced while
-     * the acknowledgement was going out.
+     * Both ends pinned: agentd found this phone's cert in its set before its
+     * hello, and the cert agentd presented is the one pinned for its machine.
      */
-    private fun bind(connection: LinkConnection): Boolean = synchronized(clientLock) {
-        if (client !== connection) return@synchronized false
-        // Both ends pinned: agentd found this phone's cert in its set before its
-        // hello, and the cert agentd presented is the one pinned for its machine.
+    private fun steers(connection: LinkConnection): Boolean {
         val clientCert = connection.clientCert
         val machineId = connection.machineId
-        val secure = connection.tls && clientCert != null && machineId != null && clientCertPinned(machineId, clientCert)
-        link.up(connection.linkOwner, secure = secure) != null
+        return connection.tls && clientCert != null && machineId != null && clientCertPinned(machineId, clientCert)
+    }
+
+    /**
+     * After hello_ack: binds the wire to this connection as secure and announces
+     * the link, before the next line is read. False when the connection was
+     * replaced while the acknowledgement was going out, or when it can no longer
+     * steer (its pin went meanwhile): such a link is never bound.
+     */
+    private fun bind(connection: LinkConnection): Boolean = synchronized(clientLock) {
+        if (client !== connection || !steers(connection)) return@synchronized false
+        link.up(connection.linkOwner, secure = true) != null
     }
 
     private fun isActive(connection: LinkConnection): Boolean =
@@ -330,7 +346,7 @@ class AgentdLinkServer internal constructor(
             is AgentdAction.Models,
             is AgentdAction.DetailRejected,
             -> link.deliver(connection.linkOwner, action)
-            is AgentdAction.LinkTrust -> if (!action.steering) revokeSteering(connection)
+            is AgentdAction.LinkTrust -> if (!action.steering) dropUntrusted(connection)
             is AgentdAction.Hello,
             is AgentdAction.HelloAcknowledged,
             is AgentdAction.HelloRejected,
@@ -339,12 +355,17 @@ class AgentdLinkServer internal constructor(
         }
     }
 
-    /** agentd no longer trusts this phone (R126): the link stops steering now, before agentd drops it. */
-    private fun revokeSteering(connection: LinkConnection) = synchronized(clientLock) {
-        if (client !== connection) return@synchronized
-        if (link.up(connection.linkOwner, secure = false) != null) {
-            store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTED, AgentdClient.REPAIR_TO_STEER)
+    /**
+     * agentd no longer trusts this phone (R126): the link ends now, before agentd
+     * drops it, rather than staying bound without steering. [serve]'s cleanup
+     * reports the link gone.
+     */
+    private fun dropUntrusted(connection: LinkConnection) {
+        synchronized(clientLock) {
+            if (client !== connection) return
+            link.end(connection.linkOwner)
         }
+        connection.close()
     }
 
     private suspend fun discoveryLoop() {
