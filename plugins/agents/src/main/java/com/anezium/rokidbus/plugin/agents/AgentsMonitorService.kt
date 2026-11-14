@@ -66,12 +66,14 @@ class AgentsMonitorService : Service() {
         AgentdLinkServer(
             AgentsRuntime.store, configStore, serviceScope, tlsIdentity,
             onSecureConnected = AgentsRuntime::announceSecureConnection,
+            // A bound link ended: the listener may have been kept only for it.
+            onLinkEnded = { alertScope.launch { reconcile() } },
             onMachineTrusted = { machineName -> AgentsRuntime.announceLinkedMachine(machineName) },
         )
     }
     private var runningAgentd: AgentdConfig? = null
     private var runningOpenClaw: OpenClawConfig? = null
-    private var listeningBesideDialled = false
+    private var listenerBesideDialled = false
     private var windowWatch: Job? = null
     private var temporaryAgentd: Job? = null
     private var temporaryOpenClaw: Job? = null
@@ -342,14 +344,33 @@ class AgentsMonitorService : Service() {
             }
             runningAgentd = wantedAgentd
         }
-        // The door always has a listener: while a window is open the inbound server runs beside a dialled slot too.
+        // The door always has a listener: while a window is open the inbound server runs beside a dialled slot too,
+        // and a computer paired through it stays connected after the window ends, until its own link does.
         val windowOpen = configStore.isLinkWindowOpen()
-        if (inboundListenerWanted(config.agentdEnabled, outboundSlot = wantedAgentd != null, windowOpen = windowOpen)) {
-            linkServer.start(besideDialled = wantedAgentd != null)
-        } else if (wantedAgentd == null || listeningBesideDialled) {
-            linkServer.stop(clearSessions = wantedAgentd == null, besideDialled = wantedAgentd != null)
+        val dialled = wantedAgentd != null
+        when (
+            inboundListenerPlan(
+                config.agentdEnabled, outboundSlot = dialled, windowOpen = windowOpen,
+                besideMode = listenerBesideDialled, boundLink = linkServer.linkSecure.value,
+            )
+        ) {
+            ListenerPlan.RUN_ALONE -> {
+                linkServer.start(besideDialled = false)
+                listenerBesideDialled = false
+            }
+            ListenerPlan.RUN_BESIDE, ListenerPlan.KEEP_BESIDE -> {
+                linkServer.start(besideDialled = true)
+                listenerBesideDialled = true
+            }
+            ListenerPlan.STOP -> {
+                if (wantedAgentd == null || listenerBesideDialled) {
+                    linkServer.stop(clearSessions = wantedAgentd == null, besideDialled = listenerBesideDialled)
+                }
+                listenerBesideDialled = false
+            }
         }
-        listeningBesideDialled = windowOpen && config.agentdEnabled && wantedAgentd != null
+        // A slot refused before the door opened is dialled again for as long as it stays open.
+        if (windowOpen && config.agentdEnabled && wantedAgentd != null) agentdClient.retryRefused(wantedAgentd)
         watchWindow(windowOpen)
         if (config.openClawEnabled) {
             temporaryOpenClaw?.cancel()
@@ -428,7 +449,7 @@ class AgentsMonitorService : Service() {
         monitoring = false
         windowWatch?.cancel()
         windowWatch = null
-        listeningBesideDialled = false
+        listenerBesideDialled = false
         agentdClient.stop(clearSessions = true)
         linkServer.stop(clearSessions = true)
         openClawClient.stop(clearSessions = true)

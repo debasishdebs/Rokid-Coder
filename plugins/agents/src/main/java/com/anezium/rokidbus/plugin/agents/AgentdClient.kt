@@ -102,16 +102,29 @@ class AgentdClient(
         if (wire.secure.value) touchUsed()
     }
 
+    /**
+     * A guided attempt began while this pairing sat refused: dial it again now, and keep saying it
+     * needs repair until a hello_ack is accepted. A pairing that is not refused, or is already being
+     * redialled, is left alone.
+     */
     @Synchronized
-    fun start(config: AgentdConfig) {
+    fun retryRefused(config: AgentdConfig) {
+        if (!_needsRepair.value || loopJob?.isActive == true) return
+        begin(config, keepRepair = true)
+    }
+
+    @Synchronized
+    fun start(config: AgentdConfig) = begin(config, keepRepair = false)
+
+    private fun begin(config: AgentdConfig, keepRepair: Boolean) {
         loopJob?.cancel()
         val advance = sockets.advance()
-        _needsRepair.value = false
+        if (!keepRepair) _needsRepair.value = false
         // After the advance, so a hello_ack still in flight cannot bind behind us.
         link.downCurrent()
         advance.previous?.cancel()
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            runConnectionLoop(config, advance.generation)
+            runConnectionLoop(config, advance.generation, redialing = keepRepair)
         }
         loopJob = job
         job.start()
@@ -132,7 +145,7 @@ class AgentdClient(
         }
     }
 
-    private suspend fun runConnectionLoop(config: AgentdConfig, generation: Long) {
+    private suspend fun runConnectionLoop(config: AgentdConfig, generation: Long, redialing: Boolean = false) {
         val pin = when (val parsed = CertPins.parse(config.fp)) {
             is PinParse.Valid -> parsed.fp
             // A stored pin that no longer reads is still a pin: refused, never dialled.
@@ -142,7 +155,7 @@ class AgentdClient(
         val steer = config.steer ?: return authFailed(generation, PairingCopy.OLDER_AGENTD)
         val http = pinnedClient(pin)
         val backoff = ReconnectBackoff()
-        var redialing = false
+        var redialing = redialing
         while (scope.isActive && sockets.isCurrent(generation)) {
             // Every dial, redials included: a pairing that went stale since the last one is not dialled.
             if (!dialAllowed()) return authFailed(generation, PairingCopy.SIGNED_OUT)

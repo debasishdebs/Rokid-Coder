@@ -50,6 +50,8 @@ class AgentdLinkServer internal constructor(
     private val tlsIdentity: PhoneTlsIdentity,
     /** A secure bind just happened: the computer's id and name. */
     private val onSecureConnected: (machineId: String, machineName: String) -> Unit = { _, _ -> },
+    /** A link that was bound has ended: the service decides whether this listener still has a job. */
+    private val onLinkEnded: () -> Unit = {},
     onEvent: (AgentdEvent) -> Unit,
 ) {
     constructor(
@@ -58,6 +60,7 @@ class AgentdLinkServer internal constructor(
         scope: CoroutineScope,
         tlsIdentity: PhoneTlsIdentity,
         onSecureConnected: (machineId: String, machineName: String) -> Unit = { _, _ -> },
+        onLinkEnded: () -> Unit = {},
         onMachineTrusted: (String) -> Unit = {},
     ) : this(
         store = store,
@@ -75,6 +78,7 @@ class AgentdLinkServer internal constructor(
         onMachineTrusted = onMachineTrusted,
         tlsIdentity = tlsIdentity,
         onSecureConnected = onSecureConnected,
+        onLinkEnded = onLinkEnded,
         onEvent = AgentsRuntime::emitEvent,
     )
 
@@ -110,7 +114,7 @@ class AgentdLinkServer internal constructor(
      * True while a dialled link (the outbound slot) is the one the store describes: this listener
      * is then only a door held open for a guided attempt, and must not repaint that link's state.
      */
-    @Volatile private var besideDialled = false
+    @Volatile internal var besideDialled = false
 
     /** [besideDialled] says an outbound slot is dialled alongside, so the store's state is left to it. */
     fun start(besideDialled: Boolean = false) {
@@ -133,8 +137,10 @@ class AgentdLinkServer internal constructor(
         serverSocket = null
         runCatching { discoverySocket?.close() }
         discoverySocket = null
+        var hadLink = false
         val open = synchronized(clientLock) {
             stopped = true
+            hadLink = client != null
             client?.let { link.end(it.linkOwner) }
             client = null
             connections.toList().also { connections.clear() }
@@ -142,8 +148,9 @@ class AgentdLinkServer internal constructor(
         open.forEach(LinkConnection::close)
         this.besideDialled = false
         store.setLinkMachine(null)
-        // Beside a dialled link the door shuts and nothing else: its connection, approvals and sessions are the slot's.
-        if (besideDialled) return
+        // Beside a dialled link the door shuts and nothing else: its connection, approvals and sessions are the
+        // slot's. A stop that ended a live inbound link did more than shut a door, and cleans up after it.
+        if (besideDialled && !hadLink) return
         store.setConnection(AgentProvider.CLAUDE, ConnectionState.DISCONNECTED)
         store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
         if (clearSessions) store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
@@ -285,13 +292,17 @@ class AgentdLinkServer internal constructor(
                 // A connection refused at bind was never this machine's use of the link.
                 if (bound) connection.machineId?.let(touchMachineSeen)
                 store.setLinkMachine(null)
-                store.setConnection(
-                    AgentProvider.CLAUDE,
-                    ConnectionState.CONNECTING,
-                    "waiting for a computer",
-                )
+                // Beside a dialled slot, the slot's state is not "waiting for a computer".
+                if (!besideDialled) {
+                    store.setConnection(
+                        AgentProvider.CLAUDE,
+                        ConnectionState.CONNECTING,
+                        "waiting for a computer",
+                    )
+                }
                 store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
                 store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
+                if (bound) onLinkEnded()
             }
         }
     }

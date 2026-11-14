@@ -131,6 +131,36 @@ internal fun openGuidedDoor(store: AgentsConfigStore, reconcile: () -> Unit) {
 internal fun inboundListenerWanted(agentdEnabled: Boolean, outboundSlot: Boolean, windowOpen: Boolean): Boolean =
     agentdEnabled && (!outboundSlot || windowOpen)
 
+internal enum class ListenerPlan {
+    /** Listen, nothing dialled: the normal rule. */
+    RUN_ALONE,
+
+    /** Listen beside a dialled slot, for a guided attempt's window. */
+    RUN_BESIDE,
+
+    /** The window is over, but a computer paired through it is still bound: keep listening until its link ends. */
+    KEEP_BESIDE,
+    STOP,
+}
+
+/**
+ * What the monitor does with the inbound listener. The window only governs admission of new machines
+ * (authorizeMachine enforces that), so a link bound through it outlives it: [besideMode] is the
+ * listener having been opened for a window beside a slot, and [boundLink] a bound, authenticated link on it.
+ */
+internal fun inboundListenerPlan(
+    agentdEnabled: Boolean,
+    outboundSlot: Boolean,
+    windowOpen: Boolean,
+    besideMode: Boolean,
+    boundLink: Boolean,
+): ListenerPlan = when {
+    inboundListenerWanted(agentdEnabled, outboundSlot, windowOpen) ->
+        if (outboundSlot) ListenerPlan.RUN_BESIDE else ListenerPlan.RUN_ALONE
+    agentdEnabled && outboundSlot && besideMode && boundLink -> ListenerPlan.KEEP_BESIDE
+    else -> ListenerPlan.STOP
+}
+
 /** The words of guided pairing, one place for the phone and the glasses. */
 internal object GuidedPairingCopy {
     const val STEP_ONE =

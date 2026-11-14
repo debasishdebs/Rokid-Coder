@@ -31,6 +31,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONObject
 import org.junit.After
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -428,18 +429,24 @@ class AgentdWireTest {
 
     /** The LAN link: the computer dials us, over a real loopback socket. */
     /** The inbound link as agentd dials it: mutual TLS, its client cert taken as the machine's pin. */
-    private inner class LanLink(listener: SSLServerSocket) {
+    private inner class LanLink(
+        listener: SSLServerSocket,
+        val store: AgentSessionStore = AgentSessionStore(),
+        val linkEnds: AtomicInteger = AtomicInteger(),
+        besideDialled: Boolean = false,
+    ) {
         val events = CopyOnWriteArrayList<AgentdEvent>()
         val server = AgentdLinkServer(
-            store = AgentSessionStore(),
+            store = store,
             authorizeMachine = { _, _ -> MachineTrustResult.TRUSTED },
             clientCertPinned = { _, _ -> true },
             touchMachineSeen = {},
             scope = scope,
             onMachineTrusted = {},
             tlsIdentity = FixturePhoneTlsIdentity(),
+            onLinkEnded = { linkEnds.incrementAndGet() },
             onEvent = { events += it },
-        )
+        ).also { it.besideDialled = besideDialled }
         val dialer: Socket = agentdContext().socketFactory.createSocket(InetAddress.getLoopbackAddress(), listener.localPort)
         private val connection = LinkConnection(listener.accept())
         private val serving = thread { server.serve(connection) }
@@ -461,15 +468,70 @@ class AgentdWireTest {
         }
     }
 
-    private fun lanLink(block: (LanLink) -> Unit) {
+    private fun lanLink(
+        store: AgentSessionStore = AgentSessionStore(),
+        linkEnds: AtomicInteger = AtomicInteger(),
+        besideDialled: Boolean = false,
+        block: (LanLink) -> Unit,
+    ) {
         tlsServerSocket(FixturePhoneTlsIdentity(), 0).use { listener ->
-            val lan = LanLink(listener)
+            val lan = LanLink(listener, store, linkEnds, besideDialled)
             try {
                 block(lan)
             } finally {
                 lan.dialer.close()
             }
         }
+    }
+
+    @Test
+    fun listener_stops_after_that_link_ends() {
+        val store = AgentSessionStore()
+        val ends = AtomicInteger()
+        lanLink(store, ends, besideDialled = true) { lan ->
+            lan.handshake()
+            assertTrue(lan.server.linkSecure.value)
+            assertEquals(0, ends.get())
+
+            lan.hangUp()
+            // The service is told, and reconciles: with the link gone and the window shut, the listener goes.
+            awaitCondition { ends.get() == 1 }
+            assertFalse(lan.server.linkSecure.value)
+            // Beside a dialled slot the link's end does not repaint the slot's connection as "waiting".
+            assertNotEquals("waiting for a computer", store.connections.value.getValue(AgentProvider.CLAUDE).detail)
+        }
+    }
+
+    @Test
+    fun stop_beside_dialled_cleans_up_when_it_ends_a_live_link() {
+        val store = AgentSessionStore()
+        lanLink(store, besideDialled = true) { lan ->
+            lan.handshake()
+            assertEquals(ConnectionState.CONNECTED, store.connections.value.getValue(AgentProvider.CLAUDE).state)
+
+            lan.server.stop(clearSessions = false, besideDialled = true)
+
+            assertEquals(ConnectionState.DISCONNECTED, store.connections.value.getValue(AgentProvider.CLAUDE).state)
+            assertFalse(lan.server.linkSecure.value)
+        }
+    }
+
+    @Test
+    fun stop_beside_dialled_with_no_link_leaves_the_slots_state() {
+        val store = AgentSessionStore()
+        store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTED, "Home")
+        val server = AgentdLinkServer(
+            store = store,
+            authorizeMachine = { _, _ -> MachineTrustResult.TRUSTED },
+            clientCertPinned = { _, _ -> true },
+            touchMachineSeen = {},
+            scope = scope,
+            onMachineTrusted = {},
+            tlsIdentity = FixturePhoneTlsIdentity(),
+            onEvent = {},
+        )
+        server.stop(clearSessions = false, besideDialled = true)
+        assertEquals(ConnectionState.CONNECTED, store.connections.value.getValue(AgentProvider.CLAUDE).state)
     }
 
     @Test

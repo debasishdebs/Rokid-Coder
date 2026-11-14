@@ -186,4 +186,44 @@ class GuidedPairingTest {
         assertTrue(store.isLinkWindowOpen())
         assertEquals(1, reconciles)
     }
+
+    @Test
+    fun paired_inbound_link_survives_window_end_beside_outbound_slot() {
+        // The window only governs admission of new machines: a bound link outlives it, and keeps its listener.
+        assertEquals(
+            ListenerPlan.KEEP_BESIDE,
+            inboundListenerPlan(
+                agentdEnabled = true, outboundSlot = true, windowOpen = false,
+                besideMode = true, boundLink = true,
+            ),
+        )
+        // While the window is open the listener runs beside the slot, bound link or not.
+        assertEquals(
+            ListenerPlan.RUN_BESIDE,
+            inboundListenerPlan(true, outboundSlot = true, windowOpen = true, besideMode = true, boundLink = true),
+        )
+        // A listener that was running alone before a slot appeared gets no such grace.
+        assertEquals(
+            ListenerPlan.STOP,
+            inboundListenerPlan(true, outboundSlot = true, windowOpen = false, besideMode = false, boundLink = true),
+        )
+        assertEquals(
+            ListenerPlan.RUN_ALONE,
+            inboundListenerPlan(true, outboundSlot = false, windowOpen = false, besideMode = false, boundLink = false),
+        )
+    }
+
+    @Test
+    fun listener_stops_after_that_link_ends_plan() {
+        // The same moment, with the link gone: the normal rule is back and the listener goes.
+        assertEquals(
+            ListenerPlan.STOP,
+            inboundListenerPlan(true, outboundSlot = true, windowOpen = false, besideMode = true, boundLink = false),
+        )
+        // Monitoring turned off ends it whatever is bound.
+        assertEquals(
+            ListenerPlan.STOP,
+            inboundListenerPlan(false, outboundSlot = true, windowOpen = false, besideMode = true, boundLink = true),
+        )
+    }
 }

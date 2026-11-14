@@ -447,6 +447,44 @@ class PinnedPairingTest {
     }
 
     @Test
+    fun refused_before_window_then_door_opened_starts_repair_redials() {
+        val harness = RedialHarness(windowOpen = false)
+        harness.client.start(config())
+        harness.refuseLatest()
+        harness.advance(60_000L)
+        // Refused with no attempt open: final, nothing dials.
+        assertEquals(1, harness.pinned.connections.size)
+        assertTrue(harness.client.needsRepair.value)
+
+        // The wearer opens the door: the refused loop restarts at once, and stays refused until accepted.
+        harness.windowOpen = true
+        harness.client.retryRefused(config())
+        harness.settle()
+        assertEquals(2, harness.pinned.connections.size)
+        assertTrue(harness.client.needsRepair.value)
+        assertEquals(
+            ConnectionState.AUTH_FAILED,
+            harness.sessions.connections.value.getValue(AgentProvider.CLAUDE).state,
+        )
+
+        // Refused again: the 5 s redials go on for as long as the window is open.
+        harness.refuseLatest()
+        harness.advance(4_999L)
+        assertEquals(2, harness.pinned.connections.size)
+        harness.advance(1L)
+        assertEquals(3, harness.pinned.connections.size)
+
+        // A client that is not refused is left alone, and so is one already redialling.
+        harness.client.retryRefused(config())
+        harness.settle()
+        assertEquals(3, harness.pinned.connections.size)
+        harness.client.stop(clearSessions = true)
+        harness.client.retryRefused(config())
+        harness.settle()
+        assertEquals(3, harness.pinned.connections.size)
+    }
+
+    @Test
     fun a_refused_slot_is_not_redialled_outside_an_attempt() {
         val harness = RedialHarness(windowOpen = false)
         harness.client.start(config())
