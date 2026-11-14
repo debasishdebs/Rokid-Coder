@@ -158,6 +158,17 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     armPairing: () => {
       pins.armAllowNext(Date.now());
     },
+    // Claude's SessionStart came before the bind and was dropped as unattached;
+    // an idle session at its prompt is shown to the phone now, not at the first prompt.
+    onBound: ({ sessionId, status, cwd }) => {
+      if (status === "idle") {
+        sessions.handleHook({
+          session_id: sessionId,
+          ...(cwd ? { cwd } : {}),
+          hook_event_name: "SessionStart",
+        });
+      }
+    },
   });
   // agentd's own read of the file Claude keeps for the bound process (R55).
   const launcherStates = new SessionStates(

@@ -66,6 +66,12 @@ export interface LauncherHubOptions {
    * same-user and 0600, may ask for it: the hook port is open to every local user.
    */
   armPairing?: () => void;
+  /**
+   * A launcher has just bound this session. Claude's own SessionStart hook
+   * normally arrives before the bind and is dropped as unattached, so this is
+   * what lets the phone see the session before the first prompt.
+   */
+  onBound?: (session: { sessionId: string; status: string; cwd?: string }) => void;
 }
 
 const COMMAND_ERRORS: ReadonlySet<string> = new Set<CommandError>([
@@ -644,6 +650,7 @@ export class LauncherHub {
     this.write(connection, { type: "bind_accepted", gen: binding.gen });
     this.write(connection, { type: "binding_state", gen: binding.gen, uncertain: false });
     this.emit(key);
+    this.options.onBound?.({ sessionId, status: session.status, ...(session.cwd ? { cwd: session.cwd } : {}) });
   }
 
   /**

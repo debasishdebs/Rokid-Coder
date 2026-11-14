@@ -52,6 +52,11 @@ test("reads_session_file_and_rejects_malformed", async () => {
     fs.writeFileSync(path.join(dir, "106.json"), JSON.stringify([106]));
     assert.equal(readClaudeSession(dir, 106), undefined);
     assert.equal(readClaudeSession(dir, -1), undefined);
+    // Claude's cwd rides along when it is a non-empty string, and only then.
+    sessionFile(dir, 107, "sess-c", { cwd: "/work/demo" });
+    assert.equal(readClaudeSession(dir, 107).cwd, "/work/demo");
+    sessionFile(dir, 108, "sess-d", { cwd: 7 });
+    assert.equal("cwd" in readClaudeSession(dir, 108), false);
   });
 });
 

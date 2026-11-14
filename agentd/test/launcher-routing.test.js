@@ -87,7 +87,7 @@ const SHORT_WINDOWS = {
  * The daemon, with session ls1 bound to a launcher this test plays. Claude's
  * sessions file starts idle a minute ago, as for a session sitting at its prompt.
  */
-async function withBound(body, { attached = [], sessionStart = true } = {}) {
+async function withBound(body, { attached = [], sessionStart = true, sessionCwd } = {}) {
   await withEnv(SHORT_WINDOWS, () =>
     withDaemon({ transport: "wshub", tls: true, attached, paired: true }, async (ctx) => {
       const sessionsDir = path.join(ctx.claudeDir, "sessions");
@@ -108,7 +108,7 @@ async function withBound(body, { attached = [], sessionStart = true } = {}) {
         };
         fs.writeFileSync(
           path.join(sessionsDir, `${child.pid}.json`),
-          JSON.stringify({ pid: child.pid, sessionId: ID, status: "idle", statusUpdatedAt: last }),
+          JSON.stringify({ pid: child.pid, sessionId: ID, status: "idle", statusUpdatedAt: last, ...(sessionCwd ? { cwd: sessionCwd } : {}) }),
         );
         launcher = await connect(ctx.daemon.launchers.socketPath);
         launcher.send({ type: "launcher_hello", v: 1, launcherId: "L1", provider: "claude", childPid: child.pid });
@@ -678,4 +678,19 @@ test("rk_claude_compact_and_model_from_the_glasses_end_to_end", async () => {
       }
     }),
   );
+});
+
+test("bind_before_any_hook_shows_the_session_in_launcher_mode", async () => {
+  // Live smoke: Claude's own SessionStart reaches agentd before the launcher's bind, so it is
+  // dropped as unattached. The bind itself must make the phone see the session, not the first prompt.
+  await withBound(async ({ phone }) => {
+    const upsert = await until(
+      () => phone.frames.find((f) => f.type === "session_upsert" && f.session.id === ID && f.session.mode === "launcher"),
+      3000,
+      "an upsert at bind",
+    );
+    assert.equal(upsert.session.capabilities.compact, true);
+    assert.equal(upsert.session.status, "idle");
+    assert.equal(upsert.session.cwd, "/work/demo");
+  }, { sessionStart: false, sessionCwd: "/work/demo" });
 });

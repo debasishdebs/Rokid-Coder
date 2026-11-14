@@ -9,6 +9,7 @@ export interface ClaudeSessionFile {
   sessionId: string;
   status: "idle" | "busy" | string;
   statusUpdatedAt?: number;
+  cwd?: string;
 }
 
 /** Claude's own files are a few hundred bytes; anything far larger is not one. */
@@ -76,6 +77,7 @@ export function readClaudeSession(dir: string, pid: number): ClaudeSessionFile |
     ...(typeof record.statusUpdatedAt === "number" && Number.isFinite(record.statusUpdatedAt)
       ? { statusUpdatedAt: record.statusUpdatedAt }
       : {}),
+    ...(typeof record.cwd === "string" && record.cwd.length > 0 ? { cwd: record.cwd } : {}),
   };
 }
 
