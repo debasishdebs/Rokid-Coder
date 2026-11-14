@@ -1176,6 +1176,27 @@ test("failed_hello_inside_window_leaves_pins_and_window_unchanged", async () => 
   assert.equal(pins.has(newcomer.fingerprint256), true);
 });
 
+test("steer_rotation_during_admission_leaves_pins_and_window_unchanged", async () => {
+  const pins = new PinStore();
+  pins.add((await phoneCert("first")).fingerprint256);
+  pins.armAllowNext(Date.now());
+  // The secret is rotated just after the hello's first read of it, while the phone is being admitted.
+  let reads = 0;
+  const { hub, agent } = await newHub({
+    pins,
+    steer: () => (++reads === 1 ? STEER : "a-secret-rotated-mid-admission"),
+    trustCheckIntervalMs: 3_600_000,
+  });
+  const before = pins.list();
+  const newcomer = await phoneCert("newcomer");
+  const { reject, code } = await refusedHello(hub, agent, { cert: newcomer });
+  assert.ok(reads >= 2, "the secret was read again at the commit point");
+  assert.deepEqual(reject, REPAIR_NEEDED);
+  assert.equal(code, 4403);
+  assert.deepEqual(pins.list(), before, "the refused phone was not pinned");
+  assert.equal(pins.allowNextOpen(Date.now()), true, "and the window is still open");
+});
+
 test("hello_ack_steering_is_always_true_for_an_accepted_wss_phone", async () => {
   const { hub, agent } = await newHub();
   const phone = await connectPhone(hub, agent);
@@ -1370,7 +1391,7 @@ test("forgetting_a_pin_closes_its_wss_peer_live", async () => {
       const seen = phone.frames.length;
       const closesBefore = phone.closes;
       const { stdout } = await runCli(coderDir, ["phones", "forget", phone.fingerprint.replace(/:/g, "").slice(0, 16)]);
-      assert.match(stdout, /^Forgot /);
+      assert.equal(stdout, "Forgotten. That phone's links close now; it must pair again to reconnect.\n");
       await phone.waitForClose(closesBefore, 3000);
       // R126: the phone heard the trust go before the link did.
       assert.deepEqual(phone.frames.slice(seen).filter((f) => f.type === "link_trust"), [FIXTURES.agent_to_phone.link_trust]);
@@ -1594,7 +1615,7 @@ test("forget_all_rotates_steer_and_cuts_wss", async () => {
   );
 });
 
-test("forget_one_prints_rotate_hint_and_keeps_steer", async () => {
+test("forget_one_says_its_links_close_and_keeps_steer", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
     async ({ phone, coderDir, steer }) => {
@@ -1603,7 +1624,7 @@ test("forget_one_prints_rotate_hint_and_keeps_steer", async () => {
       const closesBefore = phone.closes;
       const { stdout } = await runCli(coderDir, ["phones", "forget", lost]);
       assert.ok(
-        stdout.includes('This phone can still steer over the paired WebSocket link until you run "pair --rotate-steer".'),
+        stdout.startsWith("Forgotten. That phone's links close now; it must pair again to reconnect.\n"),
         stdout,
       );
       assert.equal(await steerOnDisk(coderDir), steer, "one phone forgotten keeps the secret");

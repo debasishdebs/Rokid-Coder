@@ -184,7 +184,7 @@ async function main(): Promise<void> {
           const removed = pins.forget(which);
           process.stdout.write(
             removed.length > 0
-              ? `Forgot ${removed.join(", ")}. A running agentd drops its dialled link to this phone.\nThis phone can still steer over the paired WebSocket link until you run "pair --rotate-steer".\n${pins.isEmpty() ? none : ""}`
+              ? `Forgotten. That phone's links close now; it must pair again to reconnect.\n${pins.isEmpty() ? none : ""}`
               : "No such phone.\n",
           );
         } else {

@@ -54,6 +54,11 @@ const PLAINTEXT_ERRORS = new Set([
 /** Why a hello was refused, as the phone is told: re-pair, or the token is wrong. */
 type HelloRejectReason = "repair_needed" | "bad_token";
 
+/** A hello's checks: admitted (its cert already pinned or not), or why not, for the phone and the log. */
+type Admission =
+  | { ok: true; pinned: boolean }
+  | { ok: false; reason: HelloRejectReason; log: string };
+
 function refuseHttp(_request: IncomingMessage, response: ServerResponse): void {
   response.writeHead(426, { "content-type": "text/plain" });
   response.end("WebSocket only\n");
@@ -405,34 +410,24 @@ export class WsHub {
 
   /**
    * A hello is accepted only with the token, the steering secret and a client
-   * cert that is pinned or may be pinned now, checked in that order. Nothing
-   * about pins or the pairing window changes until all three have passed, so a
-   * failed hello leaves both as they were.
+   * cert that is pinned or may be pinned now, checked in that order. Then the
+   * one commit point: all three are checked again, and only if they still hold
+   * is the cert pinned and the window spent. Nothing after the pin refuses, so a
+   * failed hello leaves pins and window as they were, even when the secret is
+   * rotated or the phone forgotten while it is being admitted.
    */
   private onHello(socket: WebSocket, state: ClientState, message: Record<string, unknown>): void {
     const fingerprint = state.peerFingerprint;
     const short = fingerprint ? shortFingerprint(fingerprint) : "none";
-    if (!tokenMatches(message.token, this.config.token)) {
-      this.rejectHello(socket, state, "bad_token", { reason: "token", fingerprint: short });
-      return;
-    }
-    if (!this.steerMatches(message.steer)) {
-      this.rejectHello(socket, state, "repair_needed", { reason: "steer", fingerprint: short });
-      return;
-    }
-    if (!fingerprint) {
-      this.rejectHello(socket, state, "repair_needed", { reason: "no_client_cert", fingerprint: short });
-      return;
-    }
-    let known: boolean;
+    let verdict: Admission;
     try {
-      known = this.pins.has(fingerprint);
-      if (!known && !this.pins.allowNextOpen(Date.now())) {
-        this.rejectHello(socket, state, "repair_needed", { reason: "unpinned_cert", fingerprint: short });
-        return;
+      verdict = this.admission(message, fingerprint);
+      if (verdict.ok) {
+        verdict = this.admission(message, fingerprint);
       }
-      if (!known) {
+      if (verdict.ok && !verdict.pinned && fingerprint) {
         // Adding also closes the allow-next window: one admission per arming.
+        // A failed write keeps nothing, so a refusal here changes nothing either.
         this.pins.add(fingerprint);
         this.logger.info("ws_phone_pinned", { fingerprint: short });
       }
@@ -444,12 +439,12 @@ export class WsHub {
       this.rejectHello(socket, state, "repair_needed", { reason: "pins_unavailable", fingerprint: short });
       return;
     }
-    const digest = this.grantsSteering(state, message.steer);
-    if (!digest) {
-      // The secret was rotated, or the phone forgotten, since the checks above.
-      this.rejectHello(socket, state, "repair_needed", { reason: "trust_changed", fingerprint: short });
+    if (!verdict.ok) {
+      this.rejectHello(socket, state, verdict.reason, { reason: verdict.log, fingerprint: short });
       return;
     }
+    // Past the commit point: a rotation or a forget from here on is the live re-check's to act on.
+    const digest = secretDigest(message.steer as string);
     state.authenticated = true;
     state.steerDigest = digest;
     state.lastPongAt = Date.now();
@@ -485,17 +480,28 @@ export class WsHub {
     socket.close(CLOSE_UNTRUSTED, reason);
   }
 
+  /** The hello's checks, in order, reading the secret and the pins afresh; changes nothing. */
+  private admission(message: Record<string, unknown>, fingerprint: string | undefined): Admission {
+    if (!tokenMatches(message.token, this.config.token)) {
+      return { ok: false, reason: "bad_token", log: "token" };
+    }
+    if (!this.steerMatches(message.steer)) {
+      return { ok: false, reason: "repair_needed", log: "steer" };
+    }
+    if (!fingerprint) {
+      return { ok: false, reason: "repair_needed", log: "no_client_cert" };
+    }
+    const pinned = this.pins.has(fingerprint);
+    if (!pinned && !this.pins.allowNextOpen(Date.now())) {
+      return { ok: false, reason: "repair_needed", log: "unpinned_cert" };
+    }
+    return { ok: true, pinned };
+  }
+
   /** Constant time, and a length mismatch is just a mismatch. */
   private steerMatches(presented: unknown): boolean {
     const expected = this.options.steer?.();
     return typeof presented === "string" && expected !== undefined && secretMatches(presented, expected);
-  }
-
-  /** The digest a steering client keeps: the secret matched and its cert is pinned. */
-  private grantsSteering(state: ClientState, presented: unknown): Buffer | undefined {
-    return typeof presented === "string" && this.steerMatches(presented) && this.isPinned(state)
-      ? secretDigest(presented)
-      : undefined;
   }
 
   private isPinned(state: ClientState): boolean {
