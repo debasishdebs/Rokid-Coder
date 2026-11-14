@@ -21,6 +21,10 @@ import com.anezium.rokidbus.client.plugin.NexusSpeechSession
 import com.anezium.rokidbus.client.plugin.NexusSpeechState
 import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
 import com.anezium.rokidbus.client.plugin.NexusSurfaceSession
+import com.anezium.rokidbus.client.plugin.NexusTtsCallbacks
+import com.anezium.rokidbus.client.plugin.NexusTtsDoneReason
+import com.anezium.rokidbus.client.plugin.NexusTtsSession
+import com.anezium.rokidbus.shared.BusPaths
 import com.anezium.rokidbus.shared.EditableSurfaceField
 import com.anezium.rokidbus.shared.plugin.NexusInputEvent
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +41,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -50,8 +55,19 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             writeFingerprint = configStore::saveNotificationFingerprint,
         )
     }
+    private val dnd by lazy { InterruptionFilterReader(applicationContext) }
     private var surface: NexusSurfaceSession? = null
     private var surfaceShown = false
+
+    /**
+     * The spoken cue's session, made on the first cue. The hub releases it when
+     * the surface closes, so a refused speak drops it and the next cue makes
+     * a fresh one. [glassesVolume] and [glassesWorn] are what the hub last said
+     * about the glasses; null until it says anything.
+     */
+    private var tts: NexusTtsSession? = null
+    private var glassesVolume: Int? = null
+    private var glassesWorn: Boolean? = null
 
     /**
      * The wearer's place in the list is a session, not a row number: the board
@@ -286,7 +302,18 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
     }
 
+    override fun onNexusLinkState(state: Int) {
+        glassesWorn = AlertSoundPolicy.wornAfter(glassesWorn, state)
+    }
+
+    override fun onNexusMessage(path: String, id: String, payload: JSONObject) {
+        if (path == BusPaths.GLASSES_DEVICE_INFO) {
+            AlertSoundPolicy.volumeFrom(payload)?.let { glassesVolume = it }
+        }
+    }
+
     override fun onNexusClose() {
+        tts = null
         ageTicker?.cancel()
         ageTicker = null
         digestFlush?.cancel()
@@ -430,6 +457,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     override fun onDestroy() {
+        tts?.close()
+        tts = null
         if (AgentsRuntime.alertGlasses === this) AgentsRuntime.alertGlasses = null
         serviceScope.cancel()
         surfaceShown = false
@@ -521,6 +550,26 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         val client = nexusClient ?: return false
         // A brief or status band took the slot since: the update would rewrite that one.
         return v2BandUp && client.updateNotice(update) == NexusSdkResult.SENT
+    }
+
+    /**
+     * The one sound Agents makes, and a nudge to look at the glasses, nothing
+     * more: generic copy, never a session heading. The phone's Do Not Disturb is read
+     * right here, right before the speech goes out, and an unreadable one counts as
+     * quiet (R37). The coordinator only marks a fresh alert as a sound, so a retry
+     * never speaks again. A refused speak is dropped silently: the band is up.
+     */
+    override fun speakCue(alert: AgentdAction.Alert) {
+        val provider = AgentProvider.fromWire(alert.sessionKey.substringBefore(':')) ?: return
+        val cue = AlertSoundPolicy.cue(alert.kind, provider) ?: return
+        if (!AlertSoundPolicy.shouldSpeak(dnd.read(), configStore.isQuiet(), glassesVolume, glassesWorn)) return
+        val session = tts ?: nexusTtsSession(
+            object : NexusTtsCallbacks {
+                override fun onTtsStarted(utteranceId: String) = Unit
+                override fun onTtsDone(utteranceId: String, reason: NexusTtsDoneReason) = Unit
+            },
+        )?.also { tts = it } ?: return
+        if (session.speak(cue) == NexusSdkResult.NOT_REGISTERED) tts = null
     }
 
     override fun hideBand() {
@@ -615,21 +664,26 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         sessions.indexOfFirst { it.key == selectedKey }.takeIf { it >= 0 } ?: 0
 
     private fun moveSelection(delta: Int) {
-        val sessions = AgentsRuntime.store.sessions.value
-        // One virtual row sits past the sessions: the start-an-agent door. The
-        // ring walks a circle, so the door is one tap UP from the top instead
-        // of the whole board away.
-        val count = sessions.size + 1
-        val current = if (selectedKey == START_KEY) sessions.size else selectedIndexIn(sessions)
-        val next = ((current + delta) % count + count) % count
-        selectedKey = if (next == sessions.size) START_KEY else sessions[next].key
+        // Two virtual rows frame the sessions: the Quiet toggle above and the
+        // start-an-agent door below. The ring walks a circle, so the door is
+        // one tap UP from the Quiet row instead of the whole board away.
+        selectedKey = BoardModel.step(
+            AgentsRuntime.store.sessions.value.map { it.key },
+            selectedKey,
+            delta,
+        )
         render(show = false)
     }
 
     /** ENTER means "deal with this": answer what is waiting, or read the rest. */
     private fun enterSelected() {
         val sessions = AgentsRuntime.store.sessions.value
-        if (selectedKey == START_KEY || sessions.isEmpty()) {
+        if (selectedKey == BoardModel.QUIET_KEY) {
+            configStore.setQuiet(!configStore.isQuiet())
+            render(show = false)
+            return
+        }
+        if (selectedKey == BoardModel.START_KEY || sessions.isEmpty()) {
             launch = Launch.Computers
             launchIndex = 0
             launchNote = null
@@ -1551,9 +1605,12 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         val config = configStore.load()
         boardSessions = sessions
         val waitingRow = BoardModel.waitingRow(AgentsRuntime.alertDirector?.waiting?.value ?: 0)
-        val startSelected = selectedKey == START_KEY || sessions.isEmpty()
-        val selectedIndex = if (startSelected) -1 else selectedIndexIn(sessions)
-        if (!startSelected) selectedKey = sessions.getOrNull(selectedIndex)?.key
+        val quiet = configStore.isQuiet()
+        val quietSelected = selectedKey == BoardModel.QUIET_KEY
+        val startSelected = !quietSelected && (selectedKey == BoardModel.START_KEY || sessions.isEmpty())
+        val onSession = !quietSelected && !startSelected
+        val selectedIndex = if (onSession) selectedIndexIn(sessions) else -1
+        if (onSession) selectedKey = sessions.getOrNull(selectedIndex)?.key
 
         val alerts = buildList {
             waitingRow?.let(::add)
@@ -1570,13 +1627,18 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
 
         // The HUD does not scroll: keep a window around the selection.
-        val windowSize = (VISIBLE_SESSION_ROWS - alerts.size).coerceAtLeast(MIN_SESSION_ROWS)
-        val anchor = if (startSelected) sessions.lastIndex.coerceAtLeast(0) else selectedIndex
+        val windowSize = (VISIBLE_SESSION_ROWS - alerts.size - 1).coerceAtLeast(MIN_SESSION_ROWS)
+        val anchor = when {
+            startSelected -> sessions.lastIndex.coerceAtLeast(0)
+            quietSelected -> 0
+            else -> selectedIndex
+        }
         val windowStart = (anchor - windowSize / 2)
             .coerceIn(0, (sessions.size - windowSize).coerceAtLeast(0))
 
         val rows = buildList {
             addAll(alerts)
+            add(BoardModel.quietRow(quiet, quietSelected))
             if (sessions.isEmpty()) {
                 add(emptyRow(config))
             } else {
@@ -2130,9 +2192,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         private const val NOT_APPLIED_CHARS = 120
         private const val ALERT_DECISION_ROWS = 3
         private const val VOICE_ROW = 2
-
-        /** Virtual board row: the door into the start-an-agent walk. */
-        private const val START_KEY = "!start-an-agent"
 
         /** Touchpad swipes come in as LEFT/RIGHT, the ring as UP/DOWN. */
         private val FORWARD_KEYS = setOf(

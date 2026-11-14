@@ -234,4 +234,30 @@ class BoardModelTest {
         assertNull(BoardModel.waitingRow(0))
         assertNull(BoardModel.waitingRow(-1))
     }
+
+    @Test
+    fun quiet_row_says_the_toggle_state_and_follows_selection() {
+        val on = BoardModel.quietRow(quiet = true, selected = false)
+        val off = BoardModel.quietRow(quiet = false, selected = true)
+
+        assertEquals("Quiet: on", on.text)
+        assertFalse(on.selected)
+        assertEquals("Quiet: off", off.text)
+        assertTrue(off.selected)
+    }
+
+    @Test
+    fun selection_ring_runs_quiet_sessions_start() {
+        val keys = listOf("a", "b")
+        // Nothing chosen yet counts as the first session; the ring wraps both ways.
+        assertEquals("b", BoardModel.step(keys, null, +1))
+        assertEquals(BoardModel.QUIET_KEY, BoardModel.step(keys, "a", -1))
+        assertEquals(BoardModel.START_KEY, BoardModel.step(keys, BoardModel.QUIET_KEY, -1))
+        assertEquals(BoardModel.QUIET_KEY, BoardModel.step(keys, BoardModel.START_KEY, +1))
+        assertEquals("a", BoardModel.step(keys, BoardModel.QUIET_KEY, +1))
+        // A session that left the board falls back to the first one; an empty board to Start.
+        assertEquals("b", BoardModel.step(keys, "gone", +1))
+        assertEquals(BoardModel.QUIET_KEY, BoardModel.step(emptyList(), null, +1))
+        assertEquals(BoardModel.QUIET_KEY, BoardModel.step(emptyList(), BoardModel.START_KEY, +1))
+    }
 }

@@ -22,7 +22,7 @@ only between `PLUGIN_OPEN` and a final `PLUGIN_CLOSE`. Do not register yourself 
 not poll in the background, do not post notifications. The SDK holds a
 foreground-service session while you are open and drops it on close; the
 user-facing notification that names the live plugin belongs to the hub. Six
-sanctioned exceptions:
+sanctioned exceptions (and Agents' monitoring exception, §3.5):
 
 1. A capability that Android forces into its own foreground service *while your
    surface is open* (Feeds' overlay WebView host is the precedent) may run that
@@ -112,6 +112,18 @@ Copy `plugins/sample` as the canonical template. The hard rules:
    exceptions are phone patching (§1, progress/completion only) and scheduled delivery: a plugin that delivers user-created
    reminders may declare `POST_NOTIFICATIONS`, `SCHEDULE_EXACT_ALARM`, and
    `RECEIVE_BOOT_COMPLETED`, strictly for those deliveries.
+
+   **Agents monitoring exception (R32).** Agents may declare `POST_NOTIFICATIONS`
+   for one thing: the visible, low-importance, ongoing "Agents monitoring · n
+   sessions" notification its monitoring foreground service stands on, with
+   Settings and Stop actions. Some ROMs freeze a foreground service whose
+   notification is never shown (measured: Vivo), and a frozen monitor misses the
+   alerts it exists to deliver. The notification carries a session count only. It
+   never carries a session heading, agent text or an alert, and Agents posts no
+   other notification: alerts belong on the glasses. It exists only while the
+   wearer's Monitoring switch is on, Stop turns that switch off, and the settings
+   screen asks for the permission once, when Monitoring is switched on. This is no
+   license for other plugins to post notifications for their own foreground services.
 6. `REQUEST_DELETE_PACKAGES` — required for the in-app Uninstall row
    (`NexusUi.uninstallCard`) to open the system uninstall dialog. Without it the
    `ACTION_DELETE` intent is silently rejected.

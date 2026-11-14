@@ -3,16 +3,18 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!--
-        POST_NOTIFICATIONS is deliberately absent. Agents alerts belong on the
-        glasses, never in the phone's shade. Without the permission Android keeps
-        the monitoring foreground service running but never shows its notification,
-        which is exactly the behaviour we want.
+        POST_NOTIFICATIONS is a documented Agents exception to plugins/AGENTS.md
+        section 3.5 (R32). It is for one thing only: the visible, low-importance
+        "Agents monitoring" notification of the monitoring service, with Settings
+        and Stop. Agents never posts an alert or a session's text to the phone;
+        alerts belong on the glasses.
     -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!--
-        The other half of the bargain above. A foreground service whose
-        notification is never shown is not treated as a protected one on every
+        Why the notification is visible, and why the exemption below stays. A
+        foreground service whose notification is never shown is not treated as a protected one on every
         ROM: measured on a Vivo device, Android froze this process outright
         (cgroup.freeze=1, no CPU time at all) while the service still reported
         isForeground=true. The kernel kept completing TCP handshakes from its

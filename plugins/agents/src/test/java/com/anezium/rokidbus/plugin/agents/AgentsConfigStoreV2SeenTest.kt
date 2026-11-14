@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.plugin.agents
 
 import android.content.SharedPreferences
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -113,5 +114,41 @@ class AgentsConfigStoreV2SeenTest {
 
         config.saveAgentd(pairing.copy(host = "100.9.9.9"), true)
         assertFalse(config.v1AttentionSuppressed(session(null), linkSecure = false))
+    }
+
+    @Test
+    fun quiet_has_one_key_and_survives_restart() {
+        assertFalse(store().isQuiet())
+
+        store().setQuiet(true)
+
+        assertEquals(true, prefs.map["alerts.quiet"])
+        assertTrue(store().isQuiet())
+        store().setQuiet(false)
+        assertFalse(store().isQuiet())
+    }
+
+    @Test
+    fun stop_turns_every_provider_off_and_keeps_the_pairing() {
+        val config = store().apply {
+            saveAgentd(pairing, true)
+            saveOpenClaw(OpenClawConfig(host = "gw", token = "t"), true)
+        }
+        assertTrue(config.load().shouldMonitor)
+
+        config.stopMonitoring()
+
+        val after = config.load()
+        assertFalse(after.agentdEnabled)
+        assertFalse(after.openClawEnabled)
+        assertFalse(after.shouldMonitor)
+        assertEquals(pairing, after.agentd)
+    }
+
+    @Test
+    fun the_notification_prompt_is_remembered_so_it_is_asked_once() {
+        assertFalse(store().notificationPermissionAsked())
+        store().markNotificationPermissionAsked()
+        assertTrue(store().notificationPermissionAsked())
     }
 }

@@ -165,6 +165,34 @@ class AgentsConfigStore internal constructor(
         }.apply()
     }
 
+    /**
+     * Turns monitoring off for every provider, keeping what is paired. The
+     * notification's Stop uses it, so the Monitoring switch reads off afterwards.
+     */
+    fun stopMonitoring() {
+        prefs.edit()
+            .putBoolean(KEY_AGENTD_ENABLED, false)
+            .putBoolean(KEY_OPENCLAW_ENABLED, false)
+            .apply()
+    }
+
+    /**
+     * The wearer's quiet toggle: no spoken alert cue. This key is the only copy of
+     * it (R74); the glasses board row and the phone settings both read and write it.
+     */
+    fun isQuiet(): Boolean = prefs.getBoolean(KEY_ALERTS_QUIET, false)
+
+    fun setQuiet(quiet: Boolean) {
+        prefs.edit().putBoolean(KEY_ALERTS_QUIET, quiet).apply()
+    }
+
+    /** True once Android's notification prompt has been shown, so the plugin asks only once. */
+    fun notificationPermissionAsked(): Boolean = prefs.getBoolean(KEY_NOTIFICATIONS_ASKED, false)
+
+    fun markNotificationPermissionAsked() {
+        prefs.edit().putBoolean(KEY_NOTIFICATIONS_ASKED, true).apply()
+    }
+
     fun saveOpenClaw(config: OpenClawConfig?, enabled: Boolean) {
         val previous = load().openClaw
         prefs.edit().apply {
@@ -439,6 +467,8 @@ class AgentsConfigStore internal constructor(
         const val KEY_OPENCLAW_SEED = "openclaw.device_seed"
         const val KEY_OPENCLAW_DEVICE_TOKEN = "openclaw.device_token"
         const val KEY_NOTIFICATION_PREFIX = "notification."
+        const val KEY_ALERTS_QUIET = "alerts.quiet"
+        const val KEY_NOTIFICATIONS_ASKED = "notifications.permission_asked"
         const val KEY_MACHINE_PREFIX = "machine.token."
         const val KEY_MACHINE_NAME_PREFIX = "machine.name."
         const val KEY_MACHINE_SEEN_PREFIX = "machine.seen."

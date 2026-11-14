@@ -20,8 +20,8 @@
 - Walk computer, project, and the project's threads on the glasses, and start
   an empty Codex thread from the ring: the board's last row is the door, one
   tap up from the top.
-- Alert on the glasses with an interactive notice; the phone stays silent and
-  the plugin holds no notification permission.
+- Alert on the glasses with an interactive notice; the phone shows only the
+  monitoring notification.
 - Let a computer link itself over the LAN, and refuse the ones that were not
   invited: unknown machines need an armed two-minute window, and a known
   machine presenting the wrong token is rejected without losing its token.

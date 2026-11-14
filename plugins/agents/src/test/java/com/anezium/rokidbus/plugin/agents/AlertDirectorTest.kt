@@ -40,6 +40,8 @@ class AlertDirectorTest {
         override fun openDecision(alert: AgentdAction.Alert) { log += "decision ${alert.id}" }
         override fun openQuestion(alert: AgentdAction.Alert) { log += "question ${alert.id}" }
         override fun invalidate(alertId: String) { log += "invalidate $alertId" }
+        val cues = mutableListOf<String>()
+        override fun speakCue(alert: AgentdAction.Alert) { cues += alert.id }
     }
 
     private val glasses = Glasses()
@@ -114,6 +116,29 @@ class AlertDirectorTest {
         assertEquals(listOf("hide", "show CLAUDE · approve", "update +1 waiting"), glasses.log)
         assertTrue(glasses.bands.single().wakeDisplay)
         assertEquals(emptyList<String>(), types())
+    }
+
+    @Test
+    fun a_cue_is_asked_for_once_per_fresh_alert_and_never_on_a_retry_or_a_reshow() {
+        up()
+        feed(alert(id = "A"))
+        feed(alert(id = "A", reason = "retry"))
+        glasses.takesUpdate = false
+        feed(alert(id = "A", reason = "update"))
+        feed(alert(id = "B", reason = "new", kind = "done"))
+        feed(alert(id = "B", reason = "reminder", kind = "done"))
+
+        // The refused update re-shows A without a sound; a reminder is a fresh sound.
+        assertEquals(listOf("A", "B", "B"), glasses.cues)
+    }
+
+    @Test
+    fun a_band_the_hub_refused_makes_no_sound() {
+        up()
+        glasses.takesBand = false
+        feed(alert())
+
+        assertEquals(emptyList<String>(), glasses.cues)
     }
 
     @Test

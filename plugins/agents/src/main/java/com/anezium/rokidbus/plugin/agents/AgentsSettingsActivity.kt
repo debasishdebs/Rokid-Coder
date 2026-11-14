@@ -1,8 +1,11 @@
 package com.anezium.rokidbus.plugin.agents
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -12,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.app.NotificationManagerCompat
 import com.anezium.rokidbus.client.ui.BusTheme
 import com.anezium.rokidbus.client.ui.NexusPluginIcons
 import com.anezium.rokidbus.client.ui.NexusUi
@@ -28,6 +32,7 @@ class AgentsSettingsActivity : Activity() {
     private lateinit var agentdEnabled: Switch
     private lateinit var agentdConnection: TextView
     private lateinit var agentdDot: View
+    private lateinit var notificationsHint: TextView
     private lateinit var batteryStatus: TextView
     private lateinit var batteryDot: View
     private lateinit var batteryGrant: Button
@@ -51,8 +56,16 @@ class AgentsSettingsActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // The notification's Stop turns monitoring off from outside this screen.
+        agentdEnabled.isChecked = configStore.load().agentdEnabled
         renderComputers()
         renderBatteryState()
+        renderNotificationState()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        renderNotificationState()
     }
 
     override fun onDestroy() {
@@ -66,7 +79,9 @@ class AgentsSettingsActivity : Activity() {
         agentdEnabled = NexusUi.switch(this).apply {
             setOnCheckedChangeListener { _, checked ->
                 configStore.saveAgentd(configStore.load().agentd, checked)
+                if (checked) askForNotifications()
                 AgentsMonitorService.reconcile(applicationContext)
+                renderNotificationState()
             }
         }
         agentdDot = NexusUi.dot(this)
@@ -93,6 +108,7 @@ class AgentsSettingsActivity : Activity() {
             }
         }
         batteryHint = NexusUi.cardBody(this, "")
+        notificationsHint = NexusUi.cardBody(this, NOTIFICATIONS_OFF).apply { visibility = View.GONE }
         computersList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val content = NexusUi.contentColumn(this).apply {
@@ -100,8 +116,9 @@ class AgentsSettingsActivity : Activity() {
                 NexusUi.cardBody(
                     this@AgentsSettingsActivity,
                     "Mission control for Claude Code, Codex, and OpenClaw sessions. " +
-                        "Agents never notifies this phone — when a session needs you, " +
-                        "it says so on your glasses.",
+                        "Agents never alerts this phone — when a session needs you, " +
+                        "it says so on your glasses. Its one notification just shows " +
+                        "that monitoring is running.",
                 ),
                 NexusUi.block(),
             )
@@ -153,6 +170,7 @@ class AgentsSettingsActivity : Activity() {
         )
         addView(BusTheme.gap(this@AgentsSettingsActivity, 8))
         addView(connectionRow(this@AgentsSettingsActivity, agentdDot, agentdConnection), NexusUi.block())
+        addView(notificationsHint, NexusUi.block())
         addView(BusTheme.gap(this@AgentsSettingsActivity, 12))
         addView(connectionRow(this@AgentsSettingsActivity, batteryDot, batteryStatus), NexusUi.block())
         addView(BusTheme.gap(this@AgentsSettingsActivity, 8))
@@ -322,6 +340,27 @@ class AgentsSettingsActivity : Activity() {
         agentdEnabled.isChecked = configStore.load().agentdEnabled
         renderComputers()
         renderBatteryState()
+        renderNotificationState()
+    }
+
+    /**
+     * Turning Monitoring on asks Android 13+ for the notification permission, once:
+     * a no is final here, and the line below the switch says what it costs. Without
+     * it the monitor notification stays hidden and some phones freeze the service.
+     */
+    private fun askForNotifications() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        if (configStore.notificationPermissionAsked()) return
+        configStore.markNotificationPermissionAsked()
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+    }
+
+    private fun renderNotificationState() {
+        if (!::notificationsHint.isInitialized) return
+        val off = configStore.load().shouldMonitor &&
+            !NotificationManagerCompat.from(this).areNotificationsEnabled()
+        notificationsHint.visibility = if (off) View.VISIBLE else View.GONE
     }
 
     /**
@@ -355,8 +394,8 @@ class AgentsSettingsActivity : Activity() {
                 "then under battery let it use power in the background. The warning " +
                 "clears when you act on it and comes back only if this happens again."
         } else {
-            "Agents shows nothing in the phone's shade, so Android may treat it as " +
-                "idle and freeze it. Frozen, it stops seeing your sessions and a " +
+            "Android may treat Agents as idle and freeze it. " +
+                "Frozen, it stops seeing your sessions and a " +
                 "computer waiting on you is answered back at the keyboard instead of " +
                 "on your glasses."
         }
@@ -433,6 +472,8 @@ class AgentsSettingsActivity : Activity() {
     private companion object {
         /** List-row id for the hand-paired daemon entry, which has no machineId. */
         const val PAIRED_ROW_ID = "paired-daemon"
+        const val REQUEST_NOTIFICATIONS = 41
+        const val NOTIFICATIONS_OFF = "Notifications off — Android may pause Agents"
     }
 }
 

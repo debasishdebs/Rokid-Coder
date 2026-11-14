@@ -23,6 +23,9 @@ interface AlertGlasses {
     /** Nothing of the alerts' is on the band slot any more: a deferred v1 attention may take it. */
     fun slotFree() = Unit
 
+    /** A fresh alert's band was taken: say its generic cue, if the phone and the wearer allow it. */
+    fun speakCue(alert: AgentdAction.Alert) = Unit
+
     /** A Done or error band was tapped: open the output reader, summary first. */
     fun openOutput(alert: AgentdAction.Alert)
     fun openDecision(alert: AgentdAction.Alert)
@@ -242,7 +245,7 @@ class AlertDirector(
     private fun applyEffects(effects: List<AlertCoordinator.Effect>) {
         for (effect in effects) {
             when (effect) {
-                is AlertCoordinator.Effect.Show -> showBand(effect.alert, effect.wake)
+                is AlertCoordinator.Effect.Show -> showBand(effect.alert, effect.wake, effect.sound)
                 is AlertCoordinator.Effect.Update -> updateBand(effect.alert)
                 AlertCoordinator.Effect.Hide -> {
                     bandId = null
@@ -260,7 +263,7 @@ class AlertDirector(
         }
     }
 
-    private fun showBand(alert: AgentdAction.Alert, wake: Boolean) {
+    private fun showBand(alert: AgentdAction.Alert, wake: Boolean, sound: Boolean = false) {
         val taken = glasses()?.showBand(AlertNotices.build(alert, monitorOnly = !secure(), wake = wake)) == true
         if (!taken) {
             // No band is up for this alert, so the coordinator must not refresh one;
@@ -273,6 +276,8 @@ class AlertDirector(
         goneId = null
         // The alert took the slot from whatever brief was on it.
         briefDone()
+        // The coordinator marks only a NEW or REMINDER band as a sound, never a retry.
+        if (sound) glasses()?.speakCue(alert)
     }
 
     /**

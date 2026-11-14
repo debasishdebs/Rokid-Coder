@@ -24,11 +24,12 @@ import java.util.concurrent.TimeUnit
 /**
  * Holds the connections to the agent providers while the HUD is closed.
  *
- * This service says nothing. It posts no alert, no summary, no progress: the
- * only notification it builds is the one `startForeground` requires, and the app
- * holds no notification permission, so Android never shows it. Everything the
- * wearer needs to know reaches them on the glasses, raised by
- * [AgentsPluginService].
+ * This service says nothing about any session. It posts no alert, no summary, no
+ * progress: the only notification it builds is the visible, low-importance
+ * "Agents monitoring" one `startForeground` stands on, with a session count,
+ * Settings and Stop (see [AgentNotifications] and the Agents monitoring exception
+ * in plugins/AGENTS.md §3.5). Everything the wearer needs to know reaches them on
+ * the glasses, raised by [AgentsPluginService].
  */
 class AgentsMonitorService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -56,6 +57,9 @@ class AgentsMonitorService : Service() {
     private var temporaryAgentd: Job? = null
     private var temporaryOpenClaw: Job? = null
 
+    /** False once monitoring is stopping: a late session change must not post the notification back. */
+    private var monitoring = true
+
     // The one AlertCoordinator lives here, behind the director, so no alert depends
     // on the plugin service being alive. The glasses side and the notice callbacks
     // run on the main thread, so the director's work does too, one piece at a time.
@@ -82,8 +86,17 @@ class AgentsMonitorService : Service() {
     override fun onCreate() {
         super.onCreate()
         notifications.createChannels()
-        startForeground(MONITOR_NOTIFICATION_ID, notifications.monitorNotification())
+        startForeground(
+            AgentNotifications.MONITOR_NOTIFICATION_ID,
+            notifications.monitorNotification(AgentsRuntime.store.sessions.value.size),
+        )
         startAlerts()
+        serviceScope.launch {
+            AgentsRuntime.store.sessions
+                .map { it.size }
+                .distinctUntilChanged()
+                .collect { count -> if (monitoring) notifications.updateMonitor(count) }
+        }
         serviceScope.launch {
             combine(agentdClient.linkSecure, linkServer.linkSecure) { dialled, listened ->
                 dialled || listened
@@ -103,6 +116,12 @@ class AgentsMonitorService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_STOP -> {
+                // The notification's Stop: the Monitoring switch reads off afterwards, here and in settings.
+                configStore.stopMonitoring()
+                stopMonitoring()
+                return START_NOT_STICKY
+            }
             ACTION_TEST_AGENTD -> {
                 if (configStore.load().shouldMonitor) reconcile()
                 testAgentd()
@@ -335,6 +354,7 @@ class AgentsMonitorService : Service() {
     }
 
     private fun stopMonitoring() {
+        monitoring = false
         agentdClient.stop(clearSessions = true)
         linkServer.stop(clearSessions = true)
         openClawClient.stop(clearSessions = true)
@@ -358,6 +378,8 @@ class AgentsMonitorService : Service() {
     companion object {
         const val ACTION_RECONCILE =
             "com.anezium.rokidbus.plugin.agents.action.RECONCILE"
+        const val ACTION_STOP =
+            "com.anezium.rokidbus.plugin.agents.action.STOP"
         const val ACTION_TEST_AGENTD =
             "com.anezium.rokidbus.plugin.agents.action.TEST_AGENTD"
         const val ACTION_TEST_OPENCLAW =
@@ -387,7 +409,6 @@ class AgentsMonitorService : Service() {
         const val EXTRA_DECISION = "decision"
         const val EXTRA_TEXT = "text"
         const val EXTRA_FRAME = "frame"
-        private const val MONITOR_NOTIFICATION_ID = 3101
         private const val TEST_WINDOW_MS = 15_000L
         private const val PRUNE_INTERVAL_MS = 60_000L
 

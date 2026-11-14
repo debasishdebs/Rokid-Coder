@@ -84,9 +84,18 @@ then flows through the ordinary monitoring to the board.
   host/port/token/name slot.
 - OpenClaw: enter the Gateway host, port (default `18789`), and token. A host
   may include `ws://` or `wss://`; a plain host uses `ws://`.
-- **Agents holds no notification permission and posts nothing on the phone.**
-  The permission is deliberately absent from the manifest, so Android keeps the
-  monitoring foreground service running but never shows its notification.
+- **Agents posts no alert on the phone.** The one notification it holds
+  `POST_NOTIFICATIONS` for is the visible, low-importance "Agents monitoring ·
+  n sessions" one of the monitoring service, with Settings and Stop (a
+  documented exception in `plugins/AGENTS.md` section 3.5). Turning Monitoring
+  on asks for the permission once; if it is refused, settings says
+  "Notifications off — Android may pause Agents".
+- **A spoken cue, off by Do Not Disturb or the quiet toggle.** A fresh approval,
+  question, Done or error alert says a short generic line ("Claude needs
+  approval") through the glasses' text to speech. It stays silent while the phone
+  is in Do Not Disturb (or that cannot be read), while the Quiet row at the top of
+  the glasses board is on, while the glasses are muted, and while they are known
+  to be off the head. The quiet setting is the `alerts.quiet` preference.
 
 Settings, auth tokens, the OpenClaw device seed, alert fingerprints, and the
 Gateway-issued device token use the plugin's private `nexus_plugin_agents`
@@ -324,9 +333,9 @@ JSON choice as Transit, plus the repository’s existing OkHttp `4.12.0`.
   `isForeground=true`. A frozen process is worse than a slow one — the kernel
   keeps completing TCP handshakes from its backlog, so `nexus-agentd` saw a
   phone that connected and then never answered `hello`, timed out after 15
-  seconds, and redialled forever. Holding no notification permission is what
-  invites this: a foreground service whose notification never appears is not
-  treated as a protected one on every ROM.
+  seconds, and redialled forever. That was seen while the notification was
+  hidden, which is why it is now visible: a foreground service whose
+  notification never appears is not treated as a protected one on every ROM.
 
   Monitoring therefore asks for a battery exemption on its own screen, and
   because that platform flag is not authoritative everywhere — this same device
@@ -344,8 +353,8 @@ JSON choice as Transit, plus the repository’s existing OkHttp `4.12.0`.
 
 - Doze remains a separate, milder limit on top of that: even unfrozen, a
   screen-off, stationary, unplugged phone may not see a transition until a
-  maintenance window. With no phone notification by design, the alert arrives
-  when the wearer next looks at the board.
+  maintenance window. The alert arrives on the glasses, not the phone, so it
+  reaches the wearer when the phone next runs the monitor.
 - The device identity is signed by a hand-written Ed25519 implementation. Its
   signatures are RFC 8032 conformant but the arithmetic is not constant-time,
   which is acceptable on a private tailnet and must be replaced with a vetted

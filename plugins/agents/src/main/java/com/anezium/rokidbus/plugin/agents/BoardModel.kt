@@ -109,6 +109,32 @@ object BoardModel {
     /** True when the row shows an age, which only a clock can keep fresh. */
     fun showsAge(session: AgentSession): Boolean = session.v2 == null && session.lastActivityAt != null
 
+    /** Virtual board row: the quiet toggle, first on the board. */
+    const val QUIET_KEY = "!quiet"
+
+    /** Virtual board row: the door into the start-an-agent walk, last on the board. */
+    const val START_KEY = "!start-an-agent"
+
+    /** The first row of the board: whether alerts speak. ENTER toggles it. */
+    fun quietRow(quiet: Boolean, selected: Boolean): NexusCardLine = NexusCardLine(
+        text = if (quiet) "Quiet: on" else "Quiet: off",
+        sub = if (quiet) "alerts stay silent" else "alerts speak a short cue",
+        tone = NexusRowTone.DIM,
+        selected = selected,
+    )
+
+    /**
+     * The row [delta] steps from [selected] on the ring Quiet, each session, Start.
+     * A selection that is gone (a session that left the board, or none yet) counts
+     * as the first session, or Start on an empty board.
+     */
+    fun step(sessionKeys: List<String>, selected: String?, delta: Int): String {
+        val ring = listOf(QUIET_KEY) + sessionKeys + START_KEY
+        val at = ring.indexOf(selected).takeIf { it >= 0 }
+            ?: if (sessionKeys.isEmpty()) ring.lastIndex else 1
+        return ring[((at + delta) % ring.size + ring.size) % ring.size]
+    }
+
     /** The `+N waiting` row that heads the board while more alerts queue behind the current one. */
     fun waitingRow(waiting: Int): NexusCardLine? =
         if (waiting > 0) NexusCardLine(text = "+$waiting waiting", tone = NexusRowTone.ALERT) else null
