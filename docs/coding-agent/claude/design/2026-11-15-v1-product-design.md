@@ -1,6 +1,6 @@
 # Rokid-Coder 1.0 — Product Design (Plan 6)
 
-**Status:** draft for the user's review, 2026-11-15. It builds on `2026-11-14-rokid-coder-design.md` and the user decisions U1–U31 in `docs/coding-agent/HANDOFF.md`. **[user]** marks the user's decisions; **[call]** marks my calls, which the user can overrule.
+**Status:** approved by the user, 2026-11-15. **Later sections override earlier ones** (§13 > §12 > §11 > §10 > §8 > §1–7). It builds on `2026-11-14-rokid-coder-design.md` and the user decisions U1–U31 in `docs/coding-agent/HANDOFF.md`. **[user]** marks the user's decisions; **[call]** marks my calls, which the user can overrule.
 
 ## 1. Intent
 Turn the working 0.8.0 into a product that anyone can install and set up without reading docs. 1.0.0 ships as downloadable installers (GitHub Releases) **[user U27]**. The Play Store comes after 1.0, but 1.0 must already be built so that Play can accept it later **[user]**.
@@ -262,7 +262,7 @@ Rules:
   - **Windows:** Windows 11 22H2+, WSL2 plus a distro, mirrored networking (offering to enable it), the TCP 8792 firewall rule, and Claude Code/Codex inside WSL (offering to install).
   - **Both:** the phone reachable on the same Wi-Fi.
   - Each failure shows a one-line fix (a command or link), then re-checks. Install continues only when everything passes, or when the user skips an item marked optional.
-- **Tailscale** (an encrypted mesh VPN for reaching your devices from other networks): kept **optional, never a prerequisite** **[call, pending the user's confirmation]**. Onboarding offers it only if Wi-Fi pairing fails, or behind a "use it away from home" link.
+- **Tailscale:** decided in U38 below.
 - **U38: Tailscale is an optional "connector", configured from the phone app.**
   - Settings → Connectors → Tailscale shows "Not installed", "Installed, not signed in" or "Connected". Detection uses the `com.tailscale.ipn` package query the manifest already has.
   - Guided steps: "Get Tailscale" (its Play Store page), then "Sign in with the same account on your computer".
@@ -273,3 +273,32 @@ Rules:
   - It is the embedded core: the glasses link, rendering and speech, behind the private `GlassesSurface` interface.
   - Making it optional or external would bring back the two-app friction and the open plugin host (U31).
   - **Coexistence:** onboarding detects an installed upstream Rokid Nexus app (`com.anezium.rokidbus.phone`). Both can't hold the glasses link, so the app says "Rokid Nexus is installed — close or uninstall it so Rokid Coder can connect to your glasses".
+
+## 13. Consolidation after the Codex review of the U35–U39 additions (`2026-11-15-v1-design-rereview-3.md`)
+These override anything earlier. They are all **[call]**s, made in line with the user's decisions.
+1. **Prerequisites vs pairing checks.** The installer's prerequisite check covers only what installing needs:
+   - the OS version
+   - on Windows: WSL2, a distro, mirrored networking and the firewall rule
+   - disk and write access
+
+   These are not install prerequisites; they are separate steps that can be skipped:
+   - **Claude Code / Codex present:** a skippable step, "Install Claude Code? / Install Codex? / Skip". With neither installed, install still completes, and `rk claude` / `rk codex` offer the install later (§2).
+   - **Reachability:** a separate *pairing* check, run after install. It passes over the same Wi-Fi OR over Tailscale. When neither works, it offers the Tailscale connector and the QR/pairing-line fallback.
+2. **Tailscale status** is limited to what the phone can know:
+   - "Not installed"
+   - "Installed — open Tailscale to check it's connected"
+   - "Connected", shown only after a pairing or link actually succeeds over a tailnet address
+
+   The explicit `com.tailscale.ipn` package query is kept when plugin discovery is removed.
+3. **Coexistence with upstream Rokid Nexus.**
+   - The app declares an explicit `<queries>` entry for `com.anezium.rokidbus.phone`.
+   - When that package is installed, it says: "Rokid Nexus is installed. Open it and tap Stop hub (or force-stop or uninstall it), then tap Retry". Closing Nexus's screen is not enough, because its service keeps the glasses link.
+   - Being installed is only a warning. The real test is whether our CXR connect succeeds after Retry.
+4. **Port forwarding scope.**
+   - Allowed: the R4 Windows fallback, a *local* Windows↔WSL port proxy plus a firewall rule, used only if mirrored mode fails.
+   - Excluded: forwarding on the user's *router*, in U38.
+5. **The pairing window opens when pairing starts.** The phone opens a fresh 2-minute window when the computer side reaches its pairing step: the installer's last step, or `/rokid:pair`, signals the phone over the same discovery path. When that isn't possible, the phone shows a "Ready to pair — tap to open the window" button. An expired window shows "Time's up — tap to try again", never a dead end.
+6. **Stale clauses settled:**
+   - Play: §§1 and 4's "kept Play-compatible" is replaced by R8 (Play is a separate decision after 1.0, and no compatibility is promised).
+   - Windows: §9's "decided in the Windows session" is replaced by R4 (WSL2 with mirrored networking). The Windows session only *verifies* R4, and falls back per point 4 above.
+   - Tailscale: U38 is final.

@@ -1,0 +1,15 @@
+- **[Important] Prerequisites block supported setup paths.** U37 requires same-Wi-Fi reachability and an installed CLI before installation ([design:260–264](~/Desktop/rokid/Rokid-Coder/docs/coding-agent/claude/design/2026-11-15-v1-product-design.md:260)). That conflicts with §2’s “neither” path and U38’s Tailscale fallback. `phone-link.ts` already supports configured and tailnet targets. **Change:** explicitly mark CLI presence and LAN reachability skippable; separate installation prerequisites from pairing checks, and accept successful Tailscale pairing.
+
+- **[Important] The Tailscale status promises exceed the detection mechanism.** U38 promises “Installed, not signed in” and “Connected,” but [`tailscaleInstalled()`](~/Desktop/rokid/Rokid-Coder/plugins/agents/src/main/java/com/anezium/rokidbus/plugin/agents/AgentsUiBits.kt:18) only checks package presence. Desktop `tailnet-discovery.ts` cannot establish the phone app’s sign-in state. **Change:** use “Not installed” / “Installed—open Tailscale to check connection,” or specify a supported status source. Preserve the explicit package query when removing plugin discovery.
+
+- **[Important] Coexistence guidance does not release link ownership reliably.** U39 says “close or uninstall” Nexus ([design:275](~/Desktop/rokid/Rokid-Coder/docs/coding-agent/claude/design/2026-11-15-v1-product-design.md:275)). Closing its activity leaves its foreground service running; [`stopHub()`](~/Desktop/rokid/Rokid-Coder/phone-hub/src/main/java/com/anezium/rokidbus/phone/BusHubService.kt:1192) explicitly disconnects CXR and closes SPP. The existing Agents manifest also lacks an explicit upstream-package query. **Change:** add that query and instruct users to **Stop the Nexus hub**, force-stop it, or uninstall; then retry connection. Treat installation as a warning, not proof of active ownership.
+
+- **[Important] Port forwarding has conflicting scope.** R4 retains a Windows port-proxy fallback ([design:155](~/Desktop/rokid/Rokid-Coder/docs/coding-agent/claude/design/2026-11-15-v1-product-design.md:155)); U38 excludes port forwarding from 1.0. **Change:** explicitly distinguish an allowed local Windows↔WSL proxy from prohibited router forwarding, or remove R4’s fallback.
+
+- **[Important] The pairing window expires during the intended setup.** §2 opens the phone’s window before the installer is downloaded; R1 limits it to two minutes. U37 adds prerequisite installation and re-checks before pairing. **Change:** open a fresh window when computer setup reaches pairing, with a visible retry action on expiry.
+
+- **[Minor] Consolidate stale decisions before planning.** §12 still calls Tailscale confirmation pending despite U38; §§1/4 still require Play compatibility despite R8; §9 still leaves Windows architecture undecided despite R4. **Change:** replace these clauses with the settled decisions and declare later amendments authoritative throughout.
+
+Static review only; no builds or tests run.
+
+VERDICT: NOT READY
