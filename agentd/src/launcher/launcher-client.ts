@@ -1,7 +1,8 @@
 import { readClaudeSession, type ClaudeSessionFile } from "./claude-sessions";
 import type { TypeCommand } from "./launcher-hub";
 import type { PtyChild } from "./pty";
-import { LaptopInput, Typist, sessionReady, systemClock, type BindingView, type Clock } from "./typist";
+import { LaptopInput, sessionBusySince } from "./laptop-input";
+import { Typist, sessionReady, systemClock, type BindingView, type Clock } from "./typist";
 
 type Frame = Record<string, unknown>;
 
@@ -50,11 +51,14 @@ function asTypeCommand(frame: Frame): TypeCommand | undefined {
  * that connection is gone it is cancelled and its result is not sent.
  */
 export class LauncherClient {
-  readonly input = new LaptopInput();
+  readonly input: LaptopInput;
   private readonly typist: Typist;
   private readonly child: PtyChild;
   private readonly send: (frame: Frame) => void;
   private readonly clock: Clock;
+  /** The pid whose sessions file the bind poll last found. */
+  private polledPid?: number;
+  /** The session agentd accepted; readiness reads only its file. */
   private owned?: { sessionId: string; pid: number };
   private epoch = 0;
   private running?: { cmdId: string; epoch: number };
@@ -66,11 +70,13 @@ export class LauncherClient {
     this.child = options.child;
     this.send = options.send;
     this.clock = options.clock ?? systemClock;
-    const ready = (after?: number): boolean => {
+    const readOwned = (): ClaudeSessionFile | undefined => {
       const owned = this.owned;
-      const file: ClaudeSessionFile | undefined = owned ? readClaudeSession(options.sessionsDir, owned.pid) : undefined;
-      return file !== undefined && file.sessionId === owned?.sessionId && sessionReady(file, after);
+      const file = owned ? readClaudeSession(options.sessionsDir, owned.pid) : undefined;
+      return file?.sessionId === owned?.sessionId ? file : undefined;
     };
+    const ready = (after?: number): boolean => sessionReady(readOwned(), after);
+    this.input = new LaptopInput({ clock: this.clock, busySince: (at) => sessionBusySince(readOwned(), at) });
     this.typist = new Typist(options.child, this.input, ready, this.clock, {
       binding: options.binding,
       onWritten: (cmdId, at) => {
@@ -94,9 +100,14 @@ export class LauncherClient {
     }
   }
 
-  /** The owned session the bind poll found; readiness reads this file. */
+  /** The owned session the bind poll found. It counts for readiness only once agentd accepts it. */
   setSession(session: ClaudeSessionFile): void {
-    this.owned = { sessionId: session.sessionId, pid: session.pid };
+    this.polledPid = session.pid;
+  }
+
+  /** The session agentd accepted the bind for, or undefined while none is bound. */
+  onBound(sessionId: string | undefined): void {
+    this.owned = sessionId !== undefined && this.polledPid !== undefined ? { sessionId, pid: this.polledPid } : undefined;
   }
 
   /** The frames from agentd that are the typist's. Returns false for any other. */
@@ -134,6 +145,7 @@ export class LauncherClient {
 
   dispose(): void {
     this.typist.dispose();
+    this.input.dispose();
     this.clock.clearTimeout(this.reportTimer);
   }
 

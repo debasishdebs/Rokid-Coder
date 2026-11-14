@@ -1,3 +1,4 @@
+import type { LaptopInput } from "./laptop-input";
 import type { CommandError, TypeCommand } from "./launcher-hub";
 import { OutputScanner } from "./output-scanner";
 import type { PtyChild } from "./pty";
@@ -53,167 +54,6 @@ export function sessionReady(file: { status: string; statusUpdatedAt?: number } 
   return after === undefined || (typeof file.statusUpdatedAt === "number" && file.statusUpdatedAt > after);
 }
 
-/** Control keys that only move the cursor, redraw, or remove text: they never make an empty prompt non-empty. */
-const NEUTRAL_CONTROLS = new Set(["\x01", "\x02", "\x04", "\x05", "\x06", "\x0b", "\x0c", "\x15", "\x17", "\x1a"]);
-const NEUTRAL_FINALS = new Set(["C", "D", "H", "F", "I", "O"]);
-
-/**
- * Follows one key stream for the draft rule. Prompt contents are not
- * observable, so it is conservative: anything that could put text in the
- * prompt sets the draft, and only Enter or Ctrl-C clears it.
- */
-class DraftTracker {
-  draft = false;
-  private inPaste = false;
-
-  clone(): DraftTracker {
-    const copy = new DraftTracker();
-    copy.draft = this.draft;
-    copy.inPaste = this.inPaste;
-    return copy;
-  }
-
-  /** Applies `data`; says whether it held a bare Esc or a Ctrl-C, outside a paste. */
-  feed(data: string): { takeover: boolean } {
-    let takeover = false;
-    let i = 0;
-    while (i < data.length) {
-      if (this.inPaste) {
-        const end = data.indexOf(PASTE_END, i);
-        this.draft = true;
-        if (end < 0) {
-          break;
-        }
-        this.inPaste = false;
-        i = end + PASTE_END.length;
-        continue;
-      }
-      const ch = data[i];
-      if (ch === ESC) {
-        const next = data[i + 1];
-        if (next === "[") {
-          const match = /^\x1b\[([0-9;?]*)[ -/]*([@-~])/.exec(data.slice(i));
-          if (!match) {
-            this.draft = true; // an unfinished sequence: assume the worst
-            break;
-          }
-          if (match[1] === "200" && match[2] === "~") {
-            this.inPaste = true;
-            this.draft = true;
-          } else if (!NEUTRAL_FINALS.has(match[2])) {
-            this.draft = true; // Up/Down recall history; Delete and the rest edit
-          }
-          i += match[0].length;
-          continue;
-        }
-        if (next === "O" && i + 2 < data.length) {
-          if (!NEUTRAL_FINALS.has(data[i + 2])) {
-            this.draft = true;
-          }
-          i += 3;
-          continue;
-        }
-        takeover = true; // a bare Esc (or Alt with a key, which starts with one)
-        i += 1;
-        continue;
-      }
-      if (ch === "\r") {
-        this.draft = false;
-      } else if (ch === "\x03") {
-        this.draft = false;
-        takeover = true;
-      } else if (ch >= " " || !NEUTRAL_CONTROLS.has(ch)) {
-        // Printable, Tab, Backspace, newline, and any control key not known to be harmless.
-        this.draft = true;
-      }
-      i += 1;
-    }
-    return { takeover };
-  }
-}
-
-/**
- * The user's keyboard. While automation owns input the keys are held, except
- * that Esc or Ctrl-C is a takeover: it passes, and the held keys are the
- * user's again. `draft` describes the prompt as it will be once every held
- * key has been delivered.
- */
-export class LaptopInput {
-  private delivered = new DraftTracker();
-  /** Set while holding: the delivered state with the held keys applied. */
-  private projected?: DraftTracker;
-  private held = "";
-  private readonly takeoverListeners: Array<() => void> = [];
-  private readonly draftListeners: Array<(draft: boolean) => void> = [];
-
-  get draft(): boolean {
-    return (this.projected ?? this.delivered).draft;
-  }
-
-  get holding(): boolean {
-    return this.projected !== undefined;
-  }
-
-  key(data: string): "pass" | "hold" {
-    const before = this.draft;
-    if (!this.projected) {
-      this.delivered.feed(data);
-      this.notify(before);
-      return "pass";
-    }
-    const probe = this.projected.clone();
-    if (probe.feed(data).takeover) {
-      // The key goes first, then the held keys are replayed after it.
-      this.delivered.feed(data);
-      this.delivered.feed(this.held);
-      this.projected = undefined;
-      for (const cb of [...this.takeoverListeners]) {
-        cb();
-      }
-      this.notify(before);
-      return "pass";
-    }
-    this.projected = probe;
-    this.held += data;
-    this.notify(before);
-    return "hold";
-  }
-
-  /** Automation takes input: keys are held from now on. */
-  hold(): void {
-    if (!this.projected) {
-      this.projected = this.delivered.clone();
-    }
-  }
-
-  /** Ends holding and returns the held keys, which the caller must write next. */
-  flushHeld(): string {
-    if (this.projected) {
-      this.delivered = this.projected;
-      this.projected = undefined;
-    }
-    const held = this.held;
-    this.held = "";
-    return held;
-  }
-
-  onTakeover(cb: () => void): void {
-    this.takeoverListeners.push(cb);
-  }
-
-  onDraftChange(cb: (draft: boolean) => void): void {
-    this.draftListeners.push(cb);
-  }
-
-  private notify(before: boolean): void {
-    if (this.draft !== before) {
-      for (const cb of [...this.draftListeners]) {
-        cb(this.draft);
-      }
-    }
-  }
-}
-
 /** Glasses text as one paste: nothing in it can end the paste or act as a key. */
 function pasteText(text: string): string {
   return text.replace(/\r\n?/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
@@ -242,8 +82,10 @@ export interface TypistOptions {
  * Types glasses commands into the Claude prompt, one at a time. A command's
  * first write waits until the prompt is ready (R50, R55); its later writes
  * follow only what the command's own scanner sees. From the first write until
- * the command completes, and then until the prompt is positively ready again,
- * the user's keys are held.
+ * the command completes the user's keys are held; keys held by then wait for
+ * the prompt to be positively ready again, unless a model result proved it
+ * (R142). A text command, or a compact agentd cancelled, holds nothing past
+ * its end when nothing was held (R143, R148).
  */
 export class Typist {
   private active?: Active;
@@ -301,7 +143,8 @@ export class Typist {
       this.options.binding.uncertain = true;
     }
     this.settle(active, "cancelled");
-    this.end(active);
+    // R148: a compact agentd gave up on stops owning input at once.
+    this.end(active, active.phase === "compacting" ? "unless_held" : "when_ready");
     this.step();
   }
 
@@ -314,10 +157,18 @@ export class Typist {
     }
   }
 
+  /** Stops for good: a command still running fails `exited`, and nothing is held any more. */
   dispose(): void {
     this.disposed = true;
     this.clock.clearTimeout(this.timer);
     this.timer = undefined;
+    this.releaseAfter = undefined;
+    const active = this.active;
+    this.active = undefined;
+    if (active) {
+      this.settle(active, "exited");
+    }
+    this.input.flushHeld();
   }
 
   private typeable(cmd: TypeCommand): boolean {
@@ -363,9 +214,9 @@ export class Typist {
           if (this.stale(active)) {
             this.cancel(active.cmd.cmdId);
           } else if (active.scanner?.seen(RESULT_MARKER)) {
+            // R142: the result line is positive proof the prompt is free again.
             this.settle(active);
-            this.end(active);
-            this.tryRelease();
+            this.end(active, "now");
           } else if (now >= active.deadline) {
             this.recover(active, now);
           }
@@ -437,7 +288,8 @@ export class Typist {
       case "text":
         this.pty.write(`${PASTE_START}${pasteText(cmd.text ?? "")}${PASTE_END}\r`);
         this.settle(active);
-        this.end(active);
+        // R143: the keyboard is never frozen for the turn this text starts.
+        this.end(active, "unless_held");
         break;
     }
     this.options.onWritten?.(cmd.cmdId, now);
@@ -462,15 +314,29 @@ export class Typist {
     active.resolve(error ? { ok: false, error } : { ok: true });
   }
 
-  /** The command no longer owns input; any held keys wait for positive readiness. */
-  private end(active: Active): void {
+  /**
+   * The command no longer owns input. Holding then ends as `release` says:
+   * - `when_ready`: once the prompt is positively ready (the brief's rule);
+   * - `unless_held`: at once when no key was held, otherwise when ready;
+   * - `now`: at once, replaying the held keys.
+   */
+  private end(active: Active, release: "when_ready" | "unless_held" | "now" = "when_ready"): void {
     if (this.active !== active) {
       return;
     }
     this.active = undefined;
-    if (active.writtenAt !== undefined && this.input.holding) {
-      this.releaseAfter = active.writtenAt;
+    if (active.writtenAt === undefined || !this.input.holding) {
+      return;
     }
+    if (release === "now" || (release === "unless_held" && !this.input.hasHeld)) {
+      this.releaseAfter = undefined;
+      const held = this.input.flushHeld();
+      if (held) {
+        this.pty.write(held);
+      }
+      return;
+    }
+    this.releaseAfter = active.writtenAt;
   }
 
   /** Positive readiness: idle, written after the command's first write, and the binding not uncertain. */

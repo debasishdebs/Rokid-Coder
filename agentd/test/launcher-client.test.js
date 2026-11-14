@@ -49,9 +49,10 @@ test("rk_claude_types_glasses_text_and_compact_through_the_hub", async () => {
   });
 });
 
+// The fake stays busy long enough for the 100 ms submit check to see it (R145).
 test("rk_claude_reports_laptop_draft_to_the_hub", async () => {
   await withTempDir(async (dir) => {
-    await withBoundRk(dir, { FAKE_SESSION_ID: "sess-e2e" }, async ({ hub, run, key }) => {
+    await withBoundRk(dir, { FAKE_SESSION_ID: "sess-e2e", FAKE_BUSY_MS: "600" }, async ({ hub, run, key }) => {
       assert.equal(hub.laptopDraft(key), false);
       run.write("half");
       await until(() => hub.laptopDraft(key), 3000, "laptop_state draft:true");
@@ -63,16 +64,17 @@ test("rk_claude_reports_laptop_draft_to_the_hub", async () => {
 
 test("rk_claude_hub_cancel_while_waiting_types_nothing", async () => {
   await withTempDir(async (dir) => {
-    await withBoundRk(dir, { FAKE_SESSION_ID: "sess-e2e" }, async ({ hub, run, key }) => {
+    await withBoundRk(dir, { FAKE_SESSION_ID: "sess-e2e", FAKE_BUSY_MS: "600" }, async ({ hub, run, key }) => {
       run.write("draft");
       await until(() => hub.laptopDraft(key), 3000, "the draft");
       const pending = hub.send(key, { command: "text", text: "never typed" });
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      // The socket keeps order: the launcher sees type_command, then cancel_command.
       hub.cancel(key, "cancelled");
       assert.deepEqual(await pending, { ok: false, error: "cancelled" });
       // With the draft submitted the prompt is ready again; a live command would type now.
       run.write("\r");
       await run.until("reply: draft");
+      await until(() => !hub.laptopDraft(key), 3000, "the submitted draft to clear");
       await new Promise((resolve) => setTimeout(resolve, 1500));
       assert.equal(run.out.includes("never typed"), false);
       // And the typist is free for the next one.

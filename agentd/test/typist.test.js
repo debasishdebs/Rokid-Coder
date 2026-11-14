@@ -2,7 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { LaptopInput, Typist, sessionReady } = require("../dist/launcher/typist.js");
+const { Typist, sessionReady } = require("../dist/launcher/typist.js");
+const { LaptopInput, sessionBusySince } = require("../dist/launcher/laptop-input.js");
 const { readClaudeSession } = require("../dist/launcher/claude-sessions.js");
 const { spawnPty } = require("../dist/launcher/pty.js");
 const { withTempDir } = require("./helpers/daemon.js");
@@ -93,8 +94,8 @@ function track(promise) {
 function setup({ gen = 1 } = {}) {
   const pty = new FakePty();
   const clock = new FakeClock();
-  const input = new LaptopInput();
   const session = { status: "idle", statusUpdatedAt: clock.now() - 10_000 };
+  const input = new LaptopInput({ clock, busySince: (at) => sessionBusySince(session, at) });
   const binding = { gen, uncertain: false };
   const written = [];
   const typist = new Typist(pty, input, (after) => sessionReady(session, after), clock, {
@@ -162,9 +163,10 @@ test("draft_on_the_real_fake_is_never_appended_to", async () => {
     child.onData((chunk) => {
       out += chunk;
     });
-    const input = new LaptopInput();
+    const clock = scaledClock(20);
+    const input = new LaptopInput({ clock });
     const binding = { gen: 1, uncertain: false };
-    const typist = new Typist(child, input, (after) => sessionReady(readClaudeSession(sessionsDir, child.pid), after), scaledClock(20), {
+    const typist = new Typist(child, input, (after) => sessionReady(readClaudeSession(sessionsDir, child.pid), after), clock, {
       binding,
     });
     try {
@@ -191,6 +193,15 @@ test("draft_cleared_by_enter_or_ctrl_c_then_command_runs", async () => {
     const box = await t.run({ command: "compact" }, 5000);
     assert.equal(box.result, undefined);
     t.type(clear);
+    if (clear === "\r") {
+      // R145: the Enter counts once Claude's file shows the submit.
+      assert.equal(t.input.draft, true, "not before the proof");
+      await t.advance(200);
+      t.session.status = "busy";
+      t.session.statusUpdatedAt = t.clock.now();
+      await t.advance(200);
+      freshIdle(t);
+    }
     assert.equal(t.input.draft, false, JSON.stringify(clear));
     t.pty.writes.length = 0;
     await t.advance(600);
@@ -200,49 +211,132 @@ test("draft_cleared_by_enter_or_ctrl_c_then_command_runs", async () => {
   }
 });
 
+const bareInput = () => new LaptopInput({ clock: new FakeClock() });
+
 test("paste_marks_draft", () => {
-  const input = new LaptopInput();
+  const input = bareInput();
   assert.equal(input.draft, false);
   assert.equal(input.key(PASTE("pasted")), "pass");
   assert.equal(input.draft, true);
   // A Ctrl-C inside a paste is pasted text, not a clear.
-  const other = new LaptopInput();
+  const other = bareInput();
   other.key(PASTE("a\x03b"));
   assert.equal(other.draft, true);
 });
 
 test("up_arrow_recall_marks_draft", () => {
   for (const key of ["\x1b[A", "\x1bOA", "\x1b[B", "\t", "\x7f", "\b", "x"]) {
-    const input = new LaptopInput();
+    const input = bareInput();
     input.key(key);
     assert.equal(input.draft, true, JSON.stringify(key));
   }
   // Cursor moves on an empty prompt change nothing.
-  const input = new LaptopInput();
+  const input = bareInput();
   input.key("\x1b[D");
   input.key("\x1b[C");
   assert.equal(input.draft, false);
 });
 
 test("ctrl_u_does_not_clear_draft", () => {
-  const input = new LaptopInput();
+  const input = bareInput();
   input.key("abc");
   input.key("\x1b[D");
   input.key("\x15");
   assert.equal(input.draft, true);
-  input.key("\r");
+  input.key("\x03");
   assert.equal(input.draft, false);
 });
 
 test("draft_changes_are_reported", () => {
-  const input = new LaptopInput();
+  const input = bareInput();
   const seen = [];
   input.onDraftChange((draft) => seen.push(draft));
   input.key("a");
   input.key("b");
-  input.key("\r");
-  input.key("\r");
+  input.key("\x03");
+  input.key("\x03");
   assert.deepEqual(seen, [true, false]);
+});
+
+test("user_esc_marks_draft", async () => {
+  // On an empty prompt: Esc may restore queued text or open the rewind selector.
+  const input = bareInput();
+  input.key("\x1b");
+  assert.equal(input.draft, true);
+  input.key("\x03");
+  assert.equal(input.draft, false);
+  // While automation owns input, the Esc that takes over marks it too.
+  const t = setup();
+  await t.run({ command: "compact" }, 600);
+  assert.equal(t.input.draft, false);
+  assert.equal(t.type("\x1b"), "pass");
+  assert.equal(t.input.draft, true);
+  t.typist.dispose();
+});
+
+test("enter_with_busy_flip_clears_draft", async () => {
+  const t = setup();
+  const seen = [];
+  t.input.onDraftChange((draft) => seen.push(draft));
+  t.type("hello");
+  t.type("\r");
+  await t.advance(1000);
+  assert.equal(t.input.draft, true);
+  t.session.status = "busy";
+  t.session.statusUpdatedAt = t.clock.now();
+  await t.advance(100);
+  assert.equal(t.input.draft, false);
+  assert.deepEqual(seen, [true, false]);
+  t.typist.dispose();
+});
+
+test("enter_without_busy_flip_keeps_draft", async () => {
+  const t = setup();
+  t.type("hello");
+  // A busy read from before the Enter proves nothing.
+  t.session.status = "busy";
+  t.session.statusUpdatedAt = t.clock.now() - 1;
+  t.type("\r");
+  await t.advance(1600);
+  assert.equal(t.input.draft, true);
+  // Nor does a flip after the 1.5 s window.
+  t.session.statusUpdatedAt = t.clock.now();
+  await t.advance(1000);
+  assert.equal(t.input.draft, true);
+  t.typist.dispose();
+});
+
+test("backslash_enter_keeps_draft", async () => {
+  const t = setup();
+  t.type("first line \\");
+  t.type("\r");
+  t.type("second");
+  await t.advance(2000);
+  assert.equal(t.input.draft, true);
+  const box = await t.run({ command: "text", text: "glasses" }, 60_100);
+  assert.deepEqual(box.result, { ok: false, error: "laptop_draft" });
+  assert.deepEqual(t.pty.writes.filter((w) => w.includes("glasses")), []);
+  t.typist.dispose();
+});
+
+test("meta_enter_keeps_draft", async () => {
+  const t = setup();
+  t.type("first line");
+  t.type("\x1b\r");
+  await t.advance(2000);
+  assert.equal(t.input.draft, true);
+  t.typist.dispose();
+});
+
+test("mouse_reports_type_nothing_and_a_bad_csi_does_not_hide_a_ctrl_c", () => {
+  const input = bareInput();
+  input.key("\x1b[<0;12;5M");
+  input.key("\x1b[<64;12;5m");
+  assert.equal(input.draft, false, "a click or a wheel turn is not a draft");
+  const other = bareInput();
+  other.key("ab");
+  other.key("\x1b[1\x03");
+  assert.equal(other.draft, false, "the Ctrl-C after a malformed CSI still clears");
 });
 
 test("statusUpdatedAt_older_than_notBefore_is_not_ready", async () => {
@@ -505,6 +599,25 @@ test("cancel_between_model_writes_leaves_the_real_fake_clean", async () => {
   });
 });
 
+test("esc_takeover_during_dialog_leaves_the_real_fake_clean", async () => {
+  await withFake({}, async ({ child, typist, input, binding, state, writes, hooks }) => {
+    // The user presses Esc the moment the command is typed, before the dialog's marker.
+    hooks.onWritten = () => {
+      if (input.key("\x1b") === "pass") child.write("\x1b");
+    };
+    const result = await typist.run({ cmdId: "c1", gen: 1, command: "model", model: "haiku" });
+    assert.deepEqual(result, { ok: false, error: "taken_over" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(writes, ["/model haiku\r"], "nothing more after the takeover");
+    assert.equal(binding.uncertain, false);
+    const end = await until(async () => {
+      const s = await state();
+      return s.status === "idle" ? s : undefined;
+    }, 5000, "the fake to settle");
+    assert.deepEqual({ dialogOpen: end.dialogOpen, line: end.line, model: end.model }, { dialogOpen: false, line: "", model: "opus" });
+  });
+});
+
 test("model_no_dialog_recovers_and_fake_state_clean", async () => {
   await withFake({ FAKE_NO_DIALOG: "1" }, async ({ typist, binding, state, writes }) => {
     const result = await typist.run({ cmdId: "c1", gen: 1, command: "model", model: "haiku" });
@@ -545,28 +658,90 @@ test("esc_during_model_takes_over_and_writes_nothing_more", async () => {
   t.typist.dispose();
 });
 
-test("user_keys_held_during_model_and_replayed_after_positive_idle", async () => {
+test("held_keys_replayed_after_model_ok_without_status_bump", async () => {
   const t = setup();
   const box = await t.run({ command: "model", model: "haiku" }, 600);
-  const firstWrite = t.clock.now();
+  // The dialog made the file busy; it never goes idle again after the switch.
   t.session.status = "busy";
-  t.session.statusUpdatedAt = firstWrite;
+  t.session.statusUpdatedAt = t.clock.now();
   assert.equal(t.type("he"), "hold");
   t.pty.emit("Switch model?");
   assert.equal(t.type("llo"), "hold");
+  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\r"], "held while the command owns input");
   t.pty.emit("Set model to haiku");
-  await t.advance(100);
+  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\r", "hello"], "R142: replayed at the result");
+  await flush();
   assert.deepEqual(box.result, { ok: true });
-  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\r"]);
-  await t.advance(5000);
-  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\r"], "busy: still held");
-  assert.equal(t.type("!"), "hold", "and still owned");
-  freshIdle(t);
-  await t.advance(200);
-  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\r", "hello!"]);
-  assert.equal(t.type("x"), "pass");
+  assert.equal(t.type("!"), "pass");
   assert.equal(t.input.draft, true, "the replayed keys are a draft");
   t.typist.dispose();
+});
+
+test("text_command_does_not_freeze_laptop_keys", async () => {
+  const t = setup();
+  const box = await t.run({ command: "text", text: "from the glasses" }, 600);
+  assert.deepEqual(box.result, { ok: true });
+  // Claude's turn: the file reads busy. The user answers a prompt at the laptop.
+  t.session.status = "busy";
+  t.session.statusUpdatedAt = t.clock.now();
+  assert.equal(t.type("1"), "pass");
+  assert.equal(t.type("\r"), "pass");
+  assert.deepEqual(t.pty.writes.slice(1), ["1", "\r"]);
+  t.typist.dispose();
+});
+
+test("cancel_after_compact_ok_releases_ownership", async () => {
+  // Without a cancel the compact owns input until compact_done.
+  const t = setup();
+  const box = await t.run({ command: "compact" }, 600);
+  assert.deepEqual(box.result, { ok: true });
+  assert.equal(t.input.holding, true);
+  t.typist.dispose();
+
+  // Cancelled with nothing held: the keyboard is free at once.
+  const u = setup();
+  await u.run({ command: "compact" }, 600);
+  u.session.status = "busy";
+  u.session.statusUpdatedAt = u.clock.now();
+  u.typist.cancel("c1");
+  assert.equal(u.input.holding, false);
+  assert.equal(u.type("x"), "pass");
+  assert.deepEqual(u.pty.writes, ["/compact\r", "x"]);
+  const next = await u.run({ cmdId: "c2", command: "compact" });
+  assert.equal(next.result, undefined, "the typist is free for the next command");
+  u.typist.dispose();
+
+  // Keys already held wait for positive readiness, or a takeover.
+  for (const release of ["idle", "takeover"]) {
+    const v = setup();
+    await v.run({ command: "compact" }, 600);
+    v.session.status = "busy";
+    v.session.statusUpdatedAt = v.clock.now();
+    assert.equal(v.type("q"), "hold");
+    v.typist.cancel("c1");
+    assert.equal(v.type("w"), "hold", "still behind the held key");
+    await v.advance(5000);
+    assert.deepEqual(v.pty.writes, ["/compact\r"]);
+    if (release === "idle") {
+      freshIdle(v);
+      await v.advance(200);
+      assert.deepEqual(v.pty.writes, ["/compact\r", "qw"]);
+    } else {
+      assert.equal(v.type("\x03"), "pass");
+      assert.deepEqual(v.pty.writes, ["/compact\r", "\x03", "qw"]);
+    }
+    v.typist.dispose();
+  }
+});
+
+test("dispose_fails_a_running_command_exited_and_holds_nothing", async () => {
+  const t = setup();
+  const box = await t.run({ command: "model", model: "haiku" }, 600);
+  t.type("k");
+  t.typist.dispose();
+  await flush();
+  assert.deepEqual(box.result, { ok: false, error: "exited" });
+  assert.equal(t.input.holding, false);
 });
 
 test("keys_held_through_compact_until_compact_done", async () => {
@@ -678,13 +853,15 @@ async function withFake(extra, body) {
     const binding = { gen: 1, uncertain: false };
     const hooks = { onWritten: () => {} };
     const ready = (after) => sessionReady(readClaudeSession(sessionsDir, child.pid), after);
-    const typist = new Typist(recording, new LaptopInput(), ready, scaledClock(20), {
+    const clock = scaledClock(20);
+    const input = new LaptopInput({ clock, busySince: (at) => sessionBusySince(readClaudeSession(sessionsDir, child.pid), at) });
+    const typist = new Typist(recording, input, ready, clock, {
       binding,
       onWritten: (cmdId, at) => hooks.onWritten(cmdId, at),
     });
     try {
       await until(() => out.includes("fake-claude ready"), 5000, "the fake");
-      await body({ child, typist, binding, writes, hooks, state: () => dumpState(child.pid, stateFile) });
+      await body({ child, typist, input, binding, writes, hooks, state: () => dumpState(child.pid, stateFile) });
     } finally {
       typist.dispose();
       child.kill("SIGKILL");

@@ -313,6 +313,7 @@ async function runClaude(args: string[]): Promise<void> {
       onUp: () => {
         boundId = undefined;
         requestedId = undefined;
+        client.onBound(undefined);
         client.onLinkUp();
         if (gaveUp && !finished) {
           // A late-started agentd gets a fresh window to find the session.
@@ -326,6 +327,7 @@ async function runClaude(args: string[]): Promise<void> {
         switch (frame.type) {
           case "bind_accepted":
             boundId = requestedId ?? boundId;
+            client.onBound(boundId);
             binding.gen = typeof frame.gen === "number" ? frame.gen : binding.gen;
             if (!announced) {
               announced = true;
@@ -336,6 +338,7 @@ async function runClaude(args: string[]): Promise<void> {
             requestedId = undefined;
             if (frame.reason === "detached") {
               boundId = undefined;
+              client.onBound(undefined);
             }
             break;
           case "binding_state":
