@@ -145,6 +145,18 @@ class AgentdClient(
     }
 
     /**
+     * [publish], but only while [generation] is still current, checked under [stateLock] so a concurrent
+     * [stop] (which advances the generation, then clears the state under the same lock) cannot be
+     * overwritten by a loop that passed its check just before it.
+     */
+    private fun publishIfCurrent(generation: Long, state: ConnectionState, detail: String? = null): Boolean =
+        synchronized(stateLock) {
+            if (!sockets.isCurrent(generation)) return false
+            publish(state, detail)
+            true
+        }
+
+    /**
      * Another transport (the inbound listener beside this slot) wrote over the shared connection state and
      * is gone: this slot's own state goes back, refused or not. Nothing is written for a slot with none.
      */
@@ -187,7 +199,7 @@ class AgentdClient(
             // Every dial, redials included: a pairing that went stale since the last one is not dialled.
             if (!dialAllowed()) return authFailed(generation, PairingCopy.SIGNED_OUT)
             // A refused pairing being tried again keeps saying so, rather than flickering to Connecting.
-            if (!redialing) publish(ConnectionState.CONNECTING)
+            if (!redialing && !publishIfCurrent(generation, ConnectionState.CONNECTING)) return
             redialing = false
             val result = try {
                 connectOnce(config, steer, http, generation, backoff)
@@ -211,10 +223,10 @@ class AgentdClient(
                     continue
                 }
                 is ConnectionOutcome.RetryWithDetail -> {
-                    publish(ConnectionState.DISCONNECTED, result.detail)
+                    publishIfCurrent(generation, ConnectionState.DISCONNECTED, result.detail)
                 }
                 ConnectionOutcome.Retry -> {
-                    publish(ConnectionState.DISCONNECTED, "Connection lost")
+                    publishIfCurrent(generation, ConnectionState.DISCONNECTED, "Connection lost")
                 }
             }
             delay(backoff.nextDelayMs())
@@ -222,9 +234,11 @@ class AgentdClient(
     }
 
     private fun authFailed(generation: Long, detail: String) {
-        if (!sockets.isCurrent(generation)) return
-        _needsRepair.value = true
-        publish(ConnectionState.AUTH_FAILED, detail)
+        synchronized(stateLock) {
+            if (!sockets.isCurrent(generation)) return
+            _needsRepair.value = true
+            publish(ConnectionState.AUTH_FAILED, detail)
+        }
     }
 
     private suspend fun connectOnce(
