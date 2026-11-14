@@ -178,10 +178,10 @@ export class Typist {
     binding.uncertain = true;
   }
 
-  /** R161: still uncertain, unless Claude's own file has since shown it idle. */
-  uncertain(): boolean {
+  /** R161: still uncertain, unless Claude's own file, as `ready` reads it, has since shown it idle. */
+  uncertain(ready: (after?: number) => boolean = this.ready): boolean {
     const binding = this.options.binding;
-    if (binding.uncertain && binding.uncertainSince !== undefined && this.ready(binding.uncertainSince)) {
+    if (binding.uncertain && binding.uncertainSince !== undefined && ready(binding.uncertainSince)) {
       binding.uncertain = false;
       binding.uncertainSince = undefined;
     }

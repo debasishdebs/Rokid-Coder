@@ -56,8 +56,9 @@ export class LauncherClient {
   private readonly child: PtyChild;
   private readonly send: (frame: Frame) => void;
   private readonly clock: Clock;
-  /** The pid whose sessions file the bind poll last found. */
-  private polledPid?: number;
+  private readonly sessionsDir: string;
+  /** The session the bind poll last found. */
+  private polled?: { sessionId: string; pid: number };
   /** The session agentd accepted; readiness reads only its file. */
   private owned?: { sessionId: string; pid: number };
   private epoch = 0;
@@ -70,6 +71,7 @@ export class LauncherClient {
     this.child = options.child;
     this.send = options.send;
     this.clock = options.clock ?? systemClock;
+    this.sessionsDir = options.sessionsDir;
     const readOwned = (): ClaudeSessionFile | undefined => {
       const owned = this.owned;
       const file = owned ? readClaudeSession(options.sessionsDir, owned.pid) : undefined;
@@ -101,19 +103,28 @@ export class LauncherClient {
     this.typist.markUncertain();
   }
 
-  /** R161: the launcher's own uncertainty, after a fresh look at Claude's file. */
+  /**
+   * R161: the launcher's own uncertainty, after a fresh look at Claude's file.
+   * N1: while unbound, as when it asks to bind after a link blip, that is the
+   * file the bind poll found, so a flag Claude has since cleared is never sent.
+   */
   uncertain(): boolean {
-    return this.typist.uncertain();
+    if (this.owned) {
+      return this.typist.uncertain();
+    }
+    const polled = this.polled;
+    const file = polled ? readClaudeSession(this.sessionsDir, polled.pid) : undefined;
+    return this.typist.uncertain((after) => sessionReady(file?.sessionId === polled?.sessionId ? file : undefined, after));
   }
 
   /** The owned session the bind poll found. It counts for readiness only once agentd accepts it. */
   setSession(session: ClaudeSessionFile): void {
-    this.polledPid = session.pid;
+    this.polled = { sessionId: session.sessionId, pid: session.pid };
   }
 
   /** The session agentd accepted the bind for, or undefined while none is bound. */
   onBound(sessionId: string | undefined): void {
-    this.owned = sessionId !== undefined && this.polledPid !== undefined ? { sessionId, pid: this.polledPid } : undefined;
+    this.owned = sessionId !== undefined && this.polled !== undefined ? { sessionId, pid: this.polled.pid } : undefined;
   }
 
   /** The frames from agentd that are the typist's. Returns false for any other. */

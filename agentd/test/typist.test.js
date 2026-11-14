@@ -1028,3 +1028,26 @@ test("link_drop_after_compact_ok_releases_keyboard", async () => {
     }
   });
 });
+
+// N1: an unbound launcher still clears its own uncertainty from Claude's file.
+test("unbound_launcher_clears_uncertainty_from_its_polled_session_file", async () => {
+  await withTempDir(async (dir) => {
+    const pty = new FakePty();
+    const clock = new FakeClock();
+    const file = path.join(dir, `${pty.pid}.json`);
+    const write = (status, at) => fs.writeFileSync(file, JSON.stringify({ pid: pty.pid, sessionId: "s1", status, statusUpdatedAt: at }));
+    const since = clock.now() - 1000;
+    const binding = { gen: 1, uncertain: true, uncertainSince: since };
+    const client = new LauncherClient({ child: pty, send: () => {}, binding, sessionsDir: dir, clock });
+    try {
+      client.setSession({ pid: pty.pid, sessionId: "s1", status: "idle" });
+      client.onBound(undefined);
+      write("idle", since - 1);
+      assert.equal(client.uncertain(), true, "an idle from before the write proves nothing");
+      write("idle", since + 1);
+      assert.equal(client.uncertain(), false, "the bind after a link blip carries the launcher's real state");
+    } finally {
+      client.dispose();
+    }
+  });
+});
