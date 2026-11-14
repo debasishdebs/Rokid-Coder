@@ -68,6 +68,14 @@ class AgentsMonitorService : Service() {
             secure = { AgentsRuntime.link.value?.secure == true },
             glasses = { AgentsRuntime.alertGlasses },
             post = { work -> alertWork.trySend(work) },
+            schedule = { delayMs, work ->
+                val timer = alertScope.launch {
+                    delay(delayMs)
+                    work()
+                }
+                val cancel: () -> Unit = { timer.cancel() }
+                cancel
+            },
         )
     }
 

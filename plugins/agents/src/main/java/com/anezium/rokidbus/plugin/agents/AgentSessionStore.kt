@@ -19,6 +19,8 @@ data class LinkMachine(
     val overTailnet: Boolean,
 )
 
+private const val MAX_NOT_APPLIED = 32
+
 class AgentSessionStore {
     private val providerSessions = AgentProvider.values().associateWith {
         linkedMapOf<String, AgentSession>()
@@ -144,12 +146,30 @@ class AgentSessionStore {
             sessions.filter { it.provider == provider }.forEach { replacement[it.id] = it }
             providerSessions[provider] = replacement
         }
+        sessions.forEach { notApplied.remove(it.key) }
         publish(nowMs)
     }
+
+    /**
+     * A mode change agentd refused, kept with the session until its next upsert:
+     * the menu shows the real mode and this beside it (R101). A brief is an extra.
+     */
+    private val notApplied = LinkedHashMap<String, String>()
+
+    @Synchronized
+    fun noteNotApplied(sessionKey: String, error: String) {
+        notApplied.remove(sessionKey)
+        notApplied[sessionKey] = error
+        while (notApplied.size > MAX_NOT_APPLIED) notApplied.remove(notApplied.keys.first())
+    }
+
+    @Synchronized
+    fun notApplied(sessionKey: String): String? = notApplied[sessionKey]
 
     @Synchronized
     fun upsert(session: AgentSession, nowMs: Long = System.currentTimeMillis()) {
         providerSessions.getValue(session.provider)[session.id] = session
+        notApplied.remove(session.key)
         publish(nowMs)
     }
 
@@ -160,6 +180,7 @@ class AgentSessionStore {
         nowMs: Long = System.currentTimeMillis(),
     ) {
         providerSessions.getValue(provider).remove(sessionId)
+        notApplied.remove("${provider.wireValue}:$sessionId")
         publish(nowMs)
     }
 

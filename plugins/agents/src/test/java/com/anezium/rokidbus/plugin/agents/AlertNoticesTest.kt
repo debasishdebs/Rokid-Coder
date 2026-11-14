@@ -314,10 +314,21 @@ class AlertNoticesTest {
 
     @Test
     fun merged_briefs_arrive_as_lines() {
-        val notice = AlertNotices.brief("Session control", "Not applied: a\nApprove-all off — x: session ended\n\n" + "y".repeat(10_000))
+        val notice = AlertNotices.briefLines(
+            "Session control",
+            listOf("Not applied: a", "Approve-all off — x: session ended", "", "y".repeat(10_000)),
+        )
 
         assertNull(notice.body)
         assertEquals(3, notice.lines.size)
         assertTrue(notice.lines.all { it.length <= 240 })
+    }
+
+    @Test
+    fun a_body_with_newlines_stays_one_line() {
+        val notice = AlertNotices.brief("Reply not sent", "line one\nline two")
+
+        assertEquals("line one line two", notice.body)
+        assertTrue(notice.lines.isEmpty())
     }
 }

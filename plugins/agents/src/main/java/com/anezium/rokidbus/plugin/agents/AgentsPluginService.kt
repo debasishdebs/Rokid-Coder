@@ -136,6 +136,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private var menuReading: Pair<String, String>? = null
     private val controlMsgIds = ArrayDeque<String>()
 
+    /** The mode_set frames among them, with their session: a rejection of one is shown on that session's menu. */
+    private val modeSetMsgIds = LinkedHashMap<String, String>()
+
     /**
      * Set the instant a reply is sent, cleared the instant something real says
      * so — the daemon's own "working" status, a failure notice, or simply
@@ -415,14 +418,15 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     override fun onNexusNoticeClosed(reason: NexusNoticeCloseReason) {
-        if (!v2BandUp) {
+        val director = AgentsRuntime.alertDirector
+        routeNoticeClose(
+            reason,
+            v2BandUp,
+            clearV2 = { v2BandUp = false },
             // A brief's band ending: the next queued brief may show.
-            AgentsRuntime.alertDirector?.onBriefClosed()
-            return
-        }
-        AgentsRuntime.alertDirector?.onBandClosed(reason)
-        // Our own hide already cleared it; any other close means no band of ours is up.
-        if (reason != NexusNoticeCloseReason.OWNER) v2BandUp = false
+            band = { director?.onBandClosed(it) },
+            brief = { director?.onBriefClosed(it) },
+        )
     }
 
     override fun onDestroy() {
@@ -453,8 +457,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         if (v2BandUp || AgentsRuntime.alertDirector?.slotBusy == true) return
         // A computer that has spoken v2 stays off this path even while its link is down (R92).
         val steering = AgentsRuntime.link.value?.secure == true
+        val director = AgentsRuntime.alertDirector
         val pending = attention.pending(AgentsRuntime.store.sessions.value) { session ->
-            configStore.v1AttentionSuppressed(session, steering)
+            // A session that had a v2 alert on this link is the alerts' to announce, not v1's.
+            configStore.v1AttentionSuppressed(session, steering) || director?.hadAlert(session.key) == true
         }
         if (pending.isEmpty()) return
         val notice = if (pending.size == 1) singleNotice(pending.single()) else groupNotice(pending)
@@ -524,6 +530,13 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     override fun brief(title: String, body: String) = showBriefNow(title, body)
+
+    override fun briefLines(title: String, lines: List<String>) {
+        val client = nexusClient
+        val shown = client != null && client.supportsNoticeSurface &&
+            showOtherNotice(client, AlertNotices.briefLines(title, lines)) == NexusSdkResult.SENT
+        if (!shown) AgentsRuntime.alertDirector?.onBriefClosed(NexusNoticeCloseReason.OWNER)
+    }
 
     /** What kept a v1 or OpenClaw attention waiting is gone: offer it again. */
     override fun slotFree() {
@@ -1057,7 +1070,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             }
             QuestionRow.Send -> {
                 if (AgentsRuntime.link.value?.secure != true) {
-                    showBriefNotice(AlertCoordinator.MONITOR_ONLY_TITLE, AlertCoordinator.MONITOR_ONLY_BODY)
+                    showBriefNotice(AlertCoordinator.MONITOR_ONLY_TITLE, AlertCoordinator.MONITOR_ONLY_BODY, safety = true)
                     return
                 }
                 val answers = flow.answers() ?: return
@@ -1099,7 +1112,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         // A menu that was covered starts its tap guard now that it is on screen again.
         val shown = ControlMenu.shown(state, now)
         if (shown !== state) menu = shown
-        val page = ControlMenu.page(shown, session, secure = AgentsRuntime.link.value?.secure == true, now = now)
+        // What agentd refused stays beside the real mode until the session's next upsert (R101).
+        val withNotice = shown.copy(notApplied = AgentsRuntime.store.notApplied(state.sessionKey))
+        val page = ControlMenu.page(withNotice, session, secure = AgentsRuntime.link.value?.secure == true, now = now)
         val rows = windowedRows(page.rows, page.selected) { row, selected ->
             NexusCardLine(
                 text = row.text.take(MENU_LINE_CHARS),
@@ -1191,13 +1206,17 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             return
         }
         if (ControlMenu.steers(command)) rememberControlMsgId(msgId) else scheduleModelsTimeout()
+        if (command is ControlMenu.Command.ModeSet) {
+            modeSetMsgIds[msgId] = sessionKey
+            while (modeSetMsgIds.size > CONTROL_MSG_IDS) modeSetMsgIds.remove(modeSetMsgIds.keys.first())
+        }
         AgentsMonitorService.sendV2(applicationContext, frame)
     }
 
     /** The reply card's text, as a v2 `followup`. Nothing about the text is logged. */
     private fun sendFollowup(sessionKey: String, text: String) {
         if (AgentsRuntime.link.value?.secure != true) {
-            showBriefNotice(ControlMenu.NOTICE_TITLE, ControlMenu.MONITOR_ONLY)
+            showBriefNotice(ControlMenu.NOTICE_TITLE, ControlMenu.MONITOR_ONLY, safety = true)
             return
         }
         val msgId = UUID.randomUUID().toString()
@@ -1243,7 +1262,13 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         when (action) {
             is AgentdAction.Ack -> {
                 if (!controlMsgIds.remove(action.msgId)) return
-                ControlMenu.ackNotice(action)?.let { showBriefNotice(ControlMenu.NOTICE_TITLE, it) }
+                val modeSession = modeSetMsgIds.remove(action.msgId)
+                if (modeSession != null && action.result == "rejected") {
+                    // The durable answer is on the menu until the session's next upsert; the brief is an extra.
+                    AgentsRuntime.store.noteNotApplied(modeSession, notApplied(action))
+                    if (surfaceShown && menu?.sessionKey == modeSession) render(show = false)
+                }
+                ControlMenu.ackNotice(action)?.let { showBriefNotice(ControlMenu.NOTICE_TITLE, it, safety = true) }
             }
             is AgentdAction.FollowupClosed -> {
                 // A reply for a window that closed would send into nothing.
@@ -1263,6 +1288,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 showBriefNotice(
                     ControlMenu.NOTICE_TITLE,
                     ControlMenu.modeResetNotice(action.from, heading, action.reason),
+                    safety = true,
                 )
             }
             is AgentdAction.Models -> {
@@ -1273,6 +1299,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             else -> Unit
         }
     }
+
+    private fun notApplied(ack: AgentdAction.Ack): String =
+        ack.error?.singleLine(NOT_APPLIED_CHARS)?.takeIf(String::isNotBlank) ?: "rejected"
 
     /** What a menu row too long for a line opens: its full text, to scroll. */
     private fun menuReader(title: String, text: String): NexusReader {
@@ -1318,15 +1347,17 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private fun thinkingVerb(): String = THINKING_VERBS[thinkingVerbIndex % THINKING_VERBS.size]
 
     /** Every brief goes through the director, which holds it back while an alert band is up (R94). */
-    private fun showBriefNotice(title: String, body: String) {
+    private fun showBriefNotice(title: String, body: String, safety: Boolean = false) {
         val director = AgentsRuntime.alertDirector
-        if (director != null) director.onBrief(title, body) else showBriefNow(title, body)
+        if (director != null) director.onBrief(title, body, safety) else showBriefNow(title, body)
     }
 
     private fun showBriefNow(title: String, body: String) {
-        val client = nexusClient ?: return
-        if (!client.supportsNoticeSurface) return
-        showOtherNotice(client, AlertNotices.brief(title, body))
+        val client = nexusClient
+        val shown = client != null && client.supportsNoticeSurface &&
+            showOtherNotice(client, AlertNotices.brief(title, body)) == NexusSdkResult.SENT
+        // A brief that never reached the glasses has no close coming: free its turn.
+        if (!shown) AgentsRuntime.alertDirector?.onBriefClosed(NexusNoticeCloseReason.OWNER)
     }
 
     private fun attemptAdoption() {
@@ -2096,6 +2127,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         private const val LAUNCH_VERDICT_TIMEOUT_MS = 35_000L
         private const val MENU_LINE_CHARS = 240
         private const val CONTROL_MSG_IDS = 32
+        private const val NOT_APPLIED_CHARS = 120
         private const val ALERT_DECISION_ROWS = 3
         private const val VOICE_ROW = 2
 

@@ -34,6 +34,8 @@ class AlertDirectorTest {
         val briefs = mutableListOf<Pair<String, String>>()
         override fun brief(title: String, body: String) { log += "brief $title"; briefs += title to body }
         override fun slotFree() { log += "free" }
+        val merged = mutableListOf<List<String>>()
+        override fun briefLines(title: String, lines: List<String>) { log += "brief $title"; merged += lines }
         override fun openOutput(alert: AgentdAction.Alert) { log += "output ${alert.id}" }
         override fun openDecision(alert: AgentdAction.Alert) { log += "decision ${alert.id}" }
         override fun openQuestion(alert: AgentdAction.Alert) { log += "question ${alert.id}" }
@@ -44,13 +46,31 @@ class AlertDirectorTest {
     private val written = mutableListOf<JSONObject>()
     private var secure = true
     private var now = 0L
+
+    private class Timer(val delayMs: Long, val work: () -> Unit) {
+        var cancelled = false
+    }
+
+    private val timers = mutableListOf<Timer>()
+
+    /** Fires the brief's pending fallback, as the clock reaching it would. */
+    private fun fireTimer() {
+        val timer = timers.last { !it.cancelled }
+        timer.cancelled = true
+        timer.work()
+    }
+
     private val director = AlertDirector(
         coordinator = AlertCoordinator(clock = { now }),
         write = { written += JSONObject(it) },
         secure = { secure },
         glasses = { glasses },
         post = { it() },
-        clock = { now },
+        schedule = { delayMs, work ->
+            val timer = Timer(delayMs, work).also(timers::add)
+            val cancel: () -> Unit = { timer.cancelled = true }
+            cancel
+        },
     )
 
     private fun alert(
@@ -313,16 +333,51 @@ class AlertDirectorTest {
     }
 
     @Test
-    fun a_lost_brief_close_does_not_stall_the_queue() {
+    fun lost_brief_close_recovers_after_10s() {
         up()
         director.onBrief("One", "a")
         director.onBrief("Two", "b")
         assertEquals(listOf("hide", "brief One"), glasses.log)
+        assertEquals(10_000L, timers.single().delayMs)
 
-        now = 11_000L
-        director.onBrief("Three", "c")
-
+        // No close ever comes; the timer alone moves the queue on, with nothing else arriving.
+        fireTimer()
         assertEquals(listOf("hide", "brief One", "brief Two"), glasses.log)
+
+        fireTimer()
+        assertEquals("free", glasses.log.last())
+    }
+
+    @Test
+    fun a_brief_close_cancels_its_timer() {
+        up()
+        director.onBrief("One", "a")
+        director.onBriefClosed()
+
+        assertTrue(timers.single().cancelled)
+    }
+
+    @Test
+    fun a_brief_taken_by_another_plugin_does_not_chain_the_next() {
+        up()
+        director.onBrief("One", "a")
+        director.onBrief("Two", "b")
+        director.onBriefClosed(NexusNoticeCloseReason.REPLACED)
+
+        assertEquals(listOf("hide", "brief One"), glasses.log)
+        // After its own 10 s the slot is ours again.
+        fireTimer()
+        assertEquals("brief Two", glasses.log.last())
+    }
+
+    @Test
+    fun dedupe_against_brief_on_screen() {
+        up()
+        director.onBrief("Session control", "Not sent")
+        director.onBrief("Session control", "Not sent")
+        director.onBriefClosed()
+
+        assertEquals(1, glasses.log.count { it.startsWith("brief") })
     }
 
     @Test
@@ -341,7 +396,7 @@ class AlertDirectorTest {
     fun safety_brief_never_evicted() {
         up()
         feed(alert())
-        director.onBrief("Session control", "Not applied: busy")
+        director.onBrief("Session control", "Not applied: busy", safety = true)
         director.onBrief("Reply too long", "1")
         director.onBrief("Still working", "2")
         director.onBrief("Computer linked", "3")
@@ -358,23 +413,83 @@ class AlertDirectorTest {
     }
 
     @Test
-    fun a_queue_of_only_safety_briefs_merges_into_one_band_and_drops_none() {
+    fun agentd_text_starting_with_not_applied_is_not_safety() {
         up()
         feed(alert())
-        director.onBrief("Session control", "Not applied: a")
-        director.onBrief("Monitor only", "approve on laptop")
-        director.onBrief("Session control", "Approve-all off — x: session ended")
-        director.onBrief("Session control", "Accept edits off — y: helper restarted")
-        director.onBrief("Session control", "Not applied: b")
+        // agentd's own words (a reply error, a machine name) can say anything.
+        director.onBrief("Reply not sent", "Not applied: from agentd")
+        director.onBrief("Computer linked", "Monitor only — boss")
+        director.onBrief("Still working", "1")
+        director.onBrief("Reply too long", "2")
+        director.onBrief("Can't type here", "3")
         director.onBandClosed(NexusNoticeCloseReason.USER)
-        repeat(3) { director.onBriefClosed() }
+        repeat(6) { director.onBriefClosed() }
 
-        // One merged band carries the first four, then the fifth follows on its own.
-        assertEquals(2, glasses.briefs.size)
-        assertEquals(4, glasses.briefs[0].second.lines().size)
-        assertTrue(glasses.briefs[0].second.contains("Not applied: a"))
-        assertTrue(glasses.briefs[0].second.contains("Accept edits off"))
-        assertEquals("Not applied: b", glasses.briefs[1].second)
+        val shown = glasses.log.filter { it.startsWith("brief") }
+        assertFalse("evicted like any ordinary brief", "brief Reply not sent" in shown)
+        assertEquals(4, shown.size)
+        assertTrue(glasses.merged.isEmpty())
+    }
+
+    @Test
+    fun merged_safety_keeps_newest_six() {
+        up()
+        feed(alert())
+        for (n in 1..12) director.onBrief("Session control", "Not applied: s$n", safety = true)
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+        repeat(8) { director.onBriefClosed() }
+
+        val lines = glasses.merged.flatten() + glasses.briefs.map { it.second }
+        assertTrue(glasses.merged.isNotEmpty())
+        assertTrue(glasses.merged.all { it.size <= 6 })
+        for (n in 7..12) assertTrue("s$n is shown", lines.any { it.endsWith("s$n") })
+        // The title is not repeated in front of each merged line.
+        assertTrue(glasses.merged.flatten().none { it.startsWith("Session control") })
+    }
+
+    @Test
+    fun a_safety_line_already_in_a_merged_band_is_not_queued_again() {
+        up()
+        feed(alert())
+        for (n in 1..5) director.onBrief("Session control", "Not applied: s$n", safety = true)
+        director.onBrief("Session control", "Not applied: s2", safety = true)
+        director.onBandClosed(NexusNoticeCloseReason.USER)
+        repeat(4) { director.onBriefClosed() }
+
+        val lines = glasses.merged.flatten() + glasses.briefs.map { it.second }
+        assertEquals(1, lines.count { it.endsWith("s2") })
+    }
+
+    @Test
+    fun a_session_with_a_v2_alert_is_the_alerts_to_announce() {
+        up()
+        assertFalse(director.hadAlert("claude:s1"))
+        feed(alert())
+        assertTrue(director.hadAlert("claude:s1"))
+        assertFalse(director.hadAlert("claude:s2"))
+
+        up()
+        assertFalse(director.hadAlert("claude:s1"))
+    }
+
+    @Test
+    fun the_service_flag_is_cleared_before_the_director_hears_a_band_close() {
+        val order = mutableListOf<String>()
+        for (reason in listOf(NexusNoticeCloseReason.USER, NexusNoticeCloseReason.TIMEOUT, NexusNoticeCloseReason.REPLACED)) {
+            order.clear()
+            routeNoticeClose(
+                reason, v2BandUp = true,
+                clearV2 = { order += "clear" }, band = { order += "band" }, brief = { order += "brief" },
+            )
+            assertEquals("$reason", listOf("clear", "band"), order)
+        }
+        // Our own hide cleared it already; a brief's close goes to the brief queue.
+        order.clear()
+        routeNoticeClose(NexusNoticeCloseReason.OWNER, true, { order += "clear" }, { order += "band" }, { order += "brief" })
+        assertEquals(listOf("band"), order)
+        order.clear()
+        routeNoticeClose(NexusNoticeCloseReason.TIMEOUT, false, { order += "clear" }, { order += "band" }, { order += "brief" })
+        assertEquals(listOf("brief"), order)
     }
 
     @Test

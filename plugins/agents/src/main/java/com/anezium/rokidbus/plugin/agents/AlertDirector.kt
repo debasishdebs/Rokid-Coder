@@ -17,6 +17,9 @@ interface AlertGlasses {
     fun hideBand()
     fun brief(title: String, body: String)
 
+    /** Several briefs in one band, one per line. */
+    fun briefLines(title: String, lines: List<String>) = brief(title, lines.joinToString(" · "))
+
     /** Nothing of the alerts' is on the band slot any more: a deferred v1 attention may take it. */
     fun slotFree() = Unit
 
@@ -47,7 +50,8 @@ class AlertDirector(
     private val secure: () -> Boolean,
     private val glasses: () -> AlertGlasses?,
     private val post: (() -> Unit) -> Unit,
-    private val clock: () -> Long = System::currentTimeMillis,
+    /** Runs [work] after the delay and returns what cancels it; the lost-close fallback of a brief. */
+    private val schedule: (Long, () -> Unit) -> (() -> Unit) = { _, _ -> {} },
 ) {
     /** The alert whose band the director put up and has not seen end. Only [post]ed work touches it. */
     private var bandId: String? = null
@@ -58,15 +62,34 @@ class AlertDirector(
     /**
      * Briefs wait here while an alert band is up or an earlier brief is on screen:
      * a brief never replaces either (R94, R100). They show one at a time, oldest first.
+     * [safety] is set by the code path that makes the brief, never read from its
+     * text, so agentd's words cannot pass as one (R101). A safety brief that has
+     * merged others holds their [lines].
      */
-    private class Brief(val title: String, val body: String, val safety: Boolean)
+    private class Brief(
+        val title: String,
+        val body: String,
+        val safety: Boolean,
+        val lines: List<String> = emptyList(),
+    ) {
+        val key get() = "$title\u0000$body"
+        fun has(text: String) = body == text || text in lines
+    }
 
     private val briefs = ArrayDeque<Brief>()
-    private var briefShownAt: Long? = null
+    private var onScreen: Brief? = null
+    private var briefTimer: (() -> Unit)? = null
     private var busy = false
 
+    /** Sessions that had a v2 alert on this link; v1 attention must not ring for them too. */
+    private val alertedSessions = HashSet<String>()
+
     /** True while an alert band, a brief or a queued brief holds the slot. Read where [post]ed work runs. */
-    val slotBusy: Boolean get() = bandId != null || briefOnScreen() || briefs.isNotEmpty()
+    val slotBusy: Boolean get() = bandId != null || onScreen != null || briefs.isNotEmpty()
+
+    /** True when [sessionKey] had a v2 alert since the link came up (R92's per-generation guard). */
+    fun hadAlert(sessionKey: String): Boolean = sessionKey in alertedSessions
+
     private var boardKeys: Set<String> = emptySet()
 
     private val _waiting = MutableStateFlow(0)
@@ -78,11 +101,15 @@ class AlertDirector(
         when (event) {
             is AgentdEvent.LinkUp -> {
                 goneId = null
+                alertedSessions.clear()
                 apply(coordinator.onLinkUp())
             }
             is AgentdEvent.LinkDown -> apply(coordinator.onLinkDown())
             is AgentdEvent.Action -> when (val action = event.action) {
-                is AgentdAction.Alert -> apply(coordinator.onAlert(reshowIfGone(action)))
+                is AgentdAction.Alert -> {
+                    alertedSessions += action.sessionKey
+                    apply(coordinator.onAlert(reshowIfGone(action)))
+                }
                 is AgentdAction.AlertClosed -> apply(coordinator.onAlertClosed(action.id, action.reason))
                 is AgentdAction.FollowupClosed -> apply(coordinator.invalidateSession(action.sessionKey))
                 else -> Unit
@@ -126,19 +153,26 @@ class AlertDirector(
 
     /**
      * A message for the wearer that is not an alert. It waits while an alert band
-     * is up or an earlier brief is showing. The queue holds [MAX_BRIEFS], the same
-     * text only once. A full queue drops its oldest ordinary brief; a safety brief
-     * (a refused change, a monitor-only refusal, a mode switched off) is never
-     * dropped, and if only safety briefs fill it they merge into one band of lines.
+     * is up or an earlier brief is showing, in a queue of [MAX_BRIEFS] that holds
+     * the same text once (also against the brief on screen). A full queue drops
+     * its oldest ordinary brief. A [safety] brief is never dropped for an ordinary
+     * one; if only safety briefs fill the queue they merge into one band that keeps
+     * the newest [MERGED_LINES] lines. What matters lasts on the board and the
+     * menu; a brief is an extra.
      */
-    fun onBrief(title: String, body: String) = post {
-        enqueue(Brief(title, body, isSafety(title, body)))
+    fun onBrief(title: String, body: String, safety: Boolean = false) = post {
+        enqueue(Brief(title, body, safety))
         settle()
     }
 
-    /** The band a brief was shown on is gone: its turn is over, the next one may show. */
-    fun onBriefClosed() = post {
-        briefShownAt = null
+    /**
+     * The band a brief was on is gone: the next one may show. Another plugin
+     * taking it is not a close we can wait on, so that slot is held until the
+     * brief's own timer says it is over.
+     */
+    fun onBriefClosed(reason: NexusNoticeCloseReason = NexusNoticeCloseReason.TIMEOUT) = post {
+        if (reason == NexusNoticeCloseReason.REPLACED) return@post
+        briefDone()
         settle()
     }
 
@@ -160,10 +194,14 @@ class AlertDirector(
 
     /** Shows the next brief when the slot is free, and says so once it has emptied. */
     private fun settle() {
-        if (bandId == null && !briefOnScreen()) {
+        if (bandId == null && onScreen == null) {
             val next = briefs.removeFirstOrNull()
-            if (next != null && glasses()?.also { it.brief(next.title, next.body) } != null) {
-                briefShownAt = clock()
+            val g = glasses()
+            if (next != null && g != null) {
+                if (next.lines.size > 1) g.briefLines(next.title, next.lines) else g.brief(next.title, next.body)
+                onScreen = next
+                // A brief's own ttl is 8 s; past this a close that never came is assumed lost.
+                briefTimer = schedule(BRIEF_STALE_MS) { post { briefDone(); settle() } }
             }
         }
         val nowBusy = slotBusy
@@ -171,29 +209,22 @@ class AlertDirector(
         busy = nowBusy
     }
 
-    /** A brief's band closes on its own deadline; a lost close must not stall the queue behind it. */
-    private fun briefOnScreen(): Boolean {
-        val at = briefShownAt ?: return false
-        if (clock() - at > BRIEF_STALE_MS) {
-            briefShownAt = null
-            return false
-        }
-        return true
+    private fun briefDone() {
+        briefTimer?.invoke()
+        briefTimer = null
+        onScreen = null
     }
 
     private fun enqueue(brief: Brief) {
-        if (briefs.any { it.title == brief.title && it.body == brief.body }) return
+        if ((briefs.asSequence() + listOfNotNull(onScreen)).any { same(it, brief) }) return
         if (briefs.size >= MAX_BRIEFS) {
             val ordinary = briefs.indexOfFirst { !it.safety }
             if (ordinary >= 0) {
                 briefs.removeAt(ordinary)
             } else {
-                // Every slot holds a safety brief: one band carries them all.
-                val merged = Brief(
-                    title = briefs.first().title,
-                    body = briefs.joinToString("\n") { line(it) },
-                    safety = true,
-                )
+                // Every slot holds a safety brief: one band carries the newest of them.
+                val lines = briefs.flatMap { it.lines.ifEmpty { listOf(line(it)) } }.takeLast(MERGED_LINES)
+                val merged = Brief(briefs.last().title, lines.last(), safety = true, lines = lines)
                 briefs.clear()
                 briefs.addLast(merged)
             }
@@ -201,14 +232,12 @@ class AlertDirector(
         briefs.addLast(brief)
     }
 
-    private fun line(brief: Brief): String = when {
-        brief.body.isBlank() -> brief.title
-        brief.title.isBlank() -> brief.body
-        else -> "${brief.title} — ${brief.body}"
-    }
+    /** The text of one brief inside a merged band: its body, or its title when it has none. */
+    private fun line(brief: Brief): String = brief.body.ifBlank { brief.title }
+    /** The same message: identical text, or a safety line already inside a merged band. */
+    private fun same(shown: Brief, brief: Brief): Boolean =
+        shown.key == brief.key || (brief.safety && shown.safety && shown.has(brief.body))
 
-    private fun isSafety(title: String, body: String): Boolean =
-        SAFETY_PREFIXES.any { title.startsWith(it) || body.startsWith(it) }
 
     private fun applyEffects(effects: List<AlertCoordinator.Effect>) {
         for (effect in effects) {
@@ -221,7 +250,9 @@ class AlertDirector(
                     glasses()?.hideBand()
                 }
                 is AlertCoordinator.Effect.Send -> write(effect.line)
-                is AlertCoordinator.Effect.Brief -> onBrief(effect.title, effect.body)
+                // The coordinator's only refusal brief is Monitor only; its text is ours, never agentd's.
+                is AlertCoordinator.Effect.Brief ->
+                    onBrief(effect.title, effect.body, safety = effect.title == AlertCoordinator.MONITOR_ONLY_TITLE)
                 is AlertCoordinator.Effect.Invalidate -> glasses()?.invalidate(effect.alertId)
                 is AlertCoordinator.Effect.OpenDecision -> glasses()?.openDecision(effect.alert)
                 is AlertCoordinator.Effect.OpenQuestion -> glasses()?.openQuestion(effect.alert)
@@ -241,7 +272,7 @@ class AlertDirector(
         bandId = alert.id
         goneId = null
         // The alert took the slot from whatever brief was on it.
-        briefShownAt = null
+        briefDone()
     }
 
     /**
@@ -266,9 +297,30 @@ class AlertDirector(
     private companion object {
         const val MAX_BRIEFS = 4
 
+        const val MERGED_LINES = 6
+
         /** A brief's own ttl is 8 s; past this a missing close is assumed lost. */
         const val BRIEF_STALE_MS = 10_000L
-
-        val SAFETY_PREFIXES = listOf("Not applied", "Monitor only", "Approve-all off", "Accept edits off")
     }
+}
+
+/**
+ * Where a notice close goes. A v2 band's own close clears the service's flag
+ * BEFORE the director hears of it: the director's work can run inline, and the
+ * attention it triggers on a free slot must see the band as gone.
+ */
+internal fun routeNoticeClose(
+    reason: NexusNoticeCloseReason,
+    v2BandUp: Boolean,
+    clearV2: () -> Unit,
+    band: (NexusNoticeCloseReason) -> Unit,
+    brief: (NexusNoticeCloseReason) -> Unit,
+) {
+    if (!v2BandUp) {
+        brief(reason)
+        return
+    }
+    // Our own hide already cleared it; any other close means no band of ours is up.
+    if (reason != NexusNoticeCloseReason.OWNER) clearV2()
+    band(reason)
 }

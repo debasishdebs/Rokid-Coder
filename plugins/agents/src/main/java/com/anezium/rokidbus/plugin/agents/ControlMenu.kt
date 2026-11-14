@@ -81,7 +81,7 @@ object ControlMenu {
      * The main menu, in order. A session without v2 (OpenClaw, an old daemon)
      * has nothing to steer, so it offers only its output. Effort is Codex's.
      */
-    fun items(session: AgentSession, secure: Boolean): List<MenuItem> {
+    fun items(session: AgentSession, secure: Boolean, notApplied: String? = null): List<MenuItem> {
         val v2 = session.v2 ?: return listOf(MenuItem.ReadOutput())
         fun steer(sub: String?, enabled: Boolean = true): Pair<String?, Boolean> =
             if (!secure) MONITOR_ONLY to false else sub to enabled
@@ -98,7 +98,9 @@ object ControlMenu {
             },
             v2.followup == FollowupState.WAITING || v2.followup == FollowupState.READY,
         )
-        val approval = steer(approvalDetail(v2))
+        val approval = steer(
+            listOfNotNull(approvalDetail(v2), notApplied?.let { "Not applied: $it" }).joinToString(" · "),
+        )
         val model = capability(v2.canModel, v2.pendingModel)
         val effort = capability(v2.canModel, v2.pendingEffort)
         val compact = capability(v2.canCompact, null)
@@ -185,6 +187,8 @@ object ControlMenu {
         val modelsAskedAt: Long? = null,
         val guardUntil: Long = 0L,
         val rearm: Boolean = false,
+        /** A mode change agentd refused, shown beside the real mode until the next upsert (R101). */
+        val notApplied: String? = null,
     )
 
     /** The state a screen change leaves: ENTER is ignored for [GUARD_MS]. */
@@ -327,7 +331,7 @@ object ControlMenu {
 
     private fun mainEntries(state: MenuState, session: AgentSession, secure: Boolean, now: Long): List<Entry> {
         val codex = session.provider == AgentProvider.CODEX
-        return items(session, secure).map { item ->
+        return items(session, secure, state.notApplied).map { item ->
             val tone = if (item.enabled) NexusRowTone.NORMAL else NexusRowTone.DIM
             val row = Row(
                 text = item.label,
