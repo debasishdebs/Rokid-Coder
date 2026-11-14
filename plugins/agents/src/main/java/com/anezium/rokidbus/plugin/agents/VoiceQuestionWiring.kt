@@ -3,6 +3,7 @@ package com.anezium.rokidbus.plugin.agents
 import android.view.KeyEvent
 import com.anezium.rokidbus.client.plugin.NexusCard
 import com.anezium.rokidbus.client.plugin.NexusCardLine
+import com.anezium.rokidbus.client.plugin.NexusReader
 import com.anezium.rokidbus.client.plugin.NexusRowTone
 import com.anezium.rokidbus.client.plugin.NexusSdkResult
 import com.anezium.rokidbus.client.plugin.NexusSpeechCallbacks
@@ -23,6 +24,9 @@ internal sealed interface VoiceTarget {
 internal class VoiceRun(val target: VoiceTarget) {
     val capture = VoiceCapture()
     var row = 0
+
+    /** True while Read all's reader is up over the heard card. */
+    var reading = false
 
     val kind: VoiceKind
         get() = when (target) {
@@ -48,6 +52,9 @@ internal class VoiceQuestionWiring(
         fun speechSession(callbacks: NexusSpeechCallbacks): NexusSpeechSession?
         fun sendFollowup(sessionKey: String, text: String)
         fun brief(title: String, body: String, safety: Boolean = false)
+
+        /** Words of a long voice reply the glasses show before condensing it (U4/U13). */
+        val voiceWordLimit: Int get() = VoiceCondense.DEFAULT_WORD_LIMIT
     }
 
     // ------------------------------------------------------------------ voice
@@ -96,16 +103,31 @@ internal class VoiceQuestionWiring(
 
     /** A new card state: the selection starts over, and a tap aimed at the old one cannot land on it. */
     private fun view(run: VoiceRun): VoiceView =
-        VoiceCard.view(run.kind, run.capture.state, allowRefused = (run.target as? VoiceTarget.Approval)?.allowRefused == true)
+        VoiceCard.view(
+            run.kind,
+            run.capture.state,
+            allowRefused = (run.target as? VoiceTarget.Approval)?.allowRefused == true,
+            wordLimit = host.voiceWordLimit,
+        )
 
     private fun voiceChanged(run: VoiceRun) {
         run.row = view(run).initial
+        run.reading = false
         screen.rearm()
         if (host.surfaceShown) host.render()
     }
 
     fun onVoiceInput(run: VoiceRun, event: NexusInputEvent) {
         val view = view(run)
+        if (run.reading) {
+            // The hub scrolls the reader; a tap or BACK returns to the heard card, which still holds the reply.
+            if (GlassesKeys.isEnter(event) || event.keyCode == KeyEvent.KEYCODE_BACK) {
+                run.reading = false
+                screen.rearm()
+                host.render()
+            }
+            return
+        }
         when {
             event.keyCode in GlassesKeys.BACKWARD -> {
                 run.row = (run.row - 1 + view.rows.size) % view.rows.size
@@ -133,6 +155,11 @@ internal class VoiceQuestionWiring(
                 host.render()
             }
             VoiceAct.SPEAK_AGAIN -> startVoice(run.target)
+            VoiceAct.READ_ALL -> {
+                run.reading = view.readAll != null
+                screen.rearm()
+                host.render()
+            }
             VoiceAct.SEND -> {
                 val text = run.capture.confirmedText() ?: return
                 val target = run.target as? VoiceTarget.Followup ?: return
@@ -143,9 +170,12 @@ internal class VoiceQuestionWiring(
             VoiceAct.USE -> {
                 val text = run.capture.confirmedText() ?: return
                 val target = run.target as? VoiceTarget.Answer ?: return
-                screen.questionFlow?.takeIf { it.alertId == target.alertId }?.setFreeText(target.itemIndex, text)
+                val kept = screen.questionFlow?.takeIf { it.alertId == target.alertId }
+                    ?.setFreeText(target.itemIndex, text)
                 screen.stopVoice()
                 host.render()
+                // An answer agentd would refuse for its length says so here, and where to give it instead.
+                if (kept == false) host.brief(QuestionFlow.TOO_LONG, "")
             }
             VoiceAct.CONFIRM -> {
                 val decision = view.decision ?: return
@@ -166,6 +196,7 @@ internal class VoiceQuestionWiring(
         val state = run.capture.state
         val view = view(run)
         val rows = buildList {
+            view.lead?.let { add(NexusCardLine(text = it, tone = NexusRowTone.BODY)) }
             view.body?.let { body ->
                 val parts = VoiceCard.bodyRows(body)
                 parts.forEachIndexed { index, part ->
@@ -196,6 +227,13 @@ internal class VoiceQuestionWiring(
             rows = rows,
             footer = "swipe choose · tap select · 2-tap cancel",
         )
+    }
+
+    /** What Read all opens: the reply as the card shows it, whole, in the paged reader; null unless it is open. */
+    fun voiceReader(run: VoiceRun): NexusReader? {
+        if (!run.reading) return null
+        val view = view(run)
+        return BoardCards.menuReader(view.title, view.readAll ?: return null)
     }
 
     // --------------------------------------------------------------- question
@@ -327,19 +365,20 @@ internal class VoiceQuestionWiring(
         )
     }
 
-    /** The answer box shows the whole answer that Send answer sends, over as many BODY rows as it takes (R123). */
+    /** The answer box shows the answer condensed as the heard card did; Send answer sends all of it. */
     private fun answerBoxLines(text: String?, selected: Boolean): List<NexusCardLine> {
-        val parts = text?.let(VoiceCard::bodyRows).orEmpty()
+        val review = text?.let { VoiceCard.review(it, host.voiceWordLimit) }
+        val parts = review?.let { VoiceCard.bodyRows(it.body) }.orEmpty()
         return buildList {
             add(
                 NexusCardLine(
                     text = "Answer box (voice)",
-                    sub = parts.firstOrNull() ?: "tap to speak",
+                    sub = review?.lead ?: parts.firstOrNull() ?: "tap to speak",
                     tone = if (text != null) NexusRowTone.ALERT else NexusRowTone.NORMAL,
                     selected = selected,
                 ),
             )
-            parts.drop(1).forEach { add(NexusCardLine(text = it, tone = NexusRowTone.BODY)) }
+            parts.drop(if (review?.lead != null) 0 else 1).forEach { add(NexusCardLine(text = it, tone = NexusRowTone.BODY)) }
         }
     }
 

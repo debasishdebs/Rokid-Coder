@@ -497,6 +497,18 @@ class AgentsConfigStore internal constructor(
     fun historyPolicy(): HistoryPolicy =
         HistoryPolicy(historyWindowHours() * HOUR_MS, historyKeepAfterSession())
 
+    // ------------------------------------------------------------ voice reply length (U4/U13)
+
+    /** Words of a long voice reply the glasses show before condensing it (phone-only); the reply is sent whole. */
+    fun voiceWordLimit(): Int =
+        prefs.getInt(KEY_VOICE_WORD_LIMIT, VoiceCondense.DEFAULT_WORD_LIMIT)
+            .coerceIn(VoiceCondense.MIN_WORD_LIMIT, VoiceCondense.MAX_WORD_LIMIT)
+
+    fun setVoiceWordLimit(words: Int) {
+        val clamped = words.coerceIn(VoiceCondense.MIN_WORD_LIMIT, VoiceCondense.MAX_WORD_LIMIT)
+        prefs.edit().putInt(KEY_VOICE_WORD_LIMIT, clamped).apply()
+    }
+
     /** The outbound pairing was used just now: a secure hello_ack, or a link that is still up. */
     @Synchronized
     fun touchAgentdUsed(now: Long = wallClock()) {
@@ -749,6 +761,7 @@ class AgentsConfigStore internal constructor(
         const val KEY_PAIRING_TTL_DAYS = "security.pairing_ttl_days"
         const val KEY_HISTORY_KEEP_AFTER_SESSION = "history.keep_after_session"
         const val KEY_HISTORY_WINDOW_HOURS = "history.window_hours"
+        const val KEY_VOICE_WORD_LIMIT = "voice.word_limit"
         const val KEY_TTL_MIGRATED = "security.ttl_migrated"
         const val KEY_SIGNED_OUT_PREFIX = "signed_out."
         const val KEY_SIGNED_OUT_DAYS_PREFIX = "signed_out_days."
@@ -784,6 +797,9 @@ private const val HOUR_MS = 60L * 60L * 1000L
 /** What Sign out unused computers offers, in days. */
 val PAIRING_TTL_CHOICES: List<Int> = listOf(3, 7, 14, 30, 90)
 const val DEFAULT_PAIRING_TTL_DAYS = 14
+
+/** What Voice reply length shown offers, in words. */
+val VOICE_WORD_LIMIT_CHOICES: List<Int> = listOf(100, 150, 250, 500)
 
 /** What History window offers, in hours. */
 val HISTORY_WINDOW_CHOICES: List<Int> = listOf(1, 4, 12, 24)

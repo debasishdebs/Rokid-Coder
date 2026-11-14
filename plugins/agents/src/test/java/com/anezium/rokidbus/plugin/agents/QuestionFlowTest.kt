@@ -177,4 +177,16 @@ class QuestionFlowTest {
             assertNull(text, flow.answers())
         }
     }
+
+    @Test
+    fun free_text_up_to_the_wire_cap_is_kept_and_over_it_refused() {
+        val flow = flow(item("Why?", options = emptyList(), free = true))
+        val long = "a".repeat(4_000)
+        assertTrue(flow.setFreeText(0, long))
+        assertEquals(long, flow.freeText(0))
+        assertFalse(flow.setFreeText(0, long + "b"))
+        // The refused text does not replace the kept one.
+        assertEquals(long, flow.freeText(0))
+        assertEquals("Answer too long — answer on laptop", QuestionFlow.TOO_LONG)
+    }
 }

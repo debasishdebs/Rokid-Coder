@@ -34,6 +34,8 @@ import com.anezium.rokidbus.plugin.agents.DEFAULT_HISTORY_WINDOW_HOURS
 import com.anezium.rokidbus.plugin.agents.HistoryEntry
 import com.anezium.rokidbus.plugin.agents.PAIRING_TTL_CHOICES
 import com.anezium.rokidbus.plugin.agents.SignedOut
+import com.anezium.rokidbus.plugin.agents.VOICE_WORD_LIMIT_CHOICES
+import com.anezium.rokidbus.plugin.agents.VoiceCondense
 import com.anezium.rokidbus.plugin.agents.ProviderConnectionState
 import com.anezium.rokidbus.plugin.agents.TempMode
 import com.anezium.rokidbus.plugin.agents.displayText
@@ -128,6 +130,8 @@ internal data class SettingsUiState(
     val historyKeepAfterSession: Boolean = false,
     val historyWindowHours: Int = DEFAULT_HISTORY_WINDOW_HOURS,
     val nowMs: Long = 0L,
+    /** Words of a long voice reply the glasses show before condensing it (U4/U13). */
+    val voiceWordLimit: Int = VoiceCondense.DEFAULT_WORD_LIMIT,
 )
 
 internal class SettingsActions(
@@ -144,6 +148,7 @@ internal class SettingsActions(
     val onPairingTtl: (Int) -> Unit = {},
     val onHistoryKeep: (Boolean) -> Unit = {},
     val onHistoryWindow: (Int) -> Unit = {},
+    val onVoiceWordLimit: (Int) -> Unit = {},
     val onClearHistory: () -> Unit = {},
     val onBatteryGrant: () -> Unit,
     val onBatteryAppInfo: () -> Unit,
@@ -180,7 +185,7 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
         item { SecurityCard(state, actions) }
 
         item { SectionLabel("Alerts") }
-        item { AlertsCard(state.alerts, actions) }
+        item { AlertsCard(state.alerts, state.voiceWordLimit, actions) }
 
         item { SectionLabel("History") }
         item { HistoryCard(state, actions, onOpen = { historyOpen = true }) }
@@ -299,7 +304,7 @@ private fun SecurityCard(state: SettingsUiState, actions: SettingsActions) {
 }
 
 @Composable
-private fun AlertsCard(alerts: AlertSettings, actions: SettingsActions) {
+private fun AlertsCard(alerts: AlertSettings, voiceWordLimit: Int, actions: SettingsActions) {
     var advanced by remember { mutableStateOf(false) }
     SettingsCard {
         ChoiceRow(
@@ -321,6 +326,13 @@ private fun AlertsCard(alerts: AlertSettings, actions: SettingsActions) {
             { actions.onAlerts { copy(reminderMs = AlertSettings.REMINDER_MINUTES[it] * 60_000L) } },
             tag = "reminder",
         )
+        ChoiceRow(
+            "Voice reply length shown", VOICE_WORD_LIMIT_CHOICES.map { "$it words" },
+            VOICE_WORD_LIMIT_CHOICES.indexOf(voiceWordLimit),
+            { actions.onVoiceWordLimit(VOICE_WORD_LIMIT_CHOICES[it]) },
+            tag = "voice_word_limit",
+        )
+        NoticeText("A long reply you dictate is shown shortened on the glasses. It is always sent in full.")
         SecondaryAction(if (advanced) "Advanced ▴" else "Advanced ▾", { advanced = !advanced }, tag = "advanced_toggle")
         if (advanced) AdvancedTimings(alerts, actions)
     }

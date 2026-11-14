@@ -77,18 +77,14 @@ class VoiceCapture {
     fun onFinal(text: String?) {
         if (invalidated || state != State.Listening) return
         val heard = text?.takeIf { it.isNotBlank() } ?: lastPartial
-        state = if (heard != null) heardOrRefused(heard) else State.Failed(DIDNT_CATCH)
+        state = if (heard != null) heardOf(heard) else State.Failed(DIDNT_CATCH)
     }
 
     /**
-     * What is sent is exactly what the heard card shows (R123): the transcript with
-     * its whitespace collapsed, and only if all of it fits on the card. A longer one
-     * is refused, never cut, so no unreviewed tail can reach the agent.
+     * What is heard is what is sent: the transcript with its whitespace collapsed,
+     * all of it. How much of it the card shows is [VoiceCard]'s business (U4/U13).
      */
-    private fun heardOrRefused(text: String): State {
-        val clean = text.singleLine(Int.MAX_VALUE)
-        return if (clean.length > MAX_REVIEW_CHARS) State.Failed(TOO_LONG) else State.Heard(clean)
-    }
+    private fun heardOf(text: String): State = State.Heard(text.singleLine(Int.MAX_VALUE))
 
     fun onStopped(reason: NexusSpeechStopReason) {
         if (invalidated) return
@@ -99,7 +95,7 @@ class VoiceCapture {
             NexusSpeechStopReason.CANCELLED -> State.Idle
             // The session ended without a final: the partial is all there is.
             NexusSpeechStopReason.COMPLETED ->
-                lastPartial?.let(::heardOrRefused) ?: State.Failed(DIDNT_CATCH)
+                lastPartial?.let(::heardOf) ?: State.Failed(DIDNT_CATCH)
             NexusSpeechStopReason.NO_SPEECH -> State.Failed(DIDNT_CATCH)
             NexusSpeechStopReason.DENIED_BUSY -> State.Failed(MIC_BUSY)
             NexusSpeechStopReason.DENIED_NO_LINK,
@@ -143,14 +139,6 @@ class VoiceCapture {
         const val DIDNT_CATCH = "Didn't catch that"
         const val UNAVAILABLE = "Voice unavailable"
         const val VOICE_ERROR = "Voice failed — try again"
-        const val TOO_LONG = "Too long to review — say a shorter reply"
-
-        /**
-         * The longest transcript the heard card shows whole: [VoiceCard.BODY_ROWS]
-         * BODY rows of the SDK's 240-char line, 960 chars. It leaves the card room
-         * for its three choice rows.
-         */
-        const val MAX_REVIEW_CHARS = VoiceCard.BODY_ROWS * VoiceCard.ROW_CHARS
     }
 }
 
@@ -195,17 +183,23 @@ object VoiceApproval {
 /** What an utterance is for; it decides the words of the heard card and what its first row does. */
 enum class VoiceKind { FOLLOWUP, ANSWER, APPROVAL }
 
-enum class VoiceAct { SEND, USE, SPEAK_AGAIN, CANCEL, CONFIRM }
+enum class VoiceAct { SEND, USE, READ_ALL, SPEAK_AGAIN, CANCEL, CONFIRM }
 
 data class VoiceRow(val text: String, val sub: String?, val act: VoiceAct)
 
-/** [initial] is the row the card opens on; [decision] is set only on the confirm card of a voice approval. */
+/**
+ * [initial] is the row the card opens on; [decision] is set only on the confirm card of a voice approval.
+ * [lead] is the first BODY row of a condensed reply, and [readAll] is the whole of what the reply is shown
+ * as, set only when [body] holds a preview of it: the `Read all` row opens it in the reader.
+ */
 data class VoiceView(
     val title: String,
     val body: String?,
     val rows: List<VoiceRow>,
     val initial: Int,
     val decision: ApprovalDecision? = null,
+    val lead: String? = null,
+    val readAll: String? = null,
 )
 
 /**
@@ -215,15 +209,44 @@ data class VoiceView(
  * and that card opens on `Cancel`.
  */
 object VoiceCard {
-    /** The heard card's transcript is drawn in at most this many BODY rows of [ROW_CHARS] each. */
+    /** The heard card draws its reply in at most this many BODY rows of [ROW_CHARS] each, its lead row included. */
     const val BODY_ROWS = 4
     const val ROW_CHARS = 240
 
     /** [body] as the card's rows, each within the SDK's line cap; together they are all of it. */
     fun bodyRows(body: String): List<String> = body.chunked(ROW_CHARS)
 
-    /** [allowRefused]: an approval whose command agentd cut (R128); a heard "allow" is refused, "deny" still works. */
-    fun view(kind: VoiceKind, state: VoiceCapture.State, allowRefused: Boolean = false): VoiceView {
+    /** A heard reply as the card draws it: [lead] if it was condensed, [body] to fit the rows, [readAll] if [body] is not all of it. */
+    data class Review(val lead: String?, val body: String, val readAll: String?)
+
+    /**
+     * What the card shows of [text] (U4/U13): the condensed display of it, under a lead row saying so. A display
+     * that the card's rows cannot hold is cut to a preview, and the whole display is offered to the reader.
+     */
+    fun review(text: String, wordLimit: Int): Review {
+        val shown = VoiceCondense.condense(text, wordLimit)
+        val lead = if (shown.condensed) {
+            "Showing ${shown.shownWords} of ${shown.totalWords} words · the full reply is sent"
+        } else {
+            null
+        }
+        val room = (BODY_ROWS - if (lead != null) 1 else 0) * ROW_CHARS
+        if (shown.display.length <= room) return Review(lead, shown.display, readAll = null)
+        val cut = shown.display.take(room - 1)
+        val preview = cut.substringBeforeLast(' ', cut).trimEnd() + "…"
+        return Review(lead, preview, readAll = shown.display)
+    }
+
+    /**
+     * [allowRefused]: an approval whose command agentd cut (R128); a heard "allow" is refused, "deny" still works.
+     * [wordLimit] is how many words of a long reply the card shows before condensing it.
+     */
+    fun view(
+        kind: VoiceKind,
+        state: VoiceCapture.State,
+        allowRefused: Boolean = false,
+        wordLimit: Int = VoiceCondense.DEFAULT_WORD_LIMIT,
+    ): VoiceView {
         val title = when (kind) {
             VoiceKind.FOLLOWUP -> "Reply by voice"
             VoiceKind.ANSWER -> "Answer by voice"
@@ -243,18 +266,12 @@ object VoiceCard {
                 0,
             )
             is VoiceCapture.State.Heard -> when (kind) {
-                // The whole transcript: it is exactly what Send sends.
-                VoiceKind.FOLLOWUP -> VoiceView(
-                    title,
-                    state.text,
-                    listOf(VoiceRow("Send", null, VoiceAct.SEND), again, cancel),
-                    0,
-                )
-                VoiceKind.ANSWER -> VoiceView(
-                    title,
-                    state.text,
-                    listOf(VoiceRow("Use answer", "sent with Send answer", VoiceAct.USE), again, cancel),
-                    0,
+                // What Send sends is the whole transcript; the card shows it condensed, and Read all shows what it shows.
+                VoiceKind.FOLLOWUP ->
+                    heardView(title, state.text, wordLimit, VoiceRow("Send", null, VoiceAct.SEND), again, cancel)
+                VoiceKind.ANSWER -> heardView(
+                    title, state.text, wordLimit,
+                    VoiceRow("Use answer", "sent with Send answer", VoiceAct.USE), again, cancel,
                 )
                 VoiceKind.APPROVAL -> when (val decision = VoiceApproval.match(state.text)) {
                     null -> VoiceView(title, VoiceApproval.PROMPT, listOf(again, cancel), 0)
@@ -270,6 +287,26 @@ object VoiceCard {
                 }
             }
         }
+    }
+
+    private fun heardView(
+        title: String,
+        text: String,
+        wordLimit: Int,
+        first: VoiceRow,
+        again: VoiceRow,
+        cancel: VoiceRow,
+    ): VoiceView {
+        val review = review(text, wordLimit)
+        val readAll = if (review.readAll != null) listOf(VoiceRow("Read all", null, VoiceAct.READ_ALL)) else emptyList()
+        return VoiceView(
+            title = title,
+            body = review.body,
+            rows = listOf(first) + readAll + listOf(again, cancel),
+            initial = 0,
+            lead = review.lead,
+            readAll = review.readAll,
+        )
     }
 
     /** The sub line of a failure that the wearer can fix, or null. */

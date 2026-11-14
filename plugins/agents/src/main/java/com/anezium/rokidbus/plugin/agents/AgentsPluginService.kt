@@ -180,6 +180,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                     this@AgentsPluginService.sendFollowup(sessionKey, text)
                 override fun brief(title: String, body: String, safety: Boolean) =
                     showBriefNotice(title, body, safety)
+                override val voiceWordLimit: Int get() = configStore.voiceWordLimit()
             },
         )
     }
@@ -1010,6 +1011,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     /** An open conversation with something to read is the one reader screen. */
     private fun activeReader(): NexusReader? {
+        // Read all, over a heard reply that the card could only preview.
+        if (screen.kind == ActiveCard.Kind.VOICE) screen.voice?.let(answers::voiceReader)?.let { return it }
         if (screen.kind == ActiveCard.Kind.ALERT_DECISION && screen.alertReading) {
             val alert = screen.decidingAlert ?: return null
             val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }

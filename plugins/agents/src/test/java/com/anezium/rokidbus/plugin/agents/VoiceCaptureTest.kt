@@ -176,6 +176,21 @@ class VoiceCaptureTest {
     }
 
     @Test
+    fun a_long_reply_is_heard_whole_never_refused() {
+        val said = (0 until 900).joinToString(" ") { "w$it" }
+        val capture = listening()
+        capture.onFinal(said)
+        assertEquals(State.Heard(said), capture.state)
+        assertEquals(said, capture.confirmedText())
+
+        // One that only the last partial carried is kept whole too.
+        val partial = listening()
+        partial.onPartial(said)
+        partial.onStopped(NexusSpeechStopReason.COMPLETED)
+        assertEquals(State.Heard(said), partial.state)
+    }
+
+    @Test
     fun nothing_but_a_heard_card_offers_to_send() {
         for (state in listOf(State.Idle, State.Listening, State.Failed("Mic busy — try again"))) {
             for (kind in VoiceKind.entries) {

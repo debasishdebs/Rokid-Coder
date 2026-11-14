@@ -322,15 +322,18 @@ open the microphone itself and logs no spoken text.
 
 - **Reply by voice.** From a session's menu, "Reply by voice" starts one
   listening session. The result appears on a card to confirm: Send, Speak again
-  or Cancel. Nothing is sent until you press Send, and the card shows the whole
-  transcript that Send sends, over up to four rows. A transcript longer than
-  the card can show (960 characters, four rows of 240) is refused with "Too
-  long to review — say a shorter reply", never cut. It works while the session
+  or Cancel. Nothing is sent until you press Send, and Send always sends the
+  whole transcript. A long reply is shown condensed (its start, a slice of its
+  middle and its end) under "Showing 250 of 600 words · the full reply is
+  sent"; "Read all" opens what the card shows in a paged reader. How many words
+  are shown is "Voice reply length shown" in settings (100, 150, 250 or 500).
+  It works while the session
   waits and, in launcher mode, at any time (see the table above).
 - **Question answers.** A question band opens one card per question with the
   options, an "Answer box (voice)" row when free text is allowed, and a
-  last page with Send answer. The answer box shows the whole answer, under the
-  same 960-character limit. Answers carry the question and option text exactly
+  last page with Send answer. The answer box shows the answer condensed in the
+  same way, and keeps all of it up to 4000 characters; a longer one says "Answer
+  too long — answer on laptop". Answers carry the question and option text exactly
   as agentd sent it; a question too large for the glasses to answer exactly
   says "Question too long — answer on laptop" on its band and offers no Answer.
 - **Voice approval.** The decision card has a "Say allow or deny" row. Only a

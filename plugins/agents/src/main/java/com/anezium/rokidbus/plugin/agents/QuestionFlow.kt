@@ -32,14 +32,14 @@ class QuestionFlow(val alertId: String, val sessionKey: String, val payload: Que
 
     /**
      * Only an item that allows free text takes any; blank text clears it. A text
-     * longer than the card can show whole is refused, never cut (R123): false
-     * when the text was not taken.
+     * longer than agentd takes as one answer ([MAX_ANSWER_CHARS]) is refused, never
+     * cut: false when the text was not taken. The card shows a long one condensed.
      */
     fun setFreeText(itemIndex: Int, text: String): Boolean {
         val item = payload.items.getOrNull(itemIndex) ?: return false
         if (!item.allowFreeText) return false
         val clean = text.trim().takeIf { it.isNotEmpty() }
-        if (clean != null && clean.length > VoiceCapture.MAX_REVIEW_CHARS) return false
+        if (clean != null && clean.length > MAX_ANSWER_CHARS) return false
         if (clean != null && item.multiSelect && picked[itemIndex].size >= MAX_ANSWER_ENTRIES) return false
         typed[itemIndex] = clean
         if (clean != null && !item.multiSelect) picked[itemIndex].clear()
@@ -65,8 +65,11 @@ class QuestionFlow(val alertId: String, val sessionKey: String, val payload: Que
         return result
     }
 
-    private companion object {
-        val FORBIDDEN_KEYS = setOf("__proto__", "constructor", "prototype")
+    companion object {
+        /** What the glasses say when [setFreeText] refuses a text for its length. */
+        const val TOO_LONG = "Answer too long — answer on laptop"
+
+        private val FORBIDDEN_KEYS = setOf("__proto__", "constructor", "prototype")
     }
 
     private fun answerOf(itemIndex: Int): Any? {

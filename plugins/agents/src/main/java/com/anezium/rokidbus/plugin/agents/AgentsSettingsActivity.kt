@@ -120,6 +120,10 @@ class AgentsSettingsActivity : ComponentActivity() {
             pruneHistory()
             refresh()
         },
+        onVoiceWordLimit = { words ->
+            configStore.setVoiceWordLimit(words)
+            refresh()
+        },
         onClearHistory = {
             AgentsRuntime.history.clear()
             refresh()
@@ -222,6 +226,7 @@ class AgentsSettingsActivity : ComponentActivity() {
             history = AgentsRuntime.history.entriesFor(configStore.historyPolicy()),
             historyKeepAfterSession = configStore.historyKeepAfterSession(),
             historyWindowHours = configStore.historyWindowHours(),
+            voiceWordLimit = configStore.voiceWordLimit(),
             nowMs = AgentsRuntime.history.now(),
         )
     }
