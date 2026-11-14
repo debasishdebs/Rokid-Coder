@@ -156,6 +156,10 @@ class AlertHistory(private val clock: () -> Long) {
         publish()
     }
 
+    /** True while any entry of [sessionKey] is kept. */
+    @Synchronized
+    fun hasEntries(sessionKey: String): Boolean = list.any { it.sessionKey == sessionKey }
+
     /** [prune] as of now, under the settings' [policy]. */
     fun pruneNow(policy: HistoryPolicy) = prune(clock(), policy.windowMs, policy.keepAfterSession)
 

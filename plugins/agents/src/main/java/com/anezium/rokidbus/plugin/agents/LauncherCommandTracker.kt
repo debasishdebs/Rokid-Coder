@@ -113,6 +113,9 @@ internal class LauncherCommandTracker(private val newId: () -> String = { UUID.r
         gone.forEach(::forget)
     }
 
+    /** The sessions holding a kept id now. */
+    fun keptSessions(): Set<String> = kept.keys.mapTo(HashSet()) { it.sessionKey }
+
     private fun fresh(key: CommandKey, now: Long, owner: String?): String {
         val id = newId()
         kept[key] = Kept(id, now, owner)
@@ -162,6 +165,13 @@ internal class ControlSender(
 
     private val tracker = LauncherCommandTracker(newId)
 
+    /** [LauncherCommandTracker.keptSessions], published after every change so [holds] needs no lock. */
+    @Volatile
+    private var keptSessions: Set<String> = emptySet()
+
+    /** True while [sessionKey] holds a kept id. Lock-free: the store asks it under its own lock. */
+    fun holds(sessionKey: String): Boolean = sessionKey in keptSessions
+
     @Synchronized
     fun send(command: ControlMenu.Command, sessionKey: String): Sent {
         val msgId = when (command) {
@@ -178,6 +188,7 @@ internal class ControlSender(
         } catch (_: IllegalArgumentException) {
             return Sent.Unframeable
         }
+        keptSessions = tracker.keptSessions()
         write(frame)
         return Sent.Written(msgId, ControlMenu.steers(command))
     }
@@ -185,7 +196,7 @@ internal class ControlSender(
     /** Routes an ack to the tracker; anything that is not a launcher command's id is [LauncherCommandTracker.AckOutcome.UNKNOWN]. */
     @Synchronized
     fun onAck(ack: AgentdAction.Ack): LauncherCommandTracker.AckOutcome =
-        tracker.onAck(ack.msgId, ack.result, ack.consumed, clock())
+        tracker.onAck(ack.msgId, ack.result, ack.consumed, clock()).also { keptSessions = tracker.keptSessions() }
 
     /** The launcher commands of [sessionKey] the wearer may now send again on purpose. */
     @Synchronized
@@ -196,6 +207,9 @@ internal class ControlSender(
      * transport's thread, hence the lock. Returns the call that stops following.
      */
     fun follow(store: AgentSessionStore): () -> Unit = store.onSessionRemoved { removal ->
-        synchronized(this) { tracker.forgetRemoved(removal.sessionKey, removal.machineId) }
+        synchronized(this) {
+            tracker.forgetRemoved(removal.sessionKey, removal.machineId)
+            keptSessions = tracker.keptSessions()
+        }
     }
 }

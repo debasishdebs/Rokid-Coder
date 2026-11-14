@@ -814,6 +814,7 @@ class AlertDirectorTest {
     private fun pendingThenReconnect(vararg reconnectSnapshot: AgentSession) {
         val store = AgentSessionStore()
         store.onSessionDeparted(director::onSessionEnded)
+        store.pinOwners(history::hasEntries)
         up()
         store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(linkSession), machineId = "A")
         director.onBoard(setOf("claude:s1"))
@@ -835,7 +836,10 @@ class AlertDirectorTest {
     private fun linked(block: Linked.() -> Unit) {
         val store = AgentSessionStore()
         val stop = store.onSessionDeparted(director::onSessionEnded)
+        // As AgentsRuntime pins them: a session's owner record lives while its history does.
+        val unpin = store.pinOwners(history::hasEntries)
         Linked(store).block()
+        unpin()
         stop()
     }
 
@@ -870,6 +874,24 @@ class AlertDirectorTest {
 
         store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList(), machineId = "A")
         assertEquals(Outcome.WITHDRAWN, entry("D").outcome)
+    }
+
+    @Test
+    fun owner_records_with_history_are_never_evicted_by_cap() = linked {
+        keepAfterSession = true
+        up()
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(session("s1")), machineId = "A")
+        feed(alert(id = "A", sessionKey = "claude:s1"))
+        // A disconnects; B reports far more sessions than the owner cap holds, then goes too.
+        store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, (0 until 2_000).map { session("b$it") }, machineId = "B")
+        store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, (2_000 until 4_000).map { session("b$it") }, machineId = "B")
+        store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
+
+        // A comes back without s1: its entry is still settled.
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList(), machineId = "A")
+        assertEquals(Outcome.WITHDRAWN, entry("A").outcome)
     }
 
     @Test

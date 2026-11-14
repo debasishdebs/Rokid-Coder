@@ -176,10 +176,38 @@ open class AgentSessionStore {
         return { removalListeners -= listener }
     }
 
+    private val ownerPins = CopyOnWriteArrayList<(String) -> Boolean>()
+
+    /**
+     * Keeps the owner record of every session [pinned] says still matters: one with history entries
+     * or a kept launcher id. A record lives while its session is on the board or pinned; any other is
+     * let go as its session leaves the board, and only such records count against [MAX_OWNERS], so
+     * the departure of a session with something waiting on it is never lost. [pinned] is called under
+     * the store's lock and must not call back into it. Returns the call that unpins.
+     */
+    fun pinOwners(pinned: (String) -> Boolean): () -> Unit {
+        ownerPins += pinned
+        return { ownerPins -= pinned }
+    }
+
     private fun own(session: AgentSession, machineId: String?) {
         if (machineId == null || session.key in owners) return
         owners[session.key] = Owner(machineId, session.provider)
-        while (owners.size > MAX_OWNERS) owners.remove(owners.keys.first())
+    }
+
+    private fun held(key: String, owner: Owner): Boolean =
+        providerSessions.getValue(owner.provider).containsKey(key.removePrefix("${owner.provider.wireValue}:")) ||
+            ownerPins.any { it(key) }
+
+    /** Lets go of the records nothing holds, but [keep]; then the cap, which only ever takes such records. */
+    private fun sweepOwners(keep: Collection<String> = emptyList()) {
+        owners.entries.removeAll { (key, owner) -> key !in keep && !held(key, owner) }
+        if (owners.size <= MAX_OWNERS) return
+        val oldest = owners.entries.iterator()
+        while (owners.size > MAX_OWNERS && oldest.hasNext()) {
+            val (key, owner) = oldest.next()
+            if (!held(key, owner)) oldest.remove()
+        }
     }
 
     /**
@@ -218,6 +246,8 @@ open class AgentSessionStore {
                 notApplied.remove(key)
                 replyNotSent.remove(key)
             }
+            // A departure keeps its record until a listener has heard it.
+            sweepOwners(keep = departed)
             publish(nowMs)
             departed
         }
@@ -232,6 +262,8 @@ open class AgentSessionStore {
     @Synchronized
     fun clearLinkSessions(providers: Set<AgentProvider>, nowMs: Long = System.currentTimeMillis()) {
         providers.forEach { provider -> providerSessions[provider] = linkedMapOf() }
+        // What is pinned stays, for the machine's next snapshot to settle.
+        sweepOwners()
         publish(nowMs)
     }
 
@@ -348,6 +380,7 @@ open class AgentSessionStore {
                 dropped += session.key
             }
         }
+        sweepOwners()
         publish(nowMs)
         return dropped
     }
@@ -408,7 +441,7 @@ open class AgentSessionStore {
     companion object {
         const val DONE_RETENTION_MS = 30 * 60 * 1_000L
 
-        /** Owners remembered, well above the history's 200 entries; the oldest go first. */
+        /** Owner records nothing holds that are kept at most; the oldest go first. Held ones never count against it. */
         private const val MAX_OWNERS = 1_024
 
         /**
@@ -458,6 +491,11 @@ object AgentsRuntime {
 
     /** The alerts the glasses showed and how each ended; in memory, lost with the process. */
     val history = AlertHistory(System::currentTimeMillis)
+
+    init {
+        // A session with history keeps its owner record, so its machine's snapshot can still settle it.
+        store.pinOwners(history::hasEntries)
+    }
 
     /**
      * True while the hub has the plugin's surface open. The monitor service

@@ -215,6 +215,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         ownerOf = AgentsRuntime.store::ownerOf,
     )
     private var stopFollowingRemovals: (() -> Unit)? = null
+    private var unpinKeptOwners: (() -> Unit)? = null
 
     /** The mode_set frames among them, with their session: a rejection of one is shown on that session's menu. */
     private val modeSetMsgIds = LinkedHashMap<String, String>()
@@ -303,6 +304,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             AgentsRuntime.store.sessions.collectLatest { raiseAttention() }
         }
         stopFollowingRemovals = controlSender.follow(AgentsRuntime.store)
+        // A session holding a kept id keeps its owner record.
+        unpinKeptOwners = AgentsRuntime.store.pinOwners(controlSender::holds)
         serviceScope.launch {
             // A reply for a session that left the board would send into nothing.
             AgentsRuntime.store.sessions.collect { sessions ->
@@ -472,6 +475,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     override fun onDestroy() {
         stopFollowingRemovals?.invoke()
         stopFollowingRemovals = null
+        unpinKeptOwners?.invoke()
+        unpinKeptOwners = null
         tts?.close()
         tts = null
         chime.close()
