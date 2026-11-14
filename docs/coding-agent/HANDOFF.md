@@ -33,20 +33,24 @@ Last updated 2026-11-15. The detailed SDD ledgers exist only on the original Mac
 - U26: onboarding. Anyone can install. The phone does setup and permissions first, then a Claude/Codex checklist, then says "finish on your laptop". When the laptop pairs (the two-way encrypted link), the phone's setup screen is pinged automatically and continues with the remaining steps. If the user has neither Claude Code nor Codex, `rk claude` / `rk codex` offer to install it.
 - U27: v1.0.0 ships downloadable APKs and laptop installers (`.dmg`/`.pkg` and `.exe`) via GitHub Releases. The phone app goes to the Play Store later. Laptop and glasses installs come from the repo.
 - U28: **"laptop/computer" means macOS AND Windows.** Windows is in v1.0 where feasible and in v1.1 at any cost. Windows work starts on the user's Windows 11 laptop in a fresh conversation, from this file.
-- U29: the repo layout is approved:
+- U29/U30: the repo layout is approved:
 
   ```
-  computer/   agentd + rk (Node/TS), macOS + Windows
-  plugin/     claude-code/ + codex/ plugins
-  mobile/     the phone app (Kotlin)
-  glasses/    the glasses app (Kotlin)
-  nexus/      the shared SDK and hub core the phone and glasses apps build on
+  computer/       agentd + rk (Node/TS), macOS + Windows
+  plugin/         claude-code/ + codex/ plugins
+  mobile/         ONE phone app: our shell, onboarding and Agents code, linking the Nexus hub core
+  glasses/        our glasses app shell + glasses install steps, linking the Nexus glasses hub
+  common/         (optional) code our mobile/ and glasses/ share
+  vendor/nexus/   upstream Rokid-Nexus as a git subtree, patched minimally
   ```
 
-  Each folder has its own README with only that part's install steps.
+  - Patches to `vendor/nexus/` are listed in `vendor/nexus/PATCHES.md`.
+  - The store, self-updater and other plugins are excluded via the build, not deleted.
+  - A weekly GitHub Action pulls upstream, runs every suite and opens a PR.
+- U31: ONE phone app, with Nexus embedded. Reasons: two installs add friction, and the open Nexus plugin host would let unvetted third-party plugins draw on the glasses. The merged app exposes no plugin host.
 
 ## Open Plan 6 question (ask the user)
-Is `mobile/` ONE app with the Nexus hub built in, or the Agents app installed next to a separate Nexus hub app (two APKs)? The current Nexus hub installs other APKs, self-updates from GitHub and patches third-party apps, and the Play Store rejects all three.
+What has to be true for 1.0 to count as "done"?
 
 ## Windows work list (for the fresh Windows conversation)
 **Plugin mode (target v1.0):**
