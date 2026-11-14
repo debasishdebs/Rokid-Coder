@@ -131,11 +131,13 @@ class AddComputerActivity : Activity() {
             setOnClickListener { openTailscaleInstall(this@AddComputerActivity) }
         }
         pairingField = NexusUi.field(this, "Paste the pairing line from nexus-agentd").apply {
-            setSingleLine(false)
-            minLines = 3
-            maxLines = 6
-            gravity = Gravity.TOP
-            setPadding(paddingLeft, 14, paddingRight, 14)
+            // The pairing line carries the token (and the pin), so it is a secret: masked, no
+            // keyboard learning or suggestions, no autofill. Never logged. A masked field is one line.
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+            typeface = Typeface.DEFAULT
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {

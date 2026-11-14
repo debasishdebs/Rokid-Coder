@@ -187,6 +187,7 @@ class AgentsMonitorService : Service() {
                     linkServer.sendSessionInput(requestId, sessionId, text)
                 }
             }
+            ACTION_PUSH_SETTINGS -> syncSettings()
             ACTION_SEND_V2 -> {
                 // A line that is not one JSON object comes back Refused, unsent.
                 intent.getStringExtra(EXTRA_FRAME)?.let(::writeToAgentd)
@@ -219,6 +220,8 @@ class AgentsMonitorService : Service() {
             AgentsRuntime.events.collect { event ->
                 noteV2(event)
                 alertDirector.onEvent(event)
+                // Every secure link up carries the phone's settings; a plaintext one cannot steer, so sends none.
+                if (event is AgentdEvent.LinkUp && event.secure) syncSettings()
             }
         }
         alertScope.launch {
@@ -227,6 +230,16 @@ class AgentsMonitorService : Service() {
                 .distinctUntilChanged()
                 .collect(alertDirector::onBoard)
         }
+    }
+
+    /**
+     * `settings_sync` and `defaults_set`, both steering (R61): sent through the wire only,
+     * which refuses them on a plaintext link. Not sent here when the link is not secure,
+     * since the next secure link up sends them.
+     */
+    private fun syncSettings() {
+        if (AgentsRuntime.link.value?.secure != true) return
+        configStore.alertSettings().syncFrames().forEach { writeToAgentd(it) }
     }
 
     /**
@@ -398,6 +411,8 @@ class AgentsMonitorService : Service() {
             "com.anezium.rokidbus.plugin.agents.action.THREAD_START"
         const val ACTION_SEND_SESSION_INPUT =
             "com.anezium.rokidbus.plugin.agents.action.SEND_SESSION_INPUT"
+        const val ACTION_PUSH_SETTINGS =
+            "com.anezium.rokidbus.plugin.agents.action.PUSH_SETTINGS"
         const val ACTION_SEND_V2 =
             "com.anezium.rokidbus.plugin.agents.action.SEND_V2"
         const val EXTRA_SESSION_ID = "sessionId"
@@ -467,6 +482,18 @@ class AgentsMonitorService : Service() {
                 Intent(context, AgentsMonitorService::class.java)
                     .setAction(ACTION_SEND_V2)
                     .putExtra(EXTRA_FRAME, frame),
+            )
+        }
+
+        /**
+         * The wearer changed an alert setting: tell agentd now. With nothing monitored there is
+         * no link, and the next secure link up sends the saved settings instead.
+         */
+        fun pushSettings(context: Context) {
+            if (!AgentsConfigStore(context).load().shouldMonitor) return
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, AgentsMonitorService::class.java).setAction(ACTION_PUSH_SETTINGS),
             )
         }
 

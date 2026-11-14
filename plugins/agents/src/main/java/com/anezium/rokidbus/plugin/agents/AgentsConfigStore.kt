@@ -186,6 +186,19 @@ class AgentsConfigStore internal constructor(
         prefs.edit().putBoolean(KEY_ALERTS_QUIET, quiet).apply()
     }
 
+    /**
+     * The phone's alert settings. Quiet is not stored with them: it is read from and
+     * written to [isQuiet] / [setQuiet], the one copy (R74).
+     */
+    fun alertSettings(): AlertSettings =
+        AlertSettings.fromJson(prefs.getString(KEY_ALERT_SETTINGS, null), quiet = isQuiet())
+
+    fun saveAlertSettings(settings: AlertSettings) {
+        val valid = settings.validated()
+        prefs.edit().putString(KEY_ALERT_SETTINGS, valid.toJson()).apply()
+        setQuiet(valid.quiet)
+    }
+
     /** True once Android's notification prompt has been shown, so the plugin asks only once. */
     fun notificationPermissionAsked(): Boolean = prefs.getBoolean(KEY_NOTIFICATIONS_ASKED, false)
 
@@ -468,6 +481,7 @@ class AgentsConfigStore internal constructor(
         const val KEY_OPENCLAW_DEVICE_TOKEN = "openclaw.device_token"
         const val KEY_NOTIFICATION_PREFIX = "notification."
         const val KEY_ALERTS_QUIET = "alerts.quiet"
+        const val KEY_ALERT_SETTINGS = "alerts.settings"
         const val KEY_NOTIFICATIONS_ASKED = "notifications.permission_asked"
         const val KEY_MACHINE_PREFIX = "machine.token."
         const val KEY_MACHINE_NAME_PREFIX = "machine.name."

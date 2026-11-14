@@ -26,3 +26,8 @@
   invited: unknown machines need an armed two-minute window, and a known
   machine presenting the wrong token is rejected without losing its token.
 - Add phone configuration for both providers.
+- Move settings to a Material screen with alerts (cadence, wait limit,
+  reminder, advanced timings), quiet, per-tool approval defaults, a switch to
+  turn approve-all off everywhere, and the limits of plugin and launcher mode.
+  The alert settings and default modes are sent to the computer on every
+  secure link and whenever they change; the pairing line is now a secret field.

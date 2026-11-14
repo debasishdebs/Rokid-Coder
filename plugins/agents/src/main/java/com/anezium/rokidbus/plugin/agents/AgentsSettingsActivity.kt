@@ -1,54 +1,63 @@
 package com.anezium.rokidbus.plugin.agents
 
 import android.Manifest
-import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.Switch
-import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationManagerCompat
-import com.anezium.rokidbus.client.ui.BusTheme
-import com.anezium.rokidbus.client.ui.NexusPluginIcons
-import com.anezium.rokidbus.client.ui.NexusUi
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.collectLatest
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.anezium.rokidbus.plugin.agents.ui.ComputerRow
+import com.anezium.rokidbus.plugin.agents.ui.SettingsActions
+import com.anezium.rokidbus.plugin.agents.ui.SettingsScreen
+import com.anezium.rokidbus.plugin.agents.ui.SettingsUiState
+import com.anezium.rokidbus.plugin.agents.ui.linkLine
+import com.anezium.rokidbus.plugin.agents.ui.theme.AgentsTheme
+import com.anezium.rokidbus.plugin.agents.ui.trustLabel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import java.util.UUID
 
-class AgentsSettingsActivity : Activity() {
+/**
+ * The plugin's settings, in Compose with the PCA theme. The pairing screens
+ * (Add a computer, a computer, the project picker, a new thread) stay Views and
+ * are launched from here (R43). Exported with no intent filter: the hub opens it
+ * by name from the plugin's SETTINGS_ACTIVITY metadata.
+ */
+class AgentsSettingsActivity : ComponentActivity() {
     private val configStore by lazy { AgentsConfigStore(applicationContext) }
-    private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private lateinit var agentdEnabled: Switch
-    private lateinit var agentdConnection: TextView
-    private lateinit var agentdDot: View
-    private lateinit var notificationsHint: TextView
-    private lateinit var batteryStatus: TextView
-    private lateinit var batteryDot: View
-    private lateinit var batteryGrant: Button
-    private lateinit var batteryAppInfo: Button
-    private lateinit var batteryHint: TextView
-    private lateinit var computersList: LinearLayout
-
-    /** The machine whose row the wearer tapped open to reach its Forget. */
-    private var expandedMachineId: String? = null
+    private var state by mutableStateOf<SettingsUiState?>(null)
     private var liveLink: LinkMachine? = null
+
+    /** The answer re-reads the screen, so the "Notifications off" line follows a no. */
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { refresh() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        buildUi()
-        loadConfig()
-        observeState()
+        // A light page under the system bars: dark icons on both.
+        val light = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+        enableEdgeToEdge(statusBarStyle = light, navigationBarStyle = light)
+        refresh()
+        setContent {
+            AgentsTheme {
+                state?.let { SettingsScreen(it, actions()) }
+            }
+        }
+        observeLink()
         if (configStore.load().shouldMonitor) {
             AgentsMonitorService.reconcile(applicationContext)
         }
@@ -56,163 +65,115 @@ class AgentsSettingsActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // The notification's Stop turns monitoring off from outside this screen.
-        agentdEnabled.isChecked = configStore.load().agentdEnabled
-        renderComputers()
-        renderBatteryState()
-        renderNotificationState()
+        // The notification's Stop and the glasses' Quiet row change things from outside this screen.
+        refresh()
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        renderNotificationState()
-    }
-
-    override fun onDestroy() {
-        uiScope.cancel()
-        super.onDestroy()
-    }
-
-    private fun buildUi() {
-        window.statusBarColor = NexusUi.BG
-        window.navigationBarColor = NexusUi.BG
-        agentdEnabled = NexusUi.switch(this).apply {
-            setOnCheckedChangeListener { _, checked ->
-                configStore.saveAgentd(configStore.load().agentd, checked)
-                if (checked) askForNotifications()
-                AgentsMonitorService.reconcile(applicationContext)
-                renderNotificationState()
-            }
-        }
-        agentdDot = NexusUi.dot(this)
-        agentdConnection = NexusUi.statusLine(this).apply { text = "DISCONNECTED" }
-        batteryDot = NexusUi.dot(this)
-        batteryStatus = NexusUi.statusLine(this)
-        batteryGrant = NexusUi.textButton(this, "Let Agents keep running").apply {
-            setOnClickListener {
-                // Re-arm before leaving: the wearer is about to change something,
-                // and the question worth answering next is whether it held, not
-                // that it was once broken.
-                configStore.clearMonitorSuspension()
-                openBatteryExemptionRequest(this@AgentsSettingsActivity)
-            }
-        }
-        // The phone's own battery screen is where some ROMs keep the decision
-        // that actually binds. Its high-power manager cannot be opened directly
-        // — it is guarded by a system permission — so App info is the nearest
+    private fun actions() = SettingsActions(
+        onBack = ::finish,
+        onMonitoring = { checked ->
+            configStore.saveAgentd(configStore.load().agentd, checked)
+            if (checked) askForNotifications()
+            AgentsMonitorService.reconcile(applicationContext)
+            refresh()
+        },
+        onOpenComputer = { row ->
+            startActivity(
+                Intent(this, ComputerActivity::class.java)
+                    .putExtra(ComputerActivity.EXTRA_MACHINE_ID, row.machineId)
+                    .putExtra(ComputerActivity.EXTRA_MACHINE_NAME, row.title),
+            )
+        },
+        onForgetPaired = {
+            val name = configStore.load().agentd?.name
+            configStore.saveAgentd(null, enabled = configStore.load().agentdEnabled)
+            AgentsMonitorService.reconcile(applicationContext)
+            refresh()
+            if (name != null) toast("$name forgotten.")
+        },
+        onAddComputer = { startActivity(Intent(this, AddComputerActivity::class.java)) },
+        onAlerts = ::changeAlerts,
+        // Quiet has the one store key (R74); it is not part of what agentd is told.
+        onQuiet = { quiet ->
+            configStore.setQuiet(quiet)
+            refresh()
+        },
+        onRevokeAll = {
+            // One id per tap. The wire sends it only over a secure link; the button is off otherwise.
+            AgentsMonitorService.sendV2(
+                applicationContext,
+                AgentdProtocolCodec.modeRevokeAll(UUID.randomUUID().toString()),
+            )
+        },
+        onBatteryGrant = {
+            // Re-arm before leaving: the wearer is about to change something, and the question
+            // worth answering next is whether it held, not that it was once broken.
+            configStore.clearMonitorSuspension()
+            openBatteryExemptionRequest(this)
+        },
+        // The phone's own battery screen is where some ROMs keep the decision that actually
+        // binds. Its high-power manager cannot be opened directly, so App info is the nearest
         // door a plugin is allowed to open.
-        batteryAppInfo = NexusUi.textButton(this, "Open App info").apply {
-            setOnClickListener {
-                configStore.clearMonitorSuspension()
-                openAppInfo(this@AgentsSettingsActivity)
+        onBatteryAppInfo = {
+            configStore.clearMonitorSuspension()
+            openAppInfo(this)
+        },
+        onUninstall = { startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName"))) },
+    )
+
+    /** Saves the change on top of what is stored now (Quiet may have moved on the glasses) and tells agentd. */
+    private fun changeAlerts(change: AlertSettings.() -> AlertSettings) {
+        configStore.saveAlertSettings(configStore.alertSettings().change())
+        AgentsMonitorService.pushSettings(applicationContext)
+        refresh()
+    }
+
+    private fun observeLink() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    AgentsRuntime.store.linkMachine.collect {
+                        liveLink = it
+                        refresh()
+                    }
+                }
+                launch {
+                    combine(
+                        AgentsRuntime.store.connections,
+                        AgentsRuntime.store.sessions,
+                        AgentsRuntime.linkSecure,
+                    ) { _, _, _ -> }.collect { refresh() }
+                }
+                launch { AgentsRuntime.linkedMachines.collect { refresh() } }
             }
         }
-        batteryHint = NexusUi.cardBody(this, "")
-        notificationsHint = NexusUi.cardBody(this, NOTIFICATIONS_OFF).apply { visibility = View.GONE }
-        computersList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
-        val content = NexusUi.contentColumn(this).apply {
-            addView(
-                NexusUi.cardBody(
-                    this@AgentsSettingsActivity,
-                    "Mission control for Claude Code, Codex, and OpenClaw sessions. " +
-                        "Agents never alerts this phone — when a session needs you, " +
-                        "it says so on your glasses. Its one notification just shows " +
-                        "that monitoring is running.",
-                ),
-                NexusUi.block(),
-            )
-            addView(BusTheme.gap(this@AgentsSettingsActivity, 18))
-            addView(NexusUi.sectionRow(this@AgentsSettingsActivity, "Monitoring"), NexusUi.block())
-            addView(BusTheme.gap(this@AgentsSettingsActivity, 10))
-            addView(monitoringCard(), NexusUi.block())
-            addView(BusTheme.gap(this@AgentsSettingsActivity, 22))
-            addView(NexusUi.sectionRow(this@AgentsSettingsActivity, "Computers"), NexusUi.block())
-            addView(BusTheme.gap(this@AgentsSettingsActivity, 10))
-            addView(computersCard(), NexusUi.block())
-            addView(BusTheme.gap(this@AgentsSettingsActivity, 24))
-            addView(NexusUi.sectionRow(this@AgentsSettingsActivity, "Plugin"), NexusUi.block())
-            addView(BusTheme.gap(this@AgentsSettingsActivity, 10))
-            addView(
-                NexusUi.uninstallCard(this@AgentsSettingsActivity, "Agents") {
-                    startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName")))
-                },
-                NexusUi.block(),
-            )
-        }
-        val root = NexusUi.fixedRoot(this).apply {
-            addView(
-                NexusUi.pluginHeader(
-                    this@AgentsSettingsActivity,
-                    NexusPluginIcons.drawableFor("terminal"),
-                    "Agents",
-                    "Coding-agent mission control · v${BuildConfig.VERSION_NAME}",
-                ),
-                NexusUi.block(),
-            )
-            addView(
-                NexusUi.screen(this@AgentsSettingsActivity, content),
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
-            )
-        }
-        setContentView(root)
     }
 
-    private fun monitoringCard() = NexusUi.card(this).apply {
-        addView(
-            NexusUi.switchRow(
-                this@AgentsSettingsActivity,
-                "Monitor sessions",
-                "Claude Code, Codex, and OpenClaw",
-                agentdEnabled,
-            ),
-            NexusUi.block(),
-        )
-        addView(BusTheme.gap(this@AgentsSettingsActivity, 8))
-        addView(connectionRow(this@AgentsSettingsActivity, agentdDot, agentdConnection), NexusUi.block())
-        addView(notificationsHint, NexusUi.block())
-        addView(BusTheme.gap(this@AgentsSettingsActivity, 12))
-        addView(connectionRow(this@AgentsSettingsActivity, batteryDot, batteryStatus), NexusUi.block())
-        addView(BusTheme.gap(this@AgentsSettingsActivity, 8))
-        addView(batteryGrant, NexusUi.block())
-        addView(batteryAppInfo, NexusUi.block())
-        addView(batteryHint, NexusUi.block())
-    }
-
-    private fun computersCard() = NexusUi.card(this).apply {
-        addView(computersList, NexusUi.block())
-        addView(NexusUi.divider(this@AgentsSettingsActivity))
-        addView(
-            NexusUi.rowTitle(this@AgentsSettingsActivity, "+ Add a computer").apply {
-                setTextColor(NexusUi.GREEN)
-                setPadding(0, NexusUi.dp(this@AgentsSettingsActivity, 10), 0, NexusUi.dp(this@AgentsSettingsActivity, 4))
-                setOnClickListener {
-                    startActivity(Intent(this@AgentsSettingsActivity, AddComputerActivity::class.java))
-                }
-            },
-            NexusUi.block(),
+    private fun refresh() {
+        val config = configStore.load()
+        val connection = AgentsRuntime.store.connections.value.getValue(AgentProvider.CLAUDE)
+        val connected = connection.state == ConnectionState.CONNECTED
+        val secure = AgentsRuntime.linkSecure.value
+        val suspended = configStore.monitorWasSuspended()
+        state = SettingsUiState(
+            version = BuildConfig.VERSION_NAME,
+            monitoring = config.agentdEnabled,
+            link = linkLine(connection, AgentsRuntime.store.sessions.value),
+            trust = trustLabel(connected, secure),
+            steering = connected && secure,
+            notificationsOff = config.shouldMonitor && !NotificationManagerCompat.from(this).areNotificationsEnabled(),
+            computers = computerRows(config),
+            alerts = configStore.alertSettings(),
+            // Observation outranks the flag: some phones keep the real decision in their own power
+            // manager and leave the platform's answer at false forever, so a green row on a phone
+            // that demonstrably froze this app would be the screen lying about what it reports.
+            batteryAllowed = batteryExemptionGranted(this),
+            batteryFrozen = suspended,
         )
     }
 
-    /**
-     * One row per computer this phone trusts. Tapping a row trades its chevron
-     * for Forget, so removing a machine takes two deliberate taps and a
-     * misplaced one costs nothing.
-     */
-    private fun renderComputers() {
-        if (!::computersList.isInitialized) return
-        computersList.removeAllViews()
-        val machines = configStore.trustedMachines()
-        val paired = configStore.load().agentd
-        if (machines.isEmpty() && paired == null) {
-            computersList.addView(
-                NexusUi.rowSub(this, "No computer linked yet — add one below"),
-                NexusUi.block(),
-            )
-            return
-        }
-        machines.forEachIndexed { index, machine ->
-            if (index > 0) computersList.addView(BusTheme.gap(this, 4))
+    private fun computerRows(config: AgentsConfig): List<ComputerRow> {
+        val rows = configStore.trustedMachines().map { machine ->
             val connected = liveLink?.machineId == machine.machineId
             val sub = when {
                 connected && liveLink?.overTailnet == true -> "Connected · over Tailscale"
@@ -220,127 +181,20 @@ class AgentsSettingsActivity : Activity() {
                 else -> lastSeenText(machine.lastSeenAtMs)
             }
             val projects = configStore.projects(machine.machineId).size
-            computersList.addView(
-                machineNavRow(
-                    title = machine.name,
-                    sub = if (projects > 0) {
-                        "$sub · $projects ${if (projects == 1) "project" else "projects"}"
-                    } else {
-                        sub
-                    },
-                    dotColor = if (connected) NexusUi.GREEN else NexusUi.INK3,
-                ) {
-                    startActivity(
-                        Intent(this, ComputerActivity::class.java)
-                            .putExtra(ComputerActivity.EXTRA_MACHINE_ID, machine.machineId)
-                            .putExtra(ComputerActivity.EXTRA_MACHINE_NAME, machine.name),
-                    )
-                },
-                NexusUi.block(),
+            ComputerRow(
+                title = machine.name,
+                sub = if (projects > 0) "$sub · $projects ${if (projects == 1) "project" else "projects"}" else sub,
+                connected = connected,
+                machineId = machine.machineId,
             )
         }
-        if (paired != null) {
-            if (machines.isNotEmpty()) computersList.addView(BusTheme.gap(this, 4))
-            computersList.addView(
-                machineRow(
-                    title = paired.name,
-                    sub = "Paired by hand · ${paired.host}:${paired.port}",
-                    dotColor = NexusUi.INK3,
-                    expanded = expandedMachineId == PAIRED_ROW_ID,
-                    onToggle = {
-                        expandedMachineId = if (expandedMachineId == PAIRED_ROW_ID) null else PAIRED_ROW_ID
-                        renderComputers()
-                    },
-                    onForget = {
-                        configStore.saveAgentd(null, enabled = agentdEnabled.isChecked)
-                        AgentsMonitorService.reconcile(applicationContext)
-                        expandedMachineId = null
-                        renderComputers()
-                        toast("${paired.name} forgotten.")
-                    },
-                ),
-                NexusUi.block(),
-            )
-        }
-    }
-
-    private fun machineNavRow(
-        title: String,
-        sub: String,
-        dotColor: Int,
-        onOpen: () -> Unit,
-    ) = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, NexusUi.dp(this@AgentsSettingsActivity, 6), 0, NexusUi.dp(this@AgentsSettingsActivity, 6))
-        setOnClickListener { onOpen() }
-        val dot = NexusUi.dot(this@AgentsSettingsActivity)
-        NexusUi.setDotColor(dot, dotColor)
-        val dotSize = NexusUi.dp(this@AgentsSettingsActivity, 8)
-        addView(
-            dot,
-            LinearLayout.LayoutParams(dotSize, dotSize).apply {
-                marginEnd = NexusUi.dp(this@AgentsSettingsActivity, 10)
-            },
+        val paired = config.agentd ?: return rows
+        return rows + ComputerRow(
+            title = paired.name,
+            sub = "Paired by hand · ${paired.host}:${paired.port}",
+            connected = false,
+            machineId = null,
         )
-        addView(
-            LinearLayout(this@AgentsSettingsActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(NexusUi.rowTitle(this@AgentsSettingsActivity, title))
-                addView(NexusUi.rowSub(this@AgentsSettingsActivity, sub))
-            },
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-        )
-        addView(NexusUi.chevron(this@AgentsSettingsActivity))
-    }
-
-    private fun machineRow(
-        title: String,
-        sub: String,
-        dotColor: Int,
-        expanded: Boolean,
-        onToggle: () -> Unit,
-        onForget: () -> Unit,
-    ) = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, NexusUi.dp(this@AgentsSettingsActivity, 6), 0, NexusUi.dp(this@AgentsSettingsActivity, 6))
-        setOnClickListener { onToggle() }
-        val dot = NexusUi.dot(this@AgentsSettingsActivity)
-        NexusUi.setDotColor(dot, dotColor)
-        val dotSize = NexusUi.dp(this@AgentsSettingsActivity, 8)
-        addView(
-            dot,
-            LinearLayout.LayoutParams(dotSize, dotSize).apply {
-                marginEnd = NexusUi.dp(this@AgentsSettingsActivity, 10)
-            },
-        )
-        addView(
-            LinearLayout(this@AgentsSettingsActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(NexusUi.rowTitle(this@AgentsSettingsActivity, title))
-                addView(NexusUi.rowSub(this@AgentsSettingsActivity, sub))
-            },
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-        )
-        if (expanded) {
-            addView(
-                NexusUi.rowTitle(this@AgentsSettingsActivity, "Forget").apply {
-                    setTextColor(NexusUi.DANGER)
-                    setPadding(NexusUi.dp(this@AgentsSettingsActivity, 12), 0, 0, 0)
-                    setOnClickListener { onForget() }
-                },
-            )
-        } else {
-            addView(NexusUi.chevron(this@AgentsSettingsActivity))
-        }
-    }
-
-    private fun loadConfig() {
-        agentdEnabled.isChecked = configStore.load().agentdEnabled
-        renderComputers()
-        renderBatteryState()
-        renderNotificationState()
     }
 
     /**
@@ -353,127 +207,11 @@ class AgentsSettingsActivity : Activity() {
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
         if (configStore.notificationPermissionAsked()) return
         configStore.markNotificationPermissionAsked()
-        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
-    }
-
-    private fun renderNotificationState() {
-        if (!::notificationsHint.isInitialized) return
-        val off = configStore.load().shouldMonitor &&
-            !NotificationManagerCompat.from(this).areNotificationsEnabled()
-        notificationsHint.visibility = if (off) View.VISIBLE else View.GONE
-    }
-
-    /**
-     * Granted is the quiet case, so the ask disappears once it is answered —
-     * the same shape the Tailscale prerequisite uses on the Add a computer
-     * screen. There is no callback when the wearer returns from the system
-     * dialog, which is why onResume re-reads it.
-     */
-    private fun renderBatteryState() {
-        val granted = batteryExemptionGranted(this)
-        // Observation outranks the flag. Some phones keep the real decision in
-        // their own power manager and leave the platform's answer at false
-        // forever, so a green row on a phone that demonstrably froze this app
-        // would be the screen lying about the one thing it is here to report.
-        val suspended = configStore.monitorWasSuspended()
-        batteryStatus.text = when {
-            suspended -> "THIS PHONE HAS FROZEN AGENTS"
-            granted -> "ALLOWED TO KEEP RUNNING"
-            else -> "ANDROID MAY FREEZE THIS APP"
-        }
-        NexusUi.setDotColor(
-            batteryDot,
-            if (granted && !suspended) NexusUi.GREEN else NexusUi.AMBER,
-        )
-        batteryGrant.visibility = if (granted && !suspended) View.GONE else View.VISIBLE
-        batteryAppInfo.visibility = batteryGrant.visibility
-        batteryHint.text = if (suspended) {
-            "Agents was frozen while monitoring, so sessions went unwatched and a " +
-                "computer waiting on you was answered back at its own keyboard. " +
-                "Allowing it above may not be enough on this phone: open App info, " +
-                "then under battery let it use power in the background. The warning " +
-                "clears when you act on it and comes back only if this happens again."
-        } else {
-            "Android may treat Agents as idle and freeze it. " +
-                "Frozen, it stops seeing your sessions and a " +
-                "computer waiting on you is answered back at the keyboard instead of " +
-                "on your glasses."
-        }
-    }
-
-    private fun observeState() {
-        uiScope.launch {
-            AgentsRuntime.store.connections.collectLatest { states ->
-                renderMonitoring(states.getValue(AgentProvider.CLAUDE))
-            }
-        }
-        uiScope.launch {
-            AgentsRuntime.store.sessions.collectLatest {
-                renderMonitoring(AgentsRuntime.store.connections.value.getValue(AgentProvider.CLAUDE))
-            }
-        }
-        uiScope.launch {
-            AgentsRuntime.store.linkMachine.collectLatest {
-                liveLink = it
-                renderComputers()
-            }
-        }
-        uiScope.launch {
-            AgentsRuntime.linkedMachines.collect { renderComputers() }
-        }
-    }
-
-    /**
-     * The status answers what the glasses are seeing, not just whether a socket
-     * is up: session counts while the link works, the link's own state while it
-     * does not.
-     */
-    private fun renderMonitoring(state: ProviderConnectionState) {
-        if (state.state != ConnectionState.CONNECTED) {
-            applyConnectionState(agentdDot, agentdConnection, state, authFailure = "LINK REFUSED")
-            return
-        }
-        val sessions = AgentsRuntime.store.sessions.value
-            .filter { it.provider in AgentProvider.AGENTD_PROVIDERS }
-        val needsYou = sessions.count { it.status == AgentStatus.NEEDS_YOU }
-        val running = sessions.count { it.status == AgentStatus.WORKING }
-        val idle = sessions.count { it.status == AgentStatus.IDLE }
-        val parts = buildList {
-            if (needsYou > 0) add(if (needsYou == 1) "1 NEEDS YOU" else "$needsYou NEED YOU")
-            add("$running RUNNING")
-            add("$idle IDLE")
-        }
-        agentdConnection.text = "WATCHING · ${parts.joinToString(" · ")}"
-        NexusUi.setDotColor(agentdDot, if (needsYou > 0) NexusUi.AMBER else NexusUi.GREEN)
-    }
-
-    private fun applyConnectionState(
-        dot: View,
-        label: TextView,
-        state: ProviderConnectionState,
-        authFailure: String,
-    ) {
-        label.text = state.displayText(authFailure)
-        NexusUi.setDotColor(
-            dot,
-            when (state.state) {
-                ConnectionState.CONNECTED -> NexusUi.GREEN
-                ConnectionState.CONNECTING -> NexusUi.AMBER
-                ConnectionState.AUTH_FAILED -> NexusUi.DANGER
-                ConnectionState.DISCONNECTED -> NexusUi.INK3
-            },
-        )
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun toast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-    }
-
-    private companion object {
-        /** List-row id for the hand-paired daemon entry, which has no machineId. */
-        const val PAIRED_ROW_ID = "paired-daemon"
-        const val REQUEST_NOTIFICATIONS = 41
-        const val NOTIFICATIONS_OFF = "Notifications off — Android may pause Agents"
     }
 }
 

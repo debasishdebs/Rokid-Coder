@@ -87,7 +87,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
      * [boardSessions] is set by [sessionsCard] so [render] knows it just built
      * the board rather than some other screen.
      */
-    private val digestGate = DigestGate(SystemClock::elapsedRealtime, DIGEST_PERIOD_MS)
+    private val digestGate = DigestGate(SystemClock::elapsedRealtime, AlertSettings.DEFAULT_DIGEST_MS)
     private var lastPushedBoard: List<AgentSession>? = null
     private var boardSessions: List<AgentSession>? = null
     private var digestFlush: Job? = null
@@ -1484,6 +1484,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         boardSessions = null
         val card = buildCard()
         boardSessions?.let { board ->
+            // The wearer's cadence (Every minute or Live), read each time so a change applies at once.
+            digestGate.periodMs = configStore.alertSettings().digestPeriodMs
             if (digest && !show && !digestGate.shouldPush(lastPushedBoard, board)) {
                 scheduleDigestFlush()
                 return
@@ -2220,7 +2222,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         private const val AGE_TICK_MS = 60_000L
 
         /** How often plain progress reaches the glasses board; the phone setting (0 = live) comes later. */
-        private const val DIGEST_PERIOD_MS = 60_000L
         private const val NOTICE_TITLE_CHARS = 32
         private const val NOTICE_BODY_CHARS = 240
         private const val ATTENTION_TTL_MS = 12_000L

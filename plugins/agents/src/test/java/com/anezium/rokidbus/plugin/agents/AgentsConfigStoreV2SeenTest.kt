@@ -129,6 +129,29 @@ class AgentsConfigStoreV2SeenTest {
     }
 
     @Test
+    fun alert_settings_persist_and_quiet_stays_on_its_one_key() {
+        assertEquals(AlertSettings(), store().alertSettings())
+
+        store().saveAlertSettings(
+            AlertSettings(waitLimitMs = 900_000, defaultCodex = TempMode.ACCEPT_EDITS, quiet = true),
+        )
+
+        val back = store().alertSettings()
+        assertEquals(900_000L, back.waitLimitMs)
+        assertEquals(TempMode.ACCEPT_EDITS, back.defaultCodex)
+        // Quiet is read through isQuiet() and lives under that key only (R74).
+        assertTrue(back.quiet)
+        assertEquals(true, prefs.map["alerts.quiet"])
+        assertFalse(prefs.map.getValue("alerts.settings").toString().contains("quiet"))
+        store().setQuiet(false)
+        assertFalse(store().alertSettings().quiet)
+        // A save is floored: the screen cannot store what agentd would refuse.
+        store().saveAlertSettings(AlertSettings(waitLimitMs = 1, defaultClaude = TempMode.APPROVE_ALL))
+        assertEquals(30_000L, store().alertSettings().waitLimitMs)
+        assertEquals(TempMode.ASK, store().alertSettings().defaultClaude)
+    }
+
+    @Test
     fun stop_turns_every_provider_off_and_keeps_the_pairing() {
         val config = store().apply {
             saveAgentd(pairing, true)
