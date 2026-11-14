@@ -7,7 +7,7 @@ const path = require("node:path");
 const tls = require("node:tls");
 const { configPath, ensureConfig, saveConfig } = require("../dist/config.js");
 const { SessionStore } = require("../dist/session-store.js");
-const { phoneCert } = require("./helpers/tls.js");
+const { agentCert, phoneCert } = require("./helpers/tls.js");
 const { PinStore } = require("../dist/tls.js");
 const {
   buildPhoneDialTargets,
@@ -347,6 +347,34 @@ test("TCP stays dialling until hello_ack, then sends data and accepts decisions"
     socket.destroy();
     await waitUntil(() => disconnectedCallbacks === 1, "disconnect callback was not delivered");
     assert.equal(link.connected, false);
+  } finally {
+    link.stop();
+    store.dispose();
+    await closeServer(server, sockets);
+  }
+});
+
+test("the TLS dial presents agentd's own cert as the client certificate (R114)", async () => {
+  const sockets = [];
+  let acceptConnection;
+  const accepted = new Promise((resolve) => { acceptConnection = resolve; });
+  // The phone asks for a client cert and checks it by pin, not by CA.
+  const server = tls.createServer(
+    { ...(await phoneCert("phone")), requestCert: true, rejectUnauthorized: false },
+    (socket) => {
+      sockets.push(socket);
+      acceptConnection({ socket, lines: collectLines(socket) });
+    },
+  );
+  const port = await listen(server);
+  const identity = await agentCert();
+  const { link, store } = createLink({ clientCert: { key: identity.key, cert: identity.cert } });
+
+  try {
+    link.connectToPhone({ host: "127.0.0.1", port, name: "test phone", tls: true });
+    const { socket, lines } = await accepted;
+    await lines.waitFor((frame) => frame.type === "hello");
+    assert.equal(socket.getPeerCertificate().fingerprint256, identity.fingerprint256);
   } finally {
     link.stop();
     store.dispose();

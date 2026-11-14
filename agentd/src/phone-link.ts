@@ -84,6 +84,11 @@ export interface PhoneLinkOptions {
    * Without a store the set lasts only as long as the process.
    */
   pins?: PinStore;
+  /**
+   * agentd's own identity, presented as the TLS client certificate when it
+   * dials a phone, so the phone can pin this computer too (R114).
+   */
+  clientCert?: { key: string; cert: string };
   v2?: PhoneV2Hooks;
   operatorMessage?: (message: string) => void;
   discoveryPort?: number;
@@ -508,7 +513,13 @@ export class PhoneLink {
       // The phone's cert is self-signed, so chain validation cannot pass; the
       // pinned set (checked below) is the identity check. Node skips
       // checkServerIdentity when validation failed, which is why it is not used.
-      ? tlsConnect({ host: announcement.host, port: announcement.port, rejectUnauthorized: false })
+      ? tlsConnect({
+          host: announcement.host,
+          port: announcement.port,
+          rejectUnauthorized: false,
+          key: this.options.clientCert?.key,
+          cert: this.options.clientCert?.cert,
+        })
       : connect({ host: announcement.host, port: announcement.port });
     this.socket = socket;
     this.channel = this.channelFor(socket);

@@ -436,6 +436,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
     pins,
+    clientCert: { key: agentCert.key, cert: agentCert.cert },
     v2: v2Hooks,
     onConnected: (trusted) => onPhoneConnected("phonelink", trusted),
     onDisconnected: (wasTrusted) => onPhoneDisconnected(wasTrusted),
