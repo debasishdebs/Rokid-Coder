@@ -175,8 +175,10 @@ test("rokid_pair_and_status_with_agentd_down_say_start_it", async () => {
   await close(server);
   const expansion = (name) => ({ hook_event_name: "UserPromptExpansion", command_name: `rokid:${name}`, session_id: "s" });
   const codex = (prompt) => ({ hook_event_name: "UserPromptSubmit", prompt, session_id: "t" });
-  const claudeEnv = { env: { ROKID_CODER_PROVIDER: "claude" } };
-  const codexEnv = { env: { ROKID_CODER_PROVIDER: "codex" } };
+  // rokid:pair first tries agentd's launcher socket: point it at an empty dir, never the real one.
+  const noSocket = fs.mkdtempSync(path.join(os.tmpdir(), "rk-nosock-"));
+  const claudeEnv = { env: { ROKID_CODER_PROVIDER: "claude", ROKID_RK_CONFIG_DIR: noSocket } };
+  const codexEnv = { env: { ROKID_CODER_PROVIDER: "codex", ROKID_RK_CONFIG_DIR: noSocket } };
   const pair = await runForwarder(port, expansion("pair"), "500", claudeEnv);
   assert.deepEqual(JSON.parse(pair.stdout), { decision: "block", reason: 'agentd isn\'t running — run "agentd run" in a terminal' });
   const codexPair = await runForwarder(port, codex(" rokid:pair\n"), "500", codexEnv);
@@ -187,4 +189,5 @@ test("rokid_pair_and_status_with_agentd_down_say_start_it", async () => {
   assert.equal((await runForwarder(port, expansion("on"), "500", claudeEnv)).stdout, "");
   assert.equal((await runForwarder(port, codex("please rokid:pair"), "500", codexEnv)).stdout, "");
   assert.equal((await runForwarder(port, expansion("pair"), "500", codexEnv)).stdout, "", "a Codex hook is read as Codex");
+  fs.rmSync(noSocket, { recursive: true, force: true });
 });

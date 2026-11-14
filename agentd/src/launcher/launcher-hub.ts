@@ -6,7 +6,7 @@ import type { AttachChange, AttachRegistry } from "../attach-registry";
 import { sessionKeyOf, type SessionKey } from "../protocol-v2";
 import type { AgentProvider, Logger } from "../types";
 import { findOwnedClaudeSession, isPidAlive } from "./claude-sessions";
-import { LAUNCHER_SOCKET_NAME } from "./status-probe";
+import { LAUNCHER_SOCKET_NAME } from "./socket-name";
 
 export { LAUNCHER_SOCKET_NAME };
 export const HELLO_DEADLINE_MS = 5000;
@@ -61,6 +61,11 @@ export interface LauncherHubOptions {
   claudeSessionsDir: string;
   logger: Logger;
   registry: AttachRegistry;
+  /**
+   * Opens the phone pairing window (allow-next). Only this socket, which is
+   * same-user and 0600, may ask for it: the hook port is open to every local user.
+   */
+  armPairing?: () => void;
 }
 
 const COMMAND_ERRORS: ReadonlySet<string> = new Set<CommandError>([
@@ -466,6 +471,9 @@ export class LauncherHub {
     }
     const frame = parsed as Frame;
     if (!connection.hello) {
+      if (frame.type === "arm_pairing") {
+        return this.onArmPairing(connection, frame);
+      }
       return frame.type === "launcher_hello" ? this.onHello(connection, frame) : "hello_expected";
     }
     switch (frame.type) {
@@ -709,6 +717,24 @@ export class LauncherHub {
     this.options.logger.warn("launcher_connection_dropped", { reason });
     connection.socket.destroy();
     this.onClose(connection);
+  }
+
+  /** A one-shot request: no hello, one answer, then the connection closes. */
+  private onArmPairing(connection: Connection, frame: Frame): string | undefined {
+    if (!hasShape(frame, ["type"])) {
+      return "bad_frame";
+    }
+    let ok = false;
+    try {
+      this.options.armPairing?.();
+      ok = this.options.armPairing !== undefined;
+    } catch (error) {
+      this.options.logger.error("arm_pairing_failed", { reason: errorCode(error) });
+    }
+    this.write(connection, { type: "pairing_armed", ok });
+    connection.socket.end();
+    this.onClose(connection);
+    return undefined;
   }
 
   private onClose(connection: Connection): void {

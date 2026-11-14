@@ -154,6 +154,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     claudeSessionsDir: launcherSessionsDir,
     logger,
     registry: attachRegistry,
+    // The plugin's pair command arrives here, from the hook forwarder (R156).
+    armPairing: () => {
+      pins.armAllowNext(Date.now());
+    },
   });
   // agentd's own read of the file Claude keeps for the bound process (R55).
   const launcherStates = new SessionStates(
@@ -310,9 +314,6 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
           } catch {
             return undefined;
           }
-        },
-        openPairingWindow: () => {
-          pins.armAllowNext(Date.now());
         },
       },
     });

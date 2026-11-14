@@ -5,7 +5,6 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { LAUNCHER_ATTACH_TEXT } from "./attach-command";
 import { claudeSessionsDir, findOwnedClaudeSession } from "./launcher/claude-sessions";
 import { LauncherClient } from "./launcher/launcher-client";
 import { offerPairing } from "./launcher/pair-prompt";
@@ -14,6 +13,9 @@ import { launcherSocketPath, probeStatus, type StatusProbe } from "./launcher/st
 import { restoreTerminal, saveTerminal } from "./launcher/terminal";
 
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
+// R155: printed before the bind, so it says attaching; only the phone shows the bind itself.
+const ATTACHING =
+  "Rokid-Coder launcher: attaching… From the glasses you can reply at any time, compact, and change model (changing model also sets your default for new sessions).";
 const SOCKET_OFF = "Rokid-Coder: agentd is running but its launcher socket is off — this session is not attached.";
 // U5: everything the banner needs is said before the TUI takes the screen.
 const CLAUDE_COMMANDS_LINE = "  In Claude, {/rokid:status} shows this session's state and {/rokid:off} stops sending it to the glasses.";
@@ -447,7 +449,7 @@ function markCommands(lines: string[], color: boolean): string {
 function claudeBanner(status: StatusProbe, color: boolean): string {
   if (status.launcherSocket) {
     return markCommands(
-      [LAUNCHER_ATTACH_TEXT, CLAUDE_COMMANDS_LINE, ...(status.paired ? [CLAUDE_GLASSES_LINE] : [])],
+      [ATTACHING, CLAUDE_COMMANDS_LINE, ...(status.paired ? [CLAUDE_GLASSES_LINE] : [])],
       color,
     );
   }

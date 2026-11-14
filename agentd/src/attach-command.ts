@@ -56,12 +56,13 @@ const STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder.";
 /**
  * U6: in a session, pairing only opens the allow-next window. The pairing line
  * and its secrets never go into a reply: a reply is model context and lands in
- * the transcript.
+ * the transcript. R156: this hook only words the reply. The hook forwarder
+ * opens the window over the same-user launcher socket, and replaces this text
+ * with PAIR_UNAVAILABLE_TEXT when it could not.
  */
 export const PAIR_TEXT =
-  "Pairing window open: Open Agents on your phone → Add a computer within 2 minutes.";
-const PAIR_FAILED_TEXT =
-  'Rokid-Coder could not open the pairing window. Run "agentd phones allow-next" in a terminal instead.';
+  "Pairing window open: Open Agents on your phone → Add a computer within 2 minutes. The phone and this computer must be on the same Wi-Fi or on Tailscale.";
+export const PAIR_UNAVAILABLE_TEXT = 'Run "agentd phones allow-next" in a terminal';
 const NO_SESSION_TEXT = "Rokid-Coder could not tell which session this is, so nothing was changed.";
 const ATTACH_FAILED_TEXT = "Rokid-Coder could not save the attach list, so this session was not attached.";
 
@@ -115,10 +116,9 @@ export interface AttachCommandContext {
   onAttached(payload: HookPayload, sessionId: string): void;
   /** A live `rk claude` binding holds this Claude session (R135). */
   isLauncherBound?(sessionId: string): boolean;
-  /** agentd's phone pin store: whether a phone is paired (undefined when unreadable), and the allow-next window. */
+  /** agentd's phone pin store: whether a phone is paired (undefined when unreadable). */
   phones?: {
     paired(): boolean | undefined;
-    openPairingWindow(): void;
   };
 }
 
@@ -134,8 +134,13 @@ function statusReply(provider: AgentProvider, attached: boolean, launcher: boole
   const pair = `type ${pairCommand(provider)} to pair your phone`;
   const next = !attached
     ? paired === false ? `${attach}, and ${pair}.` : `${attach}.`
-    : paired === false ? `${pair}.` : "on your glasses, open Agents to see this session.";
-  return `${head}\nMode: ${launcher ? "LAUNCHER" : "PLUGIN"} · Phone: ${phone} · agentd: reachable\nNext step: ${next}`;
+    : paired === false
+      ? `${pair}.`
+      : paired === undefined
+        ? 'run "agentd phones list" in a terminal to check the paired phones.'
+        : "on your glasses, open Agents to see this session.";
+  const mode = !attached ? "— (not attached)" : launcher ? "LAUNCHER" : "PLUGIN";
+  return `${head}\nMode: ${mode} · Phone: ${phone} · agentd: reachable\nNext step: ${next}`;
 }
 
 /**
@@ -154,14 +159,9 @@ export function handleAttachCommand(
     return undefined;
   }
   // Pairing is about this computer, not this session, so it needs no session id.
+  // Nothing is armed here: anyone on this machine can reach the hook port.
   if (action === "pair") {
-    try {
-      context.phones?.openPairingWindow();
-    } catch (error) {
-      context.logger.error("pair_command_failed", { reason: error instanceof Error ? error.name : "unknown" });
-      return block(PAIR_FAILED_TEXT);
-    }
-    return block(context.phones ? PAIR_TEXT : PAIR_FAILED_TEXT);
+    return block(PAIR_TEXT);
   }
   const sessionId = typeof payload.session_id === "string" && payload.session_id.length > 0
     ? payload.session_id

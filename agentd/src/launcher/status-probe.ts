@@ -4,9 +4,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { defaultStateDir } from "../config";
+import { LAUNCHER_SOCKET_NAME } from "./socket-name";
 
-// Defined here, not in the hub: rk loads this file, and the hub pulls in ./tls.
-export const LAUNCHER_SOCKET_NAME = "launcher.sock";
 const DEFAULT_HTTP_PORT = 8791;
 const HEALTH_PROBE_MS = 700;
 
@@ -94,17 +93,33 @@ function socketAnswers(socketPath: string): Promise<boolean> {
   });
 }
 
-/** Whether the pin store holds a phone. ./tls pulls in the certificate generator, so it loads only here. */
-export async function phonePaired(): Promise<boolean> {
-  const { PinStore } = await import("../tls.js");
+/**
+ * Whether the pin store holds a phone, read straight from the file: loading
+ * ./tls would pull in the certificate generator on every rk start. An absent
+ * file is no phone; one that cannot be read or parsed counts as paired, so rk
+ * never prompts on a guess.
+ */
+export function phonePaired(): boolean {
+  let text: string;
   try {
-    return !new PinStore(phonePinsFile()).isEmpty();
+    text = fs.readFileSync(phonePinsFile(), "utf8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+  try {
+    const record = JSON.parse(text) as { phones?: unknown; pins?: unknown } | null;
+    const phones = Array.isArray(record?.phones)
+      ? record.phones
+      : record?.pins && typeof record.pins === "object"
+        ? Object.values(record.pins)
+        : undefined;
+    return phones === undefined || phones.length > 0;
   } catch {
     return true;
   }
 }
 
 export async function probeStatus(): Promise<StatusProbe> {
-  const [healthy, socket, paired] = await Promise.all([agentdHealthy(), socketAnswers(launcherSocketPath()), phonePaired()]);
-  return { agentd: healthy ? "up" : "down", paired, launcherSocket: socket };
+  const [healthy, socket] = await Promise.all([agentdHealthy(), socketAnswers(launcherSocketPath())]);
+  return { agentd: healthy ? "up" : "down", paired: phonePaired(), launcherSocket: socket };
 }

@@ -147,7 +147,9 @@ for (const transport of ["phonelink", "wshub"]) {
 }
 
 const { PinStore } = require("../dist/tls.js");
-const { PAIR_TEXT } = require("../dist/attach-command.js");
+const { PAIR_TEXT, PAIR_UNAVAILABLE_TEXT } = require("../dist/attach-command.js");
+const net = require("node:net");
+const { spawn } = require("node:child_process");
 
 const CODEX = { "x-rokid-provider": "codex" };
 const claudeCommand = (sessionId, name) => ({
@@ -161,19 +163,83 @@ const codexPhrase = (sessionId, name) => ({ hook_event_name: "UserPromptSubmit",
 const pinsOf = (coderDir) => new PinStore(path.join(coderDir, "tls", "phone-pins.json"));
 const PHONE_FP = "CD".repeat(32);
 
+/** The plugins' real hook forwarder, fed one hook on stdin. */
+function runForwarder(payload, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(__dirname, "..", "dist", "hook-forward.js")], {
+      env: { ...process.env, ...env },
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.once("error", reject);
+    child.once("exit", () => resolve(stdout ? JSON.parse(stdout) : undefined));
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
+const rawSocketFrame = (socketPath, line) =>
+  new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let answer = "";
+    socket.setEncoding("utf8");
+    socket.once("connect", () => socket.write(`${line}\n`));
+    socket.on("data", (chunk) => (answer += chunk));
+    socket.once("error", reject);
+    socket.once("close", () => resolve(answer));
+  });
+
 test("rokid_pair_command_opens_window_and_shows_only_phone_step", async () => {
   await withDaemon({ transport: "wshub" }, async ({ httpPort, coderDir }) => {
+    // withDaemon points NEXUS_AGENTD_STATE_DIR at its own config, which names coderDir.
+    const env = (provider) => ({ ROKID_CODER_PROVIDER: provider, NEXUS_AGENTD_HTTP_PORT: String(httpPort), ROKID_RK_CONFIG_DIR: "" });
     assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), false);
-    const reply = await postHook(httpPort, claudeCommand("p1", "pair"));
+    const reply = await runForwarder(claudeCommand("p1", "pair"), env("claude"));
     assert.deepEqual(reply, { decision: "block", reason: PAIR_TEXT });
-    assert.equal(PAIR_TEXT, "Pairing window open: Open Agents on your phone → Add a computer within 2 minutes.");
+    assert.equal(
+      PAIR_TEXT,
+      "Pairing window open: Open Agents on your phone → Add a computer within 2 minutes. The phone and this computer must be on the same Wi-Fi or on Tailscale.",
+    );
     assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), true, "the allow-next window is open");
     assert.equal(pinsOf(coderDir).allowNextOpen(Date.now() + 2 * 60_000 + 1), false, "for two minutes");
 
     pinsOf(coderDir).closeAllowNext();
-    const codex = await postHook(httpPort, codexPhrase("t1", "pair"), CODEX);
+    const codex = await runForwarder(codexPhrase("t1", "pair"), env("codex"));
     assert.deepEqual(codex, { decision: "block", reason: PAIR_TEXT });
     assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), true, "rokid:pair in Codex opens it too");
+  });
+});
+
+test("hook_http_cannot_arm_pairing_window", async () => {
+  await withDaemon({ transport: "wshub" }, async ({ httpPort, coderDir }) => {
+    // What any local user can send: a raw POST, no forwarder, no socket.
+    assert.equal((await postHook(httpPort, claudeCommand("p2", "pair"))).decision, "block");
+    assert.equal((await postHook(httpPort, codexPhrase("t2", "pair"), CODEX)).decision, "block");
+    assert.equal((await postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "rokid:pair" })).decision, "block");
+    assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), false, "the hook port never opens the window");
+  });
+});
+
+test("rokid_pair_arms_via_launcher_socket", async () => {
+  await withDaemon({ transport: "wshub" }, async ({ httpPort, coderDir, claudeDir }) => {
+    const socketPath = path.join(coderDir, "launcher.sock");
+    // One frame, no hello: answered, then closed.
+    assert.equal(await rawSocketFrame(socketPath, '{"type":"arm_pairing"}'), '{"type":"pairing_armed","ok":true}\n');
+    assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), true);
+    pinsOf(coderDir).closeAllowNext();
+    assert.equal(await rawSocketFrame(socketPath, '{"type":"arm_pairing","extra":1}'), "", "a malformed frame arms nothing");
+    assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), false);
+
+    // No launcher socket to reach: the reply says how to open the window by hand.
+    const elsewhere = path.join(claudeDir, "no-agentd-here");
+    const reply = await runForwarder(claudeCommand("p3", "pair"), {
+      ROKID_CODER_PROVIDER: "claude",
+      NEXUS_AGENTD_HTTP_PORT: String(httpPort),
+      ROKID_RK_CONFIG_DIR: elsewhere,
+    });
+    assert.deepEqual(reply, { decision: "block", reason: PAIR_UNAVAILABLE_TEXT });
+    assert.equal(PAIR_UNAVAILABLE_TEXT, 'Run "agentd phones allow-next" in a terminal');
+    assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), false);
   });
 });
 
@@ -201,7 +267,7 @@ test("rokid_status_reports_mode_paired_agentd_next_step", async () => {
     const status = async () => (await postHook(httpPort, claudeCommand("s5", "status"))).reason;
     assert.equal(
       await status(),
-      "Not attached to Rokid-Coder.\nMode: PLUGIN · Phone: not paired · agentd: reachable\nNext step: type /rokid:on to attach, and type /rokid:pair to pair your phone.",
+      "Not attached to Rokid-Coder.\nMode: — (not attached) · Phone: not paired · agentd: reachable\nNext step: type /rokid:on to attach, and type /rokid:pair to pair your phone.",
     );
     await postHook(httpPort, claudeCommand("s5", "on"));
     assert.equal(
@@ -214,7 +280,7 @@ test("rokid_status_reports_mode_paired_agentd_next_step", async () => {
       "Attached to Rokid-Coder (plugin mode).\nMode: PLUGIN · Phone: paired · agentd: reachable\nNext step: on your glasses, open Agents to see this session.",
     );
     const codex = (await postHook(httpPort, codexPhrase("t5", "status"), CODEX)).reason;
-    assert.equal(codex, "Not attached to Rokid-Coder.\nMode: PLUGIN · Phone: paired · agentd: reachable\nNext step: type rokid:on to attach.");
+    assert.equal(codex, "Not attached to Rokid-Coder.\nMode: — (not attached) · Phone: paired · agentd: reachable\nNext step: type rokid:on to attach.");
   });
 });
 

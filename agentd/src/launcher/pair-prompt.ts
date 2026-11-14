@@ -9,6 +9,7 @@ import { phonePinsFile } from "./status-probe";
 export const PAIR_LATER = 'Pair later: run "agentd pair" or type /rokid:pair in Claude (rokid:pair in Codex).';
 const QUESTION = "No phone paired yet. Pair now? [Y/n] ";
 const PHONE_STEP = "Open Agents on your phone → Add a computer";
+const NETWORK_NOTE = "The phone and this computer must be on the same Wi-Fi or on Tailscale.";
 const PAIRED = "Paired ✓";
 const CLOSED = "The pairing window closed before a phone was added.";
 const POLL_MS = 1000;
@@ -66,6 +67,12 @@ function pinned(pins: PinStore): boolean {
   }
 }
 
+/** The window `agentd phones allow-next` opens. The override exists only so a test need not wait it out. */
+function pairWindowMs(): number | undefined {
+  const parsed = Number(process.env.ROKID_RK_PAIR_WINDOW_MS);
+  return process.env.ROKID_RK_PAIR_WINDOW_MS !== undefined && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function clock(ms: number): string {
   const seconds = Math.max(0, Math.ceil(ms / 1000));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
@@ -94,13 +101,14 @@ export async function offerPairing(): Promise<void> {
     const pins = new PinStore(phonePinsFile());
     let until: number;
     try {
-      until = pins.armAllowNext(Date.now());
+      until = pins.armAllowNext(Date.now(), pairWindowMs());
     } catch (error) {
       err.write(`Could not open the pairing window: ${error instanceof Error ? error.message : String(error)}\n${PAIR_LATER}\n`);
       return;
     }
     const tty = Boolean(err.isTTY);
     const status = (): string => `${PHONE_STEP} (${clock(until - Date.now())} left)`;
+    err.write(`${NETWORK_NOTE}\n`);
     err.write(tty ? status() : `${status()}\n`);
     const outcome = await new Promise<"paired" | "closed" | "skipped">((resolve) => {
       const timer = setInterval(() => {
@@ -122,6 +130,14 @@ export async function offerPairing(): Promise<void> {
       };
       void input.next().then(() => done("skipped"));
     });
+    if (outcome === "skipped") {
+      // A user who skipped is not left with a window still open for a stranger.
+      try {
+        pins.closeAllowNext();
+      } catch {
+        // the window still ends by itself
+      }
+    }
     // Enter already moved the cursor to a fresh line; the countdown did not.
     const fresh = outcome === "skipped" || !tty ? "" : "\r\x1b[2K";
     err.write(
