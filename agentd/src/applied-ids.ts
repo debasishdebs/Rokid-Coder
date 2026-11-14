@@ -29,6 +29,11 @@ export class AppliedIds {
     return recordedAt !== undefined && !this.expired(recordedAt, this.now());
   }
 
+  /**
+   * Throws when the record cannot be saved, and then keeps nothing: an id only
+   * memory knows would be forgotten by a restart, and a replay after it would
+   * apply the frame twice. The caller refuses the frame instead.
+   */
   record(msgId: string): void {
     const t = this.now();
     const existing = this.ids.get(msgId);
@@ -40,7 +45,24 @@ export class AppliedIds {
     try {
       this.persist();
     } catch (error) {
-      // The in-memory record still dedups within this process; only a restart can forget it.
+      this.ids.delete(msgId);
+      this.logger?.error("applied_ids_persist_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
+  /** Frees an id whose frame was refused after all, so the phone may resend it. */
+  forget(msgId: string): void {
+    if (!this.ids.delete(msgId)) {
+      return;
+    }
+    try {
+      this.persist();
+    } catch (error) {
+      // The file still holds the id, so a restart refuses a resend as a
+      // duplicate: closed, never applied twice.
       this.logger?.error("applied_ids_persist_failed", {
         reason: error instanceof Error ? error.message : String(error),
       });

@@ -12,7 +12,7 @@ import { AttachRegistry, NotAttachedError } from "./attach-registry";
 import { spawnClaudeThread } from "./claude-spawn";
 import { CodexMonitor } from "./codex/monitor";
 import { DEFAULT_WAIT_LIMIT_SEC, configPath, defaultStateDir, ensureConfig } from "./config";
-import { discoverRecentSessions } from "./discovery";
+import { claudeSessionGone, discoverRecentSessions } from "./discovery";
 import { HookHttpServer } from "./http-server";
 import { FileLogger } from "./logger";
 import { SessionStore } from "./session-store";
@@ -59,6 +59,8 @@ export interface RunningDaemon {
   /** Held tool approvals; each lives for the wait limit Y and ends with its alert. */
   approvals: ApprovalManager;
   isTailing(sessionId: string): boolean;
+  /** The once-a-minute housekeeping: stalled sessions, and approve-all for Claude sessions that are gone. */
+  sweepSessions(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -89,7 +91,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     ...approvalPolicy.takeRestartNotices(),
     ...queuedResetNotices.splice(0),
   ];
-  const endApprovalSession = (provider: AgentProvider, id: string): void => {
+  const resetApprovalMode = (provider: AgentProvider, id: string): void => {
     const notice = approvalPolicy.endSession(sessionKeyOf(provider, id));
     if (notice) {
       // They wait here while no phone is connected, so a phone that never comes
@@ -100,6 +102,9 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       queuedResetNotices.push(notice);
       logger.info("approval_mode_reset", { reason: notice.reason, from: notice.from });
     }
+  };
+  const endApprovalSession = (provider: AgentProvider, id: string): void => {
+    resetApprovalMode(provider, id);
     phoneV2?.onSessionEnded(provider, id);
   };
   // Either transport counts, as for approvals: a phone that dialled in is as
@@ -202,11 +207,13 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     const fresh = !tailManager.isTailing(sessionId);
     tailManager.start(sessionId, transcriptPath);
     if (fresh) {
-      void readTranscriptHeading(transcriptPath).then((heading) => {
-        if (heading.aiTitle || heading.firstPrompt) {
-          sessions.seedHeading(sessionId, heading);
-        }
-      });
+      void readTranscriptHeading(transcriptPath)
+        .then((heading) => {
+          if (heading.aiTitle || heading.firstPrompt) {
+            sessions.seedHeading(sessionId, heading);
+          }
+        })
+        .catch(() => undefined);
       void seedRecentMessages(sessionId, transcriptPath);
     }
   };
@@ -270,6 +277,19 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     } else if (sessionId && transcriptPath && sessions.get(sessionId)?.stale === false) {
       startTailing(sessionId, transcriptPath);
     }
+    // The tool a prompt asked about ran, failed or was denied: whoever answered
+    // it, the phone no longer can. Claude keeps the PermissionRequest hook open
+    // after its own dialog is answered, so this is the only word of it.
+    if (
+      sessionId &&
+      (eventName === "PostToolUse" || eventName === "PostToolUseFailure" || eventName === "PermissionDenied")
+    ) {
+      approvals?.settleByTool(sessionId, payload.tool_name, payload.tool_input);
+      if (!approvals?.hasPendingForSession(sessionId)) {
+        sessions.clearPermissionRequest(sessionId);
+      }
+      return {};
+    }
     // PreToolUse still arrives, and is still what keeps the session's activity
     // current, but it is no longer what the wearer is asked about: it fires for
     // every tool call, so holding on it asked them to approve reads and greps
@@ -288,6 +308,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     // above, which is why they never count as the wearer typing at the laptop.
     if (sessionId) {
       if (eventName === "Stop") {
+        phoneV2?.onClaudeStop(sessionId);
         return stopWait.hold(sessionId, closed);
       }
       if (eventName === "PreToolUse") {
@@ -330,40 +351,46 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   };
 
   // A phone came up on either transport: Claude sessions are rebuilt from their
-  // transcripts, since the tail only sees new lines, and a trusted phone also
-  // gets what was waiting for one (open approvals, queued alerts, resets nobody
-  // has been told about). A monitor-only phone cannot answer any of those.
-  const onPhoneConnected = (): void => {
-    if (trustedPhoneConnected()) {
+  // transcripts, since the tail only sees new lines. A link that is now where
+  // frames go (the outlet prefers the dialled link) also gets what was waiting
+  // for one: open approvals, the alert on the glasses, resets nobody has been
+  // told about. A monitor-only phone cannot answer any of those, and a second
+  // phone beside a trusted one must not make the first show it all again.
+  const onPhoneConnected = (transport: "phonelink" | "wshub", trusted: boolean): void => {
+    const nowPreferred = transport === "phonelink"
+      ? trusted
+      : trusted && !phoneLink?.trustedConnected && wsHub?.trustedClientCount === 1;
+    if (nowPreferred) {
       approvals?.onLinkConnected();
       phoneV2?.onChannelConnected();
     }
     rebuildAttachedClaudeSessions();
   };
-  // A phone went away on either transport. Pending approvals fall back to the
-  // laptop prompt and their alerts expire, unless the other transport still has
-  // a phone: expiring something that can still be answered would only cost the
-  // wearer the answer. Frames go to the dialled link when it is up, so only its
-  // loss strands anything; then the other phone is sent what the link held.
-  const onPhoneDisconnected = (lostTrustedDialledLink: boolean): void => {
-    if (!trustedPhoneConnected()) {
-      approvals?.onLinkDisconnected();
-    } else if (lostTrustedDialledLink) {
-      approvals?.onLinkConnected();
-      phoneV2?.onChannelConnected();
-    }
-  };
-  // A phone was forgotten or its steering secret rotated. Unlike a dropped link
-  // it is not coming back, so with no trusted phone left everything held for
-  // one goes back to the laptop now, without waiting for its socket to close:
-  // approvals, questions and Stop waits alike.
-  const onPhoneTrustRevoked = (): void => {
+  // No trusted phone is left, so nothing held for one can be answered:
+  // approvals, questions and Stop waits all go back to the laptop now.
+  const releaseHoldsIfNoTrustedPhone = (): void => {
     if (!trustedPhoneConnected()) {
       approvals?.onLinkDisconnected();
       stopWait.releaseAll();
       questionRelay.releaseAll();
     }
   };
+  // A phone went away on either transport. Unless the other transport still has
+  // a trusted phone, what was held for one is released: expiring something that
+  // can still be answered would only cost the wearer the answer. Frames go to
+  // the dialled link when it is up, so only its loss strands anything; then the
+  // other phone is sent what the link held.
+  const onPhoneDisconnected = (lostTrustedDialledLink: boolean): void => {
+    if (!trustedPhoneConnected()) {
+      releaseHoldsIfNoTrustedPhone();
+    } else if (lostTrustedDialledLink) {
+      approvals?.onLinkConnected();
+      phoneV2?.onChannelConnected();
+    }
+  };
+  // A phone was forgotten or its steering secret rotated: the same release, now,
+  // without waiting for its socket to close.
+  const onPhoneTrustRevoked = releaseHoldsIfNoTrustedPhone;
 
   const hub = new WsHub(config, sessions, logger, {
     detailProvider,
@@ -375,7 +402,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     steer: () => readSteerSecret(tlsDir),
     steerFile: steerSecretFile(tlsDir),
     v2: v2Hooks,
-    onClientConnected: onPhoneConnected,
+    onClientConnected: (trusted) => onPhoneConnected("wshub", trusted),
     onClientDisconnected: () => onPhoneDisconnected(false),
     onTrustRevoked: onPhoneTrustRevoked,
   });
@@ -401,7 +428,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onTerminalInput: typeIntoSession,
     pins,
     v2: v2Hooks,
-    onConnected: onPhoneConnected,
+    onConnected: (trusted) => onPhoneConnected("phonelink", trusted),
     onDisconnected: (wasTrusted) => onPhoneDisconnected(wasTrusted),
     onTrustRevoked: onPhoneTrustRevoked,
   });
@@ -475,6 +502,11 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     logger,
   });
   phoneV2 = phone;
+  const subscribeCodex = (threadId: string): void => {
+    codex.subscribe(threadId).catch((error: unknown) => {
+      logger.warn("codex_subscribe_failed", { reason: error instanceof Error ? error.name : "unknown" });
+    });
+  };
   // Attaching a Codex thread subscribes to it; detaching undoes everything
   // attaching allowed. Pieces that do not exist yet (stop-waits, question
   // relays, alerts) subscribe to onChange themselves when they land.
@@ -482,7 +514,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     if (kind === "attached") {
       approvalPolicy.applyDefault(sessionKeyOf(entry.provider, entry.id));
       if (entry.provider === "codex") {
-        void codex.subscribe(entry.id);
+        subscribeCodex(entry.id);
       }
       return;
     }
@@ -501,7 +533,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   // Threads attached in an earlier run are subscribed once the monitor connects.
   for (const entry of attachRegistry.list()) {
     if (entry.provider === "codex") {
-      void codex.subscribe(entry.id);
+      subscribeCodex(entry.id);
     }
   }
   const httpServer = new HookHttpServer({
@@ -511,7 +543,29 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     logger,
     extraHealth: () => ({ codex: codex.availability() }),
   });
-  const heartbeatTimer = setInterval(() => sessions.sweepStalled(), 60_000);
+  // A Claude session killed outright (kill -9, a closed terminal) sends no
+  // SessionEnd, and `claude --resume` would inherit its approve-all; once its
+  // transcript or its process is gone, the mode ends as if it had.
+  const sweepSessions = async (): Promise<void> => {
+    sessions.sweepStalled();
+    for (const entry of attachRegistry.list()) {
+      const key = sessionKeyOf("claude", entry.id);
+      if (entry.provider !== "claude" || approvalPolicy.get(key) !== "approveAll") {
+        continue;
+      }
+      if (
+        await claudeSessionGone(claudeDir, entry.id, sessions.transcriptPath(entry.id)) &&
+        approvalPolicy.get(key) === "approveAll"
+      ) {
+        logger.info("approval_mode_session_gone", {});
+        resetApprovalMode("claude", entry.id);
+        phoneV2?.flushResets();
+      }
+    }
+  };
+  const heartbeatTimer = setInterval(() => {
+    sweepSessions().catch(() => undefined);
+  }, 60_000);
   heartbeatTimer.unref();
 
   try {
@@ -556,6 +610,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     approvals,
     takeResetNotices,
     isTailing: (sessionId) => tailManager.isTailing(sessionId),
+    sweepSessions,
     async stop() {
       if (stopped) {
         return;

@@ -320,14 +320,17 @@ test("daemon_detach_releases_the_hold_as_cancelled", async () => {
   );
 });
 
-test("daemon_stop_does_not_hang_on_a_held_request", async () => {
+test("daemon_stop_does_not_hang_on_a_held_request", { timeout: 5000 }, async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
-    async ({ httpPort }) => {
-      // The harness stops the daemon after this body returns; the held request
-      // must not keep the HTTP server from closing.
-      void startStop(httpPort, "held").reply.catch(() => undefined);
+    async ({ daemon, httpPort }) => {
+      const stop = startStop(httpPort, "held");
       await settle();
+      assert.equal(daemon.stopWait.state("held").waiting, true, "the Stop is really held");
+      // The held request must not keep the HTTP server from closing; the
+      // harness's own stop afterwards is then a no-op.
+      await daemon.stop();
+      assert.deepEqual(await stop.reply, {});
     },
   );
 });
@@ -354,6 +357,40 @@ test("daemon_forwarder_that_dies_releases_the_hold_as_cancelled", async () => {
       await settle();
       assert.equal(daemon.stopWait.state("held").waiting, false);
       assert.deepEqual(releases, ["held:cancelled"]);
+    },
+  );
+});
+
+test("claude_plugin_forwards_every_slash_command_and_the_tool_outcomes", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { hooks } = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "..", "..", "plugins", "claude-code", "hooks", "hooks.json"), "utf8"),
+  );
+  // Any slash command typed at the laptop is the wearer taking over, not only rokid's own.
+  assert.equal(hooks.UserPromptExpansion.every((group) => group.matcher === undefined), true);
+  for (const event of ["PostToolUse", "PostToolUseFailure", "PermissionDenied"]) {
+    const handlers = hooks[event]?.flatMap((group) => group.hooks) ?? [];
+    assert.equal(handlers.length, 1, event);
+    assert.match(handlers[0].command, /ROKID_CODER_PROVIDER=claude .*hook-forward\.js/, event);
+  }
+});
+
+test("daemon_another_plugins_slash_command_releases_the_hold_as_laptop", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "held" }] },
+    async ({ daemon, httpPort }) => {
+      const releases = [];
+      daemon.stopWait.onRelease((sessionId, reason) => releases.push(`${sessionId}:${reason}`));
+      const stop = startStop(httpPort, "held");
+      await settle();
+      assert.equal(daemon.stopWait.state("held").waiting, true);
+      assert.deepEqual(
+        await postHook(httpPort, { hook_event_name: "UserPromptExpansion", command_name: "review:pr", session_id: "held" }),
+        {},
+      );
+      assert.deepEqual(await stop.reply, {});
+      assert.deepEqual(releases, ["held:laptop"]);
     },
   );
 });

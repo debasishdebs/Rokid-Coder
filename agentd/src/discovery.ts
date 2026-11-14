@@ -1,4 +1,4 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "./types";
 import type { DiscoveredSession } from "./session-store";
@@ -136,4 +136,58 @@ export async function discoverRecentSessions(
     }
   }
   return sessions;
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Whether a Claude session is known to be over without having said so (a
+ * killed process sends no SessionEnd): its transcript is gone, or Claude's own
+ * registry of running sessions (`<claudeDir>/sessions/<pid>.json`) has no live
+ * process for it. With no registry at all only the transcript can tell.
+ */
+export async function claudeSessionGone(
+  claudeDir: string,
+  sessionId: string,
+  transcriptPath: string | undefined,
+  isAlive: (pid: number) => boolean = processAlive,
+): Promise<boolean> {
+  if (transcriptPath) {
+    try {
+      await stat(transcriptPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return true;
+      }
+    }
+  }
+  const registry = path.join(claudeDir, "sessions");
+  let names: string[];
+  try {
+    names = await readdir(registry);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) {
+      continue;
+    }
+    let record: Record<string, unknown> | undefined;
+    try {
+      record = objectValue(JSON.parse(await readFile(path.join(registry, name), "utf8")));
+    } catch {
+      continue;
+    }
+    if (record?.sessionId === sessionId && typeof record.pid === "number" && isAlive(record.pid)) {
+      return false;
+    }
+  }
+  return true;
 }

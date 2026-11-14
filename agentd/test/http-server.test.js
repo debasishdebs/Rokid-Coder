@@ -168,3 +168,30 @@ test("killed_forwarder_aborts_hold", async () => {
     await server.stop();
   }
 });
+
+test("a_hook_handler_that_throws_synchronously_answers_empty_and_keeps_serving", async () => {
+  const errors = [];
+  let calls = 0;
+  const server = new HookHttpServer({
+    port: 0,
+    sessionCount: () => 0,
+    onHook() {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error("bug in processHook");
+      }
+      return { ok: true };
+    },
+    logger: { info() {}, warn() {}, error(event) { errors.push(event); } },
+  });
+  await server.start();
+  try {
+    const first = await call(server.port(), "POST", "/hook", JSON.stringify({ hook_event_name: "Stop" }));
+    assert.deepEqual([first.status, JSON.parse(first.body)], [200, {}]);
+    assert.deepEqual(errors, ["hook_processing_failed"]);
+    const second = await call(server.port(), "POST", "/hook", JSON.stringify({ hook_event_name: "Stop" }));
+    assert.deepEqual(JSON.parse(second.body), { ok: true }, "the daemon is still up");
+  } finally {
+    await server.stop();
+  }
+});

@@ -1,4 +1,4 @@
-import { AlertQueue, type Alert } from "./alerts";
+import { AlertQueue, type Alert, type QueueTimings } from "./alerts";
 import type { AppliedIds } from "./applied-ids";
 import type {
   ApprovalManager,
@@ -23,6 +23,7 @@ import {
 } from "./protocol-v2";
 import {
   PhoneSettingsStore,
+  type PhoneSettings,
   parseDefaultModes,
   parseTimings,
   parseWaitLimitMs,
@@ -31,6 +32,11 @@ import type { QuestionClosed, QuestionOpened, QuestionRelay } from "./question-r
 import type { SessionStore } from "./session-store";
 import type { StopWait, StopWaitReleaseReason } from "./stop-wait";
 import type { AgentProvider, Logger, Session } from "./types";
+
+/** An alert lives exactly as long as the wait limit Y: the phone's thresholds never set it. */
+function queueTimings(settings: { timings: PhoneSettings["timings"]; waitLimitMs: number }): QueueTimings {
+  return { ...settings.timings, expireMs: settings.waitLimitMs };
+}
 
 const TICK_MS = 1000;
 const MAX_MSG_ID_CHARS = 128;
@@ -83,6 +89,9 @@ type Outcome = { ok: true } | { ok: false; error: string };
 const OK: Outcome = { ok: true };
 const fail = (error: string): Outcome => ({ ok: false, error });
 
+/** The applied-id record could not be saved; the frame is refused before it does anything. */
+class StorageError extends Error {}
+
 /** What an alert is about, so an answer can be checked against the alert's own subject. */
 type Binding =
   | { kind: "approval"; requestId: string }
@@ -121,7 +130,7 @@ export class PhoneV2 {
     this.now = deps.now ?? Date.now;
     const settings = deps.settings.get();
     this.alerts = new AlertQueue(
-      settings.timings,
+      queueTimings(settings),
       (frame) => deps.outlet.send({ ...frame }),
       this.now,
       (alert, reason) => this.onAlertClosed(alert, reason),
@@ -280,21 +289,30 @@ export class PhoneV2 {
     );
   }
 
+  /**
+   * An attached Claude session's Stop hook fired: its turn is done, whether or
+   * not a hold then opens for a follow-up (no phone, or the continuation cap
+   * reached), the way a Codex turn/completed is. One Done per Stop.
+   */
+  onClaudeStop(sessionId: string): void {
+    if (this.deps.attachRegistry.isAttached("claude", sessionId)) {
+      this.onDone(sessionKeyOf("claude", sessionId));
+    }
+  }
+
   private onStopHeld(sessionId: string): void {
-    const key = sessionKeyOf("claude", sessionId);
-    this.onDone(key);
-    this.republish(key);
+    this.republish(sessionKeyOf("claude", sessionId));
   }
 
   private onStopReleased(sessionId: string, reason: StopWaitReleaseReason): void {
     const key = sessionKeyOf("claude", sessionId);
     const alertId = this.doneAlerts.get(key);
-    if (alertId) {
-      if (reason === "delivered") {
-        this.alerts.onActed(alertId);
-      } else {
-        this.alerts.withdraw(alertId);
-      }
+    // The Done outlives the hold: only a follow-up answers it, and only the
+    // wearer typing at the laptop makes it old news.
+    if (alertId && reason === "delivered") {
+      this.alerts.onActed(alertId);
+    } else if (alertId && reason === "laptop") {
+      this.alerts.withdraw(alertId);
     }
     if (!this.deps.attachRegistry.isAttached("claude", sessionId)) {
       return;
@@ -471,12 +489,14 @@ export class PhoneV2 {
   }
 
   /**
-   * A msgId is consumed only when the frame is actually about to be applied:
-   * a frame refused by the gate or by any check (bad shape, not attached, wrong
-   * session, ...) leaves its id free, so the phone can resend it once the cause
-   * is gone. Each handler calls `record` after its last check and before its
-   * first effect, synchronously, so a replay can never run twice; only the
-   * applying itself is allowed to wait.
+   * A msgId is consumed only by a frame that was applied: a frame refused by
+   * the gate, by any check (bad shape, not attached, nobody waiting, ...) or
+   * by the applying itself leaves its id free, so the phone can resend it once
+   * the cause is gone. Each handler calls `record` after its last check and
+   * before its first effect, synchronously, so a replay can never run twice;
+   * only the applying itself is allowed to wait. An id that cannot be saved is
+   * refused before anything happens: after a restart it could not be told
+   * from a new one.
    */
   private async steer(frame: Record<string, unknown>, channel: PhoneChannel): Promise<void> {
     const msgId = nonEmptyString(frame.msgId, MAX_MSG_ID_CHARS);
@@ -488,16 +508,31 @@ export class PhoneV2 {
       this.ack(channel, msgId, "duplicate");
       return;
     }
-    const record = (): void => this.deps.appliedIds.record(msgId);
+    let recorded = false;
+    const record = (): void => {
+      try {
+        this.deps.appliedIds.record(msgId);
+      } catch {
+        throw new StorageError();
+      }
+      recorded = true;
+    };
     let outcome: Outcome;
     try {
       outcome = await this.apply(frame, msgId, record);
     } catch (error) {
-      this.deps.logger.warn("phone_v2_apply_failed", {
-        type: String(frame.type).slice(0, 40),
-        reason: error instanceof Error ? error.name : "unknown",
-      });
-      outcome = fail("failed");
+      if (error instanceof StorageError) {
+        outcome = fail("storage");
+      } else {
+        this.deps.logger.warn("phone_v2_apply_failed", {
+          type: String(frame.type).slice(0, 40),
+          reason: error instanceof Error ? error.name : "unknown",
+        });
+        outcome = fail("failed");
+      }
+    }
+    if (!outcome.ok && recorded) {
+      this.deps.appliedIds.forget(msgId);
     }
     this.deps.logger.info("phone_v2_steering", {
       type: String(frame.type).slice(0, 40),
@@ -559,6 +594,9 @@ export class PhoneV2 {
     if (frame.action !== "allow" && frame.action !== "deny") {
       return fail("unknown_action");
     }
+    if (!this.deps.approvals.isPending(binding.requestId)) {
+      return fail("no_longer_pending");
+    }
     // The request can only be decided through its own alert, whatever the phone says it is about.
     record();
     return this.deps.approvals.handleDecision(binding.requestId, frame.action)
@@ -575,8 +613,12 @@ export class PhoneV2 {
     if (text.trim().length === 0 || Buffer.byteLength(text, "utf8") > MAX_FOLLOWUP_BYTES) {
       return fail("bad_text");
     }
-    record();
     if (target.provider === "claude") {
+      const wait = this.deps.stopWait.state(target.id);
+      if (!wait.waiting) {
+        return fail(wait.continuationsLeft === 0 ? "cap_reached" : "not_waiting");
+      }
+      record();
       switch (this.deps.stopWait.deliver(target.id, text, msgId)) {
         case "delivered":
           return OK;
@@ -586,6 +628,7 @@ export class PhoneV2 {
           return fail("not_waiting");
       }
     }
+    record();
     await this.deps.codex.followUp(target.id, text, msgId);
     return OK;
   }
@@ -613,10 +656,14 @@ export class PhoneV2 {
     if (!answers) {
       return fail("bad_answers");
     }
-    record();
     if (alert.question.source === "claude_tool") {
+      if (!this.deps.questionRelay.isWaiting(requestRef)) {
+        return fail("not_waiting");
+      }
+      record();
       return this.deps.questionRelay.answer(requestRef, answers, msgId) ? OK : fail("not_waiting");
     }
+    record();
     const result = await this.deps.codex.answerQuestion(requestRef, answers, msgId);
     return result === "unknown" ? fail("unknown_question") : OK;
   }
@@ -730,9 +777,9 @@ export class PhoneV2 {
   }
 
   /**
-   * The phone owns the alert thresholds and the wait limit. Not steering, so a
-   * plaintext link may send it; for that reason it must never carry the default
-   * approval modes, which are.
+   * The phone owns the alert thresholds and the wait limit. Steering, so only a
+   * trusted link reaches here; the default approval modes still travel only in
+   * defaults_set, never in this frame.
    */
   private settingsSync(frame: Record<string, unknown>, channel: PhoneChannel): void {
     const msgId = nonEmptyString(frame.msgId, MAX_MSG_ID_CHARS) ?? "";
@@ -757,7 +804,7 @@ export class PhoneV2 {
       this.ack(channel, msgId, "rejected", "state_unwritable");
       return;
     }
-    this.alerts.setTimings(parsedTimings);
+    this.alerts.setTimings(queueTimings({ timings: parsedTimings, waitLimitMs }));
     this.deps.stopWait.setWaitLimitMs(waitLimitMs);
     this.deps.questionRelay.setWaitLimitMs(waitLimitMs);
     this.deps.approvals.setTimeoutMs(waitLimitMs);

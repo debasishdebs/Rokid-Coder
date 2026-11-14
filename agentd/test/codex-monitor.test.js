@@ -1734,3 +1734,52 @@ test("codex_rpc_question_is_closed_when_resolved_elsewhere_or_detached_and_secre
     await h.close();
   }
 });
+
+test("codex_thread_closed_cancels_its_approvals_and_questions", async () => {
+  const h = await controlsHarness();
+  try {
+    const closed = [];
+    h.monitor.onQuestionClosed((event) => closed.push(event));
+    h.sockets[0].send(JSON.stringify({ id: 7, method: "item/tool/requestUserInput", params: rpcQuestionParams }));
+    h.sockets[0].send(JSON.stringify({
+      id: "approval-9",
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "t", turnId: "u", itemId: "i", startedAtMs: Date.now(), environmentId: null, reason: "Run", command: "make", cwd: "/w" },
+    }));
+    await waitUntil(() => h.approvals.size === 1 && h.monitor.questions.size === 1, "nothing was held");
+    h.send("thread/closed", { threadId: "t" });
+    await waitUntil(() => closed.length === 1 && h.approvals.size === 0, "thread/closed left bookkeeping behind");
+    assert.deepEqual(closed, [{ sessionKey: "codex:t", requestRef: "7", reason: "cancelled" }]);
+    assert.equal(h.monitor.approvalsByRpcId.size, 0);
+    assert.equal(h.transport.frames.at(-1).outcome, "local");
+  } finally {
+    await h.close();
+  }
+});
+
+test("codex_questions_live_for_the_wait_limit_and_are_capped_like_claudes", async () => {
+  const { MAX_PENDING_QUESTIONS } = require("../dist/question-relay.js");
+  const h = await controlsHarness();
+  try {
+    const opened = [];
+    const closed = [];
+    h.monitor.onQuestionOpened((event) => opened.push(event));
+    h.monitor.onQuestionClosed((event) => closed.push(event));
+    h.approvals.setTimeoutMs(60); // the wait limit Y
+    h.sockets[0].send(JSON.stringify({ id: 1, method: "item/tool/requestUserInput", params: rpcQuestionParams }));
+    await waitUntil(() => closed.length === 1, "the question outlived the wait limit");
+    assert.deepEqual(closed, [{ sessionKey: "codex:t", requestRef: "1", reason: "timeout" }]);
+    assert.equal(await h.monitor.answerQuestion("1", { "What name?": "x" }, "m1"), "unknown");
+
+    h.approvals.setTimeoutMs(60_000);
+    for (let id = 100; id < 100 + MAX_PENDING_QUESTIONS + 1; id += 1) {
+      h.sockets[0].send(JSON.stringify({ id, method: "item/tool/requestUserInput", params: rpcQuestionParams }));
+    }
+    await waitUntil(() => opened.length === 1 + MAX_PENDING_QUESTIONS, "questions were not opened");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(opened.length, 1 + MAX_PENDING_QUESTIONS, "one past the cap is left to the TUI");
+    assert.equal(h.monitor.questions.size, MAX_PENDING_QUESTIONS);
+  } finally {
+    await h.close();
+  }
+});

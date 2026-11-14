@@ -164,15 +164,18 @@ test("duplicate_followup_acked_once_applied_once", async () => {
   }
 });
 
-test("a_frame_that_ran_consumes_its_msgid_and_one_without_an_id_is_refused", async () => {
+test("a_rejected_frame_never_consumes_its_msgid_and_one_without_an_id_is_refused", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
-    async ({ phone }) => {
-      // Reached apply (and found nobody waiting): the id is spent.
+    async ({ phone, httpPort }) => {
+      // Nobody is waiting: rejected, and the id is still free for a resend.
       const frame = phone.sendFrame("followup", ["claude:s1", "nobody is waiting"]);
       assert.equal((await ackFor(phone, frame.msgId)).error, "not_waiting");
+      const reply = postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" });
+      await upsertOf(phone, "s1", (s) => s.capabilities.followup === "waiting");
       phone.send(frame);
-      await phone.waitFor("ack", (f) => f.msgId === frame.msgId && f.result === "duplicate");
+      await phone.waitFor("ack", (f) => f.msgId === frame.msgId && f.result === "applied");
+      assert.equal((await reply).decision, "block");
       phone.send({ type: "followup", v: 2, sessionKey: "claude:s1", text: "no id" });
       assert.equal((await phone.waitFor("ack", (f) => f.msgId === "")).error, "bad_msg_id");
     },
@@ -206,6 +209,75 @@ test("a_frame_refused_before_apply_does_not_consume_its_msgid", async () => {
     phone.send({ ...frame, msgId: "reused-2", mode: "approveAll", confirmed: true });
     await phone.waitFor("ack", (f) => f.msgId === "reused-2" && f.result === "applied");
   });
+});
+
+test("a_frame_whose_applying_fails_frees_its_msgid", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "codex", id: "t1" }] },
+    async ({ daemon, phone }) => {
+      const sent = [];
+      daemon.codex.followUp = async () => { throw new Error("codex is down"); };
+      const frame = phone.sendFrame("followup", ["codex:t1", "try again"]);
+      assert.equal((await ackFor(phone, frame.msgId)).error, "failed");
+      // Codex is back: the same msgId is applied, not refused as a duplicate.
+      daemon.codex.followUp = async (_id, text) => { sent.push(text); return "started"; };
+      phone.send(frame);
+      await phone.waitFor("ack", (f) => f.msgId === frame.msgId && f.result === "applied");
+      assert.deepEqual(sent, ["try again"]);
+    },
+  );
+});
+
+test("an_applied_id_that_cannot_be_saved_refuses_the_frame_before_any_effect", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ daemon, phone, coderDir }) => {
+      // A directory where the record goes: the write fails, as on a full or read-only disk.
+      await fsp.mkdir(path.join(coderDir, "applied-ids.json", "blocker"), { recursive: true });
+      const frame = phone.sendFrame("mode_set", ["claude:s1", "acceptEdits"]);
+      const ack = await ackFor(phone, frame.msgId);
+      assert.deepEqual([ack.result, ack.error], ["rejected", "storage"]);
+      assert.equal(daemon.approvalPolicy.get("claude:s1"), "ask", "nothing was applied");
+    },
+  );
+});
+
+test("bound_alert_never_expires_before_its_hold", async () => {
+  const timings = { ...DEFAULT_ALERT_TIMINGS, expireMs: 1000 };
+  await withDaemon(
+    {
+      transport: "wshub",
+      tls: true,
+      attached: [{ provider: "claude", id: "s1" }],
+      // An older settings file still carries its own expiry; it is ignored.
+      coderFiles: { "settings.json": { version: 1, timings, waitLimitMs: 3_600_000 } },
+    },
+    async ({ daemon, phone, httpPort }) => {
+      const queue = daemon.phoneV2.alerts;
+      assert.equal(queue.timings.expireMs, 3_600_000, "alert expiry is the wait limit Y");
+      const question = postHook(httpPort, {
+        hook_event_name: "PreToolUse",
+        session_id: "s1",
+        tool_name: "AskUserQuestion",
+        tool_use_id: "tu-y",
+        tool_input: { questions: [{ question: "Pick", header: "Pick", options: [{ label: "A" }] }] },
+      });
+      const alert = await phone.waitFor("alert", (f) => f.kind === "question");
+      const start = Date.now();
+      // Past the old 30-minute expiry, and past the expiry the file asked for: still answerable.
+      queue.now = () => start + 1_800_001;
+      queue.tick();
+      assert.ok(queue.get(alert.id), "the alert outlived the old fixed expiry");
+      assert.equal(daemon.questionRelay.isWaiting("tu-y"), true);
+
+      // A settings_sync that sends an expiry has it ignored as well.
+      phone.send({ type: "settings_sync", v: 2, timings, waitLimitMs: 600_000, msgId: "sync-exp" });
+      assert.equal((await ackFor(phone, "sync-exp")).result, "applied");
+      assert.equal(queue.timings.expireMs, 600_000);
+      daemon.questionRelay.releaseAll();
+      await question;
+    },
+  );
 });
 
 test("the_same_msgid_sent_over_plaintext_then_trusted_is_applied_not_duplicate", async () => {
@@ -515,9 +587,9 @@ test("claude_context_from_transcript_usage", () => {
 
 test("settings_sync_updates_wait_limit_and_caps_at_3600s", async () => {
   for (const transport of TRANSPORTS) {
-    await withDaemon({ transport, tls: false }, async ({ daemon, phone, coderDir }) => {
-      // Not steering: a plaintext link may carry it.
-      assert.equal(classifyFrame("settings_sync"), "monitor");
+    await withDaemon({ transport, tls: true }, async ({ daemon, phone, coderDir }) => {
+      // Steering: only a phone that can be held for decides how long holds last.
+      assert.equal(classifyFrame("settings_sync"), "steering");
       const timings = { ...DEFAULT_ALERT_TIMINGS, dwellMs: 3000, reminderMs: 120000, retryBackoffMs: [1000, 2000] };
       const frame = { type: "settings_sync", v: 2, timings, waitLimitMs: 7_200_000, msgId: "sync-1" };
       phone.send(frame);
@@ -839,14 +911,14 @@ test("approve_all_left_by_a_previous_run_is_reported_when_the_phone_connects", a
 
 test("settings_sync_floors_reject_values_below_them_and_change_nothing", async () => {
   for (const transport of TRANSPORTS) {
-    await withDaemon({ transport, tls: false }, async ({ daemon, phone, coderDir }) => {
+    await withDaemon({ transport, tls: true }, async ({ daemon, phone, coderDir }) => {
       const good = { ...DEFAULT_ALERT_TIMINGS };
       const cases = [
         ["floor-1", { ...good, dwellMs: 999 }, 600_000],
         ["floor-2", { ...good, ackTimeoutMs: 0 }, 600_000],
         ["floor-3", { ...good, retryBackoffMs: [5000, 500] }, 600_000],
         ["floor-4", { ...good, reminderMs: 29_999 }, 600_000],
-        ["floor-5", { ...good, expireMs: 999 }, 600_000],
+        ["floor-5", { ...good, ageBoostMs: 999 }, 600_000],
         ["floor-6", good, 29_999],
         ["floor-7", good, 0],
       ];
@@ -901,4 +973,48 @@ test("question_answer_keys_cannot_reach_a_prototype_or_grow_unbounded", async ()
       assert.equal(hook.hookSpecificOutput.updatedInput.answers.Pick, "A");
     },
   );
+});
+
+test("approve_all_resets_at_the_next_tick_once_the_claude_session_is_gone", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }], discovered: ["s1"] },
+    async ({ daemon, phone, claudeDir }) => {
+      const set = phone.sendFrame("mode_set", ["claude:s1", "approveAll", "true"]);
+      assert.equal((await ackFor(phone, set.msgId)).result, "applied");
+      await daemon.sweepSessions();
+      assert.equal(daemon.approvalPolicy.get("claude:s1"), "approveAll", "a live session keeps it");
+
+      // Killed outright: no SessionEnd, and its transcript is gone.
+      await fsp.rm(path.join(claudeDir, "projects", "-work-demo", "s1.jsonl"));
+      await daemon.sweepSessions();
+      assert.equal(daemon.approvalPolicy.get("claude:s1"), "ask");
+      const reset = await phone.waitFor("mode_reset", (f) => f.sessionKey === "claude:s1");
+      assert.deepEqual([reset.from, reset.reason], ["approveAll", "session_ended"]);
+    },
+  );
+});
+
+test("an_upsert_identical_to_the_last_one_sent_is_skipped", async () => {
+  for (const transport of TRANSPORTS) {
+    await withDaemon(
+      { transport, tls: true, attached: [{ provider: "claude", id: "s1" }] },
+      async ({ daemon, phone, httpPort }) => {
+        await postHook(httpPort, sessionStart("s1"));
+        await upsertOf(phone, "s1");
+        await settle();
+        const count = () => phone.frames.filter((f) => f.type === "session_upsert" && f.session.id === "s1").length;
+        const before = count();
+        daemon.sessions.refresh("s1");
+        daemon.sessions.refresh("s1");
+        await settle();
+        assert.equal(count(), before, `${transport}: nothing changed, nothing sent`);
+        // A real change still goes out, with the next seq.
+        const last = phone.frames.filter((f) => f.type === "session_upsert").at(-1);
+        const set = phone.sendFrame("mode_set", ["claude:s1", "acceptEdits"]);
+        await ackFor(phone, set.msgId);
+        const changed = await upsertOf(phone, "s1", (s) => s.tempMode === "acceptEdits");
+        assert.equal(changed.seq, last.seq + 1, `${transport}: no gap in seq`);
+      },
+    );
+  }
 });

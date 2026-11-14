@@ -15,6 +15,7 @@ import type {
   QuestionOpened,
   QuestionOpenedListener,
 } from "../question-relay";
+import { MAX_PENDING_QUESTIONS } from "../question-relay";
 import {
   normalizeCwd,
   projectName,
@@ -169,6 +170,8 @@ interface PendingCodexQuestion {
   /** codex_rpc only: the server request to reply to, and the question id behind each item's text. */
   rpcId?: RequestId;
   idByText?: Map<string, string>;
+  /** The wait limit Y, as for Claude's questions; then the question is the TUI's alone. */
+  timer?: NodeJS.Timeout;
 }
 
 interface PendingCodexApproval {
@@ -712,6 +715,7 @@ export class CodexMonitor {
       this.questions.delete(requestRef);
       try {
         const result = await this.followUp(pending.threadId, text, msgId);
+        clearTimeout(pending.timer);
         closed("answered");
         return result;
       } catch (error) {
@@ -734,6 +738,7 @@ export class CodexMonitor {
       throw new Error("Codex app-server is not connected");
     }
     this.questions.delete(requestRef);
+    clearTimeout(pending.timer);
     closed("answered");
     return "replied";
   }
@@ -1254,7 +1259,8 @@ export class CodexMonitor {
     const run = this.subscribeSharedOnce(threadId).finally(() => {
       this.subscribing.delete(threadId);
     });
-    this.subscribing.set(threadId, run.then(() => undefined));
+    // The map's copy is only waited on; the caller of this call sees a failure.
+    this.subscribing.set(threadId, run.then(() => undefined, () => undefined));
     return run;
   }
 
@@ -1731,6 +1737,15 @@ export class CodexMonitor {
         const thread = typeof params.threadId === "string"
           ? this.threads.get(params.threadId)
           : undefined;
+        if (typeof params.threadId === "string") {
+          // Nothing it asked can be answered now; the thread stays listed.
+          this.closeQuestions("cancelled", params.threadId);
+          for (const approval of [...this.approvalsByRpcId.values()]) {
+            if (approval.threadId === params.threadId) {
+              this.resolveApproval(approval.rpcId, "thread_closed");
+            }
+          }
+        }
         if (thread) {
           thread.status = { type: "idle" };
           this.publishThread(thread.id);
@@ -1914,6 +1929,18 @@ export class CodexMonitor {
   }
 
   private openQuestion(threadId: string, requestRef: string, pending: PendingCodexQuestion): void {
+    if (this.questions.size >= MAX_PENDING_QUESTIONS) {
+      this.options.logger.info("codex_question_left_local", { reason: "pending_limit" });
+      return;
+    }
+    pending.timer = setTimeout(() => {
+      if (this.questions.get(requestRef) !== pending) {
+        return;
+      }
+      this.questions.delete(requestRef);
+      this.emitQuestionClosed({ sessionKey: sessionKeyOf("codex", threadId), requestRef, reason: "timeout" });
+    }, this.options.approvals.timeoutMs);
+    pending.timer.unref();
     this.questions.set(requestRef, pending);
     const event: QuestionOpened = {
       sessionKey: sessionKeyOf("codex", threadId),
@@ -1950,6 +1977,7 @@ export class CodexMonitor {
         continue;
       }
       this.questions.delete(requestRef);
+      clearTimeout(pending.timer);
       this.emitQuestionClosed({
         sessionKey: sessionKeyOf("codex", pending.threadId),
         requestRef,
@@ -1963,6 +1991,7 @@ export class CodexMonitor {
     const pending = this.questions.get(requestRef);
     if (pending?.source === "codex_rpc") {
       this.questions.delete(requestRef);
+      clearTimeout(pending.timer);
       // Answered elsewhere, which for a thread the user also has open is the TUI.
       this.emitQuestionClosed({
         sessionKey: sessionKeyOf("codex", pending.threadId),

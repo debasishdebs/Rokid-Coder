@@ -15,13 +15,17 @@ export function sessionKeyOf(provider: AgentProvider, id: string): SessionKey {
 export type TempMode = "ask" | "acceptEdits" | "approveAll";
 export type DefaultMode = "ask" | "acceptEdits";
 
+/**
+ * The alert thresholds the phone owns. There is no expiry here: an alert lives
+ * exactly as long as the wait limit Y (`waitLimitMs`), so it can never end
+ * before the hold it stands for. An `expireMs` sent anyway is ignored.
+ */
 export interface AlertTimings {
   ageBoostMs: number;
   dwellMs: number;
   ackTimeoutMs: number;
   retryBackoffMs: number[];
   reminderMs: number;
-  expireMs: number;
 }
 
 export interface QuestionItem {
@@ -81,6 +85,11 @@ export interface AlertFrame {
   waiting: number;
 }
 
+/**
+ * The answer to every steering frame. `applied` and `duplicate` both mean the
+ * frame took effect once; `rejected` never consumes the msgId, so the phone may
+ * resend the same frame once the cause (`error`) is gone.
+ */
 export interface AckFrame {
   type: "ack";
   v: 2;
@@ -130,8 +139,42 @@ export interface DetailRejectedFrame {
   error: "not_attached";
 }
 
+/** The whole board, first thing on every link and in answer to `refresh`. */
+export interface SnapshotFrameV2 {
+  type: "snapshot";
+  v: 2;
+  seq: number;
+  sessions: Array<Record<string, unknown> & SessionUpsertV2Fields>;
+}
+
+/**
+ * The v1 approval frames still go to trusted phones next to each approval
+ * alert. They carry the same request: a phone that renders the alert should
+ * deduplicate them by `requestId` rather than show the request twice.
+ */
+export interface ApprovalRequestFrameV1 {
+  type: "approval_request";
+  v: 1;
+  requestId: string;
+  sessionId: string;
+  tool: string;
+  summary: string;
+  detail: string;
+  createdAt: number;
+}
+
+export interface ApprovalResolvedFrameV1 {
+  type: "approval_resolved";
+  v: 1;
+  requestId: string;
+  outcome: "allow" | "deny" | "timeout" | "local";
+}
+
 export type AgentToPhoneFrameV2 =
+  | SnapshotFrameV2
   | SessionUpsertFrameV2
+  | ApprovalRequestFrameV1
+  | ApprovalResolvedFrameV1
   | AlertFrame
   | AlertClosedFrame
   | DetailRejectedFrame
@@ -266,6 +309,9 @@ const FRAME_CLASS: Readonly<Record<string, FrameClass>> = Object.freeze({
   codex_settings: "steering",
   codex_compact: "steering",
   defaults_set: "steering",
+  // Only a phone that can be held for (a trusted one) has any use for the
+  // thresholds and the wait limit, and both decide how long holds last.
+  settings_sync: "steering",
   hello: "monitor",
   hello_ack: "monitor",
   hello_reject: "monitor",
@@ -277,7 +323,6 @@ const FRAME_CLASS: Readonly<Record<string, FrameClass>> = Object.freeze({
   fs_list: "monitor",
   alert_shown: "monitor",
   alert_dismissed: "monitor",
-  settings_sync: "monitor",
   models_request: "monitor",
 });
 

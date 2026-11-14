@@ -54,6 +54,8 @@ interface ClientState {
   pongTimer?: NodeJS.Timeout;
   /** Session whose conversation this client is currently reading, if any. */
   openSessionId?: string;
+  /** The last session_upsert payload sent to this client, by session id, so an identical one is not sent again. */
+  lastUpserts: Map<string, string>;
 }
 
 export interface WsHubOptions {
@@ -85,8 +87,8 @@ export interface WsHubOptions {
   /** How often live clients are re-checked against the current secret (the file watch also triggers it). */
   trustCheckIntervalMs?: number;
   v2?: PhoneV2Hooks;
-  /** A client finished its handshake, after it has its snapshot. */
-  onClientConnected?: () => void;
+  /** A client finished its handshake, after it has its snapshot. `trusted` is whether it may steer. */
+  onClientConnected?: (trusted: boolean) => void;
   /** An authenticated client went away. */
   onClientDisconnected?: () => void;
   /** A client lost its trust (the secret was rotated); it is being dropped. */
@@ -258,6 +260,7 @@ export class WsHub {
       },
       lastPongAt: Date.now(),
       helloTimer,
+      lastUpserts: new Map(),
     };
     this.clients.set(socket, state);
 
@@ -346,7 +349,7 @@ export class WsHub {
         },
       });
       this.sendSnapshot(socket);
-      this.options.onClientConnected?.();
+      this.options.onClientConnected?.(this.isTrusted(state));
       return;
     }
 
@@ -500,12 +503,17 @@ export class WsHub {
    * answer, so only its presence may hold a tool call, a question or a Stop.
    */
   get hasTrustedClient(): boolean {
+    return this.trustedClientCount > 0;
+  }
+
+  get trustedClientCount(): number {
+    let count = 0;
     for (const state of this.clients.values()) {
       if (state.authenticated && this.isTrusted(state)) {
-        return true;
+        count += 1;
       }
     }
-    return false;
+    return count;
   }
 
   /** The WebSocket half of typed input; both transports share the judgement. */
@@ -581,6 +589,7 @@ export class WsHub {
   private sendSnapshot(socket: WebSocket): void {
     const v2 = this.options.v2;
     const sessions = this.store.list();
+    this.clients.get(socket)?.lastUpserts.clear();
     this.send(socket, {
       type: "snapshot",
       ...(v2 ? { v: 2 } : {}),
@@ -589,18 +598,42 @@ export class WsHub {
     });
   }
 
+  /**
+   * Hooks fire in bursts that change nothing a phone shows, so an upsert every
+   * client was already sent is skipped. Otherwise it goes to all of them: the
+   * phone treats a gap in `seq` as lost frames and asks for a new snapshot.
+   */
   private broadcastUpsert(session: Session): void {
-    this.sequence += 1;
     const v2 = this.options.v2;
+    const published = v2 ? v2.decorate(session) : session;
+    const payload = JSON.stringify(published);
+    let changed = false;
+    for (const [socket, state] of this.clients) {
+      if (state.authenticated && socket.readyState === WebSocket.OPEN && state.lastUpserts.get(session.id) !== payload) {
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return;
+    }
+    for (const state of this.clients.values()) {
+      if (state.authenticated) {
+        state.lastUpserts.set(session.id, payload);
+      }
+    }
+    this.sequence += 1;
     this.broadcast({
       type: "session_upsert",
       ...(v2 ? { v: 2 } : {}),
       seq: this.sequence,
-      session: v2 ? v2.decorate(session) : session,
+      session: published,
     });
   }
 
   private broadcastRemoved(sessionId: string): void {
+    for (const state of this.clients.values()) {
+      state.lastUpserts.delete(sessionId);
+    }
     this.sequence += 1;
     this.broadcast({
       type: "session_removed",

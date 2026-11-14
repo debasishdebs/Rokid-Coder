@@ -41,22 +41,6 @@ async function waitUntil(predicate, message, timeoutMs = 3000) {
   throw new Error(message);
 }
 
-// A hook request the test can hang up on, the way Claude does once the person
-// has answered the permission prompt at the laptop.
-function abortableHook(port, payload) {
-  const body = JSON.stringify(payload);
-  const request = http.request({
-    host: "127.0.0.1",
-    port,
-    path: "/hook",
-    method: "POST",
-    headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
-  });
-  request.on("error", () => {});
-  request.end(body);
-  return request;
-}
-
 test("late_decision_after_disconnect_is_ignored", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
@@ -153,22 +137,199 @@ test("a_disconnect_keeps_the_approval_while_the_other_transport_still_has_a_phon
   );
 });
 
-test("laptop_answer_expires_alert_and_rejects_late_phone_answer", async () => {
+// Claude keeps the PermissionRequest hook open after its own dialog is
+// answered (smoke log), so the request is settled by the tool's own outcome.
+test("laptop_answer_settles_approval_via_post_tool_use", async () => {
   await withDaemon(
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
     async ({ daemon, phone, httpPort }) => {
-      const request = abortableHook(httpPort, permission("s1"));
+      const reply = postHook(httpPort, permission("s1", "make test"));
       const alert = await phone.waitFor("alert", (f) => f.kind === "approval");
+      await postHook(httpPort, {
+        hook_event_name: "Notification",
+        session_id: "s1",
+        message: "Claude needs your permission to use Bash",
+      });
+      assert.equal(daemon.sessions.get("s1").status, "needs_you");
 
-      // Claude hangs up on the hook once the prompt was answered at the laptop.
-      request.destroy();
+      // Another call to the same tool settles nothing.
+      await postHook(httpPort, { ...permission("s1", "ls"), hook_event_name: "PostToolUse" });
+      assert.equal(daemon.approvals.size, 1);
+
+      // The prompt was answered at the laptop and the tool ran; the hook's socket is still open.
+      await postHook(httpPort, {
+        hook_event_name: "PostToolUse",
+        session_id: "s1",
+        tool_name: "Bash",
+        tool_input: { command: "make test" },
+        tool_response: { stdout: "ok" },
+      });
       const closed = await phone.waitFor("alert_closed", (f) => f.id === alert.id);
       assert.equal(closed.reason, "withdrawn");
+      const resolved = await phone.waitFor("approval_resolved");
+      assert.equal(resolved.outcome, "local");
+      assert.deepEqual(await reply, {}, "the hook is answered with no decision");
       assert.equal(daemon.approvals.size, 0);
+      const session = daemon.sessions.get("s1");
+      assert.equal(session.pendingRequest, undefined);
+      assert.notEqual(session.status, "needs_you");
 
       phone.sendFrame("alert_action", [alert.id, "allow"], { msgId: "late-laptop" });
       const ack = await phone.waitFor("ack", (f) => f.msgId === "late-laptop");
       assert.deepEqual({ result: ack.result, error: ack.error }, { result: "rejected", error: "expired" });
+    },
+  );
+});
+
+test("permission_denied_settles_approval", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ daemon, phone, httpPort }) => {
+      const first = postHook(httpPort, permission("s1", "rm -rf build"));
+      const firstAlert = await phone.waitFor("alert", (f) => f.kind === "approval");
+      const second = postHook(httpPort, permission("s1", "rm -rf build"));
+      await waitUntil(() => daemon.approvals.size === 2, "the second request was not held");
+      await postHook(httpPort, {
+        hook_event_name: "PermissionDenied",
+        session_id: "s1",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf build" },
+        reason: "denied",
+      });
+      // The oldest of two identical requests goes first.
+      assert.deepEqual(await first, {});
+      assert.equal((await phone.waitFor("alert_closed", (f) => f.id === firstAlert.id)).reason, "withdrawn");
+      assert.equal(daemon.approvals.size, 1);
+      await postHook(httpPort, {
+        hook_event_name: "PostToolUseFailure",
+        session_id: "s1",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf build" },
+        error: "failed",
+      });
+      assert.deepEqual(await second, {});
+      assert.equal(daemon.approvals.size, 0);
+    },
+  );
+});
+
+for (const transport of ["wshub", "phonelink"]) {
+  test(`last_phone_loss_releases_question_and_stop_hold_${transport}`, async () => {
+    await withDaemon(
+      { transport, tls: true, attached: [{ provider: "claude", id: "s1" }, { provider: "claude", id: "s2" }] },
+      async ({ daemon, phone, httpPort }) => {
+        const stop = postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" });
+        const question = postHook(httpPort, {
+          hook_event_name: "PreToolUse",
+          session_id: "s2",
+          tool_name: "AskUserQuestion",
+          tool_use_id: "tu-lost",
+          tool_input: { questions: [{ question: "Pick", header: "Pick", options: [{ label: "A" }] }] },
+        });
+        await waitUntil(
+          () => daemon.stopWait.state("s1").waiting && daemon.questionRelay.isWaiting("tu-lost"),
+          "the Stop and the question were not held",
+        );
+        phone.close();
+        const outcome = await Promise.race([Promise.all([stop, question]), settle(3000).then(() => "held")]);
+        assert.deepEqual(outcome, [{}, {}], "both go back to the laptop when the only phone is gone");
+        assert.equal(daemon.stopWait.state("s1").waiting, false);
+        assert.equal(daemon.questionRelay.isWaiting("tu-lost"), false);
+      },
+    );
+  });
+}
+
+const doneAlerts = (phone) => phone.frames.filter((f) => f.type === "alert" && f.kind === "done");
+
+test("done_alert_when_no_phone_at_stop", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ daemon, phone, httpPort, wsPort, token, steer }) => {
+      phone.close();
+      await settle(150);
+      const reply = await postHook(httpPort, {
+        hook_event_name: "Stop",
+        session_id: "s1",
+        last_assistant_message: "All tests pass.",
+      });
+      assert.deepEqual(reply, {}, "no phone: nothing is held");
+      const second = await reconnectPhone(wsPort, token, steer);
+      try {
+        const done = await second.waitFor("alert", (f) => f.kind === "done");
+        assert.equal(done.sessionKey, "claude:s1");
+        assert.equal(done.body, "All tests pass.");
+      } finally {
+        second.close();
+      }
+    },
+  );
+});
+
+test("done_alert_after_cap_reached", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ daemon, phone, httpPort }) => {
+      for (let i = 0; i < 8; i += 1) {
+        const held = postHook(httpPort, { hook_event_name: "Stop", session_id: "s1" });
+        await waitUntil(() => daemon.stopWait.state("s1").waiting, `Stop ${i + 1} was not held`);
+        daemon.stopWait.deliver("s1", `step ${i}`, `m${i}`);
+        await held;
+      }
+      assert.equal(daemon.stopWait.state("s1").continuationsLeft, 0);
+      const before = doneAlerts(phone).length;
+      // The ninth answer: no hold can open, and the wearer still hears it.
+      assert.deepEqual(
+        await postHook(httpPort, { hook_event_name: "Stop", session_id: "s1", last_assistant_message: "Ninth answer." }),
+        {},
+      );
+      const done = await phone.waitFor("alert", (f) => f.kind === "done" && f.body === "Ninth answer.");
+      assert.equal(done.sessionKey, "claude:s1");
+      assert.ok(doneAlerts(phone).length > before);
+    },
+  );
+});
+
+test("one_done_per_stop", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ daemon, phone, httpPort }) => {
+      const held = postHook(httpPort, { hook_event_name: "Stop", session_id: "s1", last_assistant_message: "Once." });
+      await waitUntil(() => daemon.stopWait.state("s1").waiting, "the Stop was not held");
+      await phone.waitFor("alert", (f) => f.kind === "done");
+      await settle(150);
+      const ids = new Set(doneAlerts(phone).map((f) => f.id));
+      assert.equal(ids.size, 1, "a held Stop does not add a second Done");
+      daemon.stopWait.releaseByLaptop("s1");
+      await held;
+    },
+  );
+});
+
+test("a_monitor_or_second_client_does_not_replay_approvals_to_the_trusted_phone", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ daemon, phone, httpPort, wsPort, token, steer }) => {
+      const reply = postHook(httpPort, permission("s1"));
+      const alert = await phone.waitFor("alert", (f) => f.kind === "approval");
+      phone.send({ type: "alert_shown", v: 2, id: alert.id });
+      await settle();
+      const count = (type) => phone.frames.filter((f) => f.type === type).length;
+      const before = { requests: count("approval_request"), alerts: count("alert") };
+
+      const monitor = await reconnectPhone(wsPort, token, undefined, false);
+      const second = await reconnectPhone(wsPort, token, steer);
+      try {
+        await settle(150);
+        assert.equal(count("approval_request"), before.requests, "no replayed approval_request");
+        assert.equal(count("alert"), before.alerts, "the shown alert was not sent again");
+        assert.equal(daemon.phoneV2.alerts.current().state, "shown");
+      } finally {
+        monitor.close();
+        second.close();
+      }
+      daemon.approvals.handleDecision([...daemon.approvals.pending.keys()][0], "deny");
+      await reply;
     },
   );
 });

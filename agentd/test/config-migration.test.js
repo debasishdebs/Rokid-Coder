@@ -105,12 +105,11 @@ test("classify_frame_is_exhaustive_and_unknown_is_steering", () => {
   const steering = [
     "approval_decision", "session_input", "thread_start", "alert_action", "followup",
     "question_answer", "mode_set", "mode_revoke_all", "codex_settings", "codex_compact",
-    "defaults_set",
+    "defaults_set", "settings_sync",
   ];
   const monitor = [
     "hello", "hello_ack", "hello_reject", "refresh", "detail_open", "detail_close",
-    "ping", "pong", "fs_list", "alert_shown", "alert_dismissed", "settings_sync",
-    "models_request",
+    "ping", "pong", "fs_list", "alert_shown", "alert_dismissed", "models_request",
   ];
   for (const type of steering) assert.equal(classifyFrame(type), "steering", type);
   for (const type of monitor) assert.equal(classifyFrame(type), "monitor", type);

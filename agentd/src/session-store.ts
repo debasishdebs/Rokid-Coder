@@ -251,6 +251,9 @@ export class SessionStore {
       }
       case "PreCompact":
       case "PostToolUse":
+      case "PostToolUseFailure":
+      case "PermissionDenied":
+      case "UserPromptExpansion":
         break;
       case "Notification":
         this.applyNotification(record, asString(payload.message), now);
@@ -313,6 +316,22 @@ export class SessionStore {
     record.aiTitle ??= seed.aiTitle;
     record.firstUserPrompt ??= seed.firstPrompt;
     this.refreshHeading(record);
+    this.emitUpsert(record.session);
+  }
+
+  /**
+   * The permission prompt the session was waiting on has been answered (its
+   * tool ran, failed or was denied), so it no longer needs the person.
+   */
+  clearPermissionRequest(sessionId: string): void {
+    const record = this.records.get(sessionId);
+    if (record?.session.pendingRequest?.kind !== "permission") {
+      return;
+    }
+    record.session.pendingRequest = undefined;
+    if (record.session.status === "needs_you") {
+      record.session.status = "working";
+    }
     this.emitUpsert(record.session);
   }
 

@@ -28,6 +28,11 @@ export interface Alert {
 
 export type AlertCloseListener = (alert: Alert, reason: AlertClosedReason) => void;
 
+/** The phone's thresholds plus the expiry, which the daemon always sets to the wait limit Y. */
+export interface QueueTimings extends AlertTimings {
+  expireMs: number;
+}
+
 export type NewAlert = Omit<Alert, "id" | "state" | "attempts" | "promoted">;
 
 const KIND_RANK: Record<AlertKind, number> = {
@@ -72,14 +77,14 @@ export class AlertQueue {
    * glasses' own doing, so the daemon reports every other reason to the phone.
    */
   constructor(
-    private timings: AlertTimings,
+    private timings: QueueTimings,
     private readonly sink: (frame: AlertFrame) => boolean,
     private readonly now: () => number = Date.now,
     private readonly onClose?: AlertCloseListener,
   ) {}
 
   /** New thresholds apply to the alerts already queued as well as the ones to come. */
-  setTimings(timings: AlertTimings): void {
+  setTimings(timings: QueueTimings): void {
     this.timings = timings;
     this.service();
   }

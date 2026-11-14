@@ -22,7 +22,6 @@
     ],
     "UserPromptExpansion": [
       {
-        "matcher": "rokid:on|rokid:off|rokid:status",
         "hooks": [
           {
             "type": "command",
@@ -49,6 +48,36 @@
             "type": "command",
             "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\"",
             "timeout": 3600
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 node \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
           }
         ]
       }

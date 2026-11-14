@@ -5,14 +5,13 @@ import type { AlertTimings, DefaultMode } from "./protocol-v2";
 import { MAX_WAIT_LIMIT_MS } from "./stop-wait";
 import type { Logger } from "./types";
 
-/** Global Constraints: age boost 30 s, dwell 8 s, ack 5 s, backoff 5/10/20 s, reminder 5 min, expire = wait limit. */
+/** Global Constraints: age boost 30 s, dwell 8 s, ack 5 s, backoff 5/10/20 s, reminder 5 min. Expiry is the wait limit. */
 export const DEFAULT_ALERT_TIMINGS: Readonly<AlertTimings> = Object.freeze({
   ageBoostMs: 30_000,
   dwellMs: 8_000,
   ackTimeoutMs: 5_000,
   retryBackoffMs: Object.freeze([5_000, 10_000, 20_000]) as unknown as number[],
   reminderMs: 300_000,
-  expireMs: DEFAULT_WAIT_LIMIT_SEC * 1000,
 });
 
 export interface DefaultModes {
@@ -47,7 +46,11 @@ function duration(value: unknown, floor = MIN_TIMING_MS): number | undefined {
     : undefined;
 }
 
-/** All six thresholds or nothing: a half-applied set would leave the queue with mixed rules. */
+/**
+ * All five thresholds or nothing: a half-applied set would leave the queue with
+ * mixed rules. An `expireMs` (older phones and settings files carry one) is
+ * dropped, since alert expiry is always the wait limit.
+ */
 export function parseTimings(value: unknown): AlertTimings | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -57,11 +60,10 @@ export function parseTimings(value: unknown): AlertTimings | undefined {
   const dwellMs = duration(record.dwellMs);
   const ackTimeoutMs = duration(record.ackTimeoutMs);
   const reminderMs = duration(record.reminderMs, MIN_REMINDER_MS);
-  const expireMs = duration(record.expireMs);
   const backoff = record.retryBackoffMs;
   if (
     ageBoostMs === undefined || dwellMs === undefined || ackTimeoutMs === undefined ||
-    reminderMs === undefined || expireMs === undefined ||
+    reminderMs === undefined ||
     !Array.isArray(backoff) || backoff.length === 0 || backoff.length > MAX_BACKOFF_STEPS
   ) {
     return undefined;
@@ -70,7 +72,7 @@ export function parseTimings(value: unknown): AlertTimings | undefined {
   if (retryBackoffMs.some((step) => step === undefined)) {
     return undefined;
   }
-  return { ageBoostMs, dwellMs, ackTimeoutMs, retryBackoffMs: retryBackoffMs as number[], reminderMs, expireMs };
+  return { ageBoostMs, dwellMs, ackTimeoutMs, retryBackoffMs: retryBackoffMs as number[], reminderMs };
 }
 
 /** The wait limit is capped at an hour, the longest the hooks' own timeouts allow. */

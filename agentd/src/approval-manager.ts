@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { ApprovalPolicy } from "./approval-policy";
 import { DEFAULT_WAIT_LIMIT_SEC } from "./config";
 import { sessionKeyOf, type SessionKey } from "./protocol-v2";
@@ -63,12 +64,19 @@ export interface ApprovalTransport {
 
 export type HookResponse = Record<string, unknown>;
 
+/** The tool call a Claude request asks about, as its hook named it; what a later PostToolUse is matched by. */
+interface ToolCall {
+  toolName: unknown;
+  toolInput: unknown;
+}
+
 interface PendingApproval {
   request: ApprovalRequest;
   timer: NodeJS.Timeout;
   resolve: (decision: ApprovalDecision | undefined) => void;
   /** Stops listening for the hook's connection to drop. */
   release?: () => void;
+  call?: ToolCall;
 }
 
 /**
@@ -261,9 +269,11 @@ export class ApprovalManager {
   }
 
   /**
-   * `closed` is the hook's own connection: it drops when Claude gives up on the
-   * hook, which happens once the person answers at the laptop, so it ends the
-   * request as answered locally.
+   * `closed` is the hook's own connection; if it drops, the request ends as
+   * answered locally. Claude does not drop it when the person answers its own
+   * dialog at the laptop, though: that answer shows up as the tool's
+   * PostToolUse (or PostToolUseFailure, PermissionDenied), which `settleByTool`
+   * matches back to this request.
    */
   request(payload: HookPayload, closed?: AbortSignal): Promise<HookResponse> {
     const sessionId =
@@ -292,7 +302,8 @@ export class ApprovalManager {
       createdAt: this.now(),
     };
 
-    return this.requestDecision(request, closed).then((decision) =>
+    const call = { toolName: payload.tool_name, toolInput: payload.tool_input };
+    return this.requestDecision(request, closed, call).then((decision) =>
       decision ? decisionResponse(decision) : {},
     );
   }
@@ -301,7 +312,11 @@ export class ApprovalManager {
    * Shares the phone approval lifecycle with providers whose native response
    * contract is not Claude's PreToolUse hook contract.
    */
-  requestDecision(request: ApprovalRequest, closed?: AbortSignal): Promise<ApprovalDecision | undefined> {
+  requestDecision(
+    request: ApprovalRequest,
+    closed?: AbortSignal,
+    call?: ToolCall,
+  ): Promise<ApprovalDecision | undefined> {
     // Ahead of every phone check: a session on approve-all or accept-edits is
     // answered here, whether or not a phone is connected to ask.
     if (this.options.policy?.decide(request.sessionKey, request) === "allow") {
@@ -335,7 +350,7 @@ export class ApprovalManager {
     return new Promise<ApprovalDecision | undefined>((resolve) => {
       const timer = setTimeout(() => this.onTimeout(request.requestId), this.waitLimitMs);
       timer.unref();
-      const pending: PendingApproval = { request, timer, resolve };
+      const pending: PendingApproval = { request, timer, resolve, call };
       if (closed) {
         const onAbort = () => this.resolveLocal(request.requestId, "hook_closed", true);
         closed.addEventListener("abort", onAbort, { once: true });
@@ -353,6 +368,41 @@ export class ApprovalManager {
       });
       this.observe(() => this.options.observer?.onPending(request));
     });
+  }
+
+  isPending(requestId: string): boolean {
+    return this.pending.has(requestId);
+  }
+
+  hasPendingForSession(sessionId: string): boolean {
+    for (const pending of this.pending.values()) {
+      if (pending.request.sessionId === sessionId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The tool a Claude session asked about has run, failed or been denied, so
+   * its prompt was answered somewhere other than the phone. Settles the oldest
+   * pending request of that session for the same tool and the same input, as
+   * local; the hook gets no decision. False when none matched.
+   */
+  settleByTool(sessionId: string, toolName: unknown, toolInput: unknown): boolean {
+    // Map order is insertion order, so the first match is the oldest.
+    for (const [requestId, pending] of this.pending) {
+      if (
+        pending.request.sessionId === sessionId &&
+        pending.call !== undefined &&
+        pending.call.toolName === toolName &&
+        isDeepStrictEqual(pending.call.toolInput, toolInput)
+      ) {
+        this.resolveLocal(requestId, "laptop_answered", true);
+        return true;
+      }
+    }
+    return false;
   }
 
   /** False when nothing is waiting on that request any more (answered, expired or gone). */

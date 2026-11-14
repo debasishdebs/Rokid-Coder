@@ -258,3 +258,21 @@ test("daemon_detach_releases_a_held_question", async () => {
     },
   );
 });
+
+test("claude_questions_are_capped_and_one_past_the_cap_goes_to_the_tui", async () => {
+  const { MAX_PENDING_QUESTIONS } = require("../dist/question-relay.js");
+  const relay = new QuestionRelay({ waitLimitMs: 60_000 });
+  const ask = (id) => relay.hold({
+    hook_event_name: "PreToolUse",
+    session_id: "s1",
+    tool_name: "AskUserQuestion",
+    tool_use_id: id,
+    tool_input: { questions: [{ question: "Pick", options: [{ label: "A" }] }] },
+  }, new AbortController().signal);
+  const held = [];
+  for (let i = 0; i < MAX_PENDING_QUESTIONS; i += 1) held.push(ask(`tu-${i}`));
+  assert.deepEqual(await ask("tu-over"), {}, "left to the TUI at once");
+  assert.equal(relay.isWaiting("tu-over"), false);
+  relay.dispose();
+  await Promise.all(held);
+});

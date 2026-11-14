@@ -89,14 +89,28 @@ test("applied_ids_drops_malformed_entries_but_keeps_valid_ones", async () => {
   });
 });
 
-test("applied_ids_failed_write_keeps_the_in_memory_record", async () => {
+test("applied_ids_failed_write_throws_and_keeps_nothing", async () => {
   await withTempDir(async (dir) => {
     const blocker = path.join(dir, "blocker");
     await fsp.writeFile(blocker, "a file where a directory is needed");
     const { events, logger } = capturingLogger();
     const ids = new AppliedIds(path.join(blocker, "applied-ids.json"), DAY, () => 1, logger);
-    assert.doesNotThrow(() => ids.record("m1"));
-    assert.equal(ids.seen("m1"), true);
+    // Only memory would know it, and a restart would forget it: refused, not half kept.
+    assert.throws(() => ids.record("m1"));
+    assert.equal(ids.seen("m1"), false);
     assert.equal(events.some((e) => e.level === "error" && e.event === "applied_ids_persist_failed"), true);
+  });
+});
+
+test("applied_ids_forget_frees_an_id_on_disk_too", async () => {
+  await withTempDir(async (dir) => {
+    const file = path.join(dir, "applied-ids.json");
+    const ids = new AppliedIds(file, DAY, () => 1);
+    ids.record("m1");
+    ids.record("m2");
+    ids.forget("m1");
+    assert.equal(ids.seen("m1"), false);
+    const restarted = new AppliedIds(file, DAY, () => 2);
+    assert.deepEqual([restarted.seen("m1"), restarted.seen("m2")], [false, true]);
   });
 });

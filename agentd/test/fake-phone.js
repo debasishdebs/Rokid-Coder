@@ -43,7 +43,6 @@ const DEFAULT_TIMINGS = {
   ackTimeoutMs: 5000,
   retryBackoffMs: [5000, 10000, 20000],
   reminderMs: 300000,
-  expireMs: 1800000,
 };
 
 /**

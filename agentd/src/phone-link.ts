@@ -21,7 +21,7 @@ import {
 import type { SessionStore } from "./session-store";
 import type { TerminalInputOutcome } from "./terminal-input";
 import { TailscalePeerDiscovery } from "./tailnet-discovery";
-import { PinStore, shortFingerprint, watchFiles } from "./tls";
+import { PinStore, pinnedFingerprint, shortFingerprint, watchFiles } from "./tls";
 import { DETAIL_MESSAGE_LIMIT } from "./transcript-messages";
 import type {
   AgentConfig,
@@ -70,16 +70,17 @@ export interface PhoneLinkOptions {
     path: string,
     prompt: string,
   ) => Promise<ThreadStartResult>;
-  onConnected?: () => void;
+  /** `trusted` is whether the link that came up may steer. */
+  onConnected?: (trusted: boolean) => void;
   /** `wasTrusted` is whether the link that went away was a pinned-TLS one. */
   onDisconnected?: (wasTrusted: boolean) => void;
   /** The linked phone was forgotten; its link is being dropped. */
   onTrustRevoked?: () => void;
   /**
    * The trusted phone certificates. A link is trusted, and so may steer, only
-   * when it is TLS and its peer cert is in the set (added on the first
-   * authenticated hello of a fresh install, which has no pin file yet, or
-   * through `phones allow-next`).
+   * when it is TLS and its peer cert is in the set. A cert joins the set only on
+   * the first authenticated hello inside an open pairing window (`pair` or
+   * `phones allow-next`); a fresh install has none open and trusts nobody.
    * Without a store the set lasts only as long as the process.
    */
   pins?: PinStore;
@@ -229,18 +230,12 @@ export class PhoneLink {
   private targetRefreshPromise?: Promise<void>;
   private targetRefreshGeneration = 0;
   private publishedSessions = new Map<string, Session>();
-  private readonly channel: PhoneChannel;
+  /** The last session_upsert payload sent on this link, by session id, so an identical one is not sent again. */
+  private lastUpserts = new Map<string, string>();
+  /** The connection frames arrived on; see channelFor. */
+  private channel?: PhoneChannel;
 
   constructor(private readonly options: PhoneLinkOptions) {
-    const send = (frame: Record<string, unknown>): void => void this.send(frame);
-    const isTrusted = (): boolean => this.trusted;
-    this.channel = {
-      transport: "phonelink",
-      get trusted() {
-        return isTrusted();
-      },
-      send,
-    };
     this.pins = options.pins ?? new PinStore();
     this.now = options.now ?? Date.now;
     this.phoneHosts = [...options.config.phoneHosts];
@@ -308,6 +303,7 @@ export class PhoneLink {
     this.linkTrusted = false;
     this.peerFingerprint = undefined;
     this.publishedSessions.clear();
+    this.lastUpserts.clear();
     this.discovery?.close();
     this.discovery = undefined;
   }
@@ -515,6 +511,7 @@ export class PhoneLink {
       ? tlsConnect({ host: announcement.host, port: announcement.port, rejectUnauthorized: false })
       : connect({ host: announcement.host, port: announcement.port });
     this.socket = socket;
+    this.channel = this.channelFor(socket);
     this.connectedTo = target;
     this.phoneName = announcement.name;
     this.authenticated = false;
@@ -596,8 +593,8 @@ export class PhoneLink {
   /**
    * Holds the dialled phone to the trusted set before anything is sent: a cert
    * in the set is fine at any address; an unknown one is fine only for trust on
-   * first use (a fresh install, or the `phones allow-next` window). False means the
-   * link was refused and destroyed, with no hello and so no token written.
+   * first use, inside the pairing window. False means the link was refused and
+   * destroyed, with no hello and so no token written.
    */
   private verifyPeer(socket: TLSSocket, target: string): boolean {
     const actual = socket.getPeerCertificate().fingerprint256;
@@ -618,7 +615,7 @@ export class PhoneLink {
         reportedReason: "untrusted_peer",
       });
       this.tellOperator(
-        "A phone presented a TLS certificate agentd does not trust, so the link was refused before any token was sent. To add another phone, run `agentd phones allow-next` and connect it within two minutes. List trusted phones with `agentd phones list`.",
+        "A phone presented a TLS certificate agentd does not trust, so the link was refused before any token was sent. To add a phone, run `agentd pair` (or `agentd phones allow-next`) and connect it within two minutes. List trusted phones with `agentd phones list`.",
       );
       socket.destroy();
       return false;
@@ -627,11 +624,30 @@ export class PhoneLink {
     return true;
   }
 
-  /** In the set, or eligible for trust on first use. */
+  /** In the set, or eligible for trust on first use: only inside an open pairing window. */
   private mayTrust(fingerprint: string): boolean {
-    return (
-      this.pins.has(fingerprint) || !this.pins.everPinned() || this.pins.allowNextOpen(this.now())
-    );
+    return this.pins.has(fingerprint) || this.pins.allowNextOpen(this.now());
+  }
+
+  /**
+   * The frame handlers' view of one connection. A reply made after an await
+   * (a Codex follow-up, a model list) goes to the connection the frame came in
+   * on or nowhere, never to whatever link has replaced it since.
+   */
+  private channelFor(socket: TcpSocket): PhoneChannel {
+    const isCurrent = (): boolean => this.socket === socket;
+    const isTrusted = (): boolean => isCurrent() && this.trusted;
+    return {
+      transport: "phonelink",
+      get trusted() {
+        return isTrusted();
+      },
+      send: (frame) => {
+        if (isCurrent()) {
+          void this.send(frame);
+        }
+      },
+    };
   }
 
   private subscribe(): () => void {
@@ -658,6 +674,7 @@ export class PhoneLink {
     this.linkTrusted = false;
     this.peerFingerprint = undefined;
     this.publishedSessions.clear();
+    this.lastUpserts.clear();
     this.buffer = "";
     this.clearDetailRefreshTimer();
     this.pendingDetailSessionId = undefined;
@@ -730,8 +747,9 @@ export class PhoneLink {
   }
 
   private handleAuthenticatedMessage(message: Record<string, unknown>): void {
+    const channel = this.channel;
     // One gate for every frame, before any handler, v1 or v2.
-    if (!gateFrame(message, this.channel) || this.options.v2?.handle(message, this.channel)) {
+    if (!channel || !gateFrame(message, channel) || this.options.v2?.handle(message, channel)) {
       return;
     }
     switch (message.type) {
@@ -861,29 +879,31 @@ export class PhoneLink {
         () => this.recheckTrust(),
       );
     }
-    this.options.onConnected?.();
+    this.options.onConnected?.(this.linkTrusted);
   }
 
   /**
    * Trust on first use: the first authenticated hello over TLS adds the peer's
-   * cert to the trusted set, but only on a fresh install or inside the
-   * `phones allow-next` window, which admits exactly one phone. A cert already
-   * in the set is trusted as it stands.
+   * cert to the trusted set, but only inside the pairing window (`pair` or
+   * `phones allow-next`), which admits exactly one phone. A cert already in the
+   * set is trusted as it stands.
    */
   private trustPeer(): boolean {
     const fingerprint = this.peerFingerprint;
     if (!fingerprint) {
       return false;
     }
+    let known: boolean;
     try {
-      if (!this.pins.has(fingerprint) && !this.mayTrust(fingerprint)) {
+      known = this.pins.has(fingerprint);
+      if (!known && !this.mayTrust(fingerprint)) {
         return false;
       }
     } catch (error) {
       this.pinsUnreadable(error);
       return false;
     }
-    if (!this.pins.has(fingerprint)) {
+    if (!known) {
       try {
         // Adding also closes an open allow-next window: one admission per arming.
         this.pins.add(fingerprint);
@@ -894,7 +914,8 @@ export class PhoneLink {
         });
         return false;
       }
-      this.options.logger.info("phone_link_pinned", { fingerprint: shortFingerprint(fingerprint) });
+      // Long enough to check against the phone's own settings screen.
+      this.options.logger.info("phone_link_pinned", { fingerprint: pinnedFingerprint(fingerprint) });
     }
     this.linkTrusted = true;
     return true;
@@ -1220,6 +1241,7 @@ export class PhoneLink {
   private sendSnapshot(): void {
     const sessions = sessionsForPhone(this.options.store.list());
     this.publishedSessions = new Map(sessions.map((session) => [session.id, session]));
+    this.lastUpserts.clear();
     const v2 = this.options.v2;
     this.send({
       type: "snapshot",
@@ -1248,19 +1270,28 @@ export class PhoneLink {
     this.publishedSessions = next;
   }
 
+  /** Hooks fire in bursts that change nothing the phone shows; an upsert identical to the last one sent is skipped. */
   private sendUpsert(session: Session): void {
-    this.sequence += 1;
     const v2 = this.options.v2;
+    const published = v2 ? v2.decorate(session) : session;
+    const payload = JSON.stringify(published);
+    if (this.lastUpserts.get(session.id) === payload) {
+      this.scheduleCodexDetailRefresh(session);
+      return;
+    }
+    this.lastUpserts.set(session.id, payload);
+    this.sequence += 1;
     this.send({
       type: "session_upsert",
       ...(v2 ? { v: 2 } : {}),
       seq: this.sequence,
-      session: v2 ? v2.decorate(session) : session,
+      session: published,
     });
     this.scheduleCodexDetailRefresh(session);
   }
 
   private sendRemoved(sessionId: string): void {
+    this.lastUpserts.delete(sessionId);
     this.sequence += 1;
     this.send({ type: "session_removed", seq: this.sequence, sessionId });
   }

@@ -47,6 +47,11 @@ export function shortFingerprint(fingerprint: string): string {
   return fingerprint.replace(/:/g, "").slice(0, 12).toLowerCase();
 }
 
+/** The first 16 hex digits, as `phones list` writes them: what a person compares with the phone's own screen. */
+export function pinnedFingerprint(fingerprint: string): string {
+  return fingerprint.replace(/:/g, "").slice(0, 16).toUpperCase();
+}
+
 /** Normalises a fingerprint to the form `fingerprint256` uses, or undefined if it is not one. */
 export function normalizeFingerprint(value: string): string | undefined {
   const hex = value.replace(/:/g, "").toUpperCase();

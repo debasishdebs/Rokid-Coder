@@ -131,6 +131,11 @@ async function main(): Promise<void> {
       const payload = pairingPayload(config, cert.fingerprint256, steer);
       process.stdout.write(`${payload}\n`);
       qrcode.generate(payload, { small: true }, (code) => process.stdout.write(`${code}\n`));
+      // A fresh install trusts no phone: pairing is what lets the next one in.
+      new PinStore(path.join(tlsDir, "phone-pins.json")).armAllowNext(Date.now());
+      process.stdout.write(
+        `Phone pairing window open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes. Pin shown on the phone: <first 8 hex of the phone fingerprint will appear in the agentd log>\n`,
+      );
       break;
     }
     case "link-phone": {
@@ -192,7 +197,7 @@ async function main(): Promise<void> {
         );
       } else {
         throw new Error(
-          `Usage: agentd phones list | forget <fingerprint|--all> | allow-next\nTo factory-reset instead, stop agentd and delete ${tlsDir}: agentd gets a new certificate, every phone must pair again, and the next phone to connect is trusted on first use.`,
+          `Usage: agentd phones list | forget <fingerprint|--all> | allow-next\nTo factory-reset instead, stop agentd and delete ${tlsDir}: agentd gets a new certificate and trusts no phone until you run "pair" again.`,
         );
       }
       break;
@@ -215,7 +220,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        `Unknown command '${command}'. Use run, install-hooks, uninstall-hooks, pair, phones, link-phone, unlink-phone, or status.`,
+        `Unknown command '${command}'. Use run, install-hooks, uninstall-hooks, pair (prints the pairing line and opens a 2-minute window for one new phone), phones, link-phone, unlink-phone, or status.`,
       );
   }
 }

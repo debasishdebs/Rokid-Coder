@@ -8,6 +8,7 @@ const tls = require("node:tls");
 const { configPath, ensureConfig, saveConfig } = require("../dist/config.js");
 const { SessionStore } = require("../dist/session-store.js");
 const { phoneCert } = require("./helpers/tls.js");
+const { PinStore } = require("../dist/tls.js");
 const {
   buildPhoneDialTargets,
   MAX_PHONE_SESSIONS_PER_PROVIDER,
@@ -103,10 +104,18 @@ process.on("unhandledRejection", (reason) => {
   console.error("phone-link test unhandled rejection:", reason);
 });
 
+/** The pairing window `pair` opens, so the test phone is pinned on its first hello. */
+function pairingPins() {
+  const pins = new PinStore();
+  pins.armAllowNext(Date.now());
+  return pins;
+}
+
 function createLink(overrides = {}) {
   const logs = loggerHarness();
   const store = new SessionStore(config, logs.logger);
   const link = new PhoneLink({
+    pins: pairingPins(),
     config,
     store,
     logger: logs.logger,

@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { ensureConfig, saveConfig } = require("../../dist/config.js");
 const { startDaemon } = require("../../dist/daemon.js");
+const { PinStore } = require("../../dist/tls.js");
 const { createFakePhone } = require("../fake-phone.js");
 const { agentCert, seedAgentCert } = require("./tls.js");
 
@@ -65,7 +66,8 @@ function transcriptLine(sessionId) {
  * Boots the real daemon against temp state with a fake phone on `transport`.
  * `discovered` Claude sessions are written under a temp ~/.claude/projects.
  * `tls: true` makes the phone link real TLS: agentd pins the fake phone's cert
- * on its first hello (phonelink), or the fake pins agentd's cert (wshub). That
+ * on its first hello inside a pairing window opened here, as `pair` would
+ * (phonelink), or the fake pins agentd's cert (wshub). That
  * is what lets steering frames through; without it the link is monitor-only.
  * The daemon's agentd cert is the one shared test cert, copied into its tls dir. `coderFiles` pre-seeds files in
  * the Rokid-Coder state dir (name -> JSON value), such as settings.json.
@@ -94,6 +96,9 @@ async function withDaemon({ transport, tls = false, attached = [], discovered = 
     }
 
     await seedAgentCert(path.join(coderDir, "tls"));
+    if (transport === "phonelink" && tls) {
+      new PinStore(path.join(coderDir, "tls", "phone-pins.json")).armAllowNext(Date.now());
+    }
     const agent = await agentCert();
     const phone = createFakePhone({ transport, tls, pin: agent.fingerprint256 });
     const httpPort = await freePort();

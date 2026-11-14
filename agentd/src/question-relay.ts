@@ -4,6 +4,8 @@ import type { HookPayload } from "./types";
 
 /** Matches the `timeout` of the plugin's PreToolUse hook; a longer wait would be killed from outside. */
 export const MAX_QUESTION_WAIT_MS = 3_600_000;
+/** Open questions held for the glasses at once, per provider; one more is left to the provider's own UI. */
+export const MAX_PENDING_QUESTIONS = 32;
 
 export type QuestionAnswers = Record<string, string | string[]>;
 
@@ -158,6 +160,9 @@ export class QuestionRelay {
     const sessionKey = sessionKeyOf("claude", sessionId);
     // A tool_use_id is unique; a repeat means the earlier hook process is gone.
     this.holds.get(toolUseId)?.settle("cancelled", {});
+    if (this.holds.size >= MAX_PENDING_QUESTIONS) {
+      return Promise.resolve({});
+    }
     return new Promise<HookResponse>((resolve) => {
       let done = false;
       const timer = this.setTimer(() => hold.settle("timeout", {}), this.waitLimitMs);

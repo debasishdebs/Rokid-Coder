@@ -81,7 +81,9 @@ export class HookHttpServer {
           if (provider === "claude" || provider === "codex") {
             payload.__provider = provider;
           }
-          Promise.resolve(this.options.onHook(payload, closed.signal))
+          // Inside the executor, so a synchronous throw becomes a rejection
+          // instead of escaping this handler and taking the daemon down.
+          new Promise<HookResponse | void>((resolve) => resolve(this.options.onHook(payload, closed.signal)))
             .then((result) => this.respond(response, result ?? {}))
             .catch((error) => {
               this.options.logger.error("hook_processing_failed", {
