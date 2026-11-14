@@ -116,16 +116,20 @@ class AlertHistory(private val clock: () -> Long) {
         }
     }
 
-    /** A follow-up written for [sessionKey] answers its newest waiting Done or error. */
+    /**
+     * A follow-up written for [sessionKey] answers its newest waiting Done or error.
+     * Returns that alert's id, so a refusal of the follow-up can find its entry again.
+     */
     @Synchronized
-    fun onReplied(sessionKey: String) {
+    fun onReplied(sessionKey: String): String? {
         val at = list.indexOfLast {
             it.sessionKey == sessionKey && it.outcome == Outcome.PENDING &&
                 (it.kind == AlertKind.DONE || it.kind == AlertKind.ERROR)
         }
-        if (at < 0) return
+        if (at < 0) return null
         list[at] = list[at].copy(actionLabel = REPLIED, lastError = null)
         publish()
+        return list[at].alertId
     }
 
     /** agentd closed the alert for [reason]: `acted`, `expired`, `withdrawn` (or `dismissed`). */
@@ -152,11 +156,20 @@ class AlertHistory(private val clock: () -> Long) {
         publish()
     }
 
-    /** Drops every entry older than [windowMs], and those of a closed session unless [keepAfterSession]. */
+    /** [prune] as of now, under the settings' [policy]. */
+    fun pruneNow(policy: HistoryPolicy) = prune(clock(), policy.windowMs, policy.keepAfterSession)
+
+    /** What the history screen shows: expiry is applied first, so it never depends on other activity. */
+    fun entriesFor(policy: HistoryPolicy): List<HistoryEntry> {
+        pruneNow(policy)
+        return entries.value
+    }
+
+    /** Drops every entry shown more than [windowMs] ago, and those of a closed session unless [keepAfterSession]. */
     @Synchronized
     fun prune(now: Long, windowMs: Long, keepAfterSession: Boolean) {
         val removed = list.removeAll { entry ->
-            now - maxOf(entry.firstShownAtMs, entry.endedAtMs ?: 0L) > windowMs ||
+            now - entry.firstShownAtMs > windowMs ||
                 (!keepAfterSession && entry.sessionKey in closedSessions)
         }
         closedSessions.retainAll(list.mapTo(HashSet()) { it.sessionKey })

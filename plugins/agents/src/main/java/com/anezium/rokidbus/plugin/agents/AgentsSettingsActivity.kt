@@ -28,6 +28,7 @@ import com.anezium.rokidbus.plugin.agents.ui.linkLine
 import com.anezium.rokidbus.plugin.agents.ui.theme.AgentsTheme
 import com.anezium.rokidbus.plugin.agents.ui.trustLabel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -183,6 +184,13 @@ class AgentsSettingsActivity : ComponentActivity() {
                 }
                 launch { AgentsRuntime.linkedMachines.collect { refresh() } }
                 launch { AgentsRuntime.history.entries.collect { refresh() } }
+                // Relative times and expiry move with the clock, not only with what happens.
+                launch {
+                    while (true) {
+                        delay(HISTORY_TICK_MS)
+                        refresh()
+                    }
+                }
             }
         }
     }
@@ -210,7 +218,8 @@ class AgentsSettingsActivity : ComponentActivity() {
             batteryAllowed = batteryExemptionGranted(this),
             batteryFrozen = suspended,
             phoneFingerprint = phoneFingerprint,
-            history = AgentsRuntime.history.entries.value,
+            // Read through the policy: an entry past its window is gone on open, whatever else happened.
+            history = AgentsRuntime.history.entriesFor(configStore.historyPolicy()),
             historyKeepAfterSession = configStore.historyKeepAfterSession(),
             historyWindowHours = configStore.historyWindowHours(),
             nowMs = AgentsRuntime.history.now(),
@@ -267,6 +276,9 @@ class AgentsSettingsActivity : ComponentActivity() {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 }
+
+/** How often the open history screen re-reads the clock. */
+private const val HISTORY_TICK_MS = 30_000L
 
 private const val PHONE_KEY_UNAVAILABLE = "Unavailable — this phone could not make its TLS key"
 

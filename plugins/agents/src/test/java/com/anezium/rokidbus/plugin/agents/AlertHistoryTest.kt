@@ -167,4 +167,34 @@ class AlertHistoryTest {
         )
         assertEquals("Fixing the build", v2.historyHeading())
     }
+
+    @Test
+    fun late_close_does_not_extend_window() {
+        history.onShown(alert(id = "A"), "h")
+        now += 23 * hour
+        history.onClosed("A", "acted")
+        now += 2 * hour
+        // Shown 25 hours ago: gone under a 24 hour window, however late it ended.
+        history.prune(now, 24 * hour, keepAfterSession = true)
+        assertTrue(history.entries.value.isEmpty())
+    }
+
+    @Test
+    fun idle_clock_advance_prunes_on_open() {
+        val policy = HistoryPolicy(windowMs = hour, keepAfterSession = true)
+        history.onShown(alert(id = "A"), "h")
+        now += 2 * hour
+        // Nothing happened meanwhile, so the list still holds it.
+        assertEquals(1, history.entries.value.size)
+        // Opening the screen reads through the policy.
+        assertTrue(history.entriesFor(policy).isEmpty())
+        assertTrue(history.entries.value.isEmpty())
+    }
+
+    @Test
+    fun a_reply_rejection_reaches_its_entry() {
+        history.onShown(alert(id = "D", kind = "done"), "h")
+        assertEquals("D", history.onReplied("claude:s1"))
+        assertEquals(null, history.onReplied("claude:other"))
+    }
 }

@@ -3,6 +3,7 @@ package com.anezium.rokidbus.plugin.agents
 import com.anezium.rokidbus.client.plugin.NexusNotice
 import com.anezium.rokidbus.client.plugin.NexusNoticeCloseReason
 import com.anezium.rokidbus.client.plugin.NexusNoticeUpdate
+import com.anezium.rokidbus.plugin.agents.ui.outcomeText
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -781,9 +782,9 @@ class AlertDirectorTest {
     @Test
     fun session_end_marks_pending_withdrawn() {
         up()
-        director.onBoard(setOf("claude:s1"))
         feed(alert(id = "A"))
-        director.onBoard(emptySet())
+        // Only agentd's own word that the session ended counts.
+        director.onSessionEnded("claude:s1")
         assertEquals(Outcome.WITHDRAWN, entry().outcome)
 
         // Without keep-after-session, the next change drops what a closed session left.
@@ -793,13 +794,67 @@ class AlertDirectorTest {
     }
 
     @Test
+    fun monitoring_stop_keeps_history() {
+        keepAfterSession = false
+        up()
+        director.onBoard(setOf("claude:s1"))
+        feed(alert(id = "A"))
+        // Monitoring stops: the transports clear the board, which says nothing of the laptop's sessions.
+        director.onBoard(emptySet())
+        feed(alert(id = "B", sessionKey = "claude:s2"))
+
+        assertEquals(setOf("A", "B"), history.entries.value.map { it.alertId }.toSet())
+        assertEquals(Outcome.PENDING, entry("A").outcome)
+    }
+
+    @Test
+    fun reconnect_keeps_pending_entries_and_counts() {
+        keepAfterSession = false
+        up()
+        director.onBoard(setOf("claude:s1"))
+        feed(alert(id = "A"))
+        director.onEvent(AgentdEvent.LinkDown(1L))
+        director.onBoard(emptySet())
+        up()
+        director.onBoard(setOf("claude:s1"))
+        feed(alert(id = "A", reason = "retry"))
+        assertEquals(Outcome.PENDING, entry().outcome)
+        assertEquals(1, entry().shownCount)
+
+        feed(alert(id = "A", reason = "reminder"))
+        assertEquals(1, history.entries.value.size)
+        assertEquals(2, entry().shownCount)
+    }
+
+    @Test
     fun a_followup_written_marks_the_done_replied() {
         up()
         feed(alert(id = "D", kind = "done"))
-        director.onFollowupWritten("claude:s1")
+        director.onFollowupWritten("claude:s1", "m1")
         assertEquals("Replied", entry("D").actionLabel)
         director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("D", "acted")))
         assertEquals(Outcome.ACTED, entry("D").outcome)
+        assertEquals("Replied", entry("D").actionLabel)
+    }
+
+    @Test
+    fun rejected_followup_shows_not_sent() {
+        up()
+        feed(alert(id = "D", kind = "done"))
+        director.onFollowupWritten("claude:s1", "m1")
+        director.onEvent(AgentdEvent.Action(AgentdAction.Ack("m1", "rejected", "no_followup_window")))
+
+        assertEquals(Outcome.PENDING, entry("D").outcome)
+        assertEquals("no_followup_window", entry("D").lastError)
+        assertEquals(null, entry("D").actionLabel)
+        assertEquals("Not sent: no_followup_window", outcomeText(entry("D")))
+
+        // A new follow-up ends the old rejection; once agentd applied it, a stray refusal changes nothing.
+        director.onFollowupWritten("claude:s1", "m2")
+        assertEquals(null, entry("D").lastError)
+        director.onEvent(AgentdEvent.Action(AgentdAction.Ack("m2", "applied", null)))
+        director.onEvent(AgentdEvent.Action(AgentdAction.Ack("m2", "rejected", "late")))
+        assertEquals(null, entry("D").lastError)
         assertEquals("Replied", entry("D").actionLabel)
     }
 }

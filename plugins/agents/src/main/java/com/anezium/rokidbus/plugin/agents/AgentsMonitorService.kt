@@ -147,6 +147,8 @@ class AgentsMonitorService : Service() {
             while (true) {
                 delay(PRUNE_INTERVAL_MS)
                 configStore.forgetNotificationFingerprints(AgentsRuntime.store.prune())
+                // Expiry must not wait for another alert: the history ages out on this clock too.
+                AgentsRuntime.history.pruneNow(configStore.historyPolicy())
                 // This loop is the heartbeat: a tick that arrives far late is
                 // the only evidence from inside the process that the system
                 // stopped scheduling it. See AgentsFreezeWatch.
@@ -232,8 +234,8 @@ class AgentsMonitorService : Service() {
             ACTION_SEND_V2 -> {
                 // A line that is not one JSON object comes back Refused, unsent.
                 intent.getStringExtra(EXTRA_FRAME)?.let { frame ->
-                    if (writeToAgentd(frame) == AgentdWire.Result.Sent) followupSession(frame)?.let { key ->
-                        AgentsRuntime.alertDirector?.onFollowupWritten(key)
+                    if (writeToAgentd(frame) == AgentdWire.Result.Sent) followupOf(frame)?.let { (key, msgId) ->
+                        AgentsRuntime.alertDirector?.onFollowupWritten(key, msgId)
                     }
                 }
             }
@@ -267,6 +269,9 @@ class AgentsMonitorService : Service() {
                 .distinctUntilChanged()
                 .collect(alertDirector::onBoard)
         }
+        alertScope.launch {
+            AgentsRuntime.store.sessionEnded.collect(alertDirector::onSessionEnded)
+        }
     }
 
     /**
@@ -287,9 +292,12 @@ class AgentsMonitorService : Service() {
     private fun writeToAgentd(line: String): AgentdWire.Result =
         combined(listOf(agentdClient.write(line), linkServer.write(line)))
 
-    /** The session of a `followup` frame, or null for any other frame. */
-    private fun followupSession(frame: String): String? = runCatching {
-        JSONObject(frame).takeIf { it.optString("type") == "followup" }?.optString("sessionKey")?.takeIf(String::isNotBlank)
+    /** The session and msgId of a `followup` frame, or null for any other frame. */
+    private fun followupOf(frame: String): Pair<String, String>? = runCatching {
+        val json = JSONObject(frame).takeIf { it.optString("type") == "followup" } ?: return@runCatching null
+        val key = json.optString("sessionKey").takeIf(String::isNotBlank) ?: return@runCatching null
+        val msgId = json.optString("msgId").takeIf(String::isNotBlank) ?: return@runCatching null
+        key to msgId
     }.getOrNull()
 
     private fun combined(results: List<AgentdWire.Result>): AgentdWire.Result = when {

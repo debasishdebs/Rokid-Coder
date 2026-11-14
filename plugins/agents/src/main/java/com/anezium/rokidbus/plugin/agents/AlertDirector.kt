@@ -106,6 +106,9 @@ class AlertDirector(
 
     private var boardKeys: Set<String> = emptySet()
 
+    /** The alert each written follow-up answered, by its msgId, until agentd's ack. */
+    private val followupAlerts = LinkedHashMap<String, String>()
+
     private val _waiting = MutableStateFlow(0)
 
     /** The current alert's `+N waiting`, for the board's own row; it follows the coordinator after every change. */
@@ -126,7 +129,10 @@ class AlertDirector(
                 }
                 is AgentdAction.AlertClosed -> apply(coordinator.onAlertClosed(action.id, action.reason))
                 is AgentdAction.FollowupClosed -> apply(coordinator.invalidateSession(action.sessionKey))
-                is AgentdAction.Ack -> apply(coordinator.onAck(action))
+                is AgentdAction.Ack -> {
+                    onFollowupAck(action)
+                    apply(coordinator.onAck(action))
+                }
                 else -> Unit
             }
         }
@@ -136,18 +142,32 @@ class AlertDirector(
     fun onBoard(keys: Set<String>) = post {
         val gone = boardKeys - keys
         boardKeys = keys
-        gone.forEach {
-            history.onSessionGone(it)
-            apply(coordinator.invalidateSession(it))
-        }
+        // Only the cards go: an empty board is also what a stopped monitor or a dropped link leaves, and
+        // says nothing of the laptop's sessions. The history waits for [onSessionEnded].
+        gone.forEach { apply(coordinator.invalidateSession(it)) }
+    }
+
+    /** agentd reported [sessionKey] removed over a live link: what it still waited on is gone with it. */
+    fun onSessionEnded(sessionKey: String) = post {
+        history.onSessionGone(sessionKey)
+        apply(coordinator.invalidateSession(sessionKey))
     }
 
     /**
      * A `followup` for [sessionKey] was written to agentd: the wearer replied to its Done or error.
-     * Called only for a frame the wire reported Sent.
+     * Called only for a frame the wire reported Sent. [msgId] stays bound to that alert's entry, so a
+     * refusal of the follow-up can say so there.
      */
-    fun onFollowupWritten(sessionKey: String) = post {
-        history.onReplied(sessionKey)
+    fun onFollowupWritten(sessionKey: String, msgId: String) = post {
+        val alertId = history.onReplied(sessionKey) ?: return@post
+        followupAlerts[msgId] = alertId
+        while (followupAlerts.size > MAX_FOLLOWUPS) followupAlerts.remove(followupAlerts.keys.first())
+    }
+
+    private fun onFollowupAck(ack: AgentdAction.Ack) {
+        val alertId = followupAlerts.remove(ack.msgId) ?: return
+        if (ack.result != "rejected") return
+        history.onActionRejected(alertId, ack.error?.singleLine(ERROR_CHARS)?.takeIf(String::isNotBlank) ?: "refused")
     }
 
     /**
@@ -240,8 +260,7 @@ class AlertDirector(
 
     private fun apply(effects: List<AlertCoordinator.Effect>) {
         applyEffects(effects)
-        val policy = historyPolicy()
-        history.prune(history.now(), policy.windowMs, policy.keepAfterSession)
+        history.pruneNow(historyPolicy())
         _waiting.value = coordinator.current?.waiting ?: 0
         settle()
     }
@@ -365,6 +384,8 @@ class AlertDirector(
 
     private companion object {
         const val MAX_BRIEFS = 4
+        const val MAX_FOLLOWUPS = 32
+        const val ERROR_CHARS = 120
 
         const val MERGED_LINES = 6
 

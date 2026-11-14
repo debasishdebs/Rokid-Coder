@@ -39,6 +39,14 @@ open class AgentSessionStore {
 
     val approvals: StateFlow<List<AgentApproval>> = _approvals.asStateFlow()
     val sessions: StateFlow<List<AgentSession>> = _sessions.asStateFlow()
+
+    private val _sessionEnded = MutableSharedFlow<String>(extraBufferCapacity = 64)
+
+    /**
+     * The key of a session agentd itself reported removed, over a live link. A board emptied because
+     * monitoring stopped or the link dropped says nothing of the laptop's sessions, and is not announced.
+     */
+    val sessionEnded: SharedFlow<String> = _sessionEnded.asSharedFlow()
     val connections: StateFlow<Map<AgentProvider, ProviderConnectionState>> =
         _connections.asStateFlow()
     val conversation: StateFlow<AgentConversation?> = _conversation.asStateFlow()
@@ -224,6 +232,7 @@ open class AgentSessionStore {
         notApplied.remove("${provider.wireValue}:$sessionId")
         replyNotSent.remove("${provider.wireValue}:$sessionId")
         publish(nowMs)
+        _sessionEnded.tryEmit("${provider.wireValue}:$sessionId")
     }
 
     /**

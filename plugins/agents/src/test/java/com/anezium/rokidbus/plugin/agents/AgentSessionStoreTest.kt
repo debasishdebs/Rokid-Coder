@@ -3,6 +3,10 @@ package com.anezium.rokidbus.plugin.agents
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 
 class AgentSessionStoreTest {
     @Test
@@ -91,6 +95,25 @@ class AgentSessionStoreTest {
         // Gone for good: pruning again has nothing left to drop.
         assertEquals(emptySet<String>(), store.prune(now))
         assertEquals(listOf("live"), store.sessions.value.map(AgentSession::id))
+    }
+
+    @Test
+    fun only_a_removal_announces_a_session_end() = runBlocking {
+        val store = AgentSessionStore()
+        val ended = mutableListOf<String>()
+        val job = launch(start = CoroutineStart.UNDISPATCHED) { store.sessionEnded.collect { ended += it } }
+        store.replaceProvider(AgentProvider.CLAUDE, listOf(session("a", AgentProvider.CLAUDE, AgentStatus.IDLE)))
+
+        // A board cleared by a stopped or dropped link is not the laptop ending its sessions.
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
+        yield()
+        assertEquals(emptyList<String>(), ended)
+
+        store.replaceProvider(AgentProvider.CLAUDE, listOf(session("b", AgentProvider.CLAUDE, AgentStatus.IDLE)))
+        store.remove(AgentProvider.CLAUDE, "b")
+        yield()
+        assertEquals(listOf("claude:b"), ended)
+        job.cancel()
     }
 
     private fun session(
