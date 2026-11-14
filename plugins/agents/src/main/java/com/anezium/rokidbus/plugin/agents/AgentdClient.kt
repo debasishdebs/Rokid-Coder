@@ -130,10 +130,16 @@ class AgentdClient(
         job.start()
     }
 
-    /** The connection state this slot last put in the store: what it is, whatever another transport wrote since. */
-    @Volatile private var published: ProviderConnectionState? = null
+    /**
+     * Held across every write of this slot's state, store write included: publish, restore and stop's
+     * clear land in one order, so a restore never puts back a state that a newer one replaced.
+     */
+    private val stateLock = Any()
 
-    private fun publish(state: ConnectionState, detail: String? = null) {
+    /** The connection state this slot last put in the store: what it is, whatever another transport wrote since. */
+    private var published: ProviderConnectionState? = null
+
+    private fun publish(state: ConnectionState, detail: String? = null) = synchronized(stateLock) {
         published = ProviderConnectionState(state, detail)
         store.setConnection(AgentProvider.CLAUDE, state, detail)
     }
@@ -142,7 +148,7 @@ class AgentdClient(
      * Another transport (the inbound listener beside this slot) wrote over the shared connection state and
      * is gone: this slot's own state goes back, refused or not. Nothing is written for a slot with none.
      */
-    fun republishState() {
+    fun republishState() = synchronized(stateLock) {
         val own = published ?: return
         store.setConnection(AgentProvider.CLAUDE, own.state, own.detail)
     }
@@ -155,9 +161,11 @@ class AgentdClient(
         _needsRepair.value = false
         link.downCurrent()
         advance.previous?.cancel()
-        store.setConnection(AgentProvider.CLAUDE, ConnectionState.DISCONNECTED)
-        // A stopped slot has no state of its own to put back.
-        published = null
+        synchronized(stateLock) {
+            store.setConnection(AgentProvider.CLAUDE, ConnectionState.DISCONNECTED)
+            // A stopped slot has no state of its own to put back.
+            published = null
+        }
         store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
         if (clearSessions) {
             store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())

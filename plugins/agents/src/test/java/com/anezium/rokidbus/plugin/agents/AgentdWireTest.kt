@@ -15,6 +15,8 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.X509TrustManager
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -550,6 +552,97 @@ class AgentdWireTest {
             assertTrue(client.needsRepair.value)
         }
         client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun republish_never_overwrites_a_newer_state_or_a_stop() {
+        val store = GatedStore()
+        val http = FakeWebSocketClient()
+        val client = AgentdClient(
+            OkHttpClient(), store, scope, "test", FixturePhoneTlsIdentity(),
+            pinnedClient = { http },
+        ) {}
+        client.start(
+            AgentdConfig(
+                host = "127.0.0.1", port = 8790, token = "secret", name = "Home",
+                fp = FixturePhoneTlsIdentity.FINGERPRINT, steer = "abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJ-0123",
+            ),
+        )
+        // The dial is out, so the slot has published CONNECTING.
+        awaitCondition { http.connections.isNotEmpty() }
+        val connection = http.connections.single().apply { open() }
+        assertEquals(ConnectionState.CONNECTING, store.connections.value.getValue(AgentProvider.CLAUDE).state)
+
+        // A restore has read CONNECTING and is held inside its store write...
+        val staleRestore = store.holdWriteOf(client::republishState)
+        // ...while the hello_ack publishes the newer CONNECTED, then the restore lands.
+        val ack = thread { connection.message(HELLO_ACK) }
+        awaitFinishedOrBlocked(ack)
+        staleRestore.release()
+        ack.join(5_000)
+        assertEquals(
+            ProviderConnectionState(ConnectionState.CONNECTED, "Desk"),
+            store.connections.value.getValue(AgentProvider.CLAUDE),
+        )
+
+        // A restore has read CONNECTED and is held inside its store write, while stop() clears the slot.
+        val restoreBeforeStop = store.holdWriteOf(client::republishState)
+        val stop = thread { client.stop(clearSessions = true) }
+        awaitFinishedOrBlocked(stop)
+        restoreBeforeStop.release()
+        stop.join(5_000)
+        assertEquals(
+            ProviderConnectionState(ConnectionState.DISCONNECTED),
+            store.connections.value.getValue(AgentProvider.CLAUDE),
+        )
+
+        // And a restore after the stop writes nothing.
+        store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING, "waiting for a computer")
+        client.republishState()
+        assertEquals(
+            ProviderConnectionState(ConnectionState.CONNECTING, "waiting for a computer"),
+            store.connections.value.getValue(AgentProvider.CLAUDE),
+        )
+    }
+
+    /** Ran to the end, or is waiting on a monitor: either way it has gone as far as it can on its own. */
+    private fun awaitFinishedOrBlocked(worker: Thread) =
+        awaitCondition { !worker.isAlive || worker.state == Thread.State.BLOCKED }
+
+    /** A store whose chosen thread stops inside its next connection write, until released. */
+    private class GatedStore : AgentSessionStore() {
+        @Volatile private var heldThread: Thread? = null
+        @Volatile private var reached = CountDownLatch(1)
+        @Volatile private var gate = CountDownLatch(1)
+
+        inner class Held(private val worker: Thread, private val opened: CountDownLatch) {
+            fun release() {
+                opened.countDown()
+                worker.join(5_000)
+                check(!worker.isAlive) { "held write never finished" }
+            }
+        }
+
+        /** Runs [block] on its own thread and returns once that thread is inside its connection write. */
+        fun holdWriteOf(block: () -> Unit): Held {
+            reached = CountDownLatch(1)
+            gate = CountDownLatch(1)
+            val opened = gate
+            val worker = thread(start = false) { block() }
+            heldThread = worker
+            worker.start()
+            check(reached.await(5, TimeUnit.SECONDS)) { "write never reached the store" }
+            return Held(worker, opened)
+        }
+
+        override fun setConnection(provider: AgentProvider, state: ConnectionState, detail: String?) {
+            if (Thread.currentThread() === heldThread) {
+                heldThread = null
+                reached.countDown()
+                gate.await()
+            }
+            super.setConnection(provider, state, detail)
+        }
     }
 
     @Test

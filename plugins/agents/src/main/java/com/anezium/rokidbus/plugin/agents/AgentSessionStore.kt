@@ -23,7 +23,8 @@ data class LinkMachine(
 private const val MAX_NOT_APPLIED = 32
 private const val NOT_APPLIED_MS = 30_000L
 
-class AgentSessionStore {
+/** Open only so a test can hold a connection write mid-flight; nothing here is meant to be overridden. */
+open class AgentSessionStore {
     private val providerSessions = AgentProvider.values().associateWith {
         linkedMapOf<String, AgentSession>()
     }.toMutableMap()
@@ -277,7 +278,7 @@ class AgentSessionStore {
         _approvals.value.firstOrNull { it.sessionKey == sessionKey }
 
     @Synchronized
-    fun setConnection(
+    open fun setConnection(
         provider: AgentProvider,
         state: ConnectionState,
         detail: String? = null,
