@@ -29,18 +29,32 @@ End to end, computer to phone to glasses:
    app; **install a compatible `glasses-hub` build** on the glasses if the
    wearer's own hasn't shipped this yet.
 
-3. **Pair the phone with the computer.** Whichever applies:
+3. **Pair the phone with the computer.** Both sides must agree: the phone
+   decides which computers it lets in, and agentd decides which phones it
+   trusts. A fresh agentd trusts no phone, so it only trusts one **inside a
+   two-minute window opened on the computer** by `agentd pair` (which also
+   prints the pairing line) or `agentd phones allow-next` (`node dist/cli.js
+   ...` from the source tree). Run one of them before the phone connects.
+   Then, whichever applies:
    - Same Wi-Fi, first computer ever paired: turn on **Monitor sessions** in
-     Settings and the phone finds it on its own — this is the zero-setup path.
+     Settings and the phone finds the computer on its own, with no line to
+     paste (the phone-side half is zero-setup; agentd's window above is still
+     needed).
    - Anything else (a second computer, different networks, automatic
-     discovery failing): run `agentd pair` (`node dist/cli.js pair` from the
-     source tree) on the computer, then **Add a computer → paste pairing
-     line** on the phone. A computer after the first needs the wearer to hold
-     the door open for it on that screen.
-   - Either way, the **pairing line** is what turns on steering: it carries
-     the computer's certificate fingerprint (`fp`) and a steering secret
-     (`steer`). A link made without them is monitor-only. See
-     [Linking a computer](#linking-a-computer).
+     discovery failing): run `agentd pair` on the computer, then **Add a
+     computer → paste pairing line** on the phone. A computer after the first
+     needs the wearer to hold the door open for it on that screen.
+   - **What turns on steering** (allow, deny, answer, reply) depends on who
+     dials:
+     - *Phone dials the computer (outbound `wss`, the pairing line):* the line
+       must carry the computer's certificate fingerprint (`fp`) and the
+       steering secret (`steer`). Without them the link is monitor-only.
+     - *Computer dials the phone (inbound):* no pairing line is needed. The
+       link is mutual TLS: agentd must have trusted the phone inside its
+       window, and the phone must have pinned agentd's certificate. A plain
+       (non-TLS) link is monitor-only.
+
+     See [Linking a computer](#linking-a-computer).
    - Away from home: install Tailscale on both ends and sign in with the same
      account — no re-pairing needed afterward.
 
@@ -120,8 +134,9 @@ pattern; no token or pairing payload is logged.
 
 The daemon dials the phone, so the phone decides who is allowed in:
 
-- The **first** computer ever links itself — nothing exists yet to impersonate,
-  and this is what keeps the zero-setup path zero-setup.
+- The **first** computer ever links itself on the phone's side — nothing exists
+  yet to impersonate. agentd still has to trust the phone first, inside the
+  window opened by `agentd pair` or `agentd phones allow-next`.
 - Every computer **after** that must arrive while the wearer holds the door
   open: *Open the door* on the Add a computer screen opens a two-minute
   window, counts it down on screen, and can be cancelled at any moment.
