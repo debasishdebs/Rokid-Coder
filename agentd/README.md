@@ -23,6 +23,10 @@ npm run build
 node dist/cli.js run
 ```
 
+`node-pty` is a native dependency (it backs `rk claude`). `npm install` fetches its
+prebuilt binary for Windows and macOS, and the `postinstall` script sets the execute
+bit on its macOS `spawn-helper`; other platforms build it with a C++ toolchain.
+
 ### Claude Code plugin (replaces `install-hooks`)
 
 Sessions are opt-in. The Rokid-Coder plugin forwards a session's hooks to the daemon, and
