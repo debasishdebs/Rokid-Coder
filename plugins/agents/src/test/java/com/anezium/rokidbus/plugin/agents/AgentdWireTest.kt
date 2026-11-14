@@ -469,9 +469,14 @@ class AgentdWireTest {
             assertEquals("hello_ack", JSONObject(fromPhone.readLine()).getString("type"))
         }
 
+        /** Bound and announced: LinkUp is raised before the CONNECTED state is written. */
         fun handshake(pipelined: String? = null) {
             hello(pipelined)
-            awaitCondition { events.isNotEmpty() }
+            awaitCondition {
+                events.isNotEmpty() &&
+                    store.connections.value[AgentProvider.CLAUDE] ==
+                    ProviderConnectionState(ConnectionState.CONNECTED, "Desk")
+            }
         }
 
         fun hangUp() {
