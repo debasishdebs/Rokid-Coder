@@ -252,3 +252,14 @@ Rules:
 **R12′ (adds to R12): hub link protection is kept.**
 - On top of Bluetooth encryption, the phone ↔ glasses link keeps Nexus's application-level `SppAuthProtocol`, authenticated enrollment and frame replay protection, all unchanged (`BusHubService.kt:3865`, `AuthenticatedSppServer.kt:120`).
 - They are listed in `PATCHES.md` as "must not be touched" areas.
+
+## 12. User answers on the revised design (2026-11-15)
+- **U35: commit-then-reveal code pairing (R1′) approved** ("love it").
+- **U36: the private internal interface (R2) is confirmed.**
+  - The upstream "Nexus Store" (the in-app downloader and installer for third-party glasses plugins, from Anezium's registry) is not in our app.
+- **U37: a prerequisite check is added to both installers.** It runs before anything is installed:
+  - **macOS:** the OS version, and Claude Code and/or Codex present (offering the official install).
+  - **Windows:** Windows 11 22H2+, WSL2 plus a distro, mirrored networking (offering to enable it), the TCP 8792 firewall rule, and Claude Code/Codex inside WSL (offering to install).
+  - **Both:** the phone reachable on the same Wi-Fi.
+  - Each failure shows a one-line fix (a command or link), then re-checks. Install continues only when everything passes, or when the user skips an item marked optional.
+- **Tailscale** (an encrypted mesh VPN for reaching your devices from other networks): kept **optional, never a prerequisite** **[call, pending the user's confirmation]**. Onboarding offers it only if Wi-Fi pairing fails, or behind a "use it away from home" link.
