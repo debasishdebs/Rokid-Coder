@@ -3,10 +3,6 @@ package com.anezium.rokidbus.plugin.agents
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.yield
 
 class AgentSessionStoreTest {
     @Test
@@ -98,44 +94,35 @@ class AgentSessionStoreTest {
     }
 
     @Test
-    fun only_a_removal_announces_a_session_end() = runBlocking {
+    fun only_a_removal_announces_a_session_end() {
         val store = AgentSessionStore()
         val ended = mutableListOf<String>()
-        val job = launch(start = CoroutineStart.UNDISPATCHED) { store.sessionEnded.collect { ended += it } }
-        store.replaceProvider(AgentProvider.CLAUDE, listOf(session("a", AgentProvider.CLAUDE, AgentStatus.IDLE)))
+        store.onSessionDeparted { ended += it }
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(session("a", AgentProvider.CLAUDE, AgentStatus.IDLE)), machineId = "A")
 
         // A board cleared by a stopped or dropped link is not the laptop ending its sessions.
         store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
-        yield()
         assertEquals(emptyList<String>(), ended)
 
-        store.replaceProvider(AgentProvider.CLAUDE, listOf(session("b", AgentProvider.CLAUDE, AgentStatus.IDLE)))
-        store.remove(AgentProvider.CLAUDE, "b", machineId = "A")
-        yield()
-        assertEquals(listOf("claude:b"), ended)
-        job.cancel()
+        store.remove(AgentProvider.CLAUDE, "a", machineId = "A")
+        assertEquals(listOf("claude:a"), ended)
     }
 
     @Test
-    fun a_snapshot_after_a_lost_link_ends_what_it_omits() = runBlocking {
+    fun a_departure_nobody_heard_is_announced_on_the_next_snapshot() {
         val store = AgentSessionStore()
-        val ended = mutableListOf<String>()
-        val job = launch(start = CoroutineStart.UNDISPATCHED) { store.sessionEnded.collect { ended += it } }
         val a = session("a", AgentProvider.CLAUDE, AgentStatus.IDLE)
-        val b = session("b", AgentProvider.CODEX, AgentStatus.IDLE)
-        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(a, b), machineId = "A")
-
-        // The dialled link drops and the board keeps both while it redials; b closed meanwhile.
-        store.noteLinkLost(AgentProvider.AGENTD_PROVIDERS)
         store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(a), machineId = "A")
-        yield()
-        assertEquals(listOf("codex:b"), ended)
-
-        // Only the first snapshot after the loss settles it: a refresh on the live link announces nothing.
+        // No listener yet (the monitor service is starting): the record stays.
         store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList(), machineId = "A")
-        yield()
-        assertEquals(listOf("codex:b"), ended)
-        job.cancel()
+
+        val ended = mutableListOf<String>()
+        store.onSessionDeparted { ended += it }
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList(), machineId = "A")
+        assertEquals(listOf("claude:a"), ended)
+        // Heard once, it is settled: the next snapshot says nothing more.
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList(), machineId = "A")
+        assertEquals(listOf("claude:a"), ended)
     }
 
     private fun session(

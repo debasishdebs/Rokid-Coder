@@ -249,8 +249,6 @@ class AgentdClient(
         fun finish(outcome: ConnectionOutcome) {
             ended.complete(outcome)
             link.end(owner)
-            // The board outlives the link; the next snapshot says what closed while it was down.
-            if (connected.get()) store.noteLinkLost(AgentProvider.AGENTD_PROVIDERS)
         }
 
         deadlines = ConnectionDeadlines(this) { detail ->

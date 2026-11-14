@@ -4,11 +4,6 @@ import com.anezium.rokidbus.client.plugin.NexusNotice
 import com.anezium.rokidbus.client.plugin.NexusNoticeCloseReason
 import com.anezium.rokidbus.client.plugin.NexusNoticeUpdate
 import com.anezium.rokidbus.plugin.agents.ui.outcomeText
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.cancelChildren
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.yield
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -816,9 +811,9 @@ class AlertDirectorTest {
      * The monitor service's wiring of a real store into the director: an alert for s1 is pending,
      * then a transport clears the board and the link comes back with [reconnectSnapshot].
      */
-    private fun pendingThenReconnect(vararg reconnectSnapshot: AgentSession) = runBlocking {
+    private fun pendingThenReconnect(vararg reconnectSnapshot: AgentSession) {
         val store = AgentSessionStore()
-        launch(start = CoroutineStart.UNDISPATCHED) { store.sessionEnded.collect(director::onSessionEnded) }
+        store.onSessionDeparted(director::onSessionEnded)
         up()
         store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(linkSession), machineId = "A")
         director.onBoard(setOf("claude:s1"))
@@ -827,14 +822,69 @@ class AlertDirectorTest {
         store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
         director.onEvent(AgentdEvent.LinkDown(1L))
         director.onBoard(emptySet())
-        yield()
         assertEquals("a transient clear ends nothing", Outcome.PENDING, entry("A").outcome)
 
         up()
         store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, reconnectSnapshot.toList(), machineId = "A")
         director.onBoard(reconnectSnapshot.mapTo(HashSet()) { it.key })
-        yield()
-        coroutineContext.cancelChildren()
+    }
+
+    /** The monitor service's wiring of a real store into the director: departures are direct calls. */
+    private class Linked(val store: AgentSessionStore)
+
+    private fun linked(block: Linked.() -> Unit) {
+        val store = AgentSessionStore()
+        val stop = store.onSessionDeparted(director::onSessionEnded)
+        Linked(store).block()
+        stop()
+    }
+
+    private fun session(id: String, status: AgentStatus = AgentStatus.NEEDS_YOU, activity: Long? = null) =
+        AgentSession(id = id, provider = AgentProvider.CLAUDE, title = id, status = status, lastActivityAt = activity)
+
+    @Test
+    fun snapshot_from_b_never_ends_a_sessions() = linked {
+        keepAfterSession = true
+        up()
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(session("s1")), machineId = "A")
+        feed(alert(id = "A", sessionKey = "claude:s1"))
+        // A's link goes; B links with sessions of its own.
+        store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(session("b1")), machineId = "B")
+        assertEquals("B says nothing of A's sessions", Outcome.PENDING, entry("A").outcome)
+
+        // A's own snapshot omits s1: it was closed while A was away.
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList(), machineId = "A")
+        assertEquals(Outcome.WITHDRAWN, entry("A").outcome)
+    }
+
+    @Test
+    fun pruned_session_with_history_is_reconciled_on_its_machines_snapshot() = linked {
+        keepAfterSession = true
+        up()
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(session("s1", AgentStatus.DONE, activity = 0L)), machineId = "A", nowMs = 0L)
+        feed(alert(id = "D", kind = "done", sessionKey = "claude:s1"))
+        // Done long enough to age off the board; its history entry still waits.
+        assertEquals(setOf("claude:s1"), store.prune(nowMs = AgentSessionStore.DONE_RETENTION_MS + 1))
+        store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
+
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList(), machineId = "A")
+        assertEquals(Outcome.WITHDRAWN, entry("D").outcome)
+    }
+
+    @Test
+    fun hundred_departures_all_delivered() = linked {
+        keepAfterSession = true
+        up()
+        val sessions = (0 until 100).map { session("s$it") }
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, sessions, machineId = "A")
+        sessions.forEach { feed(alert(id = "A${it.id}", sessionKey = it.key)) }
+        store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
+
+        // All hundred were closed while the link was down.
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList(), machineId = "A")
+        assertEquals(100, history.entries.value.size)
+        assertEquals(listOf(Outcome.WITHDRAWN), history.entries.value.map { it.outcome }.distinct())
     }
 
     @Test

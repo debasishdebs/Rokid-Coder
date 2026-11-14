@@ -147,7 +147,10 @@ class AlertDirector(
         gone.forEach { apply(coordinator.invalidateSession(it)) }
     }
 
-    /** agentd reported [sessionKey] removed over a live link: what it still waited on is gone with it. */
+    /**
+     * [sessionKey] left for good: agentd reported it removed over a live link, or its own machine's
+     * snapshot omitted it. What it still waited on is gone with it.
+     */
     fun onSessionEnded(sessionKey: String) = post {
         history.onSessionGone(sessionKey)
         apply(coordinator.invalidateSession(sessionKey))

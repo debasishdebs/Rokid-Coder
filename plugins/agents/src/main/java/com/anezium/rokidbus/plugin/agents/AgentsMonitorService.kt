@@ -91,6 +91,7 @@ class AgentsMonitorService : Service() {
     // run on the main thread, so the director's work does too, one piece at a time.
     private val alertScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val alertWork = Channel<() -> Unit>(Channel.UNLIMITED)
+    private var stopFollowingDepartures: (() -> Unit)? = null
     private val alertDirector by lazy {
         AlertDirector(
             coordinator = AlertCoordinator(System::currentTimeMillis),
@@ -269,9 +270,9 @@ class AgentsMonitorService : Service() {
                 .distinctUntilChanged()
                 .collect(alertDirector::onBoard)
         }
-        alertScope.launch {
-            AgentsRuntime.store.sessionEnded.collect(alertDirector::onSessionEnded)
-        }
+        // A direct call, so no departure is ever lost to a full buffer; the director posts it to its own thread.
+        stopFollowingDepartures?.invoke()
+        stopFollowingDepartures = AgentsRuntime.store.onSessionDeparted(alertDirector::onSessionEnded)
     }
 
     /**
@@ -316,6 +317,8 @@ class AgentsMonitorService : Service() {
         releasePluginService()
         httpClient.dispatcher.executorService.shutdown()
         serviceScope.cancel()
+        stopFollowingDepartures?.invoke()
+        stopFollowingDepartures = null
         AgentsRuntime.clearAlertDirector(alertDirector)
         alertScope.cancel()
         alertWork.close()

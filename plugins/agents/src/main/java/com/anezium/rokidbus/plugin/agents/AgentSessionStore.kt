@@ -41,14 +41,19 @@ open class AgentSessionStore {
     val approvals: StateFlow<List<AgentApproval>> = _approvals.asStateFlow()
     val sessions: StateFlow<List<AgentSession>> = _sessions.asStateFlow()
 
-    private val _sessionEnded = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    private val departureListeners = CopyOnWriteArrayList<(String) -> Unit>()
 
     /**
-     * The key of a session agentd itself reported removed, over a live link, or one a transport cleared
-     * that the next authenticated snapshot omits. A board emptied because monitoring stopped or the
-     * link dropped says nothing of the laptop's sessions, and is not announced.
+     * Calls [listener] with the key of each session that left for good: one agentd reported removed
+     * over a live link, or one its own machine's snapshot omits. A board emptied because monitoring
+     * stopped or a link dropped says nothing of the laptop's sessions, and is not announced. Called
+     * on the transport's thread, never under the store's lock, and never dropped: a departure nobody
+     * listens to is kept and announced on its machine's next snapshot. Returns the call that stops it.
      */
-    val sessionEnded: SharedFlow<String> = _sessionEnded.asSharedFlow()
+    fun onSessionDeparted(listener: (String) -> Unit): () -> Unit {
+        departureListeners += listener
+        return { departureListeners -= listener }
+    }
     val connections: StateFlow<Map<AgentProvider, ProviderConnectionState>> =
         _connections.asStateFlow()
     val conversation: StateFlow<AgentConversation?> = _conversation.asStateFlow()
@@ -149,7 +154,9 @@ open class AgentSessionStore {
 
     /**
      * The machine that first reported each session, by key. It outlives the
-     * session on the board: a launcher id kept for a session is bound to it.
+     * session on the board, a pruned one included: a launcher id kept for a
+     * session is bound to it, and only that machine's snapshot can say the
+     * session is gone. It goes once that departure was announced.
      */
     private val owners = LinkedHashMap<String, Owner>()
 
@@ -176,67 +183,68 @@ open class AgentSessionStore {
     }
 
     /**
-     * The sessions a transport cleared from the board, by key, with their provider. Their fate is
-     * unknown until the next authenticated snapshot says it.
-     */
-    private val unconfirmed = LinkedHashMap<String, AgentProvider>()
-
-    /**
      * One snapshot, several harnesses. The daemon link speaks for every provider
      * it monitors, so its snapshot is authoritative for all of them at once —
      * replacing them one at a time would leave a harness the daemon just stopped
      * watching sitting on the board forever.
      *
-     * The first snapshot after a [clearLinkSessions] also settles what the clear
-     * left open: a cleared session it omits was closed while the link was down,
-     * and is announced on [sessionEnded].
+     * The snapshot also speaks for every session [machineId] ever reported, on
+     * the board or pruned from it: one it omits was closed, while the link was
+     * down or since, and departs. Another machine's sessions are not its to end.
      */
-    @Synchronized
     fun replaceLinkSessions(
         providers: Set<AgentProvider>,
         sessions: List<AgentSession>,
         machineId: String?,
         nowMs: Long = System.currentTimeMillis(),
     ) {
-        sessions.forEach { own(it, machineId) }
-        providers.forEach { provider ->
-            val replacement = linkedMapOf<String, AgentSession>()
-            sessions.filter { it.provider == provider }.forEach { replacement[it.id] = it }
-            providerSessions[provider] = replacement
+        val departed = synchronized(this) {
+            sessions.forEach { own(it, machineId) }
+            providers.forEach { provider ->
+                val replacement = linkedMapOf<String, AgentSession>()
+                sessions.filter { it.provider == provider }.forEach { replacement[it.id] = it }
+                providerSessions[provider] = replacement
+            }
+            sessions.forEach { notApplied.remove(it.key) }
+            val present = sessions.mapTo(HashSet()) { it.key }
+            val departed = if (machineId == null) {
+                emptyList()
+            } else {
+                owners.filter { (key, owner) ->
+                    owner.machineId == machineId && owner.provider in providers && key !in present
+                }.keys.toList()
+            }
+            departed.forEach { key ->
+                notApplied.remove(key)
+                replyNotSent.remove(key)
+            }
+            publish(nowMs)
+            departed
         }
-        sessions.forEach { notApplied.remove(it.key) }
-        val present = sessions.mapTo(HashSet()) { it.key }
-        val ended = unconfirmed.filter { (key, provider) -> provider in providers && key !in present }.keys.toList()
-        unconfirmed.entries.removeAll { it.value in providers }
-        ended.forEach { key ->
-            notApplied.remove(key)
-            replyNotSent.remove(key)
-        }
-        publish(nowMs)
-        ended.forEach { _sessionEnded.tryEmit(it) }
+        departed.forEach { announceDeparture(it, machineId) }
     }
 
     /**
      * A transport emptied the board: an inbound disconnect, a monitoring stop or
      * a dropped link. That says nothing of the laptop's sessions, so nothing is
-     * announced; the next snapshot decides.
+     * announced; the machine's next snapshot decides.
      */
     @Synchronized
     fun clearLinkSessions(providers: Set<AgentProvider>, nowMs: Long = System.currentTimeMillis()) {
-        noteLinkLost(providers)
         providers.forEach { provider -> providerSessions[provider] = linkedMapOf() }
         publish(nowMs)
     }
 
     /**
-     * The link these sessions came over ended, and the board keeps showing them
-     * (the dialled slot redials under it). Whatever closed meanwhile is learned
-     * from the next snapshot, as after [clearLinkSessions].
+     * Tells every listener [key] departed; only once one has heard it does the
+     * owner record go, so a departure nobody heard comes again on the next snapshot.
      */
-    @Synchronized
-    fun noteLinkLost(providers: Set<AgentProvider>) {
-        providers.forEach { provider ->
-            providerSessions.getValue(provider).values.forEach { unconfirmed[it.key] = provider }
+    private fun announceDeparture(key: String, machineId: String?) {
+        val listeners = departureListeners.toList()
+        if (listeners.isEmpty()) return
+        listeners.forEach { it(key) }
+        synchronized(this) {
+            if (machineId != null && owners[key]?.machineId == machineId) owners.remove(key)
         }
     }
 
@@ -312,14 +320,13 @@ open class AgentSessionStore {
         val key = "${provider.wireValue}:$sessionId"
         synchronized(this) {
             providerSessions.getValue(provider).remove(sessionId)
-            unconfirmed.remove(key)
             notApplied.remove(key)
             replyNotSent.remove(key)
             publish(nowMs)
-            _sessionEnded.tryEmit(key)
         }
         // Outside the lock: a listener may read the store.
         if (machineId != null) removalListeners.forEach { it(SessionRemoval(key, machineId)) }
+        announceDeparture(key, machineId)
     }
 
     /**
