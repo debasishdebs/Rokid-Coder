@@ -134,7 +134,7 @@ async function main(): Promise<void> {
       // A fresh install trusts no phone: pairing is what lets the next one in.
       new PinStore(path.join(tlsDir, "phone-pins.json")).armAllowNext(Date.now());
       process.stdout.write(
-        `Phone pairing window open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes. Pin shown on the phone: <first 8 hex of the phone fingerprint will appear in the agentd log>\n`,
+        `Phone pairing window open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes. When your phone connects, agentd logs its fingerprint; compare it with the one shown on the phone.\n`,
       );
       break;
     }

@@ -228,6 +228,11 @@ export class SessionStore {
         if (finalText) {
           record.session.lastAssistantText = truncateText(finalText, 140);
         }
+        // The turn is over, so a permission prompt it showed is over too
+        // (answered "No" at the laptop fires nothing else).
+        if (record.session.pendingRequest?.kind === "permission") {
+          record.session.pendingRequest = undefined;
+        }
         if (record.session.pendingRequest) {
           record.session.status = "needs_you";
         } else {

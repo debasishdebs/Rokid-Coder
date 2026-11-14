@@ -660,10 +660,11 @@ test("pair_arms_window_and_admits_one", async () => {
     const { stdout } = await runCli(coderDir, ["pair"]);
     assert.ok(
       stdout.includes(
-        "Phone pairing window open for 2 minutes. Pin shown on the phone: <first 8 hex of the phone fingerprint will appear in the agentd log>",
+        "Phone pairing window open for 2 minutes. When your phone connects, agentd logs its fingerprint; compare it with the one shown on the phone.",
       ),
       stdout,
     );
+    assert.equal(stdout.includes("<"), false, "no placeholder is printed");
     const file = path.join(coderDir, "tls", "phone-pins.json");
     const pins = new PinStore(file);
     assert.equal(pins.allowNextOpen(Date.now()), true, "pairing opened the window");

@@ -49,9 +49,12 @@ test("scripted hooks drive normalized status and pending-request transitions", (
     createdAt: now,
   });
 
+  // The turn ended with the prompt unanswered here (a laptop "No" reports
+  // nothing else), so the permission request is over with it.
   now += 10;
   store.handleHook({ ...base, hook_event_name: "Stop" });
-  assert.equal(store.get(base.session_id).status, "needs_you");
+  assert.equal(store.get(base.session_id).status, "idle");
+  assert.equal(store.get(base.session_id).pendingRequest, undefined);
 
   now += 10;
   store.handleHook({

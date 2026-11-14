@@ -33,8 +33,8 @@ function isDefaultMode(value: unknown): value is DefaultMode {
 }
 
 /**
- * Floors, because settings_sync is allowed on a plaintext link: without them a
- * monitor-only peer could set every threshold to nothing and flood the glasses.
+ * Floors, so that even a trusted phone (settings_sync is steering) cannot set
+ * every threshold to nothing and flood the glasses, or end every hold at once.
  */
 export const MIN_TIMING_MS = 1_000;
 export const MIN_REMINDER_MS = 30_000;

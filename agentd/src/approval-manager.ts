@@ -434,10 +434,10 @@ export class ApprovalManager {
     }
   }
 
-  resolveSession(sessionId: string): void {
+  resolveSession(sessionId: string, reason = "session_end"): void {
     for (const [requestId, pending] of [...this.pending]) {
       if (pending.request.sessionId === sessionId) {
-        this.resolveLocal(requestId, "session_end", true);
+        this.resolveLocal(requestId, reason, true);
       }
     }
   }

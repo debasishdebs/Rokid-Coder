@@ -300,6 +300,14 @@ export class PhoneV2 {
     }
   }
 
+  /** The wearer typed at the laptop: a Done nobody read is old news, held or not. */
+  onLaptopPrompt(sessionId: string): void {
+    const alertId = this.doneAlerts.get(sessionKeyOf("claude", sessionId));
+    if (alertId) {
+      this.alerts.withdraw(alertId);
+    }
+  }
+
   private onStopHeld(sessionId: string): void {
     this.republish(sessionKeyOf("claude", sessionId));
   }

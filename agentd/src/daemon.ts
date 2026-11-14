@@ -307,7 +307,12 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     // sessions that wait for the glasses. The attach commands were answered
     // above, which is why they never count as the wearer typing at the laptop.
     if (sessionId) {
+      // A request still pending when the turn ends, or when the wearer types
+      // a new prompt, was answered at the laptop in a way no other hook
+      // reports (a dialog "No"). A later PreToolUse is no such sign: another
+      // call of the same turn may still be waiting on its own prompt.
       if (eventName === "Stop") {
+        approvals?.resolveSession(sessionId, "turn_ended");
         phoneV2?.onClaudeStop(sessionId);
         return stopWait.hold(sessionId, closed);
       }
@@ -317,6 +322,10 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
           return questionRelay.hold(payload, closed);
         }
       } else if (eventName === "UserPromptSubmit" || eventName === "UserPromptExpansion") {
+        if (eventName === "UserPromptSubmit") {
+          approvals?.resolveSession(sessionId, "laptop_prompt");
+          phoneV2?.onLaptopPrompt(sessionId);
+        }
         stopWait.releaseByLaptop(sessionId);
         questionRelay.releaseByLaptop(sessionId);
       }
