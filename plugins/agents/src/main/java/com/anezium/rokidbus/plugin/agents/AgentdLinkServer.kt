@@ -153,7 +153,7 @@ class AgentdLinkServer internal constructor(
         if (besideDialled && !hadLink) return
         store.setConnection(AgentProvider.CLAUDE, ConnectionState.DISCONNECTED)
         store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
-        if (clearSessions) store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
+        if (clearSessions) store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
     }
 
     fun openDetail(sessionId: String): AgentdWire.Result =
@@ -300,7 +300,7 @@ class AgentdLinkServer internal constructor(
                         "waiting for a computer",
                     )
                 }
-                store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
+                store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
                 store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
                 if (bound) onLinkEnded()
             }

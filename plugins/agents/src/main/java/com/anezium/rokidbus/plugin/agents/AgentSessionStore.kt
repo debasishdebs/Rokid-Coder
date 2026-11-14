@@ -43,8 +43,9 @@ open class AgentSessionStore {
     private val _sessionEnded = MutableSharedFlow<String>(extraBufferCapacity = 64)
 
     /**
-     * The key of a session agentd itself reported removed, over a live link. A board emptied because
-     * monitoring stopped or the link dropped says nothing of the laptop's sessions, and is not announced.
+     * The key of a session agentd itself reported removed, over a live link, or one a transport cleared
+     * that the next authenticated snapshot omits. A board emptied because monitoring stopped or the
+     * link dropped says nothing of the laptop's sessions, and is not announced.
      */
     val sessionEnded: SharedFlow<String> = _sessionEnded.asSharedFlow()
     val connections: StateFlow<Map<AgentProvider, ProviderConnectionState>> =
@@ -141,10 +142,20 @@ open class AgentSessionStore {
     }
 
     /**
+     * The sessions a transport cleared from the board, by key, with their provider. Their fate is
+     * unknown until the next authenticated snapshot says it.
+     */
+    private val unconfirmed = LinkedHashMap<String, AgentProvider>()
+
+    /**
      * One snapshot, several harnesses. The daemon link speaks for every provider
      * it monitors, so its snapshot is authoritative for all of them at once —
      * replacing them one at a time would leave a harness the daemon just stopped
      * watching sitting on the board forever.
+     *
+     * The first snapshot after a [clearLinkSessions] also settles what the clear
+     * left open: a cleared session it omits was closed while the link was down,
+     * and is announced on [sessionEnded].
      */
     @Synchronized
     fun replaceLinkSessions(
@@ -158,7 +169,39 @@ open class AgentSessionStore {
             providerSessions[provider] = replacement
         }
         sessions.forEach { notApplied.remove(it.key) }
+        val present = sessions.mapTo(HashSet()) { it.key }
+        val ended = unconfirmed.filter { (key, provider) -> provider in providers && key !in present }.keys.toList()
+        unconfirmed.entries.removeAll { it.value in providers }
+        ended.forEach { key ->
+            notApplied.remove(key)
+            replyNotSent.remove(key)
+        }
         publish(nowMs)
+        ended.forEach { _sessionEnded.tryEmit(it) }
+    }
+
+    /**
+     * A transport emptied the board: an inbound disconnect, a monitoring stop or
+     * a dropped link. That says nothing of the laptop's sessions, so nothing is
+     * announced; the next snapshot decides.
+     */
+    @Synchronized
+    fun clearLinkSessions(providers: Set<AgentProvider>, nowMs: Long = System.currentTimeMillis()) {
+        noteLinkLost(providers)
+        providers.forEach { provider -> providerSessions[provider] = linkedMapOf() }
+        publish(nowMs)
+    }
+
+    /**
+     * The link these sessions came over ended, and the board keeps showing them
+     * (the dialled slot redials under it). Whatever closed meanwhile is learned
+     * from the next snapshot, as after [clearLinkSessions].
+     */
+    @Synchronized
+    fun noteLinkLost(providers: Set<AgentProvider>) {
+        providers.forEach { provider ->
+            providerSessions.getValue(provider).values.forEach { unconfirmed[it.key] = provider }
+        }
     }
 
     /**
@@ -229,6 +272,7 @@ open class AgentSessionStore {
         nowMs: Long = System.currentTimeMillis(),
     ) {
         providerSessions.getValue(provider).remove(sessionId)
+        unconfirmed.remove("${provider.wireValue}:$sessionId")
         notApplied.remove("${provider.wireValue}:$sessionId")
         replyNotSent.remove("${provider.wireValue}:$sessionId")
         publish(nowMs)

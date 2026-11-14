@@ -105,7 +105,7 @@ class AgentSessionStoreTest {
         store.replaceProvider(AgentProvider.CLAUDE, listOf(session("a", AgentProvider.CLAUDE, AgentStatus.IDLE)))
 
         // A board cleared by a stopped or dropped link is not the laptop ending its sessions.
-        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
+        store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
         yield()
         assertEquals(emptyList<String>(), ended)
 
@@ -113,6 +113,28 @@ class AgentSessionStoreTest {
         store.remove(AgentProvider.CLAUDE, "b")
         yield()
         assertEquals(listOf("claude:b"), ended)
+        job.cancel()
+    }
+
+    @Test
+    fun a_snapshot_after_a_lost_link_ends_what_it_omits() = runBlocking {
+        val store = AgentSessionStore()
+        val ended = mutableListOf<String>()
+        val job = launch(start = CoroutineStart.UNDISPATCHED) { store.sessionEnded.collect { ended += it } }
+        val a = session("a", AgentProvider.CLAUDE, AgentStatus.IDLE)
+        val b = session("b", AgentProvider.CODEX, AgentStatus.IDLE)
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(a, b))
+
+        // The dialled link drops and the board keeps both while it redials; b closed meanwhile.
+        store.noteLinkLost(AgentProvider.AGENTD_PROVIDERS)
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(a))
+        yield()
+        assertEquals(listOf("codex:b"), ended)
+
+        // Only the first snapshot after the loss settles it: a refresh on the live link announces nothing.
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
+        yield()
+        assertEquals(listOf("codex:b"), ended)
         job.cancel()
     }
 

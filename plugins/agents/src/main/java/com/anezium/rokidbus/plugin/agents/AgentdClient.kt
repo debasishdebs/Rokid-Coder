@@ -168,7 +168,7 @@ class AgentdClient(
         }
         store.clearApprovals(AgentProvider.AGENTD_PROVIDERS)
         if (clearSessions) {
-            store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
+            store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
         }
     }
 
@@ -247,6 +247,8 @@ class AgentdClient(
         fun finish(outcome: ConnectionOutcome) {
             ended.complete(outcome)
             link.end(owner)
+            // The board outlives the link; the next snapshot says what closed while it was down.
+            if (connected.get()) store.noteLinkLost(AgentProvider.AGENTD_PROVIDERS)
         }
 
         deadlines = ConnectionDeadlines(this) { detail ->

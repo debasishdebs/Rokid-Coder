@@ -200,7 +200,7 @@ class LauncherCommandTrackerTest {
             store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, sessions.toList())
 
         /** An inbound disconnect, a monitoring stop or a link drop: the transport empties the board. */
-        fun transportClear() = store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, emptyList())
+        fun transportClear() = store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
     }
 
     @Test
@@ -244,6 +244,16 @@ class LauncherCommandTrackerTest {
         yield()
         w.tap()
         assertEquals("a re-tap after a lost ack must reuse the id, never compact twice", w.msgIdOf(0), w.msgIdOf(1))
+
+        // The session was closed on the laptop while the link was down: the reconnect snapshot omits it.
+        w.transportClear()
+        yield()
+        w.snapshot()
+        yield()
+        w.snapshot(w.board)
+        yield()
+        w.tap()
+        assertNotEquals(w.msgIdOf(1), w.msgIdOf(2))
         coroutineContext.cancelChildren()
     }
 }

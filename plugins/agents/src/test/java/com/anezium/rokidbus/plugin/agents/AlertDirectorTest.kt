@@ -4,6 +4,11 @@ import com.anezium.rokidbus.client.plugin.NexusNotice
 import com.anezium.rokidbus.client.plugin.NexusNoticeCloseReason
 import com.anezium.rokidbus.client.plugin.NexusNoticeUpdate
 import com.anezium.rokidbus.plugin.agents.ui.outcomeText
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -803,6 +808,55 @@ class AlertDirectorTest {
         keepAfterSession = false
         feed(alert(id = "B", sessionKey = "claude:s2"))
         assertEquals(listOf("B"), history.entries.value.map { it.alertId })
+    }
+
+    private val linkSession = AgentSession(id = "s1", provider = AgentProvider.CLAUDE, title = "s1", status = AgentStatus.NEEDS_YOU)
+
+    /**
+     * The monitor service's wiring of a real store into the director: an alert for s1 is pending,
+     * then a transport clears the board and the link comes back with [reconnectSnapshot].
+     */
+    private fun pendingThenReconnect(vararg reconnectSnapshot: AgentSession) = runBlocking {
+        val store = AgentSessionStore()
+        launch(start = CoroutineStart.UNDISPATCHED) { store.sessionEnded.collect(director::onSessionEnded) }
+        up()
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, listOf(linkSession))
+        director.onBoard(setOf("claude:s1"))
+        feed(alert(id = "A"))
+
+        store.clearLinkSessions(AgentProvider.AGENTD_PROVIDERS)
+        director.onEvent(AgentdEvent.LinkDown(1L))
+        director.onBoard(emptySet())
+        yield()
+        assertEquals("a transient clear ends nothing", Outcome.PENDING, entry("A").outcome)
+
+        up()
+        store.replaceLinkSessions(AgentProvider.AGENTD_PROVIDERS, reconnectSnapshot.toList())
+        director.onBoard(reconnectSnapshot.mapTo(HashSet()) { it.key })
+        yield()
+        coroutineContext.cancelChildren()
+    }
+
+    @Test
+    fun session_gone_in_reconnect_snapshot_ends_it_drop_mode() {
+        keepAfterSession = false
+        // The session was closed on the laptop while the link was down: the reconnect snapshot omits it.
+        pendingThenReconnect()
+        assertEquals(emptyList<String>(), history.entries.value.map { it.alertId })
+    }
+
+    @Test
+    fun session_gone_in_reconnect_snapshot_ends_it_keep_mode() {
+        keepAfterSession = true
+        pendingThenReconnect()
+        assertEquals(Outcome.WITHDRAWN, entry("A").outcome)
+    }
+
+    @Test
+    fun transient_clear_then_same_session_in_snapshot_keeps_pending() {
+        keepAfterSession = false
+        pendingThenReconnect(linkSession)
+        assertEquals(Outcome.PENDING, entry("A").outcome)
     }
 
     @Test
