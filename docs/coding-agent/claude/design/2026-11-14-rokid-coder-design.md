@@ -307,7 +307,7 @@ Both are supported, and **the user is told each mode's limits clearly**: on the
 glasses board (a mode tag on the session row), in the session's control menu, in
 the phone app, and in the `/rokid:on` and `rk claude` startup text.
 
-| | Plugin mode: normal `claude` + `/rokid:on` | Launcher mode: `rk claude` |
+| | Plugin mode: normal `claude` + `/rokid:on` | Launcher mode: `rk claude` (**delivered, Plan 3**) |
 |---|---|---|
 | Progress, Done, approvals, questions, context | ✅ | ✅ |
 | Voice follow-up | ✅ while the session waits (limit *Y*); after that, continue at the laptop | ✅ always, also after *Y* expires |
@@ -315,6 +315,11 @@ the phone app, and in the `/rokid:on` and `rk claude` startup text.
 | Compact | ❌: shown greyed out as "needs rk claude" | ✅ |
 | Model change | ❌: shown greyed out as "needs rk claude" | ✅, with a warning that it also changes the default for new sessions |
 
+- **Launcher column delivered (Plan 3, 2026-11-14).** `rk claude` prints this before Claude starts
+  (the phone shows the bound state; the banner says "attaching…" because the bind comes after the print, R155):
+  `Rokid-Coder launcher: attaching… From the glasses you can reply at any time, compact, and change model (changing model also sets your default for new sessions).`
+  Live results and the limits found are in `../plan/2026-11-14-plan-3-smoke.md`; the user-facing
+  summary is the `rk` section of `agentd/README.md`.
 - The Rokid-Coder Claude plugin (name `rokid`) provides `/rokid:on|off|status`. `/rokid:on` attaches
   the current session to the glasses, `/rokid:off` detaches it, and `/rokid:status` shows whether it
   is attached. My call: sessions are opt-in, so unattached sessions don't send anything.
@@ -323,7 +328,8 @@ the phone app, and in the `/rokid:on` and `rk claude` startup text.
   daemon.
 - **Codex is opt-in too** **[user]**, the same way as Claude. A Rokid-Coder Codex plugin command or
   skill attaches the current thread. Its commands are `rokid:on|off|status`, typed as plain text with
-  no leading slash. `rk codex` starts attached. Unattached daemon threads are
+  no leading slash. `rk codex` (Path B, R133, Plan 3) runs plain `codex` and prints how to attach; it
+  does not attach by itself. Unattached daemon threads are
   never shown. **Builder spike:** how a Codex plugin command/skill learns its own thread ID to
   register it with agentd. **Resolved 2026-11-14 [spike]:** Codex sets `CODEX_THREAD_ID` (= `CODEX_SESSION_ID`)
   in the env of every command it runs, and hook inputs carry `session_id`. Commands run inside the session have

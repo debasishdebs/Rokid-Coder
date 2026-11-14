@@ -92,6 +92,82 @@ The token, stable machine ID, ports, and machine name live in
 Runtime logs are appended to `~/.nexus-agentd/agentd.log`; at 5 MB the daemon rotates the
 file to `agentd.log.old`.
 
+## `rk`: launcher mode
+
+`rk` starts Claude Code or Codex for you. It is installed as a second bin next to `agentd`
+(`rk` after `npm link`, or `node dist/rk.js`).
+
+```bash
+rk claude [claude args...]     # e.g. rk claude --model haiku
+rk codex  [codex args...]
+```
+
+Everything after the mode goes to the real CLI unchanged.
+
+### `rk claude`: launcher mode
+
+`rk claude` runs `claude` in a pseudo-terminal it owns, passes your keystrokes and the screen through
+untouched, and tells agentd (over `launcher.sock`, in agentd's state directory, mode 0600, same user
+only) which session it runs. agentd binds the session only after it finds a session file Claude wrote
+for a process below the launcher's own child, so another program cannot claim a session. The session
+then appears on the phone and glasses in launcher mode, even before the first prompt.
+
+| From the glasses | Launcher mode | Plugin mode (`/rokid:on`) |
+|---|---|---|
+| Progress, Done, approvals, questions, context | yes | yes |
+| Voice follow-up | any time, also after the wait limit expired | only while the Stop wait is open |
+| Compact | yes | no |
+| Model change | yes (it also sets your default model for new sessions) | no |
+
+Limits to know about:
+
+- Replies, compact and model change are typed into Claude's prompt, so they run only when Claude is idle.
+  A busy session makes them wait (up to 60 s) and then fail with `busy`.
+- Nothing is typed over a half-written prompt. If you have text in the prompt, a command waits until you
+  submit or clear it, and fails with `laptop_draft` after 60 s.
+- Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result
+  cannot be seen, the session is marked uncertain and further commands are refused until you check it.
+- A follow-up is one bracketed paste of at most 16 KiB.
+- One launcher holds a session. A second launcher for the same session is refused.
+- If agentd is not running or has its launcher socket off, `rk claude` still starts Claude, says so in
+  its banner, and attaches by itself if agentd comes up later. Nothing is lost except the glasses.
+- When `rk` ends Claude by a signal it also ends the processes left in Claude's process group. When
+  Claude exits on its own, background jobs you started stay running, as with plain `claude`.
+
+The banner is printed before Claude draws, so it is never mixed into the TUI. It reads "attaching…"
+because the phone confirms the bind afterwards. In Claude, `/rokid:status` shows the session's state and
+`/rokid:off` stops sending it to the glasses.
+
+### Pairing from `rk`
+
+If no phone is paired yet, `rk claude` and `rk codex` (when agentd is up) ask `Pair now? [Y/n]` before
+they start. **Y** opens agentd's two-minute pairing window and waits for the phone to appear under
+Agents > Add a computer (the phone and computer need the same Wi-Fi or Tailscale); Enter skips and closes
+the window again. **n**, a non-terminal stdin or a closed window print
+`Pair later: run "agentd pair" or type /rokid:pair in Claude (rokid:pair in Codex).`
+The prompt only opens the window. The pairing payload and its secrets still come only from `agentd pair`.
+
+### `rk codex`
+
+`rk codex` cannot own a Codex thread, so it runs plain `codex` and prints how to attach before Codex
+draws:
+
+```
+Rokid-Coder: starting Codex, ready to attach.
+  Next step: type rokid:on inside Codex to show this session on the glasses (rokid:off detaches, rokid:status checks).
+  rokid:on works only once the Rokid-Coder plugin (plugins/codex) is installed in Codex.
+```
+
+Limits:
+
+- It adds no compact or model control of its own; those work after `rokid:on` attaches the thread through
+  the plugin, because Codex shares its daemon.
+- Codex draws on the terminal's alternate screen. The hint is on the normal screen, so it is visible for
+  a moment before Codex starts and again after Codex exits, not while Codex runs.
+- `-c`/`--config` and `--dangerously-bypass-hook-trust` are refused (exit 2), because they move Codex off
+  the shared daemon. Run plain `codex` for those.
+- Without agentd running the hint adds a line telling you to start `agentd run`.
+
 ## Codex monitoring
 
 Codex monitoring is disabled by default. Enable it in the existing
