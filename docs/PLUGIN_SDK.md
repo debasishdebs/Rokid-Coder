@@ -883,7 +883,8 @@ updates, selection moves and a rearm in place are the same show. A report for
 a band you have since replaced or hidden is dropped, under the same token rules
 as the other notice callbacks. Only a phone hub that routes it, paired with
 glasses that send it, sets `supportsNoticeShownAck`; everywhere else it is
-false and the callback never comes. Never wait for it there: treat the wearer's
+false and the callback never comes. No phone hub routes it yet (the phone-hub
+half is pending), so today it is always false. Never wait for it there: treat the wearer's
 action, input or `USER` close as the evidence instead. `TIMEOUT` and `REPLACED`
 are never evidence, since the glasses can time out a band that never attached.
 The notice protocol stays at v5, so hubs without the ack still pair.
