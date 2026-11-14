@@ -166,4 +166,53 @@ class VoiceReviewTest {
         assertEquals("Showing 250 of 600 words · the full reply is sent", head.sub)
         assertTrue(box.all { it.text.length <= VoiceCard.ROW_CHARS })
     }
+
+    /** The SDK's NexusCard row cap: a card with more rows throws as it is built. */
+    private val cardMaxRows = 64
+
+    private fun freeItem(text: String) = QuestionItem(text, emptyList(), multiSelect = false, allowFreeText = true)
+
+    /** Moves the question card's selection to the row whose line reads [text]; fails if there is none. */
+    private fun select(flow: QuestionFlow, text: String) {
+        repeat(64) { index ->
+            screen.questionRow = index
+            if (wiring.questionCard(flow).richLines!!.any { it.selected && it.text == text }) return
+        }
+        error("no row reads $text")
+    }
+
+    @Test
+    fun review_with_max_length_answers_renders_within_row_limit() {
+        val items = (1..16).map { freeItem("Question $it?") }
+        val flow = QuestionFlow("alert-1", "claude:s1", QuestionPayload("ref", "claude_tool", items))
+        val answers = (0 until 16).map { q -> (0 until 2_000).joinToString(" ") { "q${q}w$it" }.take(4_000).trimEnd() }
+        answers.forEachIndexed { q, answer -> assertTrue(flow.setFreeText(q, answer)) }
+        screen.openQuestion(flow)
+        repeat(16) { assertTrue(screen.questionDeck!!.next()) }
+        assertTrue(screen.questionDeck!!.onReview)
+
+        // Every selection draws the card within the SDK's row cap, one condensed row per review entry.
+        repeat(16 * 2 + 1) { index ->
+            screen.questionRow = index
+            val lines = wiring.questionCard(flow).richLines!!
+            assertTrue("${lines.size} rows at selection $index", lines.size <= cardMaxRows)
+            assertTrue(lines.none { it.tone == NexusRowTone.BODY })
+            assertTrue(lines.all { it.text.length <= BoardCards.MENU_LINE_CHARS })
+            lines.filter { it.text.startsWith("Q") }.forEach { line ->
+                assertTrue(line.text, line.text.substringAfter(": ").split(' ').count { it.startsWith("q") } <= 12)
+            }
+        }
+
+        // Each question's reader action opens its whole answer in the paged reader.
+        select(flow, "Read Q3 answer")
+        wiring.onQuestionInput(flow, key(KeyEvent.KEYCODE_ENTER))
+        val reader = wiring.questionReader(flow)
+        assertNotNull(reader)
+        assertTrue(reader!!.segments.joinToString("") { it.text }.contains(answers[2]))
+        // A tap or BACK closes the reader onto the review card, which is still up.
+        wiring.onQuestionInput(flow, key(KeyEvent.KEYCODE_BACK))
+        assertNull(wiring.questionReader(flow))
+        assertTrue(screen.questionDeck!!.onReview)
+        assertEquals(ActiveCard.Kind.QUESTION, screen.kind)
+    }
 }

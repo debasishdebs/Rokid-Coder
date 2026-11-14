@@ -96,6 +96,9 @@ internal class GlassesScreen(
         }
     var questionRow = 0
 
+    /** The reader a question card's read row opened over it, as title and text; null while the card itself is up. */
+    var questionReading: Pair<String, String>? = null
+
     /**
      * The session key the wearer is typing a reply for, if they opened the
      * field, and the session id the reply goes to.
@@ -124,6 +127,7 @@ internal class GlassesScreen(
         val parent = if (child) active.kind else ActiveCard.Kind.NONE
         if (kind != ActiveCard.Kind.VOICE) stopVoice()
         if (kind != ActiveCard.Kind.QUESTION && parent != ActiveCard.Kind.QUESTION) questionFlow = null
+        questionReading = null
         if (kind != ActiveCard.Kind.ALERT_DECISION && parent != ActiveCard.Kind.ALERT_DECISION) decidingAlert = null
         if (kind != ActiveCard.Kind.REQUEST_DECISION && parent != ActiveCard.Kind.REQUEST_DECISION) {
             decidingRequestId = null
@@ -140,7 +144,10 @@ internal class GlassesScreen(
     /** Closes one card and its data; the screen goes to the card under it, if it was a child. */
     fun close(kind: ActiveCard.Kind) {
         when (kind) {
-            ActiveCard.Kind.QUESTION -> questionFlow = null
+            ActiveCard.Kind.QUESTION -> {
+                questionFlow = null
+                questionReading = null
+            }
             ActiveCard.Kind.ALERT_DECISION -> {
                 decidingAlert = null
                 alertReading = false

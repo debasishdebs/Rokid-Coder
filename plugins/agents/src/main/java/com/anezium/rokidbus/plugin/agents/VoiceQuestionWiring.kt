@@ -250,6 +250,9 @@ internal class VoiceQuestionWiring(
         /** A review row: a tap opens that question's card. */
         data class Review(val question: Int) : QuestionRow
 
+        /** Opens question [question]'s answer in the paged reader, where the card shows only part of it. */
+        data class ReadAnswer(val question: Int) : QuestionRow
+
         /** The send row of the review card. */
         data object SendAll : QuestionRow
     }
@@ -257,7 +260,10 @@ internal class VoiceQuestionWiring(
     private fun questionRows(deck: QuestionDeck): List<QuestionRow> {
         if (deck.onReview) {
             return buildList {
-                (0 until deck.questionCount).forEach { add(QuestionRow.Review(it)) }
+                (0 until deck.questionCount).forEach { question ->
+                    add(QuestionRow.Review(question))
+                    if (!deck.previewIsWhole(question)) add(QuestionRow.ReadAnswer(question))
+                }
                 add(QuestionRow.SendAll)
             }
         }
@@ -321,25 +327,21 @@ internal class VoiceQuestionWiring(
         )
     }
 
-    /** One row per question, its whole answer (R123), then Send answers. */
+    /**
+     * One condensed row per question, so sixteen answers of 4,000 characters stay within the card's
+     * rows; a read row after each one it cuts opens that answer whole (R123). Then Send answers.
+     */
     private fun reviewCard(deck: QuestionDeck, rows: List<QuestionRow>, selected: Int, heading: String): NexusCard {
-        val lines = BoardCards.windowedRowGroups(rows, selected) { row, isSelected ->
+        val lines = BoardCards.windowedRows(rows, selected) { row, isSelected ->
             when (row) {
-                is QuestionRow.Review -> {
-                    val parts = VoiceCard.bodyRows(deck.reviewLine(row.question))
-                    val answered = deck.flow.isAnswered(row.question)
-                    buildList {
-                        add(
-                            NexusCardLine(
-                                text = parts.first(),
-                                tone = if (answered) NexusRowTone.NORMAL else NexusRowTone.ALERT,
-                                selected = isSelected,
-                            ),
-                        )
-                        parts.drop(1).forEach { add(NexusCardLine(text = it, tone = NexusRowTone.BODY)) }
-                    }
-                }
-                QuestionRow.SendAll -> listOf(sendLine(SEND_ANSWERS, deck.canSend, isSelected))
+                is QuestionRow.Review -> NexusCardLine(
+                    text = deck.reviewPreview(row.question),
+                    tone = if (deck.flow.isAnswered(row.question)) NexusRowTone.NORMAL else NexusRowTone.ALERT,
+                    selected = isSelected,
+                )
+                is QuestionRow.ReadAnswer ->
+                    NexusCardLine(text = "Read Q${row.question + 1} answer", tone = NexusRowTone.DIM, selected = isSelected)
+                QuestionRow.SendAll -> sendLine(SEND_ANSWERS, deck.canSend, isSelected)
                 else -> error("not on the review card: $row")
             }
         }
@@ -349,6 +351,13 @@ internal class VoiceQuestionWiring(
             rows = lines,
             footer = "swipe move · tap open · 2-tap previous",
         )
+    }
+
+    /** What a read row opens over the question card, in the paged reader; null while the card itself is up. */
+    fun questionReader(flow: QuestionFlow): NexusReader? {
+        if (screen.questionFlow !== flow) return null
+        val (title, text) = screen.questionReading ?: return null
+        return BoardCards.menuReader(title, text)
     }
 
     private fun sendLine(text: String, answered: Boolean, selected: Boolean): NexusCardLine {
@@ -384,6 +393,15 @@ internal class VoiceQuestionWiring(
 
     fun onQuestionInput(flow: QuestionFlow, event: NexusInputEvent) {
         val deck = screen.questionDeck?.takeIf { it.flow === flow } ?: return
+        if (screen.questionReading != null) {
+            // The hub scrolls the reader; a tap or BACK returns to the card under it.
+            if (GlassesKeys.isEnter(event) || event.keyCode == KeyEvent.KEYCODE_BACK) {
+                screen.questionReading = null
+                screen.rearm()
+                host.render()
+            }
+            return
+        }
         val rows = questionRows(deck)
         when {
             event.keyCode in GlassesKeys.BACKWARD -> {
@@ -427,6 +445,11 @@ internal class VoiceQuestionWiring(
             is QuestionRow.Review -> {
                 deck.jump(row.question)
                 openCard()
+            }
+            is QuestionRow.ReadAnswer -> {
+                screen.questionReading = "Q${row.question + 1} answer" to deck.reviewLine(row.question)
+                screen.rearm()
+                host.render()
             }
             QuestionRow.Send, QuestionRow.SendAll -> {
                 if (!host.secure) {

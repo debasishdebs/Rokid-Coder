@@ -49,6 +49,24 @@ class QuestionDeck(val flow: QuestionFlow) {
         return "Q${question + 1} ${item.text}: ${answerText(question)}"
     }
 
+    /**
+     * [reviewLine] as the one row the review card gives it: the question cut, the
+     * answer condensed to [PREVIEW_WORDS] words, the row within the card's line cap.
+     */
+    fun reviewPreview(question: Int): String {
+        val item = flow.payload.items[question]
+        val answer = if (flow.isAnswered(question)) {
+            VoiceCondense.condense(answerText(question), PREVIEW_WORDS).display
+        } else {
+            NOT_ANSWERED
+        }
+        return "Q${question + 1} ${item.text.singleLine(PREVIEW_QUESTION_CHARS)}: $answer".singleLine(BoardCards.MENU_LINE_CHARS)
+    }
+
+    /** True when [reviewPreview] is all of [reviewLine]; otherwise the review card offers the rest in the reader. */
+    fun previewIsWhole(question: Int): Boolean =
+        reviewPreview(question) == reviewLine(question).singleLine(Int.MAX_VALUE)
+
     private fun answerText(question: Int): String {
         if (!flow.isAnswered(question)) return NOT_ANSWERED
         val item = flow.payload.items[question]
@@ -58,5 +76,7 @@ class QuestionDeck(val flow: QuestionFlow) {
 
     companion object {
         const val NOT_ANSWERED = "— not answered"
+        const val PREVIEW_WORDS = 12
+        private const val PREVIEW_QUESTION_CHARS = 60
     }
 }

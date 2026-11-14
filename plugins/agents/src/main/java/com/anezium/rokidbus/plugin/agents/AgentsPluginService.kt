@@ -1042,6 +1042,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private fun activeReader(): NexusReader? {
         // Read all, over a heard reply that the card could only preview.
         if (screen.kind == ActiveCard.Kind.VOICE) screen.voice?.let(answers::voiceReader)?.let { return it }
+        // A question card's read row, over the card.
+        if (screen.kind == ActiveCard.Kind.QUESTION) screen.questionFlow?.let(answers::questionReader)?.let { return it }
         if (screen.kind == ActiveCard.Kind.ALERT_DECISION && screen.alertReading) {
             val alert = screen.decidingAlert ?: return null
             val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == alert.sessionKey }
