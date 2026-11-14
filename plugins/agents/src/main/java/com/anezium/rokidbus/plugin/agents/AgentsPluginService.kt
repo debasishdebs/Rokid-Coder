@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.plugin.agents
 
 import android.content.Intent
+import android.os.SystemClock
 import android.view.KeyEvent
 import com.anezium.rokidbus.client.plugin.NexusCard
 import com.anezium.rokidbus.client.plugin.NexusCardLine
@@ -53,6 +54,20 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private var noticeTargetKey: String? = null
 
     private var ageTicker: Job? = null
+
+    /**
+     * Progress on the board is pushed once a minute rather than on every tool
+     * call; what the wearer would act on goes at once (see [DigestGate]).
+     * [lastPushedBoard] is the session list the glasses last showed, and
+     * [boardSessions] is set by [sessionsCard] so [render] knows it just built
+     * the board rather than some other screen.
+     */
+    private val digestGate = DigestGate(SystemClock::elapsedRealtime, DIGEST_PERIOD_MS)
+    private var lastPushedBoard: List<AgentSession>? = null
+    private var boardSessions: List<AgentSession>? = null
+    private var digestFlush: Job? = null
+    private var lastConnections: Map<AgentProvider, ProviderConnectionState>? = null
+    private var lastConversation: AgentConversation? = null
 
     /**
      * True while the band this plugin last put up is a v2 alert's. The notice
@@ -130,14 +145,19 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 AgentsRuntime.store.sessions,
                 AgentsRuntime.store.connections,
                 AgentsRuntime.store.conversation,
-            ) { _, _, _ -> Unit }
-                .collectLatest {
+            ) { _, connections, conversation -> connections to conversation }
+                .collectLatest { (connections, conversation) ->
                     // A busy agent changes state on every tool call, and each
                     // change used to redraw the glasses immediately: watching
                     // one work made the board flicker continuously. Settling
-                    // coalesces a burst into one redraw.
+                    // coalesces a burst into one redraw, and the digest gate
+                    // then holds plain progress to one push a minute. A link
+                    // or conversation change is not progress: it goes at once.
                     delay(RENDER_SETTLE_MS)
-                    if (surfaceShown) render(show = false)
+                    val sessionsOnly = connections == lastConnections && conversation == lastConversation
+                    lastConnections = connections
+                    lastConversation = conversation
+                    if (surfaceShown) render(show = false, digest = sessionsOnly)
                     syncThinkingTicker()
                 }
         }
@@ -201,7 +221,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         ageTicker = serviceScope.launch {
             while (isActive) {
                 delay(AGE_TICK_MS)
-                if (surfaceShown) render(show = false)
+                if (surfaceShown) render(show = false, digest = true)
             }
         }
         if (configStore.load().shouldMonitor) {
@@ -212,6 +232,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     override fun onNexusClose() {
         ageTicker?.cancel()
         ageTicker = null
+        digestFlush?.cancel()
+        digestFlush = null
+        lastPushedBoard = null
         thinkingTicker?.cancel()
         thinkingTicker = null
         awaitingReplyForKey = null
@@ -633,14 +656,39 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         render(show = true)
     }
 
-    private fun render(show: Boolean) {
+    /**
+     * [digest] marks a redraw nobody asked for (a session moved, the minute
+     * ticked): when it would only redraw the board with progress, the gate may
+     * hold it. Anything else — opening, a keypress, another screen — is drawn.
+     */
+    private fun render(show: Boolean, digest: Boolean = false) {
         val activeSurface = surface ?: return
         activeReader()?.let { reader ->
             if (show) activeSurface.showReader(reader) else activeSurface.updateReader(reader)
             return
         }
+        boardSessions = null
         val card = buildCard()
+        boardSessions?.let { board ->
+            if (digest && !show && !digestGate.shouldPush(lastPushedBoard, board)) {
+                scheduleDigestFlush()
+                return
+            }
+            // Every draw of the board is a push, so the next hold is judged against this one.
+            digestGate.markPushed()
+            lastPushedBoard = board
+        }
         if (show) activeSurface.showCard(card) else activeSurface.updateCard(card)
+    }
+
+    /** A held change must still reach the glasses when no other traffic comes to carry it. */
+    private fun scheduleDigestFlush() {
+        val at = digestGate.nextFlushAt() ?: return
+        digestFlush?.cancel()
+        digestFlush = serviceScope.launch {
+            delay((at - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+            if (surfaceShown) render(show = false, digest = true)
+        }
     }
 
     /** An open conversation with something to read is the one reader screen. */
@@ -772,11 +820,14 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         val sessions = AgentsRuntime.store.sessions.value
         val connections = AgentsRuntime.store.connections.value
         val config = configStore.load()
+        boardSessions = sessions
+        val waitingRow = BoardModel.waitingRow(AgentsRuntime.alertDirector?.waiting ?: 0)
         val startSelected = selectedKey == START_KEY || sessions.isEmpty()
         val selectedIndex = if (startSelected) -1 else selectedIndexIn(sessions)
         if (!startSelected) selectedKey = sessions.getOrNull(selectedIndex)?.key
 
         val alerts = buildList {
+            waitingRow?.let(::add)
             if (config.agentdEnabled &&
                 connections[AgentProvider.CLAUDE]?.state == ConnectionState.AUTH_FAILED
             ) {
@@ -826,27 +877,14 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         )
     }
 
-    private fun sessionRow(session: AgentSession, selected: Boolean, now: Long): NexusCardLine {
-        val age = age(now, session.lastActivityAt)
-        val trail = when (session.status) {
-            AgentStatus.NEEDS_YOU -> listOfNotNull("ASK", age)
-            AgentStatus.WORKING -> listOfNotNull("RUN", age)
-            AgentStatus.ERROR -> listOfNotNull("ERR", age)
-            AgentStatus.DONE -> listOfNotNull("done", age)
-            AgentStatus.IDLE -> listOfNotNull(age)
-        }
-        return NexusCardLine(
-            text = session.displayTitle.singleLine(120),
-            sub = sessionSub(session)?.singleLine(120),
-            tone = when (session.status) {
-                AgentStatus.NEEDS_YOU, AgentStatus.ERROR -> NexusRowTone.ALERT
-                AgentStatus.WORKING -> NexusRowTone.NORMAL
-                AgentStatus.IDLE, AgentStatus.DONE -> NexusRowTone.DIM
-            },
-            selected = selected,
-            trail = trail,
+    private fun sessionRow(session: AgentSession, selected: Boolean, now: Long): NexusCardLine =
+        BoardModel.row(
+            session,
+            selected,
+            now,
+            waiting = AgentsRuntime.alertDirector?.waiting ?: 0,
+            fallbackSub = sessionSub(session),
         )
-    }
 
     /** The line that says what this session is actually doing to you, or for you. */
     private fun sessionSub(session: AgentSession): String? = when (session.status) {
@@ -1216,7 +1254,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             groups += listOf(
                 NexusReaderSegment(
                     kind = NexusReaderSegmentKind.HEADER,
-                    text = listOfNotNull(who, age(now, message.at)).joinToString(" · "),
+                    text = listOfNotNull(who, BoardModel.age(now, message.at)).joinToString(" · "),
                     emphasis = message.role == MessageRole.USER,
                 ),
                 NexusReaderSegment(
@@ -1312,17 +1350,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         )
     }
 
-    private fun age(now: Long, at: Long?): String? {
-        if (at == null) return null
-        val elapsed = (now - at).coerceAtLeast(0)
-        return when {
-            elapsed < 60_000L -> "now"
-            elapsed < 3_600_000L -> "${elapsed / 60_000L}m"
-            elapsed < 86_400_000L -> "${elapsed / 3_600_000L}h"
-            else -> "${elapsed / 86_400_000L}d"
-        }
-    }
-
     companion object {
         const val ACTION_MONITOR_ACTIVE =
             "com.anezium.rokidbus.plugin.agents.action.MONITOR_ACTIVE"
@@ -1351,6 +1378,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         private const val READER_TOTAL_CHARS = 24_000
         private const val READER_MAX_SEGMENTS = 236
         private const val AGE_TICK_MS = 60_000L
+
+        /** How often plain progress reaches the glasses board; the phone setting (0 = live) comes later. */
+        private const val DIGEST_PERIOD_MS = 60_000L
         private const val NOTICE_TITLE_CHARS = 32
         private const val NOTICE_BODY_CHARS = 240
         private const val ATTENTION_TTL_MS = 12_000L

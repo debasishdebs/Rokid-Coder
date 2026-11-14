@@ -48,6 +48,9 @@ class AlertDirector(
     private var ignoreReplacedUntil = 0L
     private var boardKeys: Set<String> = emptySet()
 
+    /** The current alert's `+N waiting`, for the board's own row; read on the main thread, where [post]ed work runs. */
+    val waiting: Int get() = coordinator.current?.waiting ?: 0
+
     fun onEvent(event: AgentdEvent) = post {
         when (event) {
             is AgentdEvent.LinkUp -> {
