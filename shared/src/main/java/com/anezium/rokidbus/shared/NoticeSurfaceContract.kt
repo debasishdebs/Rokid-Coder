@@ -491,6 +491,16 @@ object NoticeSurfaceContract {
         .put("reason", reason.wireValue)
         .apply { identity?.let { withInteractionIdentity(this, it) } }
 
+    /**
+     * The band is attached on the glasses: the one proof that the wearer could
+     * see it. The identity is required, because a report the phone cannot pin
+     * to one show could credit a band that replaced it.
+     */
+    fun shownPayload(
+        noticeId: String,
+        identity: NoticeInteractionIdentity,
+    ): JSONObject = withInteractionIdentity(JSONObject().put("noticeId", noticeId), identity)
+
     private sealed interface TextResult {
         data object Absent : TextResult
         data class Present(val value: String?) : TextResult

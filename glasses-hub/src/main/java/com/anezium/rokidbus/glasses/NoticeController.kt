@@ -624,6 +624,26 @@ internal class NoticeStateMachine {
     }
 }
 
+/**
+ * Tells the phone that a band is attached, once per show. A show is one
+ * interaction instance: a re-render, a selection move or a rearm in place is
+ * the same show, and its question id changing does not make it a new one.
+ * The path is optional on the wire: only a phone that announced
+ * `NOTICE_SHOWN_ACK` is told. A report the transport refused stays owed to
+ * the next render of that band.
+ */
+internal class NoticeShownReporter(private val send: (JSONObject) -> Boolean) {
+    private var reported: Pair<String, String>? = null
+
+    fun bandAttached(notice: NexusNoticeSurface, phoneSupportsAck: Boolean) {
+        if (!phoneSupportsAck) return
+        val identity = notice.interactionIdentity ?: return
+        val show = notice.surfaceId to identity.instanceId
+        if (show == reported) return
+        if (send(NoticeSurfaceContract.shownPayload(notice.surfaceId, identity))) reported = show
+    }
+}
+
 internal object NoticeController {
     private data class PendingNoticeImage(
         val key: ImageDecodeKey,
@@ -639,6 +659,11 @@ internal object NoticeController {
 
     private val main = Handler(Looper.getMainLooper())
     private val state = NoticeStateMachine()
+    private val shownReporter = NoticeShownReporter { payload ->
+        GlassesHub.sendToPhone(BusPaths.NOTICE_SHOWN, payload).also { sent ->
+            if (!sent) log("notice shown transport failed")
+        }
+    }
     private val listeners = CopyOnWriteArrayList<(NexusNoticeSurface?) -> Unit>()
     private val imageDecodeCoordinator = ImageDecodeCoordinator<Bitmap>()
     private var pendingNoticeImage: PendingNoticeImage? = null
@@ -861,6 +886,16 @@ internal object NoticeController {
 
     fun setPageCount(surfaceId: String, seq: Long, count: Int) {
         main.post { applyDecision(state.setPageCount(surfaceId, seq, count)) }
+    }
+
+    /**
+     * The renderer drew [notice] into its attached window. Attached, not merely
+     * accepted: a show the window manager refused, or one hidden behind a
+     * camera or session overlay, has reached no one yet.
+     */
+    fun onBandAttached(notice: NexusNoticeSurface) {
+        if (!state.isCurrentInteraction(notice)) return
+        shownReporter.bandAttached(notice, GlassesHub.phoneSupportsNoticeShownAck())
     }
 
     /**

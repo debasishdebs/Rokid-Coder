@@ -562,6 +562,46 @@ class AlertDirectorTest {
     }
 
     @Test
+    fun the_hubs_shown_report_is_evidence_for_the_band_up_now() {
+        up()
+        director.onBandShown()
+        assertEquals(emptyList<String>(), types())
+
+        feed(alert())
+        director.onBandShown()
+
+        assertEquals(listOf("alert_shown"), types())
+        assertEquals("A", written.single().getString("id"))
+    }
+
+    @Test
+    fun a_shown_report_for_a_band_replaced_before_it_ran_is_not_evidence() {
+        val queue = ArrayDeque<() -> Unit>()
+        val queued = AlertDirector(
+            coordinator = AlertCoordinator(clock = { now }),
+            write = { written += JSONObject(it) },
+            secure = { true },
+            glasses = { glasses },
+            post = { queue.addLast(it) },
+        )
+        fun drain() { while (queue.isNotEmpty()) queue.removeFirst()() }
+        queued.onEvent(AgentdEvent.LinkUp(1L, true))
+        queued.onEvent(AgentdEvent.Action(alert(id = "A")))
+        drain()
+
+        // B's show is already queued when the hub's report for A's band lands.
+        queued.onEvent(AgentdEvent.Action(alert(id = "B")))
+        queued.onBandShown()
+        drain()
+
+        assertEquals(emptyList<String>(), types())
+        queued.onBandShown()
+        drain()
+        assertEquals(listOf("alert_shown"), types())
+        assertEquals("B", written.single().getString("id"))
+    }
+
+    @Test
     fun an_approval_with_no_glasses_is_not_left_for_a_refresh_to_find() {
         val absent = AlertDirector(
             coordinator = AlertCoordinator(clock = { now }),

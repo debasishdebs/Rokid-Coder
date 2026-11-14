@@ -59,6 +59,12 @@ class AlertDirector(
     /** The alert whose band the director put up and has not seen end. Only [post]ed work touches it. */
     private var bandId: String? = null
 
+    /**
+     * Counts the bands taken. Read when a report arrives, outside [post], so a
+     * report for a band that a queued show has since replaced counts for nothing.
+     */
+    @Volatile private var bandSerial = 0L
+
     /** An alert whose band the hub took from us (REPLACED) or timed out: its next frame re-shows it. */
     private var goneId: String? = null
 
@@ -139,6 +145,21 @@ class AlertDirector(
         val alert = coordinator.current?.takeIf { it.id == id } ?: return@post
         apply(coordinator.onShownEvidence(id))
         if (alert.kind == AlertKind.DONE || alert.kind == AlertKind.ERROR) glasses()?.openOutput(alert)
+    }
+
+    /**
+     * The hub's `/notice/shown` for the band up now: display evidence (R33). It
+     * counts for the band that was up when it arrived, never for one that has
+     * replaced it since. Without the hub's ack, input, actions and the wearer's
+     * close stay the only evidence.
+     */
+    fun onBandShown() {
+        val serial = bandSerial
+        post {
+            val id = bandId ?: return@post
+            if (serial != bandSerial || coordinator.current?.id != id) return@post
+            apply(coordinator.onShownEvidence(id))
+        }
     }
 
     fun onBandClosed(reason: NexusNoticeCloseReason) = post {
@@ -273,6 +294,7 @@ class AlertDirector(
             return
         }
         bandId = alert.id
+        bandSerial++
         goneId = null
         // The alert took the slot from whatever brief was on it.
         briefDone()

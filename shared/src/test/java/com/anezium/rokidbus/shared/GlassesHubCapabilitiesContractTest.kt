@@ -52,6 +52,43 @@ class GlassesHubCapabilitiesContractTest {
     }
 
     @Test
+    fun `the shown ack needs notice v5 and its own bit`() {
+        val base = BusCapabilityBits.NOTICE_SURFACE or BusCapabilityBits.NOTICE_SHOWN_ACK
+        fun capabilities(features: Int, notice: Int) =
+            GlassesHubCapabilitiesContract.parse(
+                GlassesHubCapabilitiesContract.toJson(
+                    GlassesHubCapabilitiesContract.create(
+                        features = features,
+                        imageSurfaceVersion = 0,
+                        noticeSurfaceVersion = notice,
+                        maxImageBytes = 0,
+                        versionName = null,
+                    ),
+                ),
+            )
+
+        assertTrue(
+            GlassesHubCapabilitiesContract.supportsNoticeShownAck(
+                capabilities(base, NoticeSurfaceContract.VERSION),
+            ),
+        )
+        // Stock glasses: notice v5 without the ack bit.
+        assertFalse(
+            GlassesHubCapabilitiesContract.supportsNoticeShownAck(
+                capabilities(BusCapabilityBits.NOTICE_SURFACE, NoticeSurfaceContract.VERSION),
+            ),
+        )
+        assertFalse(
+            GlassesHubCapabilitiesContract.supportsNoticeShownAck(capabilities(base, 4)),
+        )
+        assertFalse(
+            GlassesHubCapabilitiesContract.supportsNoticeShownAck(
+                capabilities(BusCapabilityBits.NOTICE_SHOWN_ACK, NoticeSurfaceContract.VERSION),
+            ),
+        )
+    }
+
+    @Test
     fun `capabilities carry the optional glasses version name`() {
         val capabilities = GlassesHubCapabilitiesContract.create(
             features = BusCapabilityBits.IMAGE_SURFACE or

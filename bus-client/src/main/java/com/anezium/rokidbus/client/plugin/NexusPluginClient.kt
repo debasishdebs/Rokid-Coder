@@ -165,6 +165,15 @@ class NexusPluginClient internal constructor(
         get() = currentLinkState and LinkStateBits.SPP_DATA_UP != 0 &&
             hubCapabilities and BusCapabilityBits.NOTICE_SURFACE != 0
 
+    /**
+     * Whether [NexusPluginCallbacks.onNoticeShown] will arrive for a band that
+     * is attached. The phone hub sets this only when it and the glasses both
+     * carry the ack; without it, treat the wearer's answer or dismissal as the
+     * evidence instead.
+     */
+    val supportsNoticeShownAck: Boolean
+        get() = supportsNoticeSurface && hubCapabilities and BusCapabilityBits.NOTICE_SHOWN_ACK != 0
+
     fun showNotice(notice: NexusNotice): NexusSdkResult {
         noticePreflight()?.let { return it }
         if (notice.image != null) return NexusSdkResult.INVALID_PAYLOAD
@@ -812,6 +821,17 @@ class NexusPluginClient internal constructor(
                 actionId.isNotBlank()
             ) {
                 callbacks.onNoticeAction(actionId)
+            }
+            return
+        }
+        if (path == BusPaths.NOTICE_SHOWN) {
+            if (
+                isApproved &&
+                !noticeHidePending &&
+                acceptsNoticeCallback(payload) &&
+                payload.optString("noticeId") == "$pluginId:${NoticeSurfaceContract.LOCAL_SURFACE_ID}"
+            ) {
+                callbacks.onNoticeShown()
             }
             return
         }

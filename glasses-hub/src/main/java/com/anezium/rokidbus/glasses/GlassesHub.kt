@@ -78,6 +78,21 @@ internal fun SelfArmManualAction.connectPortWaitTimeoutMs(): Long =
         0L
     }
 
+/** What these glasses announce they can render and serve; TTS only when an engine is bound. */
+internal fun glassesHubFeatures(ttsAvailable: Boolean): Int =
+    BusCapabilityBits.IMAGE_SURFACE or
+        BusCapabilityBits.PIN_SURFACE or
+        BusCapabilityBits.NOTICE_SURFACE or
+        BusCapabilityBits.NOTICE_SHOWN_ACK or
+        BusCapabilityBits.ACTIVITY_SURFACE or
+        BusCapabilityBits.ACTIVITY_EXTRAS or
+        BusCapabilityBits.INK_SURFACE or
+        BusCapabilityBits.EDITABLE_SURFACE or
+        BusCapabilityBits.GLASSES_FILES or
+        BusCapabilityBits.GLASSES_FILES_LANE or
+        BusCapabilityBits.GLASSES_FILES_HOTSPOT or
+        (if (ttsAvailable) BusCapabilityBits.TTS else 0)
+
 object GlassesHub {
     private const val LOCAL_BINARY_MAX_BYTES = 512 * 1024
     private const val WIRELESS_ADB_REQUEST_SLOTS = 2
@@ -108,6 +123,7 @@ object GlassesHub {
     private val filesHotspotCleanup = GlassesFilesHotspotCleanup()
     @Volatile private var filesHotspotTouchedAt = 0L
     @Volatile private var phoneFilesHotspotSupported = false
+    @Volatile private var phoneNoticeShownAckSupported = false
     @Volatile private var wifiOwnership: GlassesWifiOwnership? = null
     // A lambda, not a method reference: the :camera process also loads this object, and a
     // reference would drag MediaSyncEngine's class init (and its executor thread) in with it.
@@ -717,17 +733,7 @@ object GlassesHub {
             else -> SetupStage.normalize(onboarding.stage)
         }
         val capabilities = GlassesHubCapabilitiesContract.create(
-            features = BusCapabilityBits.IMAGE_SURFACE or
-                BusCapabilityBits.PIN_SURFACE or
-                BusCapabilityBits.NOTICE_SURFACE or
-                BusCapabilityBits.ACTIVITY_SURFACE or
-                BusCapabilityBits.ACTIVITY_EXTRAS or
-                BusCapabilityBits.INK_SURFACE or
-                BusCapabilityBits.EDITABLE_SURFACE or
-                BusCapabilityBits.GLASSES_FILES or
-                BusCapabilityBits.GLASSES_FILES_LANE or
-                BusCapabilityBits.GLASSES_FILES_HOTSPOT or
-                (if (ttsAvailable) BusCapabilityBits.TTS else 0),
+            features = glassesHubFeatures(ttsAvailable),
             imageSurfaceVersion = ImageSurfaceContract.VERSION,
             pinSurfaceVersion = PinSurfaceContract.VERSION,
             noticeSurfaceVersion = NoticeSurfaceContract.VERSION,
@@ -1338,6 +1344,9 @@ object GlassesHub {
 
     internal fun isPhoneConnected(): Boolean = phoneConnected
 
+    /** The phone routes `/notice/shown`; a stock phone never hears one. */
+    internal fun phoneSupportsNoticeShownAck(): Boolean = phoneNoticeShownAckSupported
+
     internal fun isWifiHubOwned(): Boolean {
         val context = appContext ?: return wifiOwnership?.isHubOwned() == true
         return wifiOwnership?.isHubOwned() == true ||
@@ -1404,6 +1413,7 @@ object GlassesHub {
     private fun updateRemotePhoneCapabilities(payload: JSONObject) {
         val advertised = PhoneHubCapabilitiesContract.parse(payload)
         phoneFilesHotspotSupported = advertised.features and BusCapabilityBits.GLASSES_FILES_HOTSPOT != 0
+        phoneNoticeShownAckSupported = PhoneHubCapabilitiesContract.supportsNoticeShownAck(advertised)
         val next = PhoneHubCapabilitiesContract.create(
             features = supportedPhoneCapabilities(advertised.features),
             cameraConsumerName = advertised.cameraConsumerName,
@@ -1455,6 +1465,7 @@ object GlassesHub {
     private fun clearRemotePhoneCapabilities() {
         val previous = remotePhoneCapabilities
         phoneFilesHotspotSupported = false
+        phoneNoticeShownAckSupported = false
         remotePhoneCapabilities = PhoneHubCapabilities(0, null)
         if (cameraLauncherEntry(previous) != null) notifyLauncherEntries()
     }

@@ -170,6 +170,16 @@ object GlassesHubCapabilitiesContract {
             capabilities.features and BusCapabilityBits.ACTIVITY_EXTRAS != 0 &&
             capabilities.activityExtrasVersion == ActivitySurfaceContract.EXTRAS_VERSION
 
+    /**
+     * The glasses send `/notice/shown` for their notice v5 bands. Optional and
+     * additive: stock glasses keep notice v5 and simply never report.
+     */
+    fun supportsNoticeShownAck(capabilities: GlassesHubCapabilities): Boolean =
+        capabilities.protocolVersion == VERSION &&
+            capabilities.features and BusCapabilityBits.NOTICE_SURFACE != 0 &&
+            capabilities.noticeSurfaceVersion == NoticeSurfaceContract.VERSION &&
+            capabilities.features and BusCapabilityBits.NOTICE_SHOWN_ACK != 0
+
     fun effectiveStage(capabilities: GlassesHubCapabilities): String =
         SetupStage.normalize(capabilities.setupStage).ifBlank {
             when {

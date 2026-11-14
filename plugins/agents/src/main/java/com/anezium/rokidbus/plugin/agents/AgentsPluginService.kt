@@ -449,6 +449,11 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         if (v2BandUp) AgentsRuntime.alertDirector?.onBandAction(id)
     }
 
+    /** Display evidence belongs to an alert's band; a brief or v1 attention band has no alert to credit. */
+    override fun onNexusNoticeShown() {
+        if (v2BandUp) AgentsRuntime.alertDirector?.onBandShown()
+    }
+
     override fun onNexusNoticeClosed(reason: NexusNoticeCloseReason) {
         val director = AgentsRuntime.alertDirector
         routeNoticeClose(

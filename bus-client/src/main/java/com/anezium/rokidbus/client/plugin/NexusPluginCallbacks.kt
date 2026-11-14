@@ -36,6 +36,15 @@ interface NexusPluginCallbacks {
     fun onNoticeClosed(reason: NexusNoticeCloseReason) = Unit
 
     /**
+     * The glasses attached this plugin's current notice band: the one proof
+     * that it reached the wearer's display, which may still be dark. Optional:
+     * only hubs with [NexusPluginClient.supportsNoticeShownAck] send it, so a
+     * plugin must not wait for it on older ones. At most once per show, and a
+     * late report for a band since replaced is dropped.
+     */
+    fun onNoticeShown() = Unit
+
+    /**
      * The wearer answered this plugin's interactive notice. Arrives whether or
      * not the plugin has a surface open, which is what the notice tier exists
      * for: a plugin can be dormant, say one thing, and be answered.
