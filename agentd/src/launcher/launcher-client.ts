@@ -93,8 +93,9 @@ export class LauncherClient {
   /** Bytes from the user's terminal. */
   onStdin(data: string): void {
     // After a takeover the typist replays the held keys, a gap after this one (R151).
-    if (this.input.key(data) === "pass") {
-      this.child.write(data);
+    const now = this.input.key(data);
+    if (now) {
+      this.child.write(now);
     }
   }
 

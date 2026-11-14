@@ -65,9 +65,9 @@ class DraftTracker {
     this.enterLast = false;
   }
 
-  /** Applies `data`; says whether it held a bare Esc or a Ctrl-C, outside a paste. */
-  feed(data: string): { takeover: boolean } {
-    let takeover = false;
+  /** Applies `data`; says where its first bare Esc or Ctrl-C outside a paste is, if it has one. */
+  feed(data: string): { takeover?: { start: number; end: number } } {
+    let takeover: { start: number; end: number } | undefined;
     let i = 0;
     while (i < data.length) {
       if (this.inPaste) {
@@ -85,7 +85,9 @@ class DraftTracker {
         const next = data[i + 1];
         if (next === "[") {
           const csi = this.csi(data, i);
-          takeover ||= csi.takeover;
+          if (csi.takeover) {
+            takeover ??= { start: i, end: csi.next };
+          }
           i = csi.next;
           continue;
         }
@@ -97,7 +99,7 @@ class DraftTracker {
           continue;
         }
         // A bare Esc (or Alt with a key, which starts with one).
-        takeover = true;
+        takeover ??= { start: i, end: i + 1 };
         this.mark();
         i += 1;
         continue;
@@ -106,7 +108,7 @@ class DraftTracker {
         this.enter();
       } else if (ch === "\x03") {
         this.clear();
-        takeover = true;
+        takeover ??= { start: i, end: i + 1 };
       } else if (ch >= " " || !NEUTRAL_CONTROLS.has(ch)) {
         // Printable, Tab, Backspace, newline, and any control key not known to be harmless.
         this.mark();
@@ -260,35 +262,27 @@ export class LaptopInput {
     return this.replaying;
   }
 
-  key(data: string): "pass" | "hold" {
+  /** One read from the terminal. Returns what goes to the child now; the rest is held or dropped. */
+  key(data: string): string {
     const before = this.draft;
     if (!this.projected) {
       this.deliver(data);
       this.watchSubmit();
       this.notify(before);
-      return "pass";
+      return data;
     }
     const probe = this.projected.clone();
-    if (probe.feed(data).takeover) {
-      // The key goes first; the held keys follow it after the gap (R151).
-      this.deliver(data);
-      if (this.held) {
-        const projected = this.delivered.clone();
-        projected.feed(this.held);
-        this.projected = projected;
-        this.replaying = true;
-      } else {
-        this.projected = undefined;
-        this.replaying = false;
+    const { takeover } = probe.feed(data);
+    if (takeover) {
+      // N4: the takeover key passes alone. Keys read before it in the same
+      // chunk are held or dropped like any other; those after it queue behind
+      // the held keys, so none can reach a dialog with it.
+      if (takeover.start > 0) {
+        this.key(data.slice(0, takeover.start));
       }
-      for (const cb of [...this.takeoverListeners]) {
-        cb();
-      }
-      if (!this.projected) {
-        this.watchSubmit();
-      }
-      this.notify(before);
-      return "pass";
+      const key = data.slice(takeover.start, takeover.end);
+      this.takeOver(key, data.slice(takeover.end));
+      return key;
     }
     if (!this.replaying && this.dropping()) {
       if (!this.droppedThisHold) {
@@ -297,12 +291,12 @@ export class LaptopInput {
           cb();
         }
       }
-      return "hold";
+      return "";
     }
     this.projected = probe;
     this.held += data;
     this.notify(before);
-    return "hold";
+    return "";
   }
 
   /** Automation takes input: keys are held from now on. */
@@ -365,6 +359,29 @@ export class LaptopInput {
   /** The first key dropped while one hold lasts. */
   onKeysDropped(cb: () => void): void {
     this.droppedListeners.push(cb);
+  }
+
+  /** The key goes first; the held keys, then `after`, follow it after the gap (R151). */
+  private takeOver(key: string, after: string): void {
+    const before = this.draft;
+    this.deliver(key);
+    this.held += after;
+    if (this.held) {
+      const projected = this.delivered.clone();
+      projected.feed(this.held);
+      this.projected = projected;
+      this.replaying = true;
+    } else {
+      this.projected = undefined;
+      this.replaying = false;
+    }
+    for (const cb of [...this.takeoverListeners]) {
+      cb();
+    }
+    if (!this.projected) {
+      this.watchSubmit();
+    }
+    this.notify(before);
   }
 
   private deliver(data: string): void {

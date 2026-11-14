@@ -103,13 +103,13 @@ function setup({ gen = 1 } = {}) {
     binding,
     onWritten: (cmdId, at) => written.push({ cmdId, at }),
   });
-  // rk's stdin path: a passed key goes to the child; the typist replays what a takeover released.
+  // rk's stdin path: what passes goes to the child; the typist replays what a takeover released.
   const type = (data) => {
-    const verdict = input.key(data);
-    if (verdict === "pass") {
-      pty.write(data);
+    const now = input.key(data);
+    if (now) {
+      pty.write(now);
     }
-    return verdict;
+    return now === data ? "pass" : now === "" ? "hold" : now;
   };
   const run = async (cmd, ms = 0) => {
     const box = track(typist.run({ cmdId: "c1", gen, ...cmd }));
@@ -170,7 +170,7 @@ test("draft_on_the_real_fake_is_never_appended_to", async () => {
     });
     try {
       await until(() => out.includes("fake-claude ready"), 5000, "the fake");
-      if (input.key("half") === "pass") child.write("half");
+      child.write(input.key("half"));
       await until(() => out.includes("half"), 5000, "the echo");
       const result = await typist.run({ cmdId: "c1", gen: 1, command: "compact" });
       assert.deepEqual(result, { ok: false, error: "laptop_draft" });
@@ -215,7 +215,7 @@ const bareInput = () => new LaptopInput({ clock: new FakeClock() });
 test("paste_marks_draft", () => {
   const input = bareInput();
   assert.equal(input.draft, false);
-  assert.equal(input.key(PASTE("pasted")), "pass");
+  assert.equal(input.key(PASTE("pasted")), PASTE("pasted"));
   assert.equal(input.draft, true);
   // A Ctrl-C inside a paste is pasted text, not a clear.
   const other = bareInput();
@@ -602,7 +602,7 @@ test("esc_takeover_during_dialog_leaves_the_real_fake_clean", async () => {
   await withFake({}, async ({ child, typist, input, binding, state, writes, hooks }) => {
     // The user presses Esc the moment the command is typed, before the dialog's marker.
     hooks.onWritten = () => {
-      if (input.key("\x1b") === "pass") child.write("\x1b");
+      child.write(input.key("\x1b"));
     };
     const result = await typist.run({ cmdId: "c1", gen: 1, command: "model", model: "haiku" });
     assert.deepEqual(result, { ok: false, error: "taken_over" });
@@ -1073,6 +1073,42 @@ test("kitty_base_layout_ctrl_c_and_report_all_keys_enter", async () => {
     input.promptSubmitted(Number.MAX_SAFE_INTEGER);
     assert.equal(input.draft, true, `${JSON.stringify(other)} is no submit`);
   }
+});
+
+// N4: keys read in the same chunk as a takeover key are not passed with it.
+test("takeover_chunk_is_split_at_the_takeover_key", async () => {
+  // An Enter read just before an Esc during a /model dialog is dropped, not typed.
+  const t = setup();
+  let dropped = 0;
+  t.input.onKeysDropped(() => dropped++);
+  await t.run({ command: "model", model: "haiku" }, 600);
+  t.type("\r\x1b");
+  await t.advance(500);
+  assert.deepEqual(t.pty.writes, ["/model haiku\r", "\x1b"], "only the Esc reaches the dialog");
+  assert.equal(dropped, 1);
+  t.typist.dispose();
+
+  // Keys after the takeover key follow it only after the gap, never as an Alt chord.
+  const u = setup();
+  await u.run({ command: "model", model: "haiku" }, 600);
+  u.type("\x1b\r");
+  assert.deepEqual(u.pty.writes, ["/model haiku\r", "\x1b"]);
+  await u.advance(100);
+  assert.deepEqual(u.pty.writes, ["/model haiku\r", "\x1b", "\r"]);
+  u.typist.dispose();
+
+  // During a compact: held keys, the prefix, then the suffix, in order after the gap.
+  const v = setup();
+  await v.run({ command: "compact" }, 600);
+  v.session.status = "busy";
+  v.session.statusUpdatedAt = v.clock.now();
+  v.type("ab");
+  v.type("c\x1bd");
+  assert.deepEqual(v.pty.writes, ["/compact\r", "\x1b"]);
+  await v.advance(100);
+  assert.deepEqual(v.pty.writes, ["/compact\r", "\x1b", "abcd"]);
+  assert.equal(v.input.holding, false);
+  v.typist.dispose();
 });
 
 // N1: an unbound launcher still clears its own uncertainty from Claude's file.
