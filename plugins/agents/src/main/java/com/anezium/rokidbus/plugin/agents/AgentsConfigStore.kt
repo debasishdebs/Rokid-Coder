@@ -373,12 +373,15 @@ class AgentsConfigStore internal constructor(
         clientCert: String? = null,
     ): MachineTrustResult {
         val key = machineKey(machineId)
-        // Before any trust decision: a computer unused past the TTL is gone, so it can neither
-        // renew itself by reconnecting before a sweep nor be taken for a known one. The wearer's
-        // open Add a computer window can still link it again, as it can any computer.
+        // Before any trust decision: a computer unused past the TTL is signed out and turned away
+        // on this very attempt, so it can neither renew itself by reconnecting before a sweep nor
+        // spend the wearer's Add a computer window. Its next attempt is an unknown computer's.
         val now = wallClock()
         migrateTtl(now)
-        if (prefs.getString(key, null) != null && isMachineStale(machineId, now)) signOutMachine(machineId, now)
+        if (prefs.getString(key, null) != null && isMachineStale(machineId, now)) {
+            signOutMachine(machineId, now)
+            return MachineTrustResult.REJECTED_NOT_INVITED
+        }
         val knownToken = prefs.getString(key, null)
         val result = decideMachineTrust(
             knownToken = knownToken,

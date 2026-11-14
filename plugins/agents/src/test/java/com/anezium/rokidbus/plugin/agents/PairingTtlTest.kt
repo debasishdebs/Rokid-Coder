@@ -222,11 +222,21 @@ class PairingTtlTest {
     }
 
     @Test
-    fun stale_computer_may_be_linked_again_inside_the_wearers_window() {
+    fun stale_machine_with_window_open_is_rejected_and_window_kept() {
         store.trustMachine("pc-1", "secret", "Desk")
         advance(days(15))
         store.armLinkWindow()
 
+        // The stale attempt is signed out and refused: it does not use up the wearer's invitation.
+        assertEquals(
+            MachineTrustResult.REJECTED_NOT_INVITED,
+            store.authorizeMachine("pc-1", "secret", "Desk", FixturePhoneTlsIdentity.FINGERPRINT),
+        )
+        assertTrue(store.trustedMachines().isEmpty())
+        assertEquals(listOf("Desk"), store.signedOut().map { it.name })
+        assertTrue(store.isLinkWindowOpen())
+
+        // A fresh attempt is an unknown computer, under the normal window rules.
         assertEquals(
             MachineTrustResult.NEWLY_TRUSTED,
             store.authorizeMachine("pc-1", "secret", "Desk", FixturePhoneTlsIdentity.FINGERPRINT),
