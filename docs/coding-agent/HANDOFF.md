@@ -62,7 +62,12 @@ Last updated 2026-11-15. The detailed SDD ledgers exist only on the original Mac
   - installer prerequisite checks
   - Tailscale as an optional connector
   - Nexus as the embedded core, with a coexistence warning
-- **Plan 6 is written and Codex-READY** after 4 review rounds: `docs/coding-agent/claude/plan/2026-11-15-plan-6-v1.md`, reviews in `docs/coding-agent/codex/reviews/2026-11-15-plan-6-*`.
+- **Plan 6 is SPLIT into three (U40, user, 2026-11-15)** after a full Codex re-review found the combined plan too big to specify well:
+  - **6a, foundation + pairing:** `docs/coding-agent/claude/plan/2026-11-15-plan-6a-foundation-pairing.md`. **Codex READY** after 4 rounds (`…plan-6a-*`). Execute this first.
+  - **6b, installers:** `…plan-6b-installers.md`. DRAFT: resolve its "Open findings" (#9–#15), then a Codex review until READY.
+  - **6c, onboarding + release:** `…plan-6c-onboarding-release.md`. DRAFT: resolve its findings, then a Codex review.
+  - Order: 6a merged, then 6b and 6c (6b can be planned and built in parallel with 6c; 6c's release step needs 6b's artifacts).
+- (Superseded) the combined Plan 6: `docs/coding-agent/claude/plan/2026-11-15-plan-6-v1.md`, reviews in `docs/coding-agent/codex/reviews/2026-11-15-plan-6-*`.
   - 13 tasks in 7 waves, with a file-ownership table.
   - T1 restructure, then T2's phone-core ADR (it needs its own Codex READY before any code).
   - T13 is the user's hardware gate before the release is published.

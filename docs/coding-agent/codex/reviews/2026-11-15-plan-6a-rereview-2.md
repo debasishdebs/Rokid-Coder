@@ -1,0 +1,4 @@
+- Prior #1 — **RESOLVED:** Phone credentials become durable before `pair_committed`; lost-commit recovery and restart recovery are explicitly specified ([plan:211–220](docs/coding-agent/claude/plan/2026-11-15-plan-6a-foundation-pairing.md#L211)).
+- Fresh #4 — **NOT RESOLVED (Important):** Persistent PinStore attempt/state and phone-first durability address the original asymmetry, but recovery requires a phone hello carrying token + `steer` ([plan:214](docs/coding-agent/claude/plan/2026-11-15-plan-6a-foundation-pairing.md#L214)). PhoneLink sends hello **from agentd**, with no `steer` ([phone-link.ts:551](agentd/src/phone-link.ts#L551)); its unchanged admission cannot perform that recovery. Specify PhoneLink recovery or an explicit wss fallback.
+- **NEW Critical/Important:** None beyond the unresolved recovery-admission item.
+VERDICT: NOT READY
