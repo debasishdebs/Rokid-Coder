@@ -12,7 +12,13 @@ The full trace lives in the SDD ledgers under `.superpowers/sdd/*/progress.md` (
   - Tests: Agents plugin 345/345, agentd 441/441, shared 460, bus-client 151. glasses-hub is 974/976; the 2 failures are pre-existing `GlassesFileStoreTest` ones, not ours.
   - Every task was reviewed, with fix rounds where needed. Then a final whole-branch review, a Codex sol diff review, one fix wave and a re-review.
   - **Nothing has run on a device yet.** Work through `docs/coding-agent/claude/plan/2026-11-14-plan-2-device-checklist.md` (50 items).
-- **Plan 3 (`rk` launchers):** the plan has been reviewed 3× by Codex and is ready. It runs after Plan 2, on `rokid-coder/plan-3`.
+- **Plan 3 (`rk` launchers): DONE** on branch `rokid-coder/plan-3`, head `3cea4e47`, with 650/650 agentd tests passing.
+  - What it adds:
+    - `rk claude`: a pty launcher with an exact session binding, safe typing, a pairing prompt and next-step hints
+    - `rk codex`: plain codex plus a hint block
+    - `/rokid:pair` and a richer `/rokid:status`
+  - How it was checked: every task was reviewed, then a final opus review, a Codex sol diff review, one fix wave, a re-review, and the residual R165.
+  - The live smoke on Haiku (never `/model`) is in `docs/coding-agent/claude/plan/2026-11-14-plan-3-smoke.md`.
 
 ## Needs you: actions
 1. **GitHub:** create the GitHub fork `Rokid-Coder` and push the branches. This is Plan 1 Task 0 step 4.
@@ -81,5 +87,21 @@ The full trace lives in the SDD ledgers under `.superpowers/sdd/*/progress.md` (
 - Proposed fix for later: a per-install hook secret (file mode 0600) that the forwarder sends and agentd checks.
 
 
-## Plan 3 progress
-(updated at the end of the run)
+## Your answers this morning (U1–U13), and what follows
+They are recorded in every ledger and in `.superpowers/sdd/MASTER-HANDOFF.md`.
+- **Already built in Plan 3:**
+  - U5: self-explanatory CLI hints
+  - U6, launcher side: rk and the plugins prompt you to pair, and `/rokid:pair` exists
+- **Plan 4 (next):**
+  - U1: alert history; reminders are silent
+  - U3: voice for approvals and questions, a chime for Done, one card per question
+  - U4/U13: a condensed head…middle…tail view, with the full text sent and a word limit (250 by default, 500 at most)
+  - U6: guided pairing on the phone and glasses
+  - U7: usage-based cert TTL, 14 days by default
+  - U8: no plaintext links at all
+- **U9:** the hook endpoint risk is accepted. **U11:** CxrGlobal isn't needed.
+
+## Plan 3 items for you
+- **Codex plugin attach** (`rokid:on` inside Codex) was not tested live, because it needs the Codex plugin installed (R25).
+- The Plan 3 spike left 2 empty Codex threads in daemon memory. They clear on the next daemon restart.
+- Pairing a new phone from inside a session opens a 2-minute window on the same Wi-Fi or Tailscale (R154). Verify it on the device.
