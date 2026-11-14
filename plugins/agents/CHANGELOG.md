@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## 0.8.0
 
 - Add Claude Code and Codex session monitoring.
 - Add a unified HUD mission-control board and a conversation view that reads
