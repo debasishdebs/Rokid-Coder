@@ -98,6 +98,21 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private var replyAttempt = 0
     private var pendingReplyRequestId: String? = null
 
+    /** True when the reply card was opened from the control menu: it sends a v2 `followup`, not a session_input. */
+    private var replyViaFollowup = false
+
+    /**
+     * The per-session control menu behind ENTER on a board row. It is a card of
+     * its own, so [menuOpenedAt] guards the screen it just opened against the
+     * second tap of a double tap, and [menuReading] is the reader a long row
+     * opens. [controlMsgIds] are the steering frames this menu sent, so an ack
+     * is only reported for what the wearer asked here.
+     */
+    private var menu: ControlMenu.MenuState? = null
+    private var menuOpenedAt = 0L
+    private var menuReading: Pair<String, String>? = null
+    private val controlMsgIds = ArrayDeque<String>()
+
     /**
      * Set the instant a reply is sent, cleared the instant something real says
      * so — the daemon's own "working" status, a failure notice, or simply
@@ -184,6 +199,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             }
         }
         serviceScope.launch {
+            AgentsRuntime.events.collect(::onAgentdEvent)
+        }
+        serviceScope.launch {
             AgentsRuntime.store.sessionInputResult.collectLatest { result ->
                 if (result == null || result.requestId != pendingReplyRequestId) return@collectLatest
                 pendingReplyRequestId = null
@@ -241,6 +259,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         surfaceShown = false
         AgentsRuntime.hudOpen = false
         decidingAlert = null
+        menu = null
+        menuReading = null
         leaveConversation()
         launch = null
         launchNote = null
@@ -260,6 +280,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             return
         }
         if (replyTargetKey != null) return
+        if (conversation == null && (menu != null || menuReading != null)) {
+            onMenuInput(event)
+            return
+        }
         // A touchpad swipe arrives as LEFT/RIGHT, the ring as UP/DOWN: both
         // walk the same list, exactly as the other boards treat them. Inside a
         // conversation the hub owns the scroll and swipes never reach us.
@@ -455,6 +479,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     private fun showConversation(session: AgentSession) {
+        menu = null
+        menuReading = null
         selectedKey = session.key
         AgentsRuntime.store.openConversation(session)
         AgentsMonitorService.openDetail(applicationContext, session)
@@ -495,10 +521,12 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
         val session = sessions.getOrNull(selectedIndexIn(sessions)) ?: return
         val approval = AgentsRuntime.store.approvalFor(session.key)
-        if (approval != null) {
-            openDecision(approval)
-        } else {
-            openConversation(session)
+        when {
+            approval != null -> openDecision(approval)
+            // A session that speaks v2 is steered from its menu, and its conversation is the
+            // menu's "Read output" row; one that does not has nothing to steer.
+            session.v2 != null -> openMenu(session)
+            else -> openConversation(session)
         }
     }
 
@@ -564,14 +592,20 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             showBriefNotice("Still working", "wait for it to stop before typing")
             return
         }
+        beginReply(session, viaFollowup = false)
+    }
+
+    /** Opens the editable reply card for [session]; [viaFollowup] picks the v2 `followup` as its send path. */
+    private fun beginReply(session: AgentSession, viaFollowup: Boolean) {
         val client = nexusClient
         if (client?.supportsEditableSurface != true) {
             showBriefNotice("Can't type here", "this glasses hub is too old")
             return
         }
         val activeSurface = surface ?: return
-        replyTargetKey = conversation.sessionKey
+        replyTargetKey = session.key
         replySessionId = session.id
+        replyViaFollowup = viaFollowup
         val attempt = ++replyAttempt
         activeSurface.onRejected = { code -> onReplyRejected(attempt, code) }
         render(show = false)
@@ -598,12 +632,17 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     override fun onNexusSurfaceTextCommitted(surfaceId: String, text: String, cancelled: Boolean) {
         val sessionKey = replyTargetKey ?: return
         val sessionId = replySessionId
+        val viaFollowup = replyViaFollowup
         replyTargetKey = null
         replySessionId = null
         render(show = false)
         if (cancelled || sessionId == null) return
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        if (viaFollowup) {
+            sendFollowup(sessionKey, trimmed)
+            return
+        }
         val requestId = UUID.randomUUID().toString()
         pendingReplyRequestId = requestId
         awaitingReplyForKey = sessionKey
@@ -616,6 +655,201 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             }
         }
         AgentsMonitorService.sendSessionInput(applicationContext, requestId, sessionId, trimmed)
+    }
+
+    // ------------------------------------------------------------------- menu
+
+    private fun openMenu(session: AgentSession) {
+        selectedKey = session.key
+        menu = ControlMenu.open(session.key)
+        menuOpenedAt = System.currentTimeMillis()
+        render(show = false)
+    }
+
+    /** The menu as a card, or null (and no menu) when its session has left the board. */
+    private fun menuCard(state: ControlMenu.MenuState): NexusCard? {
+        val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == state.sessionKey }
+        if (session == null) {
+            menu = null
+            return null
+        }
+        val page = ControlMenu.page(state, session, secure = AgentsRuntime.link.value?.secure == true)
+        val rows = windowedRows(page.rows, page.selected) { row, selected ->
+            NexusCardLine(
+                text = row.text.take(MENU_LINE_CHARS),
+                sub = row.sub?.take(MENU_LINE_CHARS),
+                tone = row.tone,
+                selected = selected,
+            )
+        }
+        return card(title = page.title, subtitle = page.subtitle, rows = rows, footer = page.footer)
+    }
+
+    private fun onMenuInput(event: NexusInputEvent) {
+        if (menuReading != null) {
+            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                menuReading = null
+                render(show = false)
+            }
+            return
+        }
+        val state = menu ?: return
+        val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == state.sessionKey }
+        if (session == null) {
+            menu = null
+            render(show = false)
+            return
+        }
+        val secure = AgentsRuntime.link.value?.secure == true
+        when {
+            event.keyCode in BACKWARD_KEYS -> {
+                menu = ControlMenu.move(state, -1, session, secure)
+                render(show = false)
+            }
+            event.keyCode in FORWARD_KEYS -> {
+                menu = ControlMenu.move(state, +1, session, secure)
+                render(show = false)
+            }
+            event.keyCode == KeyEvent.KEYCODE_ENTER ||
+                event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+            -> {
+                // The second tap of the double tap that opened this screen must not pick on it.
+                if (System.currentTimeMillis() - menuOpenedAt < DECISION_GUARD_MS) return
+                onMenuPick(state, session, secure)
+            }
+            event.keyCode == KeyEvent.KEYCODE_BACK -> {
+                menu = ControlMenu.back(state)
+                menuOpenedAt = System.currentTimeMillis()
+                render(show = false)
+            }
+        }
+    }
+
+    private fun onMenuPick(state: ControlMenu.MenuState, session: AgentSession, secure: Boolean) {
+        when (val step = ControlMenu.pick(state, session, secure)) {
+            is ControlMenu.Step.Go -> showMenu(step.state)
+            is ControlMenu.Step.Send -> {
+                sendControl(step.command, session.key)
+                showMenu(step.state)
+            }
+            is ControlMenu.Step.Say -> showBriefNotice(step.title, step.body)
+            is ControlMenu.Step.ReadText -> {
+                menuReading = step.title to step.text
+                render(show = false)
+            }
+            ControlMenu.Step.Reply -> beginReply(session, viaFollowup = true)
+            ControlMenu.Step.Read -> openConversation(session)
+            ControlMenu.Step.Close -> {
+                menu = null
+                render(show = false)
+            }
+        }
+    }
+
+    private fun showMenu(state: ControlMenu.MenuState) {
+        menu = state
+        menuOpenedAt = System.currentTimeMillis()
+        render(show = false)
+    }
+
+    /**
+     * Every write leaves through the monitor service, which hands it to
+     * [AgentdWire.write]: a steering frame over a link that cannot steer comes
+     * back MonitorOnly and is never sent. The menu has already greyed those
+     * rows, so this is the second lock, not the first.
+     */
+    private fun sendControl(command: ControlMenu.Command, sessionKey: String) {
+        val msgId = UUID.randomUUID().toString()
+        val frame = try {
+            ControlMenu.frame(command, sessionKey, msgId)
+        } catch (_: IllegalArgumentException) {
+            showBriefNotice(ControlMenu.NOTICE_TITLE, "Not sent")
+            return
+        }
+        if (ControlMenu.steers(command)) rememberControlMsgId(msgId)
+        AgentsMonitorService.sendV2(applicationContext, frame)
+    }
+
+    /** The reply card's text, as a v2 `followup`. Nothing about the text is logged. */
+    private fun sendFollowup(sessionKey: String, text: String) {
+        if (AgentsRuntime.link.value?.secure != true) {
+            showBriefNotice(ControlMenu.NOTICE_TITLE, ControlMenu.MONITOR_ONLY)
+            return
+        }
+        val msgId = UUID.randomUUID().toString()
+        val frame = try {
+            AgentdProtocolCodec.followup(sessionKey, text, msgId)
+        } catch (_: IllegalArgumentException) {
+            showBriefNotice("Reply too long", "keep it under 16 KB")
+            return
+        }
+        rememberControlMsgId(msgId)
+        AgentsMonitorService.sendV2(applicationContext, frame)
+    }
+
+    private fun rememberControlMsgId(msgId: String) {
+        controlMsgIds.addLast(msgId)
+        while (controlMsgIds.size > CONTROL_MSG_IDS) controlMsgIds.removeFirst()
+    }
+
+    private fun onAgentdEvent(event: AgentdEvent) {
+        when (event) {
+            // The menu's rows follow the link: a link that stopped steering greys them.
+            is AgentdEvent.LinkUp, is AgentdEvent.LinkDown ->
+                if (surfaceShown && menu != null) render(show = false)
+            is AgentdEvent.Action -> onControlAction(event.action)
+        }
+    }
+
+    private fun onControlAction(action: AgentdAction) {
+        when (action) {
+            is AgentdAction.Ack -> {
+                if (!controlMsgIds.remove(action.msgId)) return
+                ControlMenu.ackNotice(action)?.let { showBriefNotice(ControlMenu.NOTICE_TITLE, it) }
+            }
+            is AgentdAction.FollowupClosed -> {
+                // A reply card for a window that closed would send into nothing.
+                if (replyTargetKey == action.sessionKey && replyViaFollowup) {
+                    replyTargetKey = null
+                    replySessionId = null
+                    if (surfaceShown) render(show = false)
+                }
+                ControlMenu.followupClosedNotice(action.reason)
+                    ?.let { showBriefNotice(ControlMenu.NOTICE_TITLE, it) }
+            }
+            is AgentdAction.ModeReset -> {
+                val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == action.sessionKey }
+                val heading = session?.v2?.heading?.takeIf(String::isNotBlank)
+                    ?: session?.displayTitle
+                    ?: action.sessionKey.substringAfter(':')
+                showBriefNotice(
+                    ControlMenu.NOTICE_TITLE,
+                    ControlMenu.modeResetNotice(action.from, heading, action.reason),
+                )
+            }
+            is AgentdAction.Models -> {
+                val current = menu ?: return
+                menu = ControlMenu.withModels(current, action)
+                if (surfaceShown) render(show = false)
+            }
+            else -> Unit
+        }
+    }
+
+    /** What a menu row too long for a line opens: its full text, to scroll. */
+    private fun menuReader(title: String, text: String): NexusReader {
+        val segments = text.chunked(READER_SEGMENT_CHARS)
+            .filter { it.isNotBlank() }
+            .take(READER_MAX_SEGMENTS)
+            .map { NexusReaderSegment(NexusReaderSegmentKind.PROSE, it) }
+            .ifEmpty { listOf(NexusReaderSegment(NexusReaderSegmentKind.PROSE, "…")) }
+        return NexusReader(
+            title = title.singleLine(110).ifBlank { "Agents" },
+            footer = "swipe scroll · 2-tap back",
+            handlesBack = true,
+            contentKey = "menu:${text.hashCode()}",
+            segments = segments,
+        )
     }
 
     /** Starts or stops the reader's "thinking" line to match reality, no more. */
@@ -694,6 +928,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     /** An open conversation with something to read is the one reader screen. */
     private fun activeReader(): NexusReader? {
         if (decidingRequestId != null || decidingAlert != null || replyTargetKey != null) return null
+        menuReading?.let { (title, text) -> return menuReader(title, text) }
         val conversation = AgentsRuntime.store.conversation.value ?: return null
         // A Done or error tap reads summary first, and shows what it has while the rest loads.
         outputAlert?.takeIf { it.sessionKey == conversation.sessionKey }?.let { alert ->
@@ -714,6 +949,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             replySessionId = null
         }
         AgentsRuntime.store.conversation.value?.let { return conversationCard(it) }
+        menu?.let { state -> menuCard(state)?.let { return it } }
         launch?.let { return launchCard(it) }
         return sessionsCard()
     }
@@ -1397,6 +1633,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
          */
         private const val RENDER_SETTLE_MS = 300L
         private const val LAUNCH_VERDICT_TIMEOUT_MS = 35_000L
+        private const val MENU_LINE_CHARS = 240
+        private const val CONTROL_MSG_IDS = 32
 
         /** Virtual board row: the door into the start-an-agent walk. */
         private const val START_KEY = "!start-an-agent"
