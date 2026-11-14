@@ -212,7 +212,7 @@ test("bind_rejected_when_file_pid_not_descendant", async (t) => {
     sessionFile(sessionsDir, stranger.pid, "s1");
     const client = await launcher(hub, { launcherId: "L1", childPid: mine.pid });
     const reply = await bind(client, "s1");
-    assert.equal(reply.type, "bind_rejected");
+    assert.deepEqual(reply, { type: "bind_rejected", reason: "not_owned" });
     assert.equal(hub.binding(KEY("s1")), undefined);
     assert.equal(registry.isAttached("claude", "s1"), false);
   });
@@ -225,7 +225,7 @@ test("bind_rejected_when_child_not_alive", async (t) => {
     const client = await launcher(hub, { launcherId: "L1", childPid: child.pid });
     await killAndWait(child);
     const reply = await bind(client, "s1");
-    assert.equal(reply.type, "bind_rejected");
+    assert.deepEqual(reply, { type: "bind_rejected", reason: "child_exited" });
     assert.equal(registry.isAttached("claude", "s1"), false);
   });
 });
@@ -420,6 +420,57 @@ test("rebind_retires_old_and_cancels_pending", async (t) => {
   });
 });
 
+test("refused_rebind_keeps_existing_binding", async (t) => {
+  await withHub(async ({ hub, registry, sessionsDir }) => {
+    const child = sleeper(t);
+    const stranger = sleeper(t);
+    sessionFile(sessionsDir, child.pid, "s1");
+    sessionFile(sessionsDir, stranger.pid, "s2");
+    const client = await launcher(hub, { launcherId: "L1", childPid: child.pid });
+    assert.deepEqual(await bind(client, "s1"), { type: "bind_accepted", gen: 1 });
+    const pending = hub.send(KEY("s1"), { command: "compact" });
+    await client.waitFor("type_command");
+
+    assert.deepEqual(await bind(client, "s2"), { type: "bind_rejected", reason: "not_owned" });
+    assert.deepEqual(hub.binding(KEY("s1")), {
+      key: KEY("s1"),
+      launcherId: "L1",
+      gen: 1,
+      childPid: child.pid,
+      claudePid: child.pid,
+      uncertain: false,
+    });
+    assert.equal(hub.binding(KEY("s2")), undefined);
+    assert.equal(registry.mode("claude", "s1"), "launcher");
+    assert.equal(registry.isAttached("claude", "s2"), false);
+    assert.equal(client.frames.some((f) => f.type === "cancel_command"), false, "the pending command is not cancelled");
+    let settled;
+    pending.then((value) => (settled = value));
+    await settle(100);
+    assert.equal(settled, undefined);
+  });
+});
+
+test("oversize_command_fails_too_long", async (t) => {
+  await withHub(async ({ hub, sessionsDir }) => {
+    const child = sleeper(t);
+    sessionFile(sessionsDir, child.pid, "s1");
+    const client = await launcher(hub, { launcherId: "L1", childPid: child.pid });
+    await bind(client, "s1");
+    assert.deepEqual(
+      await hub.send(KEY("s1"), { command: "text", text: "x".repeat(MAX_FRAME_BYTES) }),
+      { ok: false, error: "too_long" },
+    );
+    await settle(100);
+    assert.equal(client.frames.some((f) => f.type === "type_command"), false, "nothing was sent");
+    // The slot is still free for a command that fits.
+    const fits = hub.send(KEY("s1"), { command: "text", text: "x".repeat(1024) });
+    const command = await client.waitFor("type_command");
+    client.send({ type: "command_result", cmdId: command.cmdId, ok: true });
+    assert.deepEqual(await fits, { ok: true });
+  });
+});
+
 test("explicit_detach_blocks_auto_bind_until_launcher_exits", async (t) => {
   await withHub(async ({ hub, registry, sessionsDir }) => {
     const child = sleeper(t);
@@ -482,8 +533,62 @@ test("explicit_detach_survives_agentd_restart_and_reconnect", async (t) => {
   });
 });
 
-test("startup_rewrites_launcher_mode_to_plugin", async () => {
+test("off_while_no_launcher_connected_blocks_rebind_after_restart", async (t) => {
+  await withHub(async ({ hub, sessionsDir, restart }) => {
+    const child = sleeper(t);
+    sessionFile(sessionsDir, child.pid, "s1");
+    const client = await launcher(hub, { launcherId: "L1", childPid: child.pid });
+    assert.equal((await bind(client, "s1")).type, "bind_accepted");
+
+    // agentd restarts: the session is plugin until its launcher reconnects.
+    const second = await restart();
+    await client.waitClosed();
+    assert.equal(second.registry.mode("claude", "s1"), "plugin");
+    // /rokid:off while no launcher holds the session.
+    second.registry.detach("claude", "s1");
+    assert.deepEqual(second.registry.explicitDetach(KEY("s1")), { key: KEY("s1") });
+
+    // It is saved: another restart keeps it, and the launcher reconnecting is refused.
+    const third = await restart();
+    assert.deepEqual(third.registry.explicitDetach(KEY("s1")), { key: KEY("s1") });
+    const again = await launcher(third.hub, { launcherId: "L1", childPid: child.pid });
+    assert.deepEqual(await bind(again, "s1"), { type: "bind_rejected", reason: "detached" });
+    assert.equal(third.registry.isAttached("claude", "s1"), false);
+    assert.equal(third.hub.binding(KEY("s1")), undefined);
+    // That launcher adopted the entry, and stays refused.
+    assert.deepEqual(third.registry.explicitDetach(KEY("s1")), { key: KEY("s1"), launcherId: "L1", childPid: child.pid });
+    assert.deepEqual(await bind(again, "s1"), { type: "bind_rejected", reason: "detached" });
+
+    // A launcher that does not run the session cannot adopt or consume it.
+    const stranger = sleeper(t);
+    const other = await launcher(third.hub, { launcherId: "L2", childPid: stranger.pid });
+    assert.deepEqual(await bind(other, "s1"), { type: "bind_rejected", reason: "not_owned" });
+    assert.equal(third.registry.explicitDetach(KEY("s1")).launcherId, "L1");
+
+    // Once the adopting launcher's child is gone, a new launcher may bind.
+    again.close();
+    await killAndWait(child);
+    const next = sleeper(t);
+    sessionFile(sessionsDir, next.pid, "s1");
+    const resumed = await launcher(third.hub, { launcherId: "L3", childPid: next.pid });
+    assert.equal((await bind(resumed, "s1")).type, "bind_accepted");
+    assert.equal(third.registry.explicitDetach(KEY("s1")), undefined);
+  });
+});
+
+test("startup_rewrites_launcher_mode_to_plugin", async (t) => {
   const deadPid = spawnSync("true").pid;
+  // A live Claude still runs "offlive"; nothing runs "offgone".
+  const sessionsDir = await fsp.mkdtemp(path.join(require("node:os").tmpdir(), "rokid-sessions-"));
+  const savedEnv = process.env.ROKID_CLAUDE_SESSIONS_DIR;
+  process.env.ROKID_CLAUDE_SESSIONS_DIR = sessionsDir;
+  t.after(async () => {
+    if (savedEnv === undefined) delete process.env.ROKID_CLAUDE_SESSIONS_DIR;
+    else process.env.ROKID_CLAUDE_SESSIONS_DIR = savedEnv;
+    await fsp.rm(sessionsDir, { recursive: true, force: true });
+  });
+  const live = sleeper(t);
+  sessionFile(sessionsDir, live.pid, "offlive");
   await withDaemon(
     {
       transport: "wshub",
@@ -497,6 +602,8 @@ test("startup_rewrites_launcher_mode_to_plugin", async () => {
           explicitDetaches: [
             { key: "claude:gone", launcherId: "L9", childPid: deadPid },
             { key: "claude:live", launcherId: "L8", childPid: process.pid },
+            { key: "claude:offgone" },
+            { key: "claude:offlive" },
           ],
         },
       },
@@ -507,7 +614,10 @@ test("startup_rewrites_launcher_mode_to_plugin", async () => {
       assert.equal(daemon.launchers.binding(KEY("s1")), undefined);
       const saved = JSON.parse(fs.readFileSync(path.join(coderDir, "attached.json"), "utf8"));
       assert.deepEqual(saved.entries.map((e) => e.mode), ["plugin", "plugin"]);
-      assert.deepEqual(saved.explicitDetaches, [{ key: "claude:live", launcherId: "L8", childPid: process.pid }]);
+      assert.deepEqual(saved.explicitDetaches, [
+        { key: "claude:live", launcherId: "L8", childPid: process.pid },
+        { key: "claude:offlive" },
+      ]);
     },
   );
 });
@@ -515,9 +625,10 @@ test("startup_rewrites_launcher_mode_to_plugin", async () => {
 test("socket_dir_wrong_mode_or_symlink_disables_launchers", async () => {
   await withTempDir(async (dir) => {
     const sessionsDir = path.join(dir, "sessions");
-    const loose = path.join(dir, "loose");
-    await fsp.mkdir(loose, { mode: 0o755 });
-    await fsp.chmod(loose, 0o755);
+    // Not looser than 0700 (so not tightened), but no use for a socket.
+    const readOnly = path.join(dir, "readonly");
+    await fsp.mkdir(readOnly);
+    await fsp.chmod(readOnly, 0o500);
     const real = path.join(dir, "real");
     await fsp.mkdir(real, { mode: 0o700 });
     const link = path.join(dir, "link");
@@ -525,7 +636,7 @@ test("socket_dir_wrong_mode_or_symlink_disables_launchers", async () => {
     const file = path.join(dir, "notadir");
     await fsp.writeFile(file, "");
 
-    for (const configDir of [loose, link, file]) {
+    for (const configDir of [readOnly, link, file]) {
       const { events, logger } = capturingLogger();
       const registry = new AttachRegistry({ file: path.join(dir, "attached.json"), logger });
       const hub = new LauncherHub({ configDir, claudeSessionsDir: sessionsDir, logger, registry });
@@ -541,8 +652,46 @@ test("socket_dir_wrong_mode_or_symlink_disables_launchers", async () => {
         await hub.stop();
       }
     }
-    assert.equal((fs.statSync(loose).mode & 0o777), 0o755, "a loose dir is not silently fixed");
+    assert.equal((fs.statSync(real).mode & 0o777), 0o700, "a symlink's target is left alone");
   });
+});
+
+test("loose_own_socket_dir_tightened_to_0700", async () => {
+  await withTempDir(async (dir) => {
+    const configDir = path.join(dir, "loose");
+    await fsp.mkdir(configDir);
+    await fsp.chmod(configDir, 0o755);
+    const { events, logger } = capturingLogger();
+    const registry = new AttachRegistry({ file: path.join(configDir, "attached.json"), logger });
+    const hub = new LauncherHub({ configDir, claudeSessionsDir: dir, logger, registry });
+    await hub.start();
+    try {
+      assert.equal(hub.enabled, true);
+      assert.equal((fs.statSync(configDir).mode & 0o777), 0o700);
+      assert.ok(events.some((e) => e.event === "launcher socket dir permissions tightened to 0700"));
+      assert.equal(events.some((e) => e.event.startsWith("launcher socket disabled: ")), false);
+    } finally {
+      await hub.stop();
+    }
+  });
+});
+
+test("foreign_owner_still_disables", { skip: process.getuid() === 0 && "running as root" }, async () => {
+  // A real directory owned by root, loose by design: it must be refused, not tightened.
+  const configDir = "/usr";
+  const before = fs.lstatSync(configDir);
+  assert.notEqual(before.uid, process.getuid());
+  const { events, logger } = capturingLogger();
+  await withTempDir(async (dir) => {
+    const registry = new AttachRegistry({ file: path.join(dir, "attached.json"), logger });
+    const hub = new LauncherHub({ configDir, claudeSessionsDir: dir, logger, registry });
+    await hub.start();
+    await hub.stop();
+    assert.equal(hub.enabled, false);
+  });
+  assert.ok(events.some((e) => e.event === "launcher socket disabled: config dir is not owned by this user"));
+  assert.equal(events.some((e) => e.event.includes("tightened")), false);
+  assert.equal(fs.lstatSync(configDir).mode, before.mode);
 });
 
 test("live_foreign_socket_not_unlinked", async () => {

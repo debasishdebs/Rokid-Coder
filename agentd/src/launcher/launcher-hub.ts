@@ -34,9 +34,15 @@ export interface TypeCommand {
   text?: string;
 }
 
+/**
+ * `too_long` is agentd's own: the command would not fit in one frame, so it
+ * was never sent. It is a hard failure, never worth retrying.
+ */
+export type SendError = CommandError | "too_long";
+
 export interface CommandResult {
   ok: boolean;
-  error?: CommandError;
+  error?: SendError;
 }
 
 export interface Binding {
@@ -222,7 +228,7 @@ export class LauncherHub {
     };
     // Frames are bounded both ways; the launcher would drop an overlong one.
     if (Buffer.byteLength(JSON.stringify(frame)) > MAX_FRAME_BYTES) {
-      return Promise.resolve({ ok: false, error: "not_ready" });
+      return Promise.resolve({ ok: false, error: "too_long" });
     }
     return new Promise((resolve) => {
       connection.pending = { cmdId: frame.cmdId, resolve };
@@ -261,7 +267,11 @@ export class LauncherHub {
     this.options.logger.warn(`launcher socket disabled: ${reason}`);
   }
 
-  /** The config dir must be a real directory of ours, mode 0700; it is created so when absent. */
+  /**
+   * The config dir must be a real directory of ours, mode 0700; it is created
+   * so when absent. One of ours that is looser is tightened (R134): it is our
+   * own private dir, and launchers silently off would be worse.
+   */
   private checkConfigDir(): string | undefined {
     const dir = this.options.configDir;
     let stats: Stats | undefined;
@@ -283,7 +293,16 @@ export class LauncherHub {
     if (stats.uid !== process.getuid?.()) {
       return "config dir is not owned by this user";
     }
-    const mode = stats.mode & 0o777;
+    let mode = stats.mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      try {
+        chmodSync(dir, 0o700);
+        mode = lstatSync(dir).mode & 0o777;
+      } catch (error) {
+        return `could not tighten the config dir (${errorCode(error)})`;
+      }
+      this.options.logger.warn("launcher socket dir permissions tightened to 0700");
+    }
     if (mode !== 0o700) {
       return `config dir mode is ${mode.toString(8).padStart(4, "0")}, not 0700`;
     }
@@ -473,7 +492,17 @@ export class LauncherHub {
     return undefined;
   }
 
-  /** R49. Every check runs before anything changes; a refusal changes nothing. */
+  /**
+   * R49. Every check runs before anything changes; a refusal changes nothing,
+   * except that a refused launcher adopts an unadopted explicit detach.
+   *
+   * `childPid` is the launcher's own claim from its hello: Node cannot tell
+   * which process is on the other end of a Unix socket, so the descendant
+   * check proves the session belongs to that pid's tree, not that the peer
+   * spawned it. Any process of this user could name some claude's pid. That
+   * is acceptable under R48, which trusts the user's own processes; the
+   * socket's 0700 dir and 0600 mode keep other users out.
+   */
   private onBind(connection: Connection, sessionId: string): void {
     const hello = connection.hello as Hello;
     const reject = (reason: string): void => {
@@ -497,14 +526,6 @@ export class LauncherHub {
       reject("child_exited");
       return;
     }
-    const detached = this.options.registry.explicitDetach(key);
-    if (detached) {
-      if (isPidAlive(detached.childPid)) {
-        reject("detached");
-        return;
-      }
-      this.options.registry.dropExplicitDetach(key);
-    }
     const owner = this.byKey.get(key);
     if (owner && owner !== connection) {
       reject("owned");
@@ -514,6 +535,21 @@ export class LauncherHub {
     if (!session || session.sessionId !== sessionId) {
       reject("not_owned");
       return;
+    }
+    // Last, so only the launcher that really runs the session can adopt an
+    // explicit detach made while no launcher held it.
+    const detached = this.options.registry.explicitDetach(key);
+    if (detached) {
+      if (detached.childPid === undefined) {
+        this.options.registry.recordExplicitDetach({ key, launcherId: hello.launcherId, childPid: hello.childPid });
+        reject("detached");
+        return;
+      }
+      if (isPidAlive(detached.childPid)) {
+        reject("detached");
+        return;
+      }
+      this.options.registry.dropExplicitDetach(key);
     }
     try {
       this.options.registry.attach("claude", sessionId, "launcher");
@@ -543,7 +579,11 @@ export class LauncherHub {
     this.emit(key);
   }
 
-  /** `/rokid:off` (or any detach) of a bound session is an explicit detach (R51). */
+  /**
+   * `/rokid:off` of a bound session is an explicit detach by this launcher
+   * (R51). The registry has already saved one keyed on the session; this adds
+   * the launcher's identity.
+   */
   private onRegistryChange({ kind, entry }: AttachChange): void {
     if (kind !== "detached") {
       return;

@@ -14,13 +14,16 @@ export interface AttachedEntry {
 }
 
 /**
- * `/rokid:off` on a launcher-bound session (R51). While `childPid` lives, no
- * launcher may bind `key` again; `/rokid:on` for the session clears it.
+ * `/rokid:off` for a Claude session (R51). No launcher may bind `key` while
+ * the entry holds; `/rokid:on` for the session clears it. An entry made while
+ * no launcher held the session has no launcher yet: the first launcher that
+ * proves it owns the session adopts it (and is refused), and from then on the
+ * entry lasts while that launcher's `childPid` lives.
  */
 export interface ExplicitDetach {
   key: SessionKey;
-  launcherId: string;
-  childPid: number;
+  launcherId?: string;
+  childPid?: number;
 }
 
 export interface AttachChange {
@@ -76,9 +79,13 @@ function parseExplicitDetach(value: unknown): ExplicitDetach | undefined {
     return undefined;
   }
   const record = value as Record<string, unknown>;
+  if (typeof record.key !== "string" || !/^(claude|codex):./.test(record.key)) {
+    return undefined;
+  }
+  if (record.launcherId === undefined && record.childPid === undefined) {
+    return { key: record.key as SessionKey };
+  }
   if (
-    typeof record.key !== "string" ||
-    !/^(claude|codex):./.test(record.key) ||
     typeof record.launcherId !== "string" ||
     record.launcherId.length === 0 ||
     !Number.isInteger(record.childPid) ||
@@ -152,6 +159,13 @@ export class AttachRegistry {
       return;
     }
     this.entries.delete(key);
+    // Saved with the detach itself, so a launcher that reconnects later (even
+    // after a restart) cannot bind the session back in. The launcher hub adds
+    // the launcher's identity when one holds the session. Codex sessions are
+    // never launcher-bound (R133).
+    if (provider === "claude" && !this.explicitDetaches.has(key)) {
+      this.explicitDetaches.set(key, { key });
+    }
     // Detaching is the closed direction: apply it in memory regardless.
     this.persistOrLog();
     this.emit({ kind: "detached", entry: { ...entry } });
@@ -189,10 +203,15 @@ export class AttachRegistry {
   /**
    * Startup: launcher mode exists only with a live binding, and no launcher is
    * connected yet, so every launcher session is plugin until its launcher
-   * rebinds. Explicit detaches whose launcher child is gone are dropped. No
-   * change events: nothing is listening yet, and nothing was attached or detached.
+   * rebinds. Explicit detaches whose launcher child is gone are dropped, and so
+   * are unadopted ones whose session no live Claude is running (`isSessionLive`;
+   * without it they are kept). No change events: nothing is listening yet, and
+   * nothing was attached or detached.
    */
-  reconcileLaunchers(isAlive: (pid: number) => boolean = isPidAlive): void {
+  reconcileLaunchers(
+    options: { isAlive?: (pid: number) => boolean; isSessionLive?: (key: SessionKey) => boolean } = {},
+  ): void {
+    const isAlive = options.isAlive ?? isPidAlive;
     let changed = false;
     for (const [key, entry] of this.entries) {
       if (entry.mode === "launcher") {
@@ -201,7 +220,10 @@ export class AttachRegistry {
       }
     }
     for (const [key, entry] of this.explicitDetaches) {
-      if (!isAlive(entry.childPid)) {
+      const gone = entry.childPid === undefined
+        ? options.isSessionLive !== undefined && !options.isSessionLive(key)
+        : !isAlive(entry.childPid);
+      if (gone) {
         this.explicitDetaches.delete(key);
         changed = true;
       }

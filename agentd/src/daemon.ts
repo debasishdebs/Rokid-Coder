@@ -14,7 +14,7 @@ import { CodexMonitor } from "./codex/monitor";
 import { DEFAULT_WAIT_LIMIT_SEC, configPath, defaultStateDir, ensureConfig } from "./config";
 import { claudeSessionGone, discoverRecentSessions } from "./discovery";
 import { HookHttpServer } from "./http-server";
-import { claudeSessionsDir } from "./launcher/claude-sessions";
+import { claudeSessionsDir, liveClaudeSessionIds } from "./launcher/claude-sessions";
 import { LauncherHub } from "./launcher/launcher-hub";
 import { FileLogger } from "./logger";
 import { SessionStore } from "./session-store";
@@ -84,8 +84,6 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     file: path.join(config.rokidCoder.stateDir, "attached.json"),
     logger,
   });
-  // No launcher has reconnected yet, so no session can be in launcher mode.
-  attachRegistry.reconcileLaunchers();
   const approvalPolicy = new ApprovalPolicy({
     file: path.join(config.rokidCoder.stateDir, "approve-all.json"),
     logger,
@@ -136,9 +134,16 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     isAttached: (provider, id) => attachRegistry.isAttached(provider, id),
   });
   const claudeDir = process.env.NEXUS_AGENTD_CLAUDE_DIR || path.join(homedir(), ".claude");
+  const launcherSessionsDir = claudeSessionsDir(claudeDir);
+  // No launcher has reconnected yet, so no session can be in launcher mode.
+  // Before anything subscribes to the registry, which this does not notify.
+  const liveIds = liveClaudeSessionIds(launcherSessionsDir);
+  attachRegistry.reconcileLaunchers({
+    isSessionLive: liveIds ? (key) => key.startsWith("claude:") && liveIds.has(key.slice("claude:".length)) : undefined,
+  });
   const launchers = new LauncherHub({
     configDir: config.rokidCoder.stateDir,
-    claudeSessionsDir: claudeSessionsDir(claudeDir),
+    claudeSessionsDir: launcherSessionsDir,
     logger,
     registry: attachRegistry,
   });

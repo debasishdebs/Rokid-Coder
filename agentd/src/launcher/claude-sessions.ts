@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, openSync, readSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -136,6 +136,30 @@ export function findOwnedClaudeSession(dir: string, rootPid: number): ClaudeSess
     }
   }
   return undefined;
+}
+
+/**
+ * The session ids that a live Claude process names in its sessions file. An
+ * absent dir means no Claude is running; any other read error is undefined,
+ * since then nothing is known.
+ */
+export function liveClaudeSessionIds(dir: string): Set<string> | undefined {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? new Set() : undefined;
+  }
+  const ids = new Set<string>();
+  for (const name of names) {
+    const match = /^(\d+)\.json$/.exec(name);
+    const pid = match ? Number(match[1]) : 0;
+    const session = pid > 0 && isPidAlive(pid) ? readClaudeSession(dir, pid) : undefined;
+    if (session) {
+      ids.add(session.sessionId);
+    }
+  }
+  return ids;
 }
 
 /** True only for a process this user can signal; EPERM (another user's) is not ours. */
