@@ -293,7 +293,8 @@ async function sttyScenario(dir, { rkArgs = ["claude"], preload, extra = {}, pre
   ].join("\n");
   const run = inPty("/bin/sh", ["-c", script], env);
   await until(() => fs.existsSync(path.join(dir, "mid")), 8000, "the mid-run terminal sample");
-  const pids = readJson(path.join(dir, "pids.json"));
+  // N8: the mid sample can come before the fake has written its pid file.
+  const pids = await until(() => readJson(path.join(dir, "pids.json")), 8000, "the fake's pid file");
   const outAtMid = run.out;
   await drive(run, pids);
   await run.exited;

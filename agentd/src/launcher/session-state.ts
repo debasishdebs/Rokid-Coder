@@ -252,13 +252,19 @@ export interface LauncherPort {
   compactDone(key: SessionKey, cmdId: string): void;
   onChange(cb: (key: SessionKey) => void): void;
   onCommandWritten(cb: (key: SessionKey, cmdId: string, at: number) => void): void;
+  /** R165: the launcher's own result for a command agentd had already cancelled. */
+  onLateResult(cb: (cmdId: string, ok: boolean) => void): void;
 }
 
 export interface RouterTimings {
   readyWaitMs: number;
   compactLimitMs: number;
   pollMs: number;
+  /** R165: how long a cancel waits to hear whether the launcher typed the command anyway. */
+  cancelSettleMs: number;
 }
+
+export const CANCEL_SETTLE_MS = 500;
 
 /** `consumed`: the command was typed before it failed, so its msgId must not be reused. */
 export type RouteOutcome = { ok: true } | { ok: false; error: string; consumed?: boolean };
@@ -277,6 +283,8 @@ interface Running {
   writtenAt?: number;
   gen: number;
   abort: (error: string) => void;
+  /** Set while a cancel waits to settle: the launcher has answered for the command. */
+  settled?: () => void;
 }
 
 /**
@@ -311,6 +319,7 @@ export class LauncherRouter {
       readyWaitMs: options.timings?.readyWaitMs ?? READY_WAIT_MS,
       compactLimitMs: options.timings?.compactLimitMs ?? COMPACT_LIMIT_MS,
       pollMs: options.timings?.pollMs ?? READY_POLL_MS,
+      cancelSettleMs: options.timings?.cancelSettleMs ?? CANCEL_SETTLE_MS,
     };
     this.onStateChange = options.onStateChange ?? (() => undefined);
     this.port.onCommandWritten((key, cmdId, at) => {
@@ -320,6 +329,14 @@ export class LauncherRouter {
         running.written = true;
         running.writtenAt ??= at;
         this.states.compactWritten(key);
+        running.settled?.();
+      }
+    });
+    this.port.onLateResult((cmdId) => {
+      for (const running of this.running.values()) {
+        if (running.cmdId === cmdId) {
+          running.settled?.();
+        }
       }
     });
     this.port.onChange((key) => {
@@ -527,8 +544,11 @@ export class LauncherRouter {
         // The launcher has not answered in time, or the session went away:
         // cancel whatever it is still doing, and say so.
         this.port.cancelCommand(cmdId);
+        await this.settleCancel(key, running);
         this.noteFailure(key, gen, cmd, result);
-        return failed(result);
+        // R165: it was typed before the cancel reached the launcher. The msgId
+        // is spent, so a resend is a duplicate and never typed twice.
+        return running.written ? { ok: false, error: "typed_after_cancel", consumed: true } : failed(result);
       }
       if (!result.ok) {
         const error: SendError = result.error ?? "not_ready";
@@ -564,6 +584,25 @@ export class LauncherRouter {
       this.states.release(key);
       this.look(key, true);
     }
+  }
+
+  /**
+   * R165: a command cancelled before agentd heard of a write may still have
+   * been typed, its `command_written` already on the way. The answer waits
+   * until the launcher says either way, or the settle window passes.
+   */
+  private settleCancel(key: SessionKey, running: Running): Promise<void> {
+    if (running.written || this.port.binding(key)?.gen !== running.gen) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => running.settled?.(), this.timings.cancelSettleMs);
+      running.settled = () => {
+        clearTimeout(timer);
+        running.settled = undefined;
+        resolve();
+      };
+    });
   }
 
   /**

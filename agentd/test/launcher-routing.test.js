@@ -800,3 +800,78 @@ test("rokid_on_after_off_rebinds_at_once_with_the_launcher_text", async () => {
     await until(() => launcher.of("bind_accepted").length > accepted, 2000, "the launcher told of it");
   });
 });
+
+// R165: a cancel crossing the launcher's first write on the socket.
+test("late_command_written_after_cancel_consumes_msgid_and_acks_typed_after_cancel", async () => {
+  await withBound(async ({ daemon, launcher, followup, ack, heldStop, noAck }) => {
+    followup("R1", "lw1");
+    const frame = await launcher.waitFor("type_command");
+    const { reply } = await heldStop();
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);
+    await noAck("lw1", 150);
+    // The launcher had typed it already: its command_written was on the way.
+    launcher.send({ type: "command_written", cmdId: frame.cmdId, at: Date.now() });
+    launcher.send({ type: "command_result", cmdId: frame.cmdId, ok: true });
+    assert.equal((await ack("lw1")).error, "typed_after_cancel");
+    daemon.stopWait.releaseByLaptop(ID);
+    await reply;
+  });
+});
+
+test("resend_after_typed_after_cancel_is_duplicate_never_retyped", async () => {
+  await withBound(async ({ daemon, phone, launcher, followup, ack, heldStop }) => {
+    followup("R1", "lw2");
+    const frame = await launcher.waitFor("type_command");
+    const { reply } = await heldStop();
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);
+    launcher.send({ type: "command_written", cmdId: frame.cmdId, at: Date.now() });
+    assert.equal((await ack("lw2")).error, "typed_after_cancel");
+    daemon.stopWait.releaseByLaptop(ID);
+    await reply;
+    phone.frames.length = 0;
+    followup("R1", "lw2");
+    assert.equal((await ack("lw2")).result, "duplicate");
+    await settle(300);
+    assert.equal(launcher.of("type_command").length, 1, "never typed again");
+  });
+});
+
+test("cancel_without_write_still_rejected_cancelled_and_retryable", async () => {
+  await withBound(async ({ daemon, phone, launcher, followup, ack, heldStop }) => {
+    followup("R1", "lw3");
+    const frame = await launcher.waitFor("type_command");
+    const { reply } = await heldStop();
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);
+    const cancelledAt = Date.now();
+    // The launcher confirms it typed nothing; the ack need not wait out the window.
+    launcher.send({ type: "command_result", cmdId: frame.cmdId, ok: false, error: "cancelled" });
+    assert.equal((await ack("lw3")).error, "cancelled");
+    assert.ok(Date.now() - cancelledAt < 450, "answered on the launcher's word");
+    daemon.stopWait.releaseByLaptop(ID);
+    await reply;
+    // The msgId was not spent: the same reply may be sent again, and is typed.
+    phone.frames.length = 0;
+    followup("R1", "lw3");
+    const again = await launcher.waitFor("type_command", (f) => f.cmdId !== frame.cmdId);
+    answer(launcher, again);
+    assert.equal((await ack("lw3")).result, "applied");
+  });
+});
+
+test("timeout_cancel_then_late_command_written_acks_typed_after_cancel", async () => {
+  await withBound(async ({ launcher, command, ack }) => {
+    command({ command: "compact" }, "lw4");
+    const frame = await launcher.waitFor("type_command");
+    // No answer within the 1.5 s compact window: agentd cancels.
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId, 4000);
+    launcher.send({ type: "command_written", cmdId: frame.cmdId, at: Date.now() });
+    assert.equal((await ack("lw4")).error, "typed_after_cancel");
+  });
+  // Nothing from the launcher at all: after the settle window it is a plain timeout.
+  await withBound(async ({ launcher, command, ack }) => {
+    command({ command: "compact" }, "lw5");
+    const frame = await launcher.waitFor("type_command");
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId, 4000);
+    assert.equal((await ack("lw5")).error, "timeout");
+  });
+});

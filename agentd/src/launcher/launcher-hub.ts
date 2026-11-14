@@ -122,6 +122,8 @@ interface Connection {
   pending?: Pending;
   /** The last command sent here, still addressable after its result (a compact owns input until it is done). */
   lastCmdId?: string;
+  /** R165: the command agentd last cancelled here; the launcher's own result for it still counts. */
+  cancelledCmdId?: string;
   /** The launcher's last `launcher_bind`, so a refused one can be retried here when the refusal ends. */
   lastBind?: { sessionId: string; uncertain: boolean };
   draft: boolean;
@@ -173,6 +175,7 @@ export class LauncherHub {
   private readonly byKey = new Map<SessionKey, Connection>();
   private readonly listeners: Array<(key: SessionKey) => void> = [];
   private readonly writtenListeners: Array<(key: SessionKey, cmdId: string, at: number) => void> = [];
+  private readonly lateResultListeners: Array<(cmdId: string, ok: boolean) => void> = [];
   /** Why each key's last binding ended: `exited` when its launcher went away, `cancelled` when it moved on. */
   private readonly unbound = new Map<SessionKey, CommandError>();
   private generation = 0;
@@ -344,6 +347,11 @@ export class LauncherHub {
 
   onChange(cb: (key: SessionKey) => void): void {
     this.listeners.push(cb);
+  }
+
+  /** R165: the launcher's own result for a command agentd had already cancelled on its connection. */
+  onLateResult(cb: (cmdId: string, ok: boolean) => void): void {
+    this.lateResultListeners.push(cb);
   }
 
   /** A launcher wrote a command's first bytes into its session's prompt. */
@@ -558,6 +566,9 @@ export class LauncherHub {
         if (pending?.cmdId === frame.cmdId) {
           connection.pending = undefined;
           pending.resolve(frame.ok ? { ok: true } : { ok: false, error: frame.error as CommandError });
+        } else if (connection.cancelledCmdId === frame.cmdId) {
+          connection.cancelledCmdId = undefined;
+          this.emitLateResult(frame.cmdId, frame.ok);
         }
         return undefined;
       }
@@ -797,6 +808,7 @@ export class LauncherHub {
       return;
     }
     connection.pending = undefined;
+    connection.cancelledCmdId = pending.cmdId;
     if (notify) {
       this.write(connection, { type: "cancel_command", cmdId: pending.cmdId });
     }
@@ -846,6 +858,16 @@ export class LauncherHub {
   private write(connection: Connection, frame: object): void {
     if (!connection.closed && connection.socket.writable) {
       connection.socket.write(`${JSON.stringify(frame)}\n`);
+    }
+  }
+
+  private emitLateResult(cmdId: string, ok: boolean): void {
+    for (const listener of [...this.lateResultListeners]) {
+      try {
+        listener(cmdId, ok);
+      } catch (error) {
+        this.options.logger.error("launcher_listener_failed", { reason: errorCode(error) });
+      }
     }
   }
 

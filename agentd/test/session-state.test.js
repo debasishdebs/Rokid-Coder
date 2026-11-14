@@ -72,6 +72,7 @@ function fakePort() {
     compactDone: (key, cmdId) => port.compactDones.push(cmdId),
     onChange: (cb) => changes.push(cb),
     onCommandWritten: (cb) => written.push(cb),
+    onLateResult: () => undefined,
     // The launcher's side.
     emit: (key) => changes.forEach((cb) => cb(key)),
     written(at) {
