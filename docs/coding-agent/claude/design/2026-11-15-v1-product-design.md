@@ -263,3 +263,13 @@ Rules:
   - **Both:** the phone reachable on the same Wi-Fi.
   - Each failure shows a one-line fix (a command or link), then re-checks. Install continues only when everything passes, or when the user skips an item marked optional.
 - **Tailscale** (an encrypted mesh VPN for reaching your devices from other networks): kept **optional, never a prerequisite** **[call, pending the user's confirmation]**. Onboarding offers it only if Wi-Fi pairing fails, or behind a "use it away from home" link.
+- **U38: Tailscale is an optional "connector", configured from the phone app.**
+  - Settings → Connectors → Tailscale shows "Not installed", "Installed, not signed in" or "Connected". Detection uses the `com.tailscale.ipn` package query the manifest already has.
+  - Guided steps: "Get Tailscale" (its Play Store page), then "Sign in with the same account on your computer".
+  - It is offered only when Wi-Fi pairing fails, or behind a "Use it away from home" link.
+  - The computer installer's prerequisite check lists Tailscale as optional, with an install link.
+  - Not built: embedding Tailscale (tsnet/libtailscale/Headscale), our own relay, port forwarding. These are post-1.0 decisions.
+- **Nexus is not a connector** **[call, pending the user's confirmation]**.
+  - It is the embedded core: the glasses link, rendering and speech, behind the private `GlassesSurface` interface.
+  - Making it optional or external would bring back the two-app friction and the open plugin host (U31).
+  - **Coexistence:** onboarding detects an installed upstream Rokid Nexus app (`com.anezium.rokidbus.phone`). Both can't hold the glasses link, so the app says "Rokid Nexus is installed — close or uninstall it so Rokid Coder can connect to your glasses".
