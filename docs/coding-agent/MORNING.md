@@ -24,6 +24,10 @@ The full trace lives in the SDD ledgers under `.superpowers/sdd/*/progress.md` (
   - Tests the controller ran itself: agentd 672/672; Agents plugin 490 tests with 0 failures. Codex final check: all findings addressed.
   - Details, the open questions and the device checks are in the "Plan 4" section at the end.
 
+- **Plan 5 (cleanup, per-kind sounds, OpenClaw removed): DONE** on branch `rokid-coder/plan-5`. It is based on plan-4 and is on top of everything else.
+  - Tests the controller ran: agentd 685/685, twice. A third run hit one flake in an older Codex reconnect test, `codex_socket_reconnect_resubscribes_attached`, which is logged. Agents plugin 482/0 on 3 runs.
+  - Codex reviewed it once, followed by one fix wave, and a check confirmed all findings were addressed.
+
 ## Needs you: actions
 1. **GitHub:** create the GitHub fork `Rokid-Coder` and push the branches. This is Plan 1 Task 0 step 4.
 2. **Codex plugin install check.** It writes to `~/.codex`. The exact commands and cleanup are in `.superpowers/sdd/2026-11-14-plan-1-laptop/task-4-report.md`. Don't use `-c` overrides or `--dangerously-bypass-hook-trust`: they move the TUI off the shared daemon (R11).
@@ -123,7 +127,7 @@ Plan: `docs/coding-agent/claude/plan/2026-11-14-plan-4-feedback.md`. It went thr
 **Decisions I made on assumption. Please confirm or overrule them (cheap to flip):**
 1. **R168: the phone's own cert is required on wss.** That is how each phone gets its own sign-out timer. The cost is one re-pair.
 2. **R169: a stale or unknown pairing gets nothing.** It sees "Pair again" rather than a read-only view.
-3. **R170: OpenClaw (upstream Nexus) is out of scope and may still be unencrypted.** Should it get TLS too?
+3. **R170: answered by U18.** OpenClaw was removed in Plan 5, in commit `Remove the OpenClaw provider`. That one commit can be reverted on its own.
 4. **R172: errors are still spoken.** You named only approvals, questions and Done.
 5. **R174: history is shown on the phone only.** Do you want a "Recent alerts" list on the glasses?
 6. **R191: the chime can only blip on the speaker if Bluetooth drops within its 0.18 s.** This goes on the device checklist.
@@ -135,3 +139,19 @@ Plan: `docs/coding-agent/claude/plan/2026-11-14-plan-4-feedback.md`. It went thr
 - Glasses row fitting is a cautious estimate, so "Read all" shows on most longer replies.
 - The Android chime player has no unit tests and needs the device check (R191).
 - Kept command ids last as long as the plugin service does.
+
+## Plan 5 (2026-11-15 night), branch `rokid-coder/plan-5`
+Plan: `docs/coding-agent/claude/plan/2026-11-15-plan-5-cleanup.md`. Your answers U16–U21 are in its header. Ledger: `.superpowers/sdd/2026-11-15-plan-5-cleanup/progress.md`.
+- **Sound per alert type, set on the phone (U19).** Settings → Alerts has a row for approval, question, error, Done and reminder, each with Speak, Chime or Silent. The defaults: approval, question and error speak; Done chimes; reminders are silent.
+- **OpenClaw removed (U18).** Nothing agentd-related depended on it. One shared text helper moved to `SingleLine.kt`, and old `openclaw.*` prefs are cleared once.
+  - **Behaviour change:** monitoring now follows only the agentd switch.
+  - I edited the plugin CHANGELOG's 1.0.0 lines in place, assuming 1.0.0 never shipped. Please confirm.
+- **`rk` fixes from Plan 3's review.** Stale "uncertain" state is no longer re-sent. Esc and Ctrl-C take over on non-Latin keyboard layouts too. Ctrl-C at the `rk codex` hint now aborts instead of starting Codex. Closed sessions are pruned. The pairing call checks the socket owner. The terminal is restored even when the hint is killed.
+- **Tests fixed.**
+  - The parallel test daemons raced on shared env settings, and that race is fixed.
+  - The smoke test now runs isolated, and `npm run smoke` passes.
+  - Three timing flakes were fixed, and one older race in the phone's inbound link was fixed with them.
+  - **Still open:** the flake `codex_socket_reconnect_resubscribes_attached`.
+- **Worktrees removed (U21).** Their branches are kept for the trace.
+
+**Next: Plan 6 (product-ready + Play Store).** We're in the design discussion now.
