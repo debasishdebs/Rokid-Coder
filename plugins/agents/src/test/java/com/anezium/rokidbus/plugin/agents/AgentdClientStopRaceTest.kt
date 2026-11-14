@@ -6,6 +6,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.job
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -45,8 +49,8 @@ class AgentdClientStopRaceTest {
         assertTrue(inDial.await(5, TimeUnit.SECONDS))
         client.stop(clearSessions = false)
         release.countDown()
-        // Give a stale loop every chance to publish over the stopped state.
-        Thread.sleep(300)
+        // The stale loop runs to its end, so whatever it would publish over the stop has landed.
+        runBlocking { withTimeout(5_000) { scope.coroutineContext.job.children.toList().joinAll() } }
 
         assertEquals(ConnectionState.DISCONNECTED, sessions.connections.value.getValue(AgentProvider.CLAUDE).state)
     }
