@@ -215,4 +215,39 @@ class VoiceReviewTest {
         assertTrue(screen.questionDeck!!.onReview)
         assertEquals(ActiveCard.Kind.QUESTION, screen.kind)
     }
+
+    @Test
+    fun use_then_reopen_reads_middle_and_tail_then_sends_full_text() {
+        val flow = QuestionFlow("alert-1", "claude:s1", QuestionPayload("ref", "claude_tool", listOf(freeItem("What next?"))))
+        screen.openQuestion(flow)
+        val said = words(600)
+        val run = heard(said, VoiceTarget.Answer("alert-1", 0))
+        // Use answer: the card goes back to the question, holding the whole answer.
+        wiring.onVoiceInput(run, key(KeyEvent.KEYCODE_ENTER))
+        assertEquals(said, flow.freeText(0))
+
+        // The stored answer can be read again: its condensed middle and end are in the reader.
+        select(flow, "Read answer")
+        wiring.onQuestionInput(flow, key(KeyEvent.KEYCODE_ENTER))
+        val read = wiring.questionReader(flow)!!.segments.joinToString("") { it.text }
+        assertEquals(VoiceCondense.condense(said, VoiceCondense.DEFAULT_WORD_LIMIT).display, read)
+        assertTrue(read.contains(" … w275 "))
+        assertTrue(read.endsWith(" w599"))
+        wiring.onQuestionInput(flow, key(KeyEvent.KEYCODE_BACK))
+        assertNull(wiring.questionReader(flow))
+
+        // A tap on the box itself still records a new answer.
+        select(flow, "Answer box (voice)")
+        wiring.onQuestionInput(flow, key(KeyEvent.KEYCODE_ENTER))
+        assertEquals(ActiveCard.Kind.VOICE, screen.kind)
+        assertEquals(VoiceTarget.Answer("alert-1", 0), screen.voice?.target)
+        screen.stopVoice()
+        assertEquals(ActiveCard.Kind.QUESTION, screen.kind)
+
+        // Send answer sends the whole transcript, not what the card showed.
+        select(flow, "Send answer")
+        assertEquals(mapOf<String, Any>("What next?" to said), flow.answers())
+        wiring.onQuestionInput(flow, key(KeyEvent.KEYCODE_ENTER))
+        assertNull(screen.questionFlow)
+    }
 }

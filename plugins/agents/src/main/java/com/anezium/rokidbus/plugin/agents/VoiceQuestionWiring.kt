@@ -271,6 +271,8 @@ internal class VoiceQuestionWiring(
         return buildList {
             item.options.indices.forEach { add(QuestionRow.Option(it)) }
             if (item.allowFreeText) add(QuestionRow.AnswerBox)
+            // A stored answer can be read again; the box itself records a new one.
+            if (item.allowFreeText && deck.flow.freeText(deck.index) != null) add(QuestionRow.ReadAnswer(deck.index))
             if (deck.hasReview) add(QuestionRow.Next) else add(QuestionRow.Send)
             if (deck.index > 0) add(QuestionRow.Previous)
         }
@@ -311,6 +313,7 @@ internal class VoiceQuestionWiring(
                             selected = isSelected,
                         )
                     }
+                    is QuestionRow.ReadAnswer -> NexusCardLine(text = READ_ANSWER, tone = NexusRowTone.DIM, selected = isSelected)
                     QuestionRow.Next -> NexusCardLine(text = NEXT_QUESTION, selected = isSelected)
                     QuestionRow.Previous ->
                         NexusCardLine(text = PREVIOUS_QUESTION, tone = NexusRowTone.DIM, selected = isSelected)
@@ -447,7 +450,13 @@ internal class VoiceQuestionWiring(
                 openCard()
             }
             is QuestionRow.ReadAnswer -> {
-                screen.questionReading = "Q${row.question + 1} answer" to deck.reviewLine(row.question)
+                // The review card reads the answer whole; the answer box reads it as the heard card showed it.
+                val text = if (deck.onReview) {
+                    deck.reviewLine(row.question)
+                } else {
+                    VoiceCondense.condense(flow.freeText(row.question) ?: return, host.voiceWordLimit).display
+                }
+                screen.questionReading = "Q${row.question + 1} answer" to text
                 screen.rearm()
                 host.render()
             }
@@ -467,6 +476,7 @@ internal class VoiceQuestionWiring(
 
     private companion object {
         const val NEXT_QUESTION = "Next question ›"
+        const val READ_ANSWER = "Read answer"
         const val PREVIOUS_QUESTION = "‹ Previous question"
         const val REVIEW_ANSWERS = "Review answers"
         const val SEND_ANSWER = "Send answer"
