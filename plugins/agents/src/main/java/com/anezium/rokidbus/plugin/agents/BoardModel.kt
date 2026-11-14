@@ -12,6 +12,10 @@ import com.anezium.rokidbus.client.plugin.NexusRowTone
 object BoardModel {
     private const val TEXT_CHARS = 120
     private const val SUB_CHARS = 240
+
+    /** What the step keeps when a file shares the line, so a long path never pushes it out. */
+    private const val STEP_CHARS = 80
+    private const val FILE_STEP_SEPARATOR = " · "
     private const val BADGE_CHARS = 24
     private const val TRAIL_ITEMS = 8
     private const val TRAIL_ITEM_CHARS = 24
@@ -20,21 +24,19 @@ object BoardModel {
      * The provider's own approval modes that run things without asking, so the
      * wearer can see that a session is loose even when agentd's temporary mode
      * is `ask`. Claude's `permission_mode` and Codex's `approvalPolicy` share
-     * the one read-only field.
+     * the one read-only field. `acceptEdits` is informational: it only skips
+     * edit prompts, but the wearer should still see it.
      */
     private val PERMISSIVE_NATIVE_MODES = setOf("never", "bypassPermissions", "acceptEdits", "dontAsk")
 
     /**
-     * One session. [waiting] is the current alert's `+N waiting`; it is drawn as
-     * its own row ([waitingRow]) and changes nothing here. [fallbackSub] is what
-     * the row says when v2 gives no file or step.
+     * One session. [fallbackSub] is what the row says when v2 gives no file or
+     * step. The `+N waiting` row is drawn apart, by [waitingRow].
      */
-    @Suppress("UNUSED_PARAMETER")
     fun row(
         session: AgentSession,
         selected: Boolean,
         now: Long,
-        waiting: Int,
         fallbackSub: String? = null,
     ): NexusCardLine {
         val v2 = session.v2
@@ -58,13 +60,7 @@ object BoardModel {
         }.take(TRAIL_ITEMS).map { it.take(TRAIL_ITEM_CHARS) }
 
         val heading = v2?.heading?.singleLine(TEXT_CHARS)?.takeIf(String::isNotBlank)
-        val fileAndStep = v2?.let {
-            listOfNotNull(it.currentFile, it.step)
-                .map { part -> part.singleLine(SUB_CHARS) }
-                .filter(String::isNotBlank)
-                .joinToString(" · ")
-                .takeIf(String::isNotBlank)
-        }
+        val fileAndStep = v2?.let { fileAndStep(it.currentFile, it.step) }
         return NexusCardLine(
             text = heading ?: session.displayTitle.singleLine(TEXT_CHARS),
             badge = when (session.provider) {
@@ -87,6 +83,31 @@ object BoardModel {
             selected = selected,
         )
     }
+
+    /**
+     * `file · step`, each part left out when absent. The file is the end of the
+     * path, since the name is what matters on a small HUD, and the step has a
+     * budget of its own so a long path cannot push it out.
+     */
+    private fun fileAndStep(currentFile: String?, rawStep: String?): String? {
+        val file = currentFile?.singleLine(Int.MAX_VALUE)?.takeIf(String::isNotBlank)
+        val step = rawStep?.singleLine(if (file == null) SUB_CHARS else STEP_CHARS)?.takeIf(String::isNotBlank)
+        val fileBudget = SUB_CHARS - if (step == null) 0 else FILE_STEP_SEPARATOR.length + step.length
+        return listOfNotNull(file?.let { endOfPath(it, fileBudget) }, step)
+            .joinToString(FILE_STEP_SEPARATOR)
+            .takeIf(String::isNotBlank)
+    }
+
+    /** The end of [path] within [budget], opened with an ellipsis and cut at a slash when it can be: `…/src/foo.ts`. */
+    private fun endOfPath(path: String, budget: Int): String {
+        if (path.length <= budget) return path
+        val tail = path.takeLast(budget - 1)
+        val slash = tail.indexOf('/')
+        return "…" + if (slash >= 0) tail.substring(slash) else tail
+    }
+
+    /** True when the row shows an age, which only a clock can keep fresh. */
+    fun showsAge(session: AgentSession): Boolean = session.v2 == null && session.lastActivityAt != null
 
     /** The `+N waiting` row that heads the board while more alerts queue behind the current one. */
     fun waitingRow(waiting: Int): NexusCardLine? =

@@ -2,6 +2,7 @@ package com.anezium.rokidbus.plugin.agents
 
 import com.anezium.rokidbus.client.plugin.NexusRowTone
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,7 +40,7 @@ class BoardModelTest {
     ) = AgentSession(id = "s1", provider = provider, title = title, status = status, v2 = v2)
 
     private fun row(session: AgentSession, selected: Boolean = false) =
-        BoardModel.row(session, selected, now = 1_000_000L, waiting = 0)
+        BoardModel.row(session, selected, now = 1_000_000L)
 
     @Test
     fun row_shows_badge_heading_file_step_and_mode_tags() {
@@ -122,7 +123,6 @@ class BoardModelTest {
             session(v2 = null),
             selected = false,
             now = 1_000_000L,
-            waiting = 0,
             fallbackSub = "wants to run Bash",
         )
 
@@ -138,7 +138,6 @@ class BoardModelTest {
             session(v2 = v2(currentFile = null, step = null)),
             selected = false,
             now = 0L,
-            waiting = 0,
             fallbackSub = "wants to run Bash",
         )
         assertEquals("wants to run Bash", line.sub)
@@ -148,8 +147,7 @@ class BoardModelTest {
                 session(v2 = v2(currentFile = "a.kt", step = "b")),
                 selected = false,
                 now = 0L,
-                waiting = 0,
-                fallbackSub = "wants to run Bash",
+                    fallbackSub = "wants to run Bash",
             ).sub,
         )
     }
@@ -170,13 +168,61 @@ class BoardModelTest {
             ),
         )
 
-        assertTrue(line.text.length <= 240)
-        assertTrue(line.sub!!.length <= 240)
+        assertEquals(120, line.text.length)
+        assertEquals(240, line.sub!!.length)
         assertTrue(line.badge!!.length <= 24)
-        assertTrue(line.trail.size <= 8)
+        // state, mode, temp mode and a permissive native mode: the longest row there is.
+        assertEquals(4, line.trail.size)
+        assertEquals(24, line.trail[1].length)
+        assertEquals("bypassPermissions", line.trail[3])
         assertTrue(line.trail.all { it.length <= 24 })
         // A multi-line heading is one line on the glasses.
         assertEquals("a b", row(session(v2 = v2(heading = "a\n  b"))).text)
+    }
+
+    @Test
+    fun a_long_display_title_is_capped_when_there_is_no_heading() {
+        val long = "t".repeat(600)
+
+        assertEquals(120, row(session(title = long, v2 = null)).text.length)
+        assertEquals(120, row(session(title = long, v2 = v2(heading = " "))).text.length)
+    }
+
+    @Test
+    fun long_path_keeps_file_name() {
+        val path = "/Users/me/" + "deep/".repeat(80) + "src/foo.ts"
+        val sub = row(session(v2 = v2(currentFile = path, step = null))).sub!!
+
+        assertTrue(sub.startsWith("…/"))
+        assertTrue(sub.endsWith("/src/foo.ts"))
+        assertTrue(sub.length <= 240)
+        assertEquals("src/foo.ts", row(session(v2 = v2(currentFile = "src/foo.ts", step = null))).sub)
+    }
+
+    @Test
+    fun step_survives_long_path() {
+        val path = "/" + "d".repeat(400) + "/foo.ts"
+        val sub = row(session(v2 = v2(currentFile = path, step = "running tests"))).sub!!
+
+        assertTrue(sub.endsWith("foo.ts · running tests"))
+        assertTrue(sub.length <= 240)
+        // A long step keeps its own budget and still leaves the file name room.
+        val both = row(session(v2 = v2(currentFile = path, step = "s".repeat(500)))).sub!!
+        assertTrue(both.contains("foo.ts · "))
+        assertTrue(both.length <= 240)
+    }
+
+    @Test
+    fun age_tick_refreshes_non_v2_rows() {
+        val plain = session(v2 = null).copy(lastActivityAt = 0L)
+        val tagged = session().copy(lastActivityAt = 0L)
+
+        assertTrue(BoardModel.showsAge(plain))
+        assertFalse(BoardModel.showsAge(tagged))
+        assertFalse(BoardModel.showsAge(session(v2 = null)))
+        // The age the tick has to redraw: it moves with the clock, the row is otherwise equal.
+        assertEquals(listOf("RUN", "5m"), BoardModel.row(plain, false, now = 5 * 60_000L).trail)
+        assertEquals(listOf("RUN", "6m"), BoardModel.row(plain, false, now = 6 * 60_000L).trail)
     }
 
     @Test

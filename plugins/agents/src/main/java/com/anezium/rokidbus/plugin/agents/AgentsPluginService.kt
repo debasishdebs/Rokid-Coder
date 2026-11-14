@@ -20,17 +20,22 @@ import com.anezium.rokidbus.shared.EditableSurfaceField
 import com.anezium.rokidbus.shared.plugin.NexusInputEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.util.UUID
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class AgentsPluginService : NexusPluginService(), AlertGlasses {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val configStore by lazy { AgentsConfigStore(applicationContext) }
@@ -177,6 +182,14 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 }
         }
         serviceScope.launch {
+            // `+N waiting` is the coordinator's count, not the sessions', so it
+            // redraws the board by itself as soon as the count moves.
+            AgentsRuntime.alertDirectors
+                .flatMapLatest { it?.waiting ?: flowOf(0) }
+                .distinctUntilChanged()
+                .collect { if (surfaceShown) render(show = false) }
+        }
+        serviceScope.launch {
             // Attention follows sessions alone. It used to ride the combined
             // flow above, so a computer that was simply unreachable — its
             // client cycling connecting/disconnected — re-raised the band on
@@ -228,7 +241,13 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         ageTicker = serviceScope.launch {
             while (isActive) {
                 delay(AGE_TICK_MS)
-                if (surfaceShown) render(show = false, digest = true)
+                // The minute tick also keeps a non-v2 row's age honest, which the gate would otherwise hold.
+                if (surfaceShown) {
+                    render(
+                        show = false,
+                        digest = AgentsRuntime.store.sessions.value.none(BoardModel::showsAge),
+                    )
+                }
             }
         }
         if (configStore.load().shouldMonitor) {
@@ -1058,7 +1077,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         val connections = AgentsRuntime.store.connections.value
         val config = configStore.load()
         boardSessions = sessions
-        val waitingRow = BoardModel.waitingRow(AgentsRuntime.alertDirector?.waiting ?: 0)
+        val waitingRow = BoardModel.waitingRow(AgentsRuntime.alertDirector?.waiting?.value ?: 0)
         val startSelected = selectedKey == START_KEY || sessions.isEmpty()
         val selectedIndex = if (startSelected) -1 else selectedIndexIn(sessions)
         if (!startSelected) selectedKey = sessions.getOrNull(selectedIndex)?.key
@@ -1119,7 +1138,6 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             session,
             selected,
             now,
-            waiting = AgentsRuntime.alertDirector?.waiting ?: 0,
             fallbackSub = sessionSub(session),
         )
 

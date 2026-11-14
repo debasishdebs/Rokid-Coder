@@ -301,8 +301,16 @@ object AgentsRuntime {
      * [AlertDirector] (R72) and the plugin service owns the bus client, so each
      * registers itself for the other while it is alive.
      */
-    @Volatile
-    internal var alertDirector: AlertDirector? = null
+    private val _alertDirector = MutableStateFlow<AlertDirector?>(null)
+
+    /** Seen as a flow too, so the board can follow the director's `+N waiting` across a monitor restart. */
+    internal val alertDirectors: StateFlow<AlertDirector?> = _alertDirector.asStateFlow()
+
+    internal var alertDirector: AlertDirector?
+        get() = _alertDirector.value
+        set(value) {
+            _alertDirector.value = value
+        }
 
     @Volatile
     internal var alertGlasses: AlertGlasses? = null

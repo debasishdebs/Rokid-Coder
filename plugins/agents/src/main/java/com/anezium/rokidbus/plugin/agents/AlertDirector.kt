@@ -3,6 +3,9 @@ package com.anezium.rokidbus.plugin.agents
 import com.anezium.rokidbus.client.plugin.NexusNotice
 import com.anezium.rokidbus.client.plugin.NexusNoticeCloseReason
 import com.anezium.rokidbus.client.plugin.NexusNoticeUpdate
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /** The glasses side of the alerts: implemented by the plugin service, which owns the bus client. */
 interface AlertGlasses {
@@ -52,8 +55,10 @@ class AlertDirector(
     private var pendingBrief: Pair<String, String>? = null
     private var boardKeys: Set<String> = emptySet()
 
-    /** The current alert's `+N waiting`, for the board's own row; read on the main thread, where [post]ed work runs. */
-    val waiting: Int get() = coordinator.current?.waiting ?: 0
+    private val _waiting = MutableStateFlow(0)
+
+    /** The current alert's `+N waiting`, for the board's own row; it follows the coordinator after every change. */
+    val waiting: StateFlow<Int> = _waiting.asStateFlow()
 
     fun onEvent(event: AgentdEvent) = post {
         when (event) {
@@ -121,6 +126,7 @@ class AlertDirector(
 
     private fun apply(effects: List<AlertCoordinator.Effect>) {
         applyEffects(effects)
+        _waiting.value = coordinator.current?.waiting ?: 0
         val brief = pendingBrief
         if (brief != null && bandId == null) {
             pendingBrief = null
