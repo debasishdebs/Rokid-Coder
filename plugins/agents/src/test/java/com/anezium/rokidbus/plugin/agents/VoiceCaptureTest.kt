@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.plugin.agents
 
+import com.anezium.rokidbus.client.plugin.NexusSdkResult
 import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
 import com.anezium.rokidbus.plugin.agents.VoiceCapture.State
 import org.junit.Assert.assertEquals
@@ -212,5 +213,63 @@ class VoiceCaptureTest {
     fun an_answer_by_voice_is_only_kept_not_sent() {
         val view = VoiceCard.view(VoiceKind.ANSWER, State.Heard("the blue one"))
         assertEquals(VoiceAct.USE, view.rows.first().act)
+    }
+
+    // ------------------------------------------------- a start that is still in flight (R105)
+
+    private class FakeSession : SpeechStop {
+        var stops = 0
+        override fun stop() { stops++ }
+    }
+
+    @Test
+    fun cancel_during_start_stops_when_active() {
+        val capture = VoiceCapture()
+        val session = FakeSession()
+        capture.attach(session)
+        // The wearer backs out while the hub is still answering the start.
+        capture.invalidate()
+        assertEquals(0, session.stops)
+        capture.onStarted()
+        assertEquals(1, session.stops)
+        // Nothing the dropped session says is kept.
+        capture.onPartial("approve everything")
+        capture.onFinal("approve everything")
+        assertEquals(State.Idle, capture.state)
+        assertNull(capture.confirmedText())
+        // A second report of the same start stops nothing more.
+        capture.onStarted()
+        assertEquals(1, session.stops)
+    }
+
+    @Test
+    fun a_live_run_is_stopped_by_invalidate_once() {
+        val capture = VoiceCapture()
+        val session = FakeSession()
+        capture.attach(session)
+        capture.onStarted()
+        capture.invalidate()
+        assertEquals(1, session.stops)
+        capture.onStarted()
+        assertEquals(1, session.stops)
+    }
+
+    @Test
+    fun not_granted_vs_still_stopping_copy() {
+        val notGranted = VoiceCapture().also { it.onStartRefused(NexusSdkResult.CAPABILITY_NOT_GRANTED) }
+        assertEquals(State.Failed("Voice unavailable"), notGranted.state)
+        assertEquals("allow Speech to text in Nexus settings", VoiceCard.hint(notGranted.state))
+
+        // The earlier session is still stopping: the SDK refuses a second one.
+        val stopping = VoiceCapture().also { it.onStartRefused(NexusSdkResult.CAPABILITY_NOT_AVAILABLE) }
+        assertEquals(State.Failed("Mic busy — try again"), stopping.state)
+        assertNull(VoiceCard.hint(stopping.state))
+
+        val unbound = VoiceCapture().also { it.onStartRefused(NexusSdkResult.NOT_REGISTERED) }
+        assertEquals(State.Failed("Voice failed — try again"), unbound.state)
+        assertNull(VoiceCard.hint(unbound.state))
+
+        val sent = VoiceCapture().also { it.onStartRefused(NexusSdkResult.SENT) }
+        assertEquals(State.Idle, sent.state)
     }
 }

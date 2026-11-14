@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.plugin.agents
 
 import com.anezium.rokidbus.client.plugin.NexusNoticeCloseReason
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
@@ -177,7 +178,7 @@ class AlertCoordinator(
                 alertId = id,
                 requestRef = question.requestRef,
                 answers = answers,
-                msgId = msgIdFor(id, QUESTION_ANSWER),
+                msgId = msgIdFor(id, QUESTION_ANSWER + ":" + contentKey(answers)),
             )
         } catch (_: IllegalArgumentException) {
             return listOf(Effect.Brief(NOT_SENT, NOT_SENT_BODY))
@@ -237,6 +238,18 @@ class AlertCoordinator(
     /** One msgId per (alert, action), reused when the wearer presses it again, so agentd applies it once. */
     private fun msgIdFor(id: String, action: String): String =
         seenOf(id).msgIds.getOrPut(action, newMsgId)
+
+    /** Equal answers give the same key, in any order; a corrected answer gives another (R102). */
+    private fun contentKey(answers: Map<String, Any>): String {
+        val text = answers.entries.sortedBy { it.key }.joinToString("\u0001") { (question, answer) ->
+            question + "\u0002" + when (answer) {
+                is List<*> -> "L" + answer.joinToString("\u0003")
+                else -> "S$answer"
+            }
+        }
+        return MessageDigest.getInstance("SHA-256").digest(text.toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(16)
+    }
 
     private fun seenOf(id: String): Seen = seen.getOrPut(id, ::Seen)
 

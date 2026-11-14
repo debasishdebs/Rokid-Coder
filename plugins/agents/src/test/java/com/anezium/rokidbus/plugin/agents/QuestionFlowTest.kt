@@ -133,4 +133,24 @@ class QuestionFlowTest {
         assertEquals("Red", answers.getString("Colour?"))
         assertEquals("M", answers.getJSONArray("Sizes?").getString(0))
     }
+
+    @Test
+    fun a_multi_select_never_holds_more_than_the_wire_takes() {
+        val labels = (1..32).map { "o$it" }
+        val flow = flow(item("Many?", options = labels, multi = true, free = true))
+        labels.indices.forEach { flow.toggle(0, it) }
+        flow.setFreeText(0, "and one more")
+        // 32 picks fill the list; the free text would make a 33rd entry agentd refuses.
+        assertEquals(32, (flow.answers()?.get("Many?") as List<*>).size)
+        assertNull(flow.freeText(0))
+    }
+
+    @Test
+    fun a_question_text_agentd_refuses_as_a_key_cannot_be_answered() {
+        for (text in listOf("__proto__", "constructor", "prototype")) {
+            val flow = flow(item(text))
+            flow.toggle(0, 0)
+            assertNull(text, flow.answers())
+        }
+    }
 }

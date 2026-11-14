@@ -51,4 +51,34 @@ class RejectedModeTest {
         store.remove(session.provider, session.id)
         assertNull(store.notApplied(session.key))
     }
+
+    private fun replySub(): String? {
+        val state = ControlMenu.open(session.key).copy(replyNotSent = store.replyNotSent(session.key))
+        return ControlMenu.page(state, session, secure = true).rows.first { it.text == "Reply by voice" }.sub
+    }
+
+    @Test
+    fun rejected_followup_shown_on_menu() {
+        store.upsert(session)
+        assertNull(replySub())
+
+        store.noteReplyNotSent(session.key, "session not waiting")
+        assertEquals("Reply not sent: session not waiting", replySub())
+
+        // Unlike a refused mode, an upsert of the session does not end it.
+        store.upsert(session)
+        assertEquals("Reply not sent: session not waiting", replySub())
+
+        // The next follow-up (or a followup_closed) clears it.
+        store.clearReplyNotSent(session.key)
+        assertNull(replySub())
+    }
+
+    @Test
+    fun a_monitor_only_link_still_says_monitor_only_not_the_rejection() {
+        store.noteReplyNotSent(session.key, "x")
+        val state = ControlMenu.open(session.key).copy(replyNotSent = "x")
+        val sub = ControlMenu.page(state, session, secure = false).rows.first { it.text == "Reply by voice" }.sub
+        assertEquals(ControlMenu.MONITOR_ONLY, sub)
+    }
 }

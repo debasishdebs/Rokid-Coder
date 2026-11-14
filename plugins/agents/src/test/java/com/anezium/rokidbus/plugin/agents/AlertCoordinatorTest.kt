@@ -553,6 +553,20 @@ class AlertCoordinatorTest {
     }
 
     @Test
+    fun corrected_answer_new_msgid_identical_resend_same() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        openQuestion(coordinator)
+        val first = sends(coordinator.onQuestionConfirm("Q", answers, secure = true)).single()
+        val same = sends(coordinator.onQuestionConfirm("Q", mapOf<String, Any>("Pick?" to "Blue"), secure = true)).single()
+        val corrected = sends(coordinator.onQuestionConfirm("Q", mapOf<String, Any>("Pick?" to "Red"), secure = true)).single()
+        assertEquals(first.getString("msgId"), same.getString("msgId"))
+        assertNotEquals(first.getString("msgId"), corrected.getString("msgId"))
+        // Sending the first content again after the correction still reuses its own msgId.
+        val back = sends(coordinator.onQuestionConfirm("Q", answers, secure = true)).single()
+        assertEquals(first.getString("msgId"), back.getString("msgId"))
+    }
+
+    @Test
     fun question_confirm_over_a_plaintext_link_briefs_monitor_only() {
         val coordinator = AlertCoordinator(clock = { 0L })
         openQuestion(coordinator)

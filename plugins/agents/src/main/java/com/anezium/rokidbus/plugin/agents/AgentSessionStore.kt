@@ -166,6 +166,28 @@ class AgentSessionStore {
     @Synchronized
     fun notApplied(sessionKey: String): String? = notApplied[sessionKey]
 
+    /**
+     * A follow-up agentd rejected, kept with the session until the next follow-up
+     * or its `followup_closed` (R106). Unlike [notApplied] a session upsert does
+     * not end it: the rejection says nothing about the session's state.
+     */
+    private val replyNotSent = LinkedHashMap<String, String>()
+
+    @Synchronized
+    fun noteReplyNotSent(sessionKey: String, error: String) {
+        replyNotSent.remove(sessionKey)
+        replyNotSent[sessionKey] = error
+        while (replyNotSent.size > MAX_NOT_APPLIED) replyNotSent.remove(replyNotSent.keys.first())
+    }
+
+    @Synchronized
+    fun replyNotSent(sessionKey: String): String? = replyNotSent[sessionKey]
+
+    @Synchronized
+    fun clearReplyNotSent(sessionKey: String) {
+        replyNotSent.remove(sessionKey)
+    }
+
     @Synchronized
     fun upsert(session: AgentSession, nowMs: Long = System.currentTimeMillis()) {
         providerSessions.getValue(session.provider)[session.id] = session
@@ -181,6 +203,7 @@ class AgentSessionStore {
     ) {
         providerSessions.getValue(provider).remove(sessionId)
         notApplied.remove("${provider.wireValue}:$sessionId")
+        replyNotSent.remove("${provider.wireValue}:$sessionId")
         publish(nowMs)
     }
 

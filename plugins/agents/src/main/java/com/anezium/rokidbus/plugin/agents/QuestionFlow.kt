@@ -18,7 +18,10 @@ class QuestionFlow(val alertId: String, val sessionKey: String, val payload: Que
         if (optionIndex !in item.options.indices) return
         val set = picked[itemIndex]
         if (item.multiSelect) {
-            if (!set.remove(optionIndex)) set.add(optionIndex)
+            // agentd takes at most MAX_ANSWER_ENTRIES parts; a pick past that would only be refused at the end.
+            if (!set.remove(optionIndex) && set.size + (if (typed[itemIndex] != null) 1 else 0) < MAX_ANSWER_ENTRIES) {
+                set.add(optionIndex)
+            }
         } else {
             set.clear()
             set.add(optionIndex)
@@ -32,6 +35,7 @@ class QuestionFlow(val alertId: String, val sessionKey: String, val payload: Que
         val item = payload.items.getOrNull(itemIndex) ?: return
         if (!item.allowFreeText) return
         val clean = text.trim().take(MAX_ANSWER_CHARS).takeIf { it.isNotEmpty() }
+        if (clean != null && item.multiSelect && picked[itemIndex].size >= MAX_ANSWER_ENTRIES) return
         typed[itemIndex] = clean
         if (clean != null && !item.multiSelect) picked[itemIndex].clear()
     }
@@ -44,12 +48,19 @@ class QuestionFlow(val alertId: String, val sessionKey: String, val payload: Que
 
     /** Null until every item has an answer (and while two items share one text, which one key cannot hold). */
     fun answers(): Map<String, Any>? {
-        if (payload.items.map { it.text }.toSet().size != payload.items.size) return null
+        val texts = payload.items.map { it.text }
+        if (texts.toSet().size != texts.size) return null
+        // agentd refuses these as keys: the answers are indexed by question text.
+        if (texts.any { it in FORBIDDEN_KEYS }) return null
         val result = LinkedHashMap<String, Any>()
         for (index in payload.items.indices) {
             result[payload.items[index].text] = answerOf(index) ?: return null
         }
         return result
+    }
+
+    private companion object {
+        val FORBIDDEN_KEYS = setOf("__proto__", "constructor", "prototype")
     }
 
     private fun answerOf(itemIndex: Int): Any? {

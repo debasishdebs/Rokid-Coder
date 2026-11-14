@@ -1,7 +1,13 @@
 package com.anezium.rokidbus.plugin.agents
 
+import com.anezium.rokidbus.client.plugin.NexusSdkResult
 import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
 import java.util.Locale
+
+/** The one thing the capture needs from a speech session. The SDK's `stop()` only acts once the hub has accepted the start. */
+fun interface SpeechStop {
+    fun stop()
+}
 
 /**
  * One tap-to-talk utterance as a pure state machine over the events of a
@@ -26,10 +32,40 @@ class VoiceCapture {
 
     private var lastPartial: String? = null
     private var invalidated = false
+    private var session: SpeechStop? = null
+    private var started = false
+    private var stopped = false
 
+    /** The session this utterance runs on, so that [invalidate] can stop it. */
+    fun attach(session: SpeechStop) {
+        this.session = session
+    }
+
+    /**
+     * The hub accepted the start. If the wearer gave up while it was still
+     * answering (R105), the session is live now and nothing is listening to it:
+     * stop it at once so the mic closes and the next start is not refused.
+     */
     fun onStarted() {
-        if (invalidated || state != State.Idle) return
+        started = true
+        if (invalidated) {
+            stopSession()
+            return
+        }
+        if (state != State.Idle) return
         state = State.Listening
+    }
+
+    /** The start was refused before any session ran; the copy tells a missing grant from a mic still held. */
+    fun onStartRefused(result: NexusSdkResult) {
+        if (invalidated || state != State.Idle) return
+        state = when (result) {
+            NexusSdkResult.SENT -> return
+            NexusSdkResult.CAPABILITY_NOT_GRANTED -> State.Failed(UNAVAILABLE)
+            // An earlier session of ours is still stopping, or another plugin holds the one speech session.
+            NexusSdkResult.CAPABILITY_NOT_AVAILABLE -> State.Failed(MIC_BUSY)
+            else -> State.Failed(VOICE_ERROR)
+        }
     }
 
     fun onPartial(text: String) {
@@ -59,20 +95,32 @@ class VoiceCapture {
             NexusSpeechStopReason.DENIED_NO_LINK,
             NexusSpeechStopReason.LINK_LOST,
             -> State.Failed(LINK_LOST)
-            NexusSpeechStopReason.REVOKED,
+            // Only a grant the wearer took away is theirs to fix in settings.
+            NexusSpeechStopReason.REVOKED -> State.Failed(UNAVAILABLE)
             NexusSpeechStopReason.DENIED_NOT_READY,
             NexusSpeechStopReason.DENIED_START_FAILED,
             NexusSpeechStopReason.DENIED_INVALID,
-            -> State.Failed(UNAVAILABLE)
-            NexusSpeechStopReason.ERROR -> State.Failed(VOICE_ERROR)
+            NexusSpeechStopReason.ERROR,
+            -> State.Failed(VOICE_ERROR)
         }
     }
 
-    /** The card this belongs to is closed: stop caring about anything the hub still says. */
+    /**
+     * The card this belongs to is closed: stop caring about anything the hub
+     * still says, and stop the session if it is live. One that is still starting
+     * is stopped by [onStarted] when the hub accepts it.
+     */
     fun invalidate() {
         invalidated = true
         state = State.Idle
         lastPartial = null
+        if (started) stopSession()
+    }
+
+    private fun stopSession() {
+        if (stopped) return
+        stopped = true
+        session?.stop()
     }
 
     /** The text to act on, only once the utterance was heard and is not blank. */

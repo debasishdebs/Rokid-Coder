@@ -81,7 +81,12 @@ object ControlMenu {
      * The main menu, in order. A session without v2 (OpenClaw, an old daemon)
      * has nothing to steer, so it offers only its output. Effort is Codex's.
      */
-    fun items(session: AgentSession, secure: Boolean, notApplied: String? = null): List<MenuItem> {
+    fun items(
+        session: AgentSession,
+        secure: Boolean,
+        notApplied: String? = null,
+        replyNotSent: String? = null,
+    ): List<MenuItem> {
         val v2 = session.v2 ?: return listOf(MenuItem.ReadOutput())
         fun steer(sub: String?, enabled: Boolean = true): Pair<String?, Boolean> =
             if (!secure) MONITOR_ONLY to false else sub to enabled
@@ -91,7 +96,8 @@ object ControlMenu {
             steer(if (can) pending?.let { "pending" } else missing, can)
 
         val reply = steer(
-            when (v2.followup) {
+            // A rejected follow-up stays on the row until the next one or a followup_closed (R106).
+            if (replyNotSent != null) "Reply not sent: $replyNotSent" else when (v2.followup) {
                 FollowupState.WAITING, FollowupState.READY -> null
                 FollowupState.CAP_REACHED -> FOLLOWUP_CAP_REACHED
                 FollowupState.UNAVAILABLE -> FOLLOWUP_UNAVAILABLE
@@ -189,6 +195,8 @@ object ControlMenu {
         val rearm: Boolean = false,
         /** A mode change agentd refused, shown beside the real mode until the next upsert (R101). */
         val notApplied: String? = null,
+        /** A follow-up agentd rejected, shown on the Reply by voice row until the next one (R106). */
+        val replyNotSent: String? = null,
     )
 
     /** The state a screen change leaves: ENTER is ignored for [GUARD_MS]. */
@@ -331,7 +339,7 @@ object ControlMenu {
 
     private fun mainEntries(state: MenuState, session: AgentSession, secure: Boolean, now: Long): List<Entry> {
         val codex = session.provider == AgentProvider.CODEX
-        return items(session, secure, state.notApplied).map { item ->
+        return items(session, secure, state.notApplied, state.replyNotSent).map { item ->
             val tone = if (item.enabled) NexusRowTone.NORMAL else NexusRowTone.DIM
             val row = Row(
                 text = item.label,
