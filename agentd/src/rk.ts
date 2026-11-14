@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { defaultStateDir } from "./config";
 import { claudeSessionsDir, findOwnedClaudeSession } from "./launcher/claude-sessions";
+import { LauncherClient } from "./launcher/launcher-client";
 import { LAUNCHER_SOCKET_NAME } from "./launcher/launcher-hub";
 import { spawnPty, type PtyChild } from "./launcher/pty";
 import { restoreTerminal, saveTerminal } from "./launcher/terminal";
@@ -115,7 +116,7 @@ class LauncherLink {
   constructor(
     private readonly socketPath: string,
     private readonly hello: Frame,
-    private readonly handlers: { onFrame: (frame: Frame) => void; onUp: () => void },
+    private readonly handlers: { onFrame: (frame: Frame) => void; onUp: () => void; onDown: () => void },
   ) {}
 
   attach(socket: net.Socket): void {
@@ -147,6 +148,7 @@ class LauncherLink {
       if (this.socket === socket) {
         this.socket = undefined;
         this.up = false;
+        this.handlers.onDown();
         this.scheduleReconnect();
       }
     });
@@ -289,6 +291,7 @@ async function runClaude(args: string[]): Promise<void> {
   let boundId: string | undefined;
   let requestedId: string | undefined;
   let announced = false;
+  const client = new LauncherClient({ child, send: (frame) => link.send(frame), binding, sessionsDir });
 
   const link: LauncherLink = new LauncherLink(
     socketPath,
@@ -297,7 +300,9 @@ async function runClaude(args: string[]): Promise<void> {
       onUp: () => {
         boundId = undefined;
         requestedId = undefined;
+        client.onLinkUp();
       },
+      onDown: () => client.onLinkDown(),
       onFrame: (frame) => {
         switch (frame.type) {
           case "bind_accepted":
@@ -321,7 +326,8 @@ async function runClaude(args: string[]): Promise<void> {
             }
             break;
           default:
-            // type_command and cancel_command arrive with the typist (Task 3).
+            // type_command, cancel_command and compact_done
+            client.onFrame(frame);
             break;
         }
       },
@@ -344,6 +350,7 @@ async function runClaude(args: string[]): Promise<void> {
       const session = findOwnedClaudeSession(sessionsDir, child.pid);
       if (session) {
         everFound = true;
+        client.setSession(session);
         if (session.sessionId !== boundId && session.sessionId !== requestedId) {
           requestedId = session.sessionId;
           link.send({ type: "launcher_bind", sessionId: session.sessionId });
@@ -364,7 +371,7 @@ async function runClaude(args: string[]): Promise<void> {
   child.onExit((code, signal) => finish(code, signal));
 
   process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (data: string) => child.write(data));
+  process.stdin.on("data", (data: string) => client.onStdin(data));
   process.stdin.on("error", () => {});
   process.stdin.on("end", () => {
     if (shutdown || eofStarted) {
