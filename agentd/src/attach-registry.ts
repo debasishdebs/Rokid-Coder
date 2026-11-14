@@ -194,6 +194,21 @@ export class AttachRegistry {
     return entry ? { ...entry } : undefined;
   }
 
+  /**
+   * M10: Claude ended a session `rk claude` attached by itself (launcher
+   * mode), and nothing else would ever remove it. Unlike detach this records
+   * no explicit detach and tells no listener: the session is over, not opted
+   * out. A session the user attached keeps its entry.
+   */
+  endLauncherSession(provider: AgentProvider, id: string): void {
+    const key = sessionKeyOf(provider, id);
+    if (this.entries.get(key)?.mode !== "launcher") {
+      return;
+    }
+    this.entries.delete(key);
+    this.persistOrLog();
+  }
+
   dropExplicitDetach(key: SessionKey): void {
     if (this.explicitDetaches.delete(key)) {
       this.persistOrLog();

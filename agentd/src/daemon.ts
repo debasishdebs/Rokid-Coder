@@ -376,6 +376,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       stopWait.endSession(sessionId);
       questionRelay.endSession(sessionId);
       endApprovalSession("claude", sessionId);
+      attachRegistry.endLauncherSession("claude", sessionId);
     } else if (sessionId && transcriptPath && sessions.get(sessionId)?.stale === false) {
       startTailing(sessionId, transcriptPath);
     }

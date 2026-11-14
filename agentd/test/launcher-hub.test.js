@@ -10,7 +10,7 @@ const { LauncherHub, HELLO_DEADLINE_MS, MAX_FRAME_BYTES } = require("../dist/lau
 const { AttachRegistry } = require("../dist/attach-registry.js");
 const { HookHttpServer } = require("../dist/http-server.js");
 const { silentLogger } = require("../dist/logger.js");
-const { withTempDir, withDaemon } = require("./helpers/daemon.js");
+const { withTempDir, withDaemon, postHook } = require("./helpers/daemon.js");
 
 const KEY = (id) => `claude:${id}`;
 
@@ -601,6 +601,22 @@ test("rokid_on_asks_the_launcher_again_rather_than_replaying_its_last_uncertaint
     client.send({ type: "launcher_bind", sessionId: "s1", uncertain: false });
     await client.waitFor("bind_accepted", (f) => f.gen === 2);
     assert.equal(hub.binding(KEY("s1")).uncertain, false);
+  });
+});
+
+// M10: a session rk attached by itself is forgotten once Claude ends it.
+test("session_end_prunes_the_launcher_attach", async () => {
+  await withDaemon({ transport: "wshub" }, async ({ daemon, httpPort, coderDir }) => {
+    daemon.attachRegistry.attach("claude", "rk-made", "launcher");
+    daemon.attachRegistry.attach("claude", "opted-in", "plugin");
+    for (const id of ["rk-made", "opted-in"]) {
+      await postHook(httpPort, { hook_event_name: "SessionEnd", session_id: id, reason: "prompt_input_exit" }, { "x-rokid-provider": "claude" });
+    }
+    assert.equal(daemon.attachRegistry.isAttached("claude", "rk-made"), false);
+    assert.equal(daemon.attachRegistry.explicitDetach(KEY("rk-made")), undefined, "an end is no /rokid:off");
+    assert.equal(daemon.attachRegistry.mode("claude", "opted-in"), "plugin", "the user's own opt-in stays");
+    const saved = JSON.parse(fs.readFileSync(path.join(coderDir, "attached.json"), "utf8"));
+    assert.deepEqual(saved.entries.map((e) => e.id), ["opted-in"]);
   });
 });
 
