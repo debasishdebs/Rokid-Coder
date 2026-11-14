@@ -62,6 +62,10 @@ Last updated 2026-11-15. The detailed SDD ledgers exist only on the original Mac
   - installer prerequisite checks
   - Tailscale as an optional connector
   - Nexus as the embedded core, with a coexistence warning
+- **Plan 6 is written and Codex-READY** after 4 review rounds: `docs/coding-agent/claude/plan/2026-11-15-plan-6-v1.md`, reviews in `docs/coding-agent/codex/reviews/2026-11-15-plan-6-*`.
+  - 13 tasks in 7 waves, with a file-ownership table.
+  - T1 restructure, then T2's phone-core ADR (it needs its own Codex READY before any code).
+  - T13 is the user's hardware gate before the release is published.
 - Next step: then the plan is written (writing-plans), then the tasks are built in parallel with one Codex review.
 - **Windows requires WSL (U34).** Settle where agentd runs (preferably inside WSL with mirrored networking) at the start of the Windows session.
 
