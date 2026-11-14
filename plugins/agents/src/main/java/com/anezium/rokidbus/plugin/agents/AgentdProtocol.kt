@@ -539,8 +539,8 @@ class AgentdProtocolCodec {
                 .toString()
         }
 
-        /** The thresholds and the wait limit the phone owns; agentd derives the alert expiry from the limit. */
-        fun settingsSync(timings: AlertTimings, waitLimitMs: Long, msgId: String): String =
+        /** The thresholds, the wait limit and the days a pairing may go unused that the phone owns; agentd derives the alert expiry from the limit. */
+        fun settingsSync(timings: AlertTimings, waitLimitMs: Long, msgId: String, pairingTtlDays: Int = 14): String =
             steering("settings_sync", msgId)
                 .put(
                     "timings",
@@ -552,6 +552,7 @@ class AgentdProtocolCodec {
                         .put("reminderMs", timings.reminderMs),
                 )
                 .put("waitLimitMs", waitLimitMs)
+                .put("pairingTtlDays", pairingTtlDays)
                 .toString()
 
         fun modelsRequest(sessionKey: String): String =

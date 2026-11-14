@@ -356,6 +356,7 @@ export class PinStore {
    */
   isTrusted(fp: string, now: number, ttlMs: number): boolean {
     this.reload();
+    this.clampToNow(now);
     const normalized = normalizeFingerprint(fp);
     const entry = normalized === undefined ? undefined : this.phones.get(normalized);
     if (!entry) {
@@ -374,6 +375,7 @@ export class PinStore {
    */
   touch(fp: string, now: number): void {
     this.reload();
+    this.clampToNow(now);
     const normalized = normalizeFingerprint(fp);
     const entry = normalized === undefined ? undefined : this.phones.get(normalized);
     if (!entry) {
@@ -393,6 +395,7 @@ export class PinStore {
    */
   expire(now: number, ttlMs: number): string[] {
     this.reload();
+    this.clampToNow(now);
     const gone = [...this.phones.values()].filter((entry) => isStale(entry, now, ttlMs));
     if (gone.length === 0 && !this.needsWrite) {
       return [];
@@ -409,6 +412,25 @@ export class PinStore {
       });
     }
     return gone.map((entry) => entry.fp);
+  }
+
+  /**
+   * A last use in the future means the clock went back since it was recorded.
+   * It counts as now from here on, and the correction is written once, so an
+   * unused pairing never gains the rolled-back time as extra life.
+   */
+  private clampToNow(now: number): void {
+    let changed = false;
+    for (const entry of this.phones.values()) {
+      if (entry.lastUsedAt > now) {
+        entry.lastUsedAt = now;
+        changed = true;
+      }
+    }
+    // Also what `reload` corrected or migrated: written once, then no longer pending.
+    if (changed || this.needsWrite) {
+      this.commit(new Map(this.phones), this.allowNextUntil, this.pinnedBefore);
+    }
   }
 
   isEmpty(): boolean {

@@ -1730,10 +1730,46 @@ test("future_last_used_is_clamped_to_now", async () => {
     assert.equal(store.isTrusted(fp, now + 14 * DAY - 1, 14 * DAY), true);
     assert.deepEqual(store.expire(now + 14 * DAY, 14 * DAY), [fp]);
 
-    // The next write puts the corrected time on disk, even inside the hour.
+    // The first use after the load puts the corrected time on disk, even inside the hour.
     await fsp.writeFile(file, JSON.stringify(future));
     store.touch(fp, now + 1_000);
-    assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).phones[0].lastUsedAt, now + 1_000);
+    assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).phones[0].lastUsedAt, now);
+  });
+});
+
+test("clock_rollback_after_load_does_not_extend_ttl", async () => {
+  await withTempDir(async (dir) => {
+    const file = pinsFileOf(dir);
+    const fp = (await phoneCert("a")).fingerprint256;
+    const ttl = 14 * DAY;
+    const t0 = 100 * DAY;
+    let clock = t0;
+    const store = new PinStore(file, { now: () => clock });
+    store.add(fp, t0);
+    // The clock goes back five days after the pin was loaded and written.
+    clock = t0 - 5 * DAY;
+    assert.equal(store.isTrusted(fp, clock, ttl), true, "still inside the TTL");
+    assert.equal(
+      JSON.parse(await fsp.readFile(file, "utf8")).phones[0].lastUsedAt,
+      clock,
+      "the correction is on disk, not only in memory",
+    );
+    // Unused since the clamped time: the TTL runs from there, not from the future time.
+    assert.equal(store.isTrusted(fp, clock + ttl - 1, ttl), true);
+    clock += ttl;
+    assert.equal(store.isTrusted(fp, clock, ttl), false, "expired 14 days after the clamped time");
+    assert.deepEqual(store.list(), []);
+
+    // The same through expire and touch.
+    clock = t0;
+    store.add(fp, t0);
+    clock = t0 - 5 * DAY;
+    assert.deepEqual(store.expire(clock + ttl, ttl), [fp]);
+    clock = t0;
+    store.add(fp, t0);
+    clock = t0 - 5 * DAY;
+    store.touch(fp, clock);
+    assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).phones[0].lastUsedAt, clock);
   });
 });
 
