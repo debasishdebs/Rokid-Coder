@@ -41,8 +41,8 @@ class AlertDirectorTest {
         override fun openDecision(alert: AgentdAction.Alert) { log += "decision ${alert.id}" }
         override fun openQuestion(alert: AgentdAction.Alert) { log += "question ${alert.id}" }
         override fun invalidate(alertId: String) { log += "invalidate $alertId" }
-        val cues = mutableListOf<String>()
-        override fun speakCue(alert: AgentdAction.Alert) { cues += alert.id }
+        val sounds = mutableListOf<AlertSound>()
+        override fun playSound(sound: AlertSound) { sounds += sound }
     }
 
     private val glasses = Glasses()
@@ -164,8 +164,9 @@ class AlertDirectorTest {
         feed(alert(id = "B", reason = "new", kind = "done"))
         feed(alert(id = "B", reason = "reminder", kind = "done"))
 
-        // The refused update re-shows A without a sound; a reminder wakes but never speaks.
-        assertEquals(listOf("A", "B"), glasses.cues)
+        // The refused update re-shows A without a sound; a reminder wakes but never sounds.
+        // A fresh approval speaks, a fresh Done chimes.
+        assertEquals(listOf(AlertSound.Speak("Claude needs approval"), AlertSound.Chime), glasses.sounds)
     }
 
     @Test
@@ -174,7 +175,7 @@ class AlertDirectorTest {
         glasses.takesBand = false
         feed(alert())
 
-        assertEquals(emptyList<String>(), glasses.cues)
+        assertEquals(emptyList<AlertSound>(), glasses.sounds)
     }
 
     @Test
@@ -278,6 +279,17 @@ class AlertDirectorTest {
         director.onEvent(AgentdEvent.Action(AgentdAction.FollowupClosed("claude:s1", "ended")))
         director.onQuestionConfirm("Q", answers)
         assertEquals(emptyList<String>(), types())
+        assertTrue("invalidate Q" in glasses.log)
+    }
+
+    @Test
+    fun a_withdrawn_question_invalidates_its_open_deck() {
+        up()
+        feed(alert(id = "Q", kind = "question"))
+        director.onBandAction("answer")
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("Q", "withdrawn")))
+
+        // The service closes the deck and briefs "No longer waiting" on this.
         assertTrue("invalidate Q" in glasses.log)
     }
 

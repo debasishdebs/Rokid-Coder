@@ -6,8 +6,15 @@ import org.json.JSONObject
 /** The phone's Do Not Disturb, as far as the plugin can read it. */
 enum class DndState { OFF, ON, UNKNOWN }
 
+/** The one sound an alert makes: a generic spoken line, the Done chime, or nothing. */
+sealed interface AlertSound {
+    data class Speak(val text: String) : AlertSound
+    data object Chime : AlertSound
+    data object None : AlertSound
+}
+
 /**
- * When an alert is spoken, and what is said. The spoken cue is only a nudge to
+ * When an alert is heard, and what it sounds like. The spoken cue is only a nudge to
  * look at the glasses, so it is generic: it names the tool and the kind of
  * alert and never a session heading or any agent text. Pure, so every
  * reason to stay silent is tested without a phone.
@@ -22,21 +29,30 @@ object AlertSoundPolicy {
     fun shouldSpeak(dnd: DndState, quiet: Boolean, glassesVolume: Int?, worn: Boolean?): Boolean =
         dnd == DndState.OFF && !quiet && glassesVolume != 0 && worn != false
 
-    /** The line spoken for an alert of [kind] from [provider], or null for a kind that never speaks. */
-    fun cue(kind: AlertKind, provider: AgentProvider): String? {
+    /**
+     * What an alert of [kind] from [provider] sounds like. A frame that only
+     * repeats or refreshes an alert ([reason] other than a new one) is never heard
+     * again; Done is a chime, the kinds that wait on the wearer are spoken.
+     */
+    fun sound(kind: AlertKind, provider: AgentProvider, reason: AlertReason): AlertSound {
+        if (reason != AlertReason.NEW) return AlertSound.None
         val name = when (provider) {
             AgentProvider.CLAUDE -> "Claude"
             AgentProvider.CODEX -> "Codex"
             AgentProvider.OPENCLAW -> "OpenClaw"
         }
         return when (kind) {
-            AlertKind.APPROVAL -> "$name needs approval"
-            AlertKind.QUESTION -> "$name has a question"
-            AlertKind.DONE -> "$name is done"
-            AlertKind.ERROR -> "$name hit an error"
-            AlertKind.NOTICE -> null
+            AlertKind.APPROVAL -> AlertSound.Speak("$name needs approval")
+            AlertKind.QUESTION -> AlertSound.Speak("$name has a question")
+            AlertKind.ERROR -> AlertSound.Speak("$name hit an error")
+            AlertKind.DONE -> AlertSound.Chime
+            AlertKind.NOTICE -> AlertSound.None
         }
     }
+
+    /** [sound] if the phone, the wearer and the glasses allow a sound right now (the [shouldSpeak] gates), else nothing. */
+    fun allowed(sound: AlertSound, dnd: DndState, quiet: Boolean, glassesVolume: Int?, worn: Boolean?): AlertSound =
+        if (sound != AlertSound.None && shouldSpeak(dnd, quiet, glassesVolume, worn)) sound else AlertSound.None
 
     /**
      * The hub reports the worn bit false both before it has heard anything and

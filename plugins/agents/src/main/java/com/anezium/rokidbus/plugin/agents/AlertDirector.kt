@@ -23,8 +23,8 @@ interface AlertGlasses {
     /** Nothing of the alerts' is on the band slot any more: a deferred v1 attention may take it. */
     fun slotFree() = Unit
 
-    /** A fresh alert's band was taken: say its generic cue, if the phone and the wearer allow it. */
-    fun speakCue(alert: AgentdAction.Alert) = Unit
+    /** A fresh alert's band was taken: make its sound, if the phone and the wearer allow it. */
+    fun playSound(sound: AlertSound) = Unit
 
     /** A Done or error band was tapped: open the output reader, summary first. */
     fun openOutput(alert: AgentdAction.Alert)
@@ -360,7 +360,10 @@ class AlertDirector(
         // The alert took the slot from whatever brief was on it.
         briefDone()
         // The coordinator marks only a NEW band as a sound, never a retry or a reminder.
-        if (sound) glasses()?.speakCue(alert)
+        if (sound) {
+            val provider = AgentProvider.fromWire(alert.sessionKey.substringBefore(':'))
+            if (provider != null) glasses()?.playSound(AlertSoundPolicy.sound(alert.kind, provider, alert.reason))
+        }
     }
 
     /**

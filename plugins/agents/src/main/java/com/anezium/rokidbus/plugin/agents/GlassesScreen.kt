@@ -83,10 +83,17 @@ internal class GlassesScreen(
     var voice: VoiceRun? = null
         private set
 
-    /** The question card's state: answers per item, one item per page, bound to its alert by id. */
+    /** The question card's state: answers per item, bound to its alert by id. */
     var questionFlow: QuestionFlow? = null
         private set
-    var questionPage = 0
+    private var deck: QuestionDeck? = null
+
+    /** Which card of the question alert is up, one per question and a review; null while no question card is open. */
+    val questionDeck: QuestionDeck?
+        get() {
+            val flow = questionFlow ?: return null
+            return deck?.takeIf { it.flow === flow } ?: QuestionDeck(flow).also { deck = it }
+        }
     var questionRow = 0
 
     /**
@@ -193,7 +200,7 @@ internal class GlassesScreen(
     fun openQuestion(flow: QuestionFlow) {
         open(ActiveCard.Kind.QUESTION)
         questionFlow = flow
-        questionPage = 0
+        deck = null
         questionRow = 0
     }
 

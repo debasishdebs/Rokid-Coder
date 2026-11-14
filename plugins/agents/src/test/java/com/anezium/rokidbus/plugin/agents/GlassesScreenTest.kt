@@ -67,6 +67,31 @@ class GlassesScreenTest {
         now = 60_000L
     }
 
+    private fun flowOf(vararg texts: String) = QuestionFlow(
+        "a1",
+        "claude:s1",
+        QuestionPayload("ref", "claude_tool", texts.map { QuestionItem(it, listOf(QuestionOption("Red")), false, false) }),
+    )
+
+    @Test
+    fun withdraw_mid_deck_closes_deck_with_brief() {
+        // The service answers an invalidate by closing the question card (and briefing "No longer waiting").
+        screen.openQuestion(flowOf("A?", "B?", "C?"))
+        val deck = screen.questionDeck!!
+        deck.next()
+        deck.next()
+        assertEquals(2, deck.index)
+
+        screen.close(ActiveCard.Kind.QUESTION)
+
+        assertEquals(ActiveCard.Kind.NONE, screen.kind)
+        assertEquals(null, screen.questionFlow)
+        assertEquals(null, screen.questionDeck)
+        // The next question alert starts again from Q1.
+        screen.openQuestion(flowOf("A?", "B?"))
+        assertEquals(0, screen.questionDeck!!.index)
+    }
+
     @Test
     fun band_dismiss_then_second_tap_never_confirms_card_underneath() {
         staleDecisionCard()

@@ -204,68 +204,126 @@ internal class VoiceQuestionWiring(
         data class Option(val index: Int) : QuestionRow
         data object AnswerBox : QuestionRow
         data object Next : QuestionRow
+        data object Previous : QuestionRow
+
+        /** The send row of a one-question alert, on its only card. */
         data object Send : QuestionRow
+
+        /** A review row: a tap opens that question's card. */
+        data class Review(val question: Int) : QuestionRow
+
+        /** The send row of the review card. */
+        data object SendAll : QuestionRow
     }
 
-    private fun questionRows(flow: QuestionFlow, page: Int): List<QuestionRow> {
-        val item = flow.payload.items[page]
+    private fun questionRows(deck: QuestionDeck): List<QuestionRow> {
+        if (deck.onReview) {
+            return buildList {
+                (0 until deck.questionCount).forEach { add(QuestionRow.Review(it)) }
+                add(QuestionRow.SendAll)
+            }
+        }
+        val item = deck.flow.payload.items[deck.index]
         return buildList {
             item.options.indices.forEach { add(QuestionRow.Option(it)) }
             if (item.allowFreeText) add(QuestionRow.AnswerBox)
-            add(if (page == flow.itemCount - 1) QuestionRow.Send else QuestionRow.Next)
+            if (deck.hasReview) add(QuestionRow.Next) else add(QuestionRow.Send)
+            if (deck.index > 0) add(QuestionRow.Previous)
         }
     }
 
     fun questionCard(flow: QuestionFlow): NexusCard {
-        val page = screen.questionPage.coerceIn(0, flow.itemCount - 1)
-        val item = flow.payload.items[page]
-        val secure = host.secure
-        val rows = questionRows(flow, page)
+        val deck = screen.questionDeck?.takeIf { it.flow === flow } ?: QuestionDeck(flow)
+        val rows = questionRows(deck)
         val selected = screen.questionRow.coerceIn(0, rows.lastIndex)
         val session = AgentsRuntime.store.sessions.value.firstOrNull { it.key == flow.sessionKey }
+        val heading = session?.displayTitle?.singleLine(100) ?: flow.payload.source
+        return if (deck.onReview) {
+            reviewCard(deck, rows, selected, heading)
+        } else {
+            questionPageCard(deck, rows, selected, heading)
+        }
+    }
+
+    private fun questionPageCard(deck: QuestionDeck, rows: List<QuestionRow>, selected: Int, heading: String): NexusCard {
+        val flow = deck.flow
+        val page = deck.index
+        val item = flow.payload.items[page]
         val lines = BoardCards.windowedRowGroups(rows, selected) { row, isSelected ->
             if (row == QuestionRow.AnswerBox) return@windowedRowGroups answerBoxLines(flow.freeText(page), isSelected)
-            val line = when (row) {
-                is QuestionRow.Option -> {
-                    val picked = flow.isPicked(page, row.index)
-                    val mark = when {
-                        item.multiSelect -> if (picked) "[x] " else "[ ] "
-                        else -> if (picked) "(x) " else "( ) "
+            listOf(
+                when (row) {
+                    is QuestionRow.Option -> {
+                        val picked = flow.isPicked(page, row.index)
+                        val mark = when {
+                            item.multiSelect -> if (picked) "[x] " else "[ ] "
+                            else -> if (picked) "(x) " else "( ) "
+                        }
+                        val option = item.options[row.index]
+                        NexusCardLine(
+                            text = (mark + option.label).singleLine(BoardCards.MENU_LINE_CHARS),
+                            sub = option.description?.singleLine(BoardCards.MENU_LINE_CHARS),
+                            tone = if (picked) NexusRowTone.ALERT else NexusRowTone.NORMAL,
+                            selected = isSelected,
+                        )
                     }
-                    val option = item.options[row.index]
-                    NexusCardLine(
-                        text = (mark + option.label).singleLine(BoardCards.MENU_LINE_CHARS),
-                        sub = option.description?.singleLine(BoardCards.MENU_LINE_CHARS),
-                        tone = if (picked) NexusRowTone.ALERT else NexusRowTone.NORMAL,
-                        selected = isSelected,
-                    )
-                }
-                QuestionRow.AnswerBox -> error("drawn by answerBoxLines")
-                QuestionRow.Next -> NexusCardLine(
-                    text = "Next question",
-                    sub = if (flow.isAnswered(page)) null else "answer this one first",
-                    tone = if (flow.isAnswered(page)) NexusRowTone.NORMAL else NexusRowTone.DIM,
-                    selected = isSelected,
-                )
-                QuestionRow.Send -> NexusCardLine(
-                    text = "Send answer",
-                    sub = when {
-                        !secure -> AlertCoordinator.NOT_CONNECTED
-                        flow.answers() == null -> "answer every question first"
-                        else -> null
-                    },
-                    tone = if (secure && flow.answers() != null) NexusRowTone.NORMAL else NexusRowTone.DIM,
-                    selected = isSelected,
-                )
-            }
-            listOf(line)
+                    QuestionRow.Next -> NexusCardLine(text = NEXT_QUESTION, selected = isSelected)
+                    QuestionRow.Previous ->
+                        NexusCardLine(text = PREVIOUS_QUESTION, tone = NexusRowTone.DIM, selected = isSelected)
+                    QuestionRow.Send -> sendLine(SEND_ANSWER, deck.canSend, isSelected)
+                    else -> error("not on a question card: $row")
+                },
+            )
         }
-        val heading = session?.displayTitle?.singleLine(100) ?: flow.payload.source
         return BoardCards.card(
             title = if (flow.itemCount > 1) "Q${page + 1}/${flow.itemCount} · $heading" else heading,
             subtitle = item.text.singleLine(BoardCards.MENU_LINE_CHARS),
             rows = lines,
             footer = if (page > 0) "swipe move · tap pick · 2-tap previous" else "swipe move · tap pick · 2-tap close",
+        )
+    }
+
+    /** One row per question, its whole answer (R123), then Send answers. */
+    private fun reviewCard(deck: QuestionDeck, rows: List<QuestionRow>, selected: Int, heading: String): NexusCard {
+        val lines = BoardCards.windowedRowGroups(rows, selected) { row, isSelected ->
+            when (row) {
+                is QuestionRow.Review -> {
+                    val parts = VoiceCard.bodyRows(deck.reviewLine(row.question))
+                    val answered = deck.flow.isAnswered(row.question)
+                    buildList {
+                        add(
+                            NexusCardLine(
+                                text = parts.first(),
+                                tone = if (answered) NexusRowTone.NORMAL else NexusRowTone.ALERT,
+                                selected = isSelected,
+                            ),
+                        )
+                        parts.drop(1).forEach { add(NexusCardLine(text = it, tone = NexusRowTone.BODY)) }
+                    }
+                }
+                QuestionRow.SendAll -> listOf(sendLine(SEND_ANSWERS, deck.canSend, isSelected))
+                else -> error("not on the review card: $row")
+            }
+        }
+        return BoardCards.card(
+            title = REVIEW_ANSWERS,
+            subtitle = heading,
+            rows = lines,
+            footer = "swipe move · tap open · 2-tap previous",
+        )
+    }
+
+    private fun sendLine(text: String, answered: Boolean, selected: Boolean): NexusCardLine {
+        val ready = host.secure && answered
+        return NexusCardLine(
+            text = text,
+            sub = when {
+                !host.secure -> AlertCoordinator.NOT_CONNECTED
+                !answered -> "answer every question first"
+                else -> null
+            },
+            tone = if (ready) NexusRowTone.NORMAL else NexusRowTone.DIM,
+            selected = selected,
         )
     }
 
@@ -286,8 +344,8 @@ internal class VoiceQuestionWiring(
     }
 
     fun onQuestionInput(flow: QuestionFlow, event: NexusInputEvent) {
-        val page = screen.questionPage.coerceIn(0, flow.itemCount - 1)
-        val rows = questionRows(flow, page)
+        val deck = screen.questionDeck?.takeIf { it.flow === flow } ?: return
+        val rows = questionRows(deck)
         when {
             event.keyCode in GlassesKeys.BACKWARD -> {
                 screen.questionRow = (screen.questionRow.coerceIn(0, rows.lastIndex) - 1 + rows.size) % rows.size
@@ -298,34 +356,40 @@ internal class VoiceQuestionWiring(
                 host.render()
             }
             GlassesKeys.isEnter(event) ->
-                onQuestionPick(flow, page, rows[screen.questionRow.coerceIn(0, rows.lastIndex)])
+                onQuestionPick(deck, rows[screen.questionRow.coerceIn(0, rows.lastIndex)])
             event.keyCode == KeyEvent.KEYCODE_BACK -> {
-                if (page > 0) {
-                    screen.questionPage = page - 1
-                    screen.questionRow = 0
-                    screen.rearm()
+                if (deck.previous()) {
+                    openCard()
                 } else {
                     screen.close(ActiveCard.Kind.QUESTION)
+                    host.render()
                 }
-                host.render()
             }
         }
     }
 
-    private fun onQuestionPick(flow: QuestionFlow, page: Int, row: QuestionRow) {
+    /** A new card of the deck: the selection starts at its top, and a tap aimed at the old one cannot land on it. */
+    private fun openCard() {
+        screen.questionRow = 0
+        screen.rearm()
+        host.render()
+    }
+
+    private fun onQuestionPick(deck: QuestionDeck, row: QuestionRow) {
+        val flow = deck.flow
         when (row) {
             is QuestionRow.Option -> {
-                flow.toggle(page, row.index)
+                flow.toggle(deck.index, row.index)
                 host.render()
             }
-            QuestionRow.AnswerBox -> startVoice(VoiceTarget.Answer(flow.alertId, page))
-            QuestionRow.Next -> if (flow.isAnswered(page)) {
-                screen.questionPage = page + 1
-                screen.questionRow = 0
-                screen.rearm()
-                host.render()
+            QuestionRow.AnswerBox -> startVoice(VoiceTarget.Answer(flow.alertId, deck.index))
+            QuestionRow.Next -> if (deck.next()) openCard()
+            QuestionRow.Previous -> if (deck.previous()) openCard()
+            is QuestionRow.Review -> {
+                deck.jump(row.question)
+                openCard()
             }
-            QuestionRow.Send -> {
+            QuestionRow.Send, QuestionRow.SendAll -> {
                 if (!host.secure) {
                     host.brief(AlertCoordinator.NOT_SENT, AlertCoordinator.NOT_CONNECTED, safety = true)
                     return
@@ -337,5 +401,13 @@ internal class VoiceQuestionWiring(
                 AgentsRuntime.alertDirector?.onQuestionConfirm(flow.alertId, answers)
             }
         }
+    }
+
+    private companion object {
+        const val NEXT_QUESTION = "Next question ›"
+        const val PREVIOUS_QUESTION = "‹ Previous question"
+        const val REVIEW_ANSWERS = "Review answers"
+        const val SEND_ANSWER = "Send answer"
+        const val SEND_ANSWERS = "Send answers"
     }
 }

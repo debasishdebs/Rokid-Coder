@@ -39,19 +39,56 @@ class AlertSoundPolicyTest {
         assertTrue(speaks(volume = null, worn = null))
     }
 
+    private fun sound(
+        kind: AlertKind,
+        provider: AgentProvider = AgentProvider.CLAUDE,
+        reason: AlertReason = AlertReason.NEW,
+    ) = AlertSoundPolicy.sound(kind, provider, reason)
+
     @Test
-    fun cue_copy_per_kind_and_provider() {
-        assertEquals("Claude needs approval", AlertSoundPolicy.cue(AlertKind.APPROVAL, AgentProvider.CLAUDE))
-        assertEquals("Codex needs approval", AlertSoundPolicy.cue(AlertKind.APPROVAL, AgentProvider.CODEX))
-        assertEquals("Claude has a question", AlertSoundPolicy.cue(AlertKind.QUESTION, AgentProvider.CLAUDE))
-        assertEquals("Codex is done", AlertSoundPolicy.cue(AlertKind.DONE, AgentProvider.CODEX))
-        assertEquals("Claude is done", AlertSoundPolicy.cue(AlertKind.DONE, AgentProvider.CLAUDE))
-        assertEquals("Claude hit an error", AlertSoundPolicy.cue(AlertKind.ERROR, AgentProvider.CLAUDE))
+    fun done_chimes_approval_and_question_speak() {
+        assertEquals(AlertSound.Chime, sound(AlertKind.DONE))
+        assertEquals(AlertSound.Chime, sound(AlertKind.DONE, AgentProvider.CODEX))
+        assertEquals(AlertSound.Speak("Claude needs approval"), sound(AlertKind.APPROVAL))
+        assertEquals(AlertSound.Speak("Codex needs approval"), sound(AlertKind.APPROVAL, AgentProvider.CODEX))
+        assertEquals(AlertSound.Speak("Claude has a question"), sound(AlertKind.QUESTION))
+        assertEquals(AlertSound.Speak("OpenClaw has a question"), sound(AlertKind.QUESTION, AgentProvider.OPENCLAW))
+        assertEquals(AlertSound.Speak("Claude hit an error"), sound(AlertKind.ERROR))
+        AgentProvider.values().forEach { assertEquals(AlertSound.None, sound(AlertKind.NOTICE, it)) }
     }
 
     @Test
-    fun notice_kind_has_no_cue() {
-        AgentProvider.values().forEach { assertNull(AlertSoundPolicy.cue(AlertKind.NOTICE, it)) }
+    fun reminder_retry_resume_are_silent() {
+        val silent = listOf(AlertReason.REMINDER, AlertReason.RETRY, AlertReason.RESUME, AlertReason.UPDATE)
+        for (kind in AlertKind.values()) {
+            for (reason in silent) {
+                assertEquals("$kind $reason", AlertSound.None, sound(kind, reason = reason))
+            }
+        }
+    }
+
+    @Test
+    fun chime_obeys_dnd_quiet_volume_worn() {
+        fun gated(
+            sound: AlertSound,
+            dnd: DndState = DndState.OFF,
+            quiet: Boolean = false,
+            volume: Int? = 8,
+            worn: Boolean? = true,
+        ) = AlertSoundPolicy.allowed(sound, dnd, quiet, volume, worn)
+
+        assertEquals(AlertSound.Chime, gated(AlertSound.Chime))
+        assertEquals(AlertSound.Chime, gated(AlertSound.Chime, volume = null, worn = null))
+        assertEquals(AlertSound.None, gated(AlertSound.Chime, dnd = DndState.ON))
+        assertEquals(AlertSound.None, gated(AlertSound.Chime, dnd = DndState.UNKNOWN))
+        assertEquals(AlertSound.None, gated(AlertSound.Chime, quiet = true))
+        assertEquals(AlertSound.None, gated(AlertSound.Chime, volume = 0))
+        assertEquals(AlertSound.None, gated(AlertSound.Chime, worn = false))
+        val speak = AlertSound.Speak("Claude has a question")
+        assertEquals(speak, gated(speak))
+        assertEquals(AlertSound.None, gated(speak, quiet = true))
+        assertEquals(AlertSound.None, gated(speak, dnd = DndState.ON))
+        assertEquals(AlertSound.None, gated(AlertSound.None))
     }
 
     @Test

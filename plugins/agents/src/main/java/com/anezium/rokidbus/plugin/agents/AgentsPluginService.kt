@@ -61,6 +61,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
      * about the glasses; null until it says anything.
      */
     private var tts: NexusTtsSession? = null
+    private val chime by lazy { ChimePlayer(applicationContext) }
     private var glassesVolume: Int? = null
     private var glassesWorn: Boolean? = null
 
@@ -459,6 +460,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     override fun onDestroy() {
         tts?.close()
         tts = null
+        chime.close()
         if (AgentsRuntime.alertGlasses === this) AgentsRuntime.alertGlasses = null
         serviceScope.cancel()
         surfaceShown = false
@@ -478,16 +480,22 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     override fun updateBand(update: NexusNoticeUpdate): Boolean = band.update(update)
 
     /**
-     * The one sound Agents makes, and a nudge to look at the glasses, nothing
-     * more: generic copy, never a session heading. The phone's Do Not Disturb is read
-     * right here, right before the speech goes out, and an unreadable one counts as
-     * quiet (R37). The coordinator only marks a fresh alert as a sound, so a retry
-     * never speaks again. A refused speak is dropped silently: the band is up.
+     * The sound an alert makes, a nudge to look at the glasses and nothing more:
+     * a generic spoken line or the Done chime, never a session heading. The phone's
+     * Do Not Disturb is read right here, right before the sound goes out, and an
+     * unreadable one counts as quiet (R37). The coordinator only marks a fresh alert
+     * as a sound, so a retry never sounds again. A refused speak is dropped
+     * silently: the band is up. The chime plays only to Bluetooth ([ChimePlayer]).
      */
-    override fun speakCue(alert: AgentdAction.Alert) {
-        val provider = AgentProvider.fromWire(alert.sessionKey.substringBefore(':')) ?: return
-        val cue = AlertSoundPolicy.cue(alert.kind, provider) ?: return
-        if (!AlertSoundPolicy.shouldSpeak(dnd.read(), configStore.isQuiet(), glassesVolume, glassesWorn)) return
+    override fun playSound(sound: AlertSound) {
+        when (val heard = AlertSoundPolicy.allowed(sound, dnd.read(), configStore.isQuiet(), glassesVolume, glassesWorn)) {
+            AlertSound.None -> Unit
+            AlertSound.Chime -> chime.play()
+            is AlertSound.Speak -> speak(heard.text)
+        }
+    }
+
+    private fun speak(cue: String) {
         val session = tts ?: nexusTtsSession(
             object : NexusTtsCallbacks {
                 override fun onTtsStarted(utteranceId: String) = Unit

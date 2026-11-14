@@ -135,6 +135,30 @@ class QuestionFlowTest {
     }
 
     @Test
+    fun answers_keep_exact_wire_strings() {
+        // Labels that look like the deck's own rows, with edge spaces and symbols, go out byte for byte.
+        val flow = flow(
+            item("Next question ›", options = listOf("Review answers", " Send answers ", "— not answered")),
+            item("Tools?", options = listOf("Q1 Read", "Q2 Write"), multi = true, free = true),
+        )
+        flow.toggle(0, 1)
+        flow.toggle(1, 1)
+        flow.toggle(1, 0)
+        flow.setFreeText(1, "  spoken  text ")
+        assertEquals(
+            mapOf<String, Any>(
+                "Next question ›" to " Send answers ",
+                "Tools?" to listOf("Q1 Read", "Q2 Write", "spoken  text"),
+            ),
+            flow.answers(),
+        )
+        val line = AgentdProtocolCodec.questionAnswer("claude:s1", flow.alertId, flow.payload.requestRef, flow.answers()!!, "m1")
+        val answers = org.json.JSONObject(line).getJSONObject("answers")
+        assertEquals(" Send answers ", answers.getString("Next question ›"))
+        assertEquals("Q2 Write", answers.getJSONArray("Tools?").getString(1))
+    }
+
+    @Test
     fun a_multi_select_never_holds_more_than_the_wire_takes() {
         val labels = (1..32).map { "o$it" }
         val flow = flow(item("Many?", options = labels, multi = true, free = true))
