@@ -168,6 +168,48 @@ function bashPayload() {
   };
 }
 
+// R156/M6: the pairing window is asked for only over a socket provably this user's.
+test("arm_pairing_only_over_a_launcher_socket_in_a_private_dir_of_ours", async () => {
+  const server = http.createServer((request, response) => {
+    request.resume();
+    request.once("end", () => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ decision: "block", reason: "Pairing window open" }));
+    });
+  });
+  const port = await listen(server);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rk-arm-"));
+  const asked = [];
+  const sockServer = require("node:net").createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      asked.push(chunk);
+      socket.end('{"type":"pairing_armed","ok":true}\n');
+    });
+    socket.on("error", () => {});
+  });
+  try {
+    const dir = path.join(root, "rc");
+    fs.mkdirSync(dir, { mode: 0o700 });
+    await new Promise((resolve) => sockServer.listen(path.join(dir, "launcher.sock"), resolve));
+    const pair = { hook_event_name: "UserPromptExpansion", command_name: "rokid:pair", session_id: "s" };
+    const env = { env: { ROKID_CODER_PROVIDER: "claude", ROKID_RK_CONFIG_DIR: dir } };
+    fs.chmodSync(dir, 0o700);
+    const ours = await runForwarder(port, pair, "500", env);
+    assert.deepEqual(JSON.parse(ours.stdout), { decision: "block", reason: "Pairing window open" });
+    assert.equal(asked.length, 1, "a private dir of ours is asked");
+    // A dir open to others is not provably ours: its socket is never connected to.
+    fs.chmodSync(dir, 0o755);
+    const loose = await runForwarder(port, pair, "500", env);
+    assert.deepEqual(JSON.parse(loose.stdout), { decision: "block", reason: 'Run "agentd phones allow-next" in a terminal' });
+    assert.equal(asked.length, 1, "the loose dir's socket was never asked");
+  } finally {
+    await new Promise((resolve) => sockServer.close(resolve));
+    await close(server);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rokid_pair_and_status_with_agentd_down_say_start_it", async () => {
   // A port nothing listens on: agentd is down.
   const server = http.createServer();

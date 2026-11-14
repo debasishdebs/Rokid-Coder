@@ -77,11 +77,35 @@ function rokidStateDir() {
     }
     return node_path_1.default.join((0, node_os_1.homedir)(), ".rokid-coder");
 }
+/**
+ * M6, as rk's `launcherSocketTrusted` (which this file may not import): the
+ * socket and its directory are this user's, the directory a real one closed
+ * to everybody else. Any other socket there could be another local user's,
+ * which could then claim the window opened.
+ */
+function launcherSocketTrusted(socketPath) {
+    const uid = process.getuid?.();
+    if (uid === undefined) {
+        return true;
+    }
+    try {
+        const dir = (0, node_fs_1.lstatSync)(node_path_1.default.dirname(socketPath));
+        const socket = (0, node_fs_1.lstatSync)(socketPath);
+        return dir.isDirectory() && dir.uid === uid && (dir.mode & 0o077) === 0 && socket.isSocket() && socket.uid === uid;
+    }
+    catch {
+        return false;
+    }
+}
 /** Asks agentd over the launcher socket to open the pairing window; true once it says it did. */
 function armPairing() {
+    const socketPath = node_path_1.default.join(rokidStateDir(), "launcher.sock");
+    if (!launcherSocketTrusted(socketPath)) {
+        return Promise.resolve(false);
+    }
     return new Promise((resolve) => {
         let answer = "";
-        const socket = (0, node_net_1.createConnection)(node_path_1.default.join(rokidStateDir(), "launcher.sock"));
+        const socket = (0, node_net_1.createConnection)(socketPath);
         const done = (ok) => {
             clearTimeout(timer);
             socket.destroy();
