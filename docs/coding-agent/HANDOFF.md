@@ -51,6 +51,11 @@ Last updated 2026-11-15. The detailed SDD ledgers exist only on the original Mac
 
 ## Plan 6
 - The design is `docs/coding-agent/claude/design/2026-11-15-v1-product-design.md`: "done" is §3, my calls are §8, the user's answers U32–U34 are §9.
+- Codex design review: 3 rounds, now READY (`docs/coding-agent/codex/reviews/2026-11-15-v1-design-*`). Key revisions:
+  - pairing confirmed by a commit-then-reveal 6-digit code (§11 R1′)
+  - a private in-process GlassesSurface adapter (R2)
+  - Windows = agentd inside WSL2 with mirrored networking (R4)
+  - a parity gate after the restructure (R6/R6′)
 - Next step: the user approves the design, then the plan is written (writing-plans), then the tasks are built in parallel with one Codex review.
 - **Windows requires WSL (U34).** Settle where agentd runs (preferably inside WSL with mirrored networking) at the start of the Windows session.
 

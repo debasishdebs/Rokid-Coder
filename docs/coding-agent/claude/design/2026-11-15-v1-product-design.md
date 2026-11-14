@@ -106,4 +106,149 @@ Every screen and every CLI step says what to do next (U5).
     - How does the phone's discovery (UDP 8793) and TLS dial-in reach a WSL2 instance? Mirrored networking, or a port proxy.
     - What does the `.exe` install?
   - Preference **[call]**: run `agentd` where the CLIs run (inside WSL), with WSL mirrored networking, so the hooks and the launcher socket stay local. The `.exe` then checks for WSL and sets this up.
-- Status: **ready for the user's final read and approval.**
+- Status: Codex review rounds 1–3 done (§10, §11); **Codex VERDICT: READY**. Awaiting the user's approval.
+
+## 10. Revisions after the Codex design review (`docs/coding-agent/codex/reviews/2026-11-15-v1-design-review.md`)
+These override §§3, 5, 6 and 8 where they differ. All are **[call]** unless marked otherwise.
+
+**R1 (Critical #1): pairing proves the peer with a matching code.** Automatic discovery stays, but no pin grants anything until the user confirms the code on both screens.
+- The code is 6 digits, the same idea as Bluetooth pairing: `SAS = first 6 decimal digits of SHA-256(phoneCertFp ‖ agentdCertFp ‖ windowNonce)`.
+- Both devices compute and show it: the phone screen, and the installer/CLI.
+- The user confirms "Codes match" on the phone and presses Enter on the computer. Only then are the pins committed and steering granted.
+- **Mismatch or cancel:** both pins are discarded and the window closes.
+- **Expiry:** the window lasts 2 minutes, as today.
+- **Competing peers:** if a second candidate appears during the window, the attempt is aborted with "More than one device answered — try again". The first-to-answer is never trusted.
+- **Fallback:** the QR/pairing line, scanned or pasted, carries both fingerprints, so it needs no code.
+- Existing users who pair from the CLI keep `agentd pair`. Its fingerprint check becomes this same code.
+
+**R2 (#2): one app, with a private in-process adapter instead of the plugin bus.**
+- The Agents code stops extending `NexusPluginService`. A new internal interface (`GlassesSurface`: cards, notices, input, TTS/STT, wake, lifecycle) is implemented directly on the hub core, in the same process.
+- There is no AIDL, no external discovery, no plugin grant, and no other app can bind.
+- The existing `AgentsPluginService` behaviour is kept by putting it behind that interface. Its tests then run against a fake `GlassesSurface`.
+
+**R3 (#3): removal by product variant, proved by inspection.**
+- `phone-hub` is split into a library (the core: the CXR link, speech, rendering) and the upstream app shell. Our `mobile/` app depends only on the library.
+- The store, updater, Patcher entry, plugin discovery and `BusHubService` export stay in the upstream shell and are absent from our APK.
+- Release gates:
+  - A CI check on the merged release manifest: no exported services except our own, no `REQUEST_INSTALL_PACKAGES` unless R8 proves it is needed, no `<queries>` for the plugin action.
+  - A test where an unrelated app tries to bind or start our services and is refused.
+
+**R4 (#4, #5): the Windows architecture, settled for planning.**
+- **Where agentd runs:** inside WSL2 (Ubuntu, the default distro), beside the Claude Code and Codex CLIs, which on Windows run in WSL (U34). So agentd and `rk` are the Linux build there: Unix sockets, node-pty on Linux, the same code as macOS.
+- **Supported setup:** Windows 11 22H2+, WSL 2 with **mirrored networking**. The `.exe` checks both. If mirrored mode is off, it offers to turn it on (`.wslconfig` `networkingMode=mirrored`, then `wsl --shutdown`), after the user confirms.
+- **Connection directions** (the same on every OS):
+
+  | Link | Direction | Protocol and port |
+  |---|---|---|
+  | Discovery | agentd → LAN | UDP broadcast, 8793 |
+  | PhoneLink | agentd → phone | TLS dial-out, phone's port 8792 |
+  | wss | phone → agentd | TLS, agentd's 8792 |
+  | Hooks | CLI → agentd | loopback HTTP, 8791 |
+
+  - Mirrored mode lets the broadcast and the inbound 8792 reach WSL.
+  - Windows Firewall needs one inbound rule for TCP 8792, which the `.exe` adds.
+  - **Fallback when broadcast is blocked:** the QR/pairing line carries the phone's address, or Tailscale is used.
+- **Tailscale:** the host's Tailscale is used, through mirrored networking. `tailnet-discovery` calls `tailscale.exe` through WSL interop, falling back to `tailscale` in WSL.
+- **State** lives in the WSL home (`~/.rokid-coder`). **Login start:** a Windows Task Scheduler entry runs `wsl -d <distro> -- agentd run` at logon.
+- **What the `.exe` installs:** it checks WSL, installs the Linux agentd bundle into the distro, sets the networking, firewall rule and scheduled task, then runs plugin install and pairing inside WSL.
+- **The older named-pipe/ConPTY items** in HANDOFF's Windows work list are superseded. They come back only if native Windows CLIs (outside WSL) are ever supported.
+- Everything above is verified first thing in the Windows session. If mirrored mode fails on the user's laptop, the fallback design is a port proxy plus a firewall rule, decided there.
+
+**R5 (#6): a runtime wrapper.**
+- The installers ship a pinned Node (22 LTS) and install stable wrappers: `~/.rokid-coder/bin/agentd`, `rk`, and `rokid-node`.
+- The hook commands in `plugins/*/hooks/hooks.json`, the LaunchAgent and the scheduled task call `rokid-node`, never bare `node`.
+- node-pty prebuilds are matched to that Node ABI for each architecture.
+- Gate: install on clean machines (no Node, no build tools), including a home path with spaces and non-ASCII characters.
+
+**R6 (#7): a preservation map, and a parity gate before any feature work.**
+- **Task 1 is the restructure alone.** It records the exact upstream SHA (the merge base with `upstream/main`, today `15cd98ad`) and adds `vendor/nexus` as a subtree of it.
+- It re-applies our changes to the vendored hub modules as the numbered patches listed in `PATCHES.md`.
+- It moves our code into `computer/`, `plugin/`, `mobile/` and `glasses/`, and fixes every relative path: the CxrGlobal path becomes `vendor/../CxrGlobal`, plus the Gradle includes and the CI paths.
+- **Parity gate:** every suite passes with the same counts as `release/0.8.0`, and the APKs build, before Task 2 starts.
+
+**R7 (#8): a bundled glasses APK, with verification kept.**
+- The phone app ships `glasses.apk` plus `glasses.json` (package, versionCode, SHA-256, signer SHA-256) as assets.
+- Before every push it runs the existing verification (package, version, digest, signer), then calls CXR.
+- **States:**
+  - Not installed: install.
+  - Older version on the glasses: offer an update.
+  - Same version: nothing to do.
+  - Newer version on the glasses: leave it, with a warning.
+  - A failed push is retried with a visible error.
+- Application ids change. Kotlin class namespaces may stay (`com.anezium.rokidbus.*`). Every hard-coded package or component name (e.g. `BusHubService.kt:150,3978,4020`) is moved to one constants file.
+
+**R8 (#9): Play is a separate decision.**
+- 1.0 does not claim to be Play-compatible.
+- The plan finds out whether the CXR install path needs `REQUEST_INSTALL_PACKAGES` on the phone. If it doesn't, the permission is removed. If it does, that is recorded as the Play blocker to solve before submission.
+
+**R9 (#10): one foreground service in the merged app.**
+- `connectedDevice` while the glasses are linked. `microphone` is added only while push-to-talk is active, started from a user action on the glasses (allowed as a foreground start).
+- The `specialUse` agents service is folded in.
+- **Boot:** the boot receiver starts only the `connectedDevice` service, never the microphone.
+- **Denied permissions:** the matching feature is shown as off, with a "Grant" pointer.
+- **User Stop:** a notification action stops everything until the app is opened again.
+- **Battery:** the battery-exemption request stays, behind an explained setting.
+
+**R10 (#11): "done" includes behaviour, not just packaging.** 1.0 is gated on the device checklist, rewritten for the single app. On real hardware, with Claude Code AND Codex, on macOS AND Windows (WSL), it must pass:
+- attaching a session
+- approvals and questions
+- same-session replies
+- alerts on the glasses within about 5 s
+- DND and quiet
+- disconnect and reconnect
+- pairing expiry and revocation
+- the launcher typing-safety rules
+- installer upgrade (0.8.0 → 1.0 on the computer side) and uninstall
+- onboarding recovery (killing the app halfway through, the computer offline, a code mismatch)
+
+The full behaviour contract from the 2026-11-14 design §3 and §12 carries forward unchanged.
+
+**R11 (#12): the privacy note tells the truth.**
+- **Rokid-Coder runs no servers and collects nothing.**
+- **Data leaves your devices only through the services you already use:**
+  - the Claude/Anthropic and Codex/OpenAI CLIs
+  - your Android speech engine, which may be online
+  - Tailscale, if you choose it
+- Nexus's bring-your-own-key cloud speech engines (`SpeechSettingsActivity.kt:271-279`) are excluded from the 1.0 app.
+
+**R12 (#13): the transport anti-goal is scoped.**
+- Pinned mutual TLS applies to all computer ↔ phone application traffic, on both paths.
+- These exceptions stay:
+  - loopback HTTP hooks (U9)
+  - plaintext UDP discovery, which carries no secrets
+- The phone ↔ glasses link is Rokid's CXR/Bluetooth link: it is paired and encrypted at the Bluetooth level, and we add nothing to it in 1.0.
+
+## 11. Amendments after the Codex re-review (`2026-11-15-v1-design-rereview.md`)
+**R1′ (replaces R1's code formula): commit-then-reveal comparison.** This is the same structure as Bluetooth numeric comparison and ZRTP SAS (RFC 6189 §4.4.1.1). It runs inside the already-established TLS session, whose two cert fingerprints are fixed by the handshake.
+1. The computer picks a 256-bit nonce `Nc` and sends `C = SHA-256("rokid-sas-v1" ‖ Nc ‖ agentdFp ‖ phoneFp)`.
+2. Only after receiving C does the phone send its own 256-bit nonce `Np`.
+3. The computer reveals `Nc`. The phone checks it against C and aborts on mismatch.
+4. Both compute `SAS = decimal(first 20 bits of SHA-256("rokid-sas-v1" ‖ Nc ‖ Np ‖ agentdFp ‖ phoneFp)) mod 10^6`, shown as 6 digits. The user confirms on both sides.
+
+Rules:
+- One attempt per pairing window. A second commitment or nonce in the same window aborts the attempt. There is no retry inside a window.
+- The pins are committed only after both confirmations. Steering is granted only after that.
+- An intermediary must commit before it sees `Np`, so it gets one 1-in-10^6 guess per user-visible attempt and can't search offline.
+- The QR/pairing-line fallback binds both fingerprints directly, so it needs no code.
+- The protocol and its tests are reviewed by Codex as their own task.
+
+**R6′ (adds to R6): build ownership.**
+- **One Gradle build at the repo root.** `settings.gradle.kts` includes:
+  - `:vendor:nexus:shared`, `:vendor:nexus:bus-client`, `:vendor:nexus:ink-engine`
+  - `:vendor:nexus:phone-core`, the library split out of upstream `phone-hub`
+  - `:vendor:nexus:glasses-hub`
+  - `:mobile:app` and `:glasses:app`
+- The upstream `phone-hub` app shell stays in `vendor/nexus` but is not included in our build.
+- `plugins/agents`' separate Gradle root is retired; its code moves into `:mobile:app`.
+- **The computer side** is one npm workspace: `computer/` (agentd + rk), plus `plugin/claude-code` and `plugin/codex`, whose `bin/` copies come from `computer/` at build time, as today.
+- **CxrGlobal stays a sibling checkout of the repo root**, `<repoRoot>/../CxrGlobal`, pinned at v0.3.0's SHA. `settings.gradle.kts` sets `cxrGlobalDirectory = rootDir.parentFile.resolve("CxrGlobal")` explicitly, so the move into `vendor/` doesn't change it.
+
+**R9′ (replaces R9's microphone line): the microphone works only where Android allows it.**
+- The merged foreground service declares `connectedDevice|microphone`. It starts with the microphone type only while the app is in the foreground: after onboarding, whenever the user opens the app, and on tapping the notification.
+- Once it was started that way, the "while in use" access persists while the service runs, so later push-to-talk from the glasses works.
+- **After a reboot** the boot receiver starts `connectedDevice` only. Voice shows as "Open Rokid Coder once to turn on voice", on the glasses and in the notification, until the user opens the app.
+- **Failure handling:** upstream's existing promotion and failure handling (`BusHubService.kt:4893-4945`) is kept as is. A failed promotion shows that same pointer, never a silent failure.
+
+**R12′ (adds to R12): hub link protection is kept.**
+- On top of Bluetooth encryption, the phone ↔ glasses link keeps Nexus's application-level `SppAuthProtocol`, authenticated enrollment and frame replay protection, all unchanged (`BusHubService.kt:3865`, `AuthenticatedSppServer.kt:120`).
+- They are listed in `PATCHES.md` as "must not be touched" areas.
