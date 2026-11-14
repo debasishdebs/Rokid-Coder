@@ -313,6 +313,15 @@ class AgentdLinkServer internal constructor(
     private fun isActive(connection: LinkConnection): Boolean =
         synchronized(clientLock) { client === connection }
 
+    /**
+     * An hourly tick: the machine bound to a secure link now is in use, so a computer that stays
+     * connected for longer than the pairing TTL never signs out.
+     */
+    fun touchLive() {
+        if (!wire.secure.value) return
+        client?.machineId?.let(touchMachineSeen)
+    }
+
     /** The wearer forgot this machine: a live link from it does not survive that. */
     fun dropMachine(machineId: String) {
         val current = synchronized(clientLock) { client }

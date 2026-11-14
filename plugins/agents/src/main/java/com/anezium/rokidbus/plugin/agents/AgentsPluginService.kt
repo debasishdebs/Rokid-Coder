@@ -998,6 +998,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
             waiting = AgentsRuntime.alertDirector?.waiting?.value ?: 0,
             quiet = configStore.isQuiet(),
             now = System.currentTimeMillis(),
+            signedOut = configStore.signedOut(),
         )
         selectedKey = board.selectedKey
         return board.card

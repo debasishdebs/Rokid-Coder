@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -46,7 +47,14 @@ class AgentsMonitorService : Service() {
     private val tlsIdentity by lazy { KeystorePhoneTlsIdentity() }
     private val agentdClient by lazy {
         // The wss dial goes through its own client, built from this one (pinnedOkHttpClient).
-        AgentdClient(httpClient, AgentsRuntime.store, serviceScope, VERSION_NAME, tlsIdentity)
+        AgentdClient(
+            httpClient, AgentsRuntime.store, serviceScope, VERSION_NAME, tlsIdentity,
+            dialAllowed = {
+                // A pairing the TTL just signed out is dropped from the monitor at once, not at the next tick.
+                configStore.outboundAdmitted().also { admitted -> if (!admitted) alertScope.launch { reconcile() } }
+            },
+            touchUsed = configStore::touchAgentdUsed,
+        )
     }
     private val openClawClient by lazy {
         OpenClawClient(httpClient, AgentsRuntime.store, configStore, serviceScope, VERSION_NAME)
@@ -105,6 +113,15 @@ class AgentsMonitorService : Service() {
             combine(agentdClient.linkSecure, linkServer.linkSecure) { dialled, listened ->
                 dialled || listened
             }.collect(AgentsRuntime::setLinkSecure)
+        }
+        // Before the first reconcile: whatever went unused while the service was down is signed out first.
+        ttlTick()
+        serviceScope.launch {
+            while (true) {
+                delay(PAIRING_TTL_TICK_MS)
+                // The sweep drops links and restarts the monitor, which the main thread owns.
+                withContext(Dispatchers.Main) { reconcile() }
+            }
         }
         serviceScope.launch {
             while (true) {
@@ -235,7 +252,7 @@ class AgentsMonitorService : Service() {
      */
     private fun syncSettings() {
         if (AgentsRuntime.link.value?.secure != true) return
-        configStore.alertSettings().syncFrames().forEach { writeToAgentd(it) }
+        configStore.alertSettings().syncFrames(configStore.pairingTtlDays()).forEach { writeToAgentd(it) }
     }
 
     /**
@@ -269,7 +286,24 @@ class AgentsMonitorService : Service() {
         super.onDestroy()
     }
 
+    /**
+     * Touches the live links, then signs out what has gone unused past the TTL. An inbound
+     * computer that was signed out has its link dropped; the outbound slot is stopped by [reconcile].
+     */
+    private fun ttlTick(): Boolean {
+        val before = configStore.trustedMachines().mapTo(HashSet()) { it.machineId }
+        val signedOut = runPairingTtlTick(
+            touchLive = listOf(agentdClient::touchLive, linkServer::touchLive),
+            sweep = { configStore.expireUnused() },
+        )
+        if (signedOut.isEmpty()) return false
+        val after = configStore.trustedMachines().mapTo(HashSet()) { it.machineId }
+        (before - after).forEach(linkServer::dropMachine)
+        return true
+    }
+
     private fun reconcile() {
+        ttlTick()
         val config = configStore.load()
         if (!config.shouldMonitor) {
             stopMonitoring()

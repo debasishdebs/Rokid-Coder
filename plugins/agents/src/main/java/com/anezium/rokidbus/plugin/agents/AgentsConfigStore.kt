@@ -36,7 +36,13 @@ internal object PairingCopy {
 
     /** A line, or a slot saved from one, without a pin or a steering secret: agentd refuses its hello. */
     const val OLDER_AGENTD = "This pairing line is from an older agentd — run agentd pair again"
+
+    /** The outbound dial that the usage TTL stopped; the Computers card says which computer and how long. */
+    const val SIGNED_OUT = "Signed out — not used for too long. Add it again."
 }
+
+/** A computer the phone signed out because it went unused past the pairing TTL (U7). */
+data class SignedOut(val name: String, val atMs: Long, val unusedDays: Int)
 
 data class OpenClawConfig(
     val host: String,
@@ -163,12 +169,15 @@ internal fun isLinkWindowDeadlineOpen(deadline: Long, now: Long): Boolean =
 
 class AgentsConfigStore internal constructor(
     private val prefs: SharedPreferences,
+    /** Wall time, for how long a pairing has gone unused; a seam so no test sleeps. */
+    private val wallClock: () -> Long = System::currentTimeMillis,
     private val elapsedRealtime: () -> Long,
 ) {
     constructor(
         context: Context,
         elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
-    ) : this(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE), elapsedRealtime)
+        wallClock: () -> Long = System::currentTimeMillis,
+    ) : this(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE), wallClock, elapsedRealtime)
 
     fun load(): AgentsConfig {
         val agentdHost = prefs.getString(KEY_AGENTD_HOST, null)
@@ -209,10 +218,20 @@ class AgentsConfigStore internal constructor(
             config.fp == null && prefs.getString(KEY_AGENTD_FP, null) != null
         }
 
-    /** False, with nothing written, when [agentdPairingRefusal] turns [config] away. */
+    /** The Monitoring switch: turns the agentd link on or off and leaves whatever is paired, or signed out, as it is. */
+    fun setAgentdEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AGENTD_ENABLED, enabled).apply()
+    }
+
+    /**
+     * False, with nothing written, when [agentdPairingRefusal] turns [config] away.
+     * A non-null [config] is a pairing the wearer just made, so it counts as a use.
+     */
+    @Synchronized
     fun saveAgentd(config: AgentdConfig?, enabled: Boolean): Boolean {
         if (config != null && agentdPairingRefusal(config) != null) return false
         val current = load().agentd
+        val forgottenName = prefs.getString(KEY_AGENTD_NAME, null)
         prefs.edit().apply {
             putBoolean(KEY_AGENTD_ENABLED, enabled)
             // A different computer, or none: what the old one proved is not this one's.
@@ -228,7 +247,11 @@ class AgentsConfigStore internal constructor(
                 remove(KEY_AGENTD_NAME)
                 remove(KEY_AGENTD_FP)
                 remove(KEY_AGENTD_STEER)
+                remove(KEY_AGENTD_LAST_USED)
+                forgottenName?.let { removeSignedOut(this, it) }
             } else {
+                putLong(KEY_AGENTD_LAST_USED, wallClock())
+                removeSignedOut(this, config.name)
                 putString(KEY_AGENTD_HOST, config.host)
                 putInt(KEY_AGENTD_PORT, config.port)
                 putString(KEY_AGENTD_TOKEN, config.token)
@@ -350,6 +373,12 @@ class AgentsConfigStore internal constructor(
         clientCert: String? = null,
     ): MachineTrustResult {
         val key = machineKey(machineId)
+        // Before any trust decision: a computer unused past the TTL is gone, so it can neither
+        // renew itself by reconnecting before a sweep nor be taken for a known one. The wearer's
+        // open Add a computer window can still link it again, as it can any computer.
+        val now = wallClock()
+        migrateTtl(now)
+        if (prefs.getString(key, null) != null && isMachineStale(machineId, now)) signOutMachine(machineId, now)
         val knownToken = prefs.getString(key, null)
         val result = decideMachineTrust(
             knownToken = knownToken,
@@ -365,8 +394,10 @@ class AgentsConfigStore internal constructor(
             prefs.edit()
                 .putString(key, token)
                 .putString("$KEY_MACHINE_NAME_PREFIX$machineId", machineName)
+                .putLong("$KEY_MACHINE_SEEN_PREFIX$machineId", now)
                 .apply { if (clientCert != null) putString(pinKey, clientCert) else remove(pinKey) }
                 .remove(KEY_LINK_WINDOW_DEADLINE)
+                .apply { removeSignedOut(this, machineName) }
                 .apply()
         } else if (result == MachineTrustResult.TRUSTED && pinned == null && clientCert != null) {
             prefs.edit().putString(pinKey, clientCert).apply()
@@ -382,6 +413,8 @@ class AgentsConfigStore internal constructor(
         prefs.edit()
             .putString(machineKey(machineId), token)
             .putString("$KEY_MACHINE_NAME_PREFIX$machineId", machineName)
+            .putLong("$KEY_MACHINE_SEEN_PREFIX$machineId", wallClock())
+            .apply { removeSignedOut(this, machineName) }
             .apply()
     }
 
@@ -422,9 +455,145 @@ class AgentsConfigStore internal constructor(
         }
         .sortedBy { it.name.lowercase() }
 
-    fun touchMachineSeen(machineId: String, now: Long = System.currentTimeMillis()) {
+    fun touchMachineSeen(machineId: String, now: Long = wallClock()) {
         if (prefs.getString(machineKey(machineId), null) == null) return
         prefs.edit().putLong("$KEY_MACHINE_SEEN_PREFIX$machineId", now).apply()
+    }
+
+    // ------------------------------------------------------------ pairing TTL (U7)
+
+    /** Days a computer may go unused before this phone signs out of it. */
+    fun pairingTtlDays(): Int =
+        prefs.getInt(KEY_PAIRING_TTL_DAYS, DEFAULT_PAIRING_TTL_DAYS).takeIf { it in PAIRING_TTL_CHOICES }
+            ?: DEFAULT_PAIRING_TTL_DAYS
+
+    fun setPairingTtlDays(days: Int) {
+        if (days !in PAIRING_TTL_CHOICES) return
+        prefs.edit().putInt(KEY_PAIRING_TTL_DAYS, days).apply()
+    }
+
+    /** The outbound pairing was used just now: a secure hello_ack, or a link that is still up. */
+    @Synchronized
+    fun touchAgentdUsed(now: Long = wallClock()) {
+        if (prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank()) return
+        prefs.edit().putLong(KEY_AGENTD_LAST_USED, now).apply()
+    }
+
+    /**
+     * Signs out of every computer unused for longer than [pairingTtlDays] as of [now], and says which.
+     * An outbound slot keeps its host and name for the re-pair hint; an inbound machine is forgotten.
+     */
+    @Synchronized
+    fun expireUnused(now: Long = wallClock()): List<SignedOut> {
+        migrateTtl(now)
+        val out = mutableListOf<SignedOut>()
+        if (!prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank() && isStale(KEY_AGENTD_LAST_USED, now)) {
+            out += signOutAgentd(now)
+        }
+        prefs.all.keys
+            .filter { it.startsWith(KEY_MACHINE_PREFIX) }
+            .map { it.removePrefix(KEY_MACHINE_PREFIX) }
+            .filter { isMachineStale(it, now) }
+            .forEach { out += signOutMachine(it, now) }
+        return out
+    }
+
+    /**
+     * Whether the outbound pairing may be dialled now. A slot unused past the TTL is signed out
+     * here and not dialled, so a stale computer cannot renew itself between sweeps.
+     */
+    @Synchronized
+    fun outboundAdmitted(now: Long = wallClock()): Boolean {
+        migrateTtl(now)
+        if (prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank()) return false
+        if (!isStale(KEY_AGENTD_LAST_USED, now)) return true
+        signOutAgentd(now)
+        return false
+    }
+
+    /** Computers signed out and not yet added again, most recent first. */
+    fun signedOut(): List<SignedOut> = prefs.all.keys
+        .filter { it.startsWith(KEY_SIGNED_OUT_PREFIX) }
+        .map { key ->
+            val name = key.removePrefix(KEY_SIGNED_OUT_PREFIX)
+            SignedOut(
+                name = name,
+                atMs = prefs.getLong(key, 0L),
+                unusedDays = prefs.getInt("$KEY_SIGNED_OUT_DAYS_PREFIX$name", pairingTtlDays()),
+            )
+        }
+        .sortedWith(compareByDescending<SignedOut> { it.atMs }.thenBy { it.name })
+
+    fun clearSignedOut(name: String) {
+        prefs.edit().also { removeSignedOut(it, name) }.apply()
+    }
+
+    private fun removeSignedOut(editor: SharedPreferences.Editor, name: String) {
+        editor.remove("$KEY_SIGNED_OUT_PREFIX$name").remove("$KEY_SIGNED_OUT_DAYS_PREFIX$name")
+    }
+
+    /**
+     * The first run of the TTL stamps every pairing that has no timestamp with [now], so nothing
+     * paired before the upgrade is signed out at once. Marked by [KEY_TTL_MIGRATED]; once only.
+     */
+    private fun migrateTtl(now: Long) {
+        if (prefs.getBoolean(KEY_TTL_MIGRATED, false)) return
+        prefs.edit().apply {
+            if (!prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank() && !prefs.contains(KEY_AGENTD_LAST_USED)) {
+                putLong(KEY_AGENTD_LAST_USED, now)
+            }
+            prefs.all.keys.filter { it.startsWith(KEY_MACHINE_PREFIX) }
+                .map { it.removePrefix(KEY_MACHINE_PREFIX) }
+                .filter { prefs.getLong("$KEY_MACHINE_SEEN_PREFIX$it", 0L) <= 0L }
+                .forEach { putLong("$KEY_MACHINE_SEEN_PREFIX$it", now) }
+            putBoolean(KEY_TTL_MIGRATED, true)
+        }.apply()
+    }
+
+    private fun isMachineStale(machineId: String, now: Long) = isStale("$KEY_MACHINE_SEEN_PREFIX$machineId", now)
+
+    /**
+     * A last use in the future (the clock went back, or a bad write) is clamped to [now]: it is
+     * not a reason to sign out, and it must not hold a pairing open past the TTL either. After
+     * the one-time migration a pairing with no timestamp at all counts as never used.
+     */
+    private fun isStale(lastUsedKey: String, now: Long): Boolean {
+        val last = prefs.getLong(lastUsedKey, 0L)
+        if (last > now) {
+            prefs.edit().putLong(lastUsedKey, now).apply()
+            return false
+        }
+        return now - last > pairingTtlDays() * DAY_MS
+    }
+
+    private fun unusedDays(lastUsedKey: String, now: Long): Int =
+        ((now - prefs.getLong(lastUsedKey, 0L)) / DAY_MS).coerceIn(pairingTtlDays().toLong(), 36_500L).toInt()
+
+    private fun signOutAgentd(now: Long): SignedOut {
+        val name = prefs.getString(KEY_AGENTD_NAME, null)?.takeIf(String::isNotBlank)
+            ?: prefs.getString(KEY_AGENTD_HOST, "").orEmpty()
+        val signedOut = SignedOut(name, now, unusedDays(KEY_AGENTD_LAST_USED, now))
+        prefs.edit()
+            .remove(KEY_AGENTD_TOKEN)
+            .remove(KEY_AGENTD_FP)
+            .remove(KEY_AGENTD_STEER)
+            .remove(KEY_AGENTD_LAST_USED)
+            .remove(v2SeenKey(DIALLED))
+            .putLong("$KEY_SIGNED_OUT_PREFIX$name", now)
+            .putInt("$KEY_SIGNED_OUT_DAYS_PREFIX$name", signedOut.unusedDays)
+            .apply()
+        return signedOut
+    }
+
+    private fun signOutMachine(machineId: String, now: Long): SignedOut {
+        val name = prefs.getString("$KEY_MACHINE_NAME_PREFIX$machineId", null)?.takeIf(String::isNotBlank) ?: machineId
+        val signedOut = SignedOut(name, now, unusedDays("$KEY_MACHINE_SEEN_PREFIX$machineId", now))
+        forgetMachine(machineId)
+        prefs.edit()
+            .putLong("$KEY_SIGNED_OUT_PREFIX$name", now)
+            .putInt("$KEY_SIGNED_OUT_DAYS_PREFIX$name", signedOut.unusedDays)
+            .apply()
+        return signedOut
     }
 
     /**
@@ -551,6 +720,11 @@ class AgentsConfigStore internal constructor(
         const val KEY_AGENTD_NAME = "agentd.name"
         const val KEY_AGENTD_FP = "agentd.fp"
         const val KEY_AGENTD_STEER = "agentd.steer"
+        const val KEY_AGENTD_LAST_USED = "agentd.last_used_at"
+        const val KEY_PAIRING_TTL_DAYS = "security.pairing_ttl_days"
+        const val KEY_TTL_MIGRATED = "security.ttl_migrated"
+        const val KEY_SIGNED_OUT_PREFIX = "signed_out."
+        const val KEY_SIGNED_OUT_DAYS_PREFIX = "signed_out_days."
         const val KEY_OPENCLAW_ENABLED = "openclaw.enabled"
         const val KEY_OPENCLAW_HOST = "openclaw.host"
         const val KEY_OPENCLAW_PORT = "openclaw.port"
@@ -576,3 +750,9 @@ class AgentsConfigStore internal constructor(
 }
 
 internal const val LINK_WINDOW_DURATION_MS = 2L * 60L * 1000L
+
+private const val DAY_MS = 24L * 60L * 60L * 1000L
+
+/** What Sign out unused computers offers, in days. */
+val PAIRING_TTL_CHOICES: List<Int> = listOf(3, 7, 14, 30, 90)
+const val DEFAULT_PAIRING_TTL_DAYS = 14

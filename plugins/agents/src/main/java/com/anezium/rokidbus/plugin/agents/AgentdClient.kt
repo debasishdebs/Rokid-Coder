@@ -33,6 +33,10 @@ class AgentdClient(
     private val versionName: String,
     identity: PhoneTlsIdentity,
     private val pinnedClient: (pin: String) -> OkHttpClient = { pin -> pinnedOkHttpClient(httpClient, pin, identity) },
+    /** Asked before every dial: false once the pairing went unused past the TTL, which signs it out (U7). */
+    private val dialAllowed: () -> Boolean = { true },
+    /** The pairing was just used: a secure hello_ack, or a link still up. */
+    private val touchUsed: () -> Unit = {},
     onEvent: (AgentdEvent) -> Unit = AgentsRuntime::emitEvent,
 ) {
     private var loopJob: Job? = null
@@ -85,6 +89,11 @@ class AgentdClient(
     /** Any prebuilt frame line, v2 or v1; the wire decides whether it may leave. */
     fun write(line: String): AgentdWire.Result = wire.write(line)
 
+    /** An hourly tick while the link is bound secure: a computer that stays connected never expires. */
+    fun touchLive() {
+        if (wire.secure.value) touchUsed()
+    }
+
     @Synchronized
     fun start(config: AgentdConfig) {
         loopJob?.cancel()
@@ -126,6 +135,8 @@ class AgentdClient(
         val http = pinnedClient(pin)
         val backoff = ReconnectBackoff()
         while (scope.isActive && sockets.isCurrent(generation)) {
+            // Every dial, redials included: a pairing that went stale since the last one is not dialled.
+            if (!dialAllowed()) return authFailed(generation, PairingCopy.SIGNED_OUT)
             store.setConnection(AgentProvider.CLAUDE, ConnectionState.CONNECTING)
             val result = try {
                 connectOnce(config, steer, http, generation, backoff)
@@ -226,6 +237,7 @@ class AgentdClient(
                         }
                         if (!connected.compareAndSet(false, true)) return
                         link.up(owner, secure = true, stillLive = ::isLive) ?: return
+                        touchUsed()
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()

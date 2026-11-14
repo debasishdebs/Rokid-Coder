@@ -30,6 +30,8 @@ import com.anezium.rokidbus.plugin.agents.AgentStatus
 import com.anezium.rokidbus.plugin.agents.AgentProvider
 import com.anezium.rokidbus.plugin.agents.AlertSettings
 import com.anezium.rokidbus.plugin.agents.ConnectionState
+import com.anezium.rokidbus.plugin.agents.PAIRING_TTL_CHOICES
+import com.anezium.rokidbus.plugin.agents.SignedOut
 import com.anezium.rokidbus.plugin.agents.ProviderConnectionState
 import com.anezium.rokidbus.plugin.agents.TempMode
 import com.anezium.rokidbus.plugin.agents.displayText
@@ -50,6 +52,12 @@ internal object SettingsCopy {
     /** R60: a second computer joins steering only when the laptop lets it in. */
     const val PAIR_HINT =
         "To approve from this phone, run agentd pair (or agentd phones allow-next) on the computer."
+
+    const val TTL_HINT =
+        "A computer this phone has not used for this long is signed out, and has to be added again."
+
+    /** U7: the phone signed out of [name], and says what to do next. */
+    fun signedOut(name: String, days: Int) = "Signed out of $name — not used for $days days. Add it again."
 }
 
 /** What the Monitoring card says about the link, and the colour of its dot. */
@@ -108,6 +116,9 @@ internal data class SettingsUiState(
     val alerts: AlertSettings,
     val batteryAllowed: Boolean,
     val batteryFrozen: Boolean,
+    /** Days a computer may go unused before it is signed out (U7). */
+    val pairingTtlDays: Int = 14,
+    val signedOut: List<SignedOut> = emptyList(),
     /** R75: the first 16 hex digits, grouped, to hold against agentd's log; null until read. */
     val phoneFingerprint: String? = null,
 )
@@ -121,6 +132,7 @@ internal class SettingsActions(
     val onAlerts: (AlertSettings.() -> AlertSettings) -> Unit,
     val onQuiet: (Boolean) -> Unit,
     val onRevokeAll: () -> Unit,
+    val onPairingTtl: (Int) -> Unit = {},
     val onBatteryGrant: () -> Unit,
     val onBatteryAppInfo: () -> Unit,
     val onUninstall: () -> Unit,
@@ -146,6 +158,9 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
 
         item { SectionLabel("Computers") }
         item { ComputersCard(state, actions) }
+
+        item { SectionLabel("Security") }
+        item { SecurityCard(state, actions) }
 
         item { SectionLabel("Alerts") }
         item { AlertsCard(state.alerts, actions) }
@@ -236,6 +251,29 @@ private fun ComputersCard(state: SettingsUiState, actions: SettingsActions) {
         }
         SecondaryAction("Add a computer", actions.onAddComputer, tag = "add_computer")
         NoticeText(SettingsCopy.PAIR_HINT, tag = "pair_hint")
+    }
+}
+
+@Composable
+private fun SecurityCard(state: SettingsUiState, actions: SettingsActions) {
+    SettingsCard {
+        ChoiceRow(
+            "Sign out unused computers", PAIRING_TTL_CHOICES.map { "$it days" },
+            PAIRING_TTL_CHOICES.indexOf(state.pairingTtlDays),
+            { actions.onPairingTtl(PAIRING_TTL_CHOICES[it]) },
+            tag = "pairing_ttl",
+        )
+        NoticeText(SettingsCopy.TTL_HINT, tag = "ttl_hint")
+        state.signedOut.forEachIndexed { index, row ->
+            // The next step is the line itself: tapping it opens Add a computer.
+            Text(
+                SettingsCopy.signedOut(row.name, row.unusedDays),
+                style = MaterialTheme.typography.bodyMedium,
+                color = AgentsColors.ChipCoral.second,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(onClick = actions.onAddComputer)
+                    .testTag("signed_out_$index"),
+            )
+        }
     }
 }
 

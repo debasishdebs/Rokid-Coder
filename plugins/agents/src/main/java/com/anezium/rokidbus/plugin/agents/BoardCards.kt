@@ -17,6 +17,7 @@ internal object BoardCards {
     const val MENU_LINE_CHARS = 240
     const val VISIBLE_SESSION_ROWS = 6
     private const val MIN_SESSION_ROWS = 4
+    private const val MAX_SIGNED_OUT_ROWS = 2
     private const val READER_SEGMENT_CHARS = 4_000
     private const val READER_MAX_SEGMENTS = 236
 
@@ -83,6 +84,7 @@ internal object BoardCards {
         waiting: Int,
         quiet: Boolean,
         now: Long,
+        signedOut: List<SignedOut> = emptyList(),
     ): Board {
         val waitingRow = BoardModel.waitingRow(waiting)
         val quietSelected = selectedKey == BoardModel.QUIET_KEY
@@ -93,6 +95,8 @@ internal object BoardCards {
 
         val alerts = buildList {
             waitingRow?.let(::add)
+            // The HUD does not scroll, so a pile of them shows the latest two; Settings lists every one.
+            signedOut.take(MAX_SIGNED_OUT_ROWS).forEach { add(problemRow("Signed out of ${it.name}", "pair again: Add a computer")) }
             if (config.agentdEnabled &&
                 connections[AgentProvider.CLAUDE]?.state == ConnectionState.AUTH_FAILED
             ) {

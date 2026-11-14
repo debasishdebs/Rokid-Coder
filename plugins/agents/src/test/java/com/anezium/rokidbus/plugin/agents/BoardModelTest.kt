@@ -260,4 +260,23 @@ class BoardModelTest {
         assertEquals(BoardModel.QUIET_KEY, BoardModel.step(emptyList(), null, +1))
         assertEquals(BoardModel.QUIET_KEY, BoardModel.step(emptyList(), BoardModel.START_KEY, +1))
     }
+
+    @Test
+    fun signed_out_row_is_a_problem_row_with_the_next_step() {
+        val board = BoardCards.sessionsCard(
+            sessions = emptyList(),
+            connections = emptyMap(),
+            config = AgentsConfig(agentdEnabled = true, agentd = null, openClawEnabled = false, openClaw = null),
+            selectedKey = null,
+            waiting = 0,
+            quiet = false,
+            now = 0L,
+            signedOut = listOf(SignedOut("Desk", 1L, 14), SignedOut("Laptop", 1L, 20), SignedOut("Third", 1L, 30)),
+        )
+
+        val rows = board.card.richLines.orEmpty().filter { it.text.startsWith("Signed out of ") }
+        assertEquals(listOf("Signed out of Desk", "Signed out of Laptop"), rows.map { it.text })
+        assertEquals(listOf("pair again: Add a computer"), rows.map { it.sub }.distinct())
+        assertEquals(listOf(NexusRowTone.ALERT), rows.map { it.tone }.distinct())
+    }
 }

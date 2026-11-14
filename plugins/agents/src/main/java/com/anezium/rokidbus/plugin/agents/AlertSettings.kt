@@ -53,10 +53,13 @@ data class AlertSettings(
     }
 
     /** `settings_sync` then `defaults_set`, each with a msgId of its own (one per user action). Both steer. */
-    fun syncFrames(newMsgId: () -> String = { UUID.randomUUID().toString() }): List<String> {
+    fun syncFrames(
+        pairingTtlDays: Int = DEFAULT_PAIRING_TTL_DAYS,
+        newMsgId: () -> String = { UUID.randomUUID().toString() },
+    ): List<String> {
         val v = validated()
         return listOf(
-            AgentdProtocolCodec.settingsSync(v.timings(), v.waitLimitMs, newMsgId()),
+            AgentdProtocolCodec.settingsSync(v.timings(), v.waitLimitMs, newMsgId(), pairingTtlDays),
             AgentdProtocolCodec.defaultsSet(v.defaultClaude, v.defaultCodex, newMsgId()),
         )
     }

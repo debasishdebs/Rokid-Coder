@@ -84,7 +84,8 @@ class AgentsSettingsActivity : ComponentActivity() {
     private fun actions() = SettingsActions(
         onBack = ::finish,
         onMonitoring = { checked ->
-            configStore.saveAgentd(configStore.load().agentd, checked)
+            // Only the switch: a computer signed out for lack of use keeps its re-pair hint.
+            configStore.setAgentdEnabled(checked)
             if (checked) askForNotifications()
             AgentsMonitorService.reconcile(applicationContext)
             refresh()
@@ -105,6 +106,13 @@ class AgentsSettingsActivity : ComponentActivity() {
         },
         onAddComputer = { startActivity(Intent(this, AddComputerActivity::class.java)) },
         onAlerts = ::changeAlerts,
+        onPairingTtl = { days ->
+            configStore.setPairingTtlDays(days)
+            // Told to agentd now, and a shorter limit may sign a computer out right away.
+            AgentsMonitorService.pushSettings(applicationContext)
+            if (configStore.load().shouldMonitor) AgentsMonitorService.reconcile(applicationContext)
+            refresh()
+        },
         // Quiet has the one store key (R74); it is not part of what agentd is told.
         onQuiet = { quiet ->
             configStore.setQuiet(quiet)
@@ -176,6 +184,8 @@ class AgentsSettingsActivity : ComponentActivity() {
             notificationsOff = config.shouldMonitor && !NotificationManagerCompat.from(this).areNotificationsEnabled(),
             computers = computerRows(config),
             alerts = configStore.alertSettings(),
+            pairingTtlDays = configStore.pairingTtlDays(),
+            signedOut = configStore.signedOut(),
             // Observation outranks the flag: some phones keep the real decision in their own power
             // manager and leave the platform's answer at false forever, so a green row on a phone
             // that demonstrably froze this app would be the screen lying about what it reports.

@@ -66,4 +66,12 @@ class SettingsScreenTest {
         )
         assertEquals(LinkTone.WARN, linkLine(ProviderConnectionState(ConnectionState.CONNECTING), emptyList()).tone)
     }
+
+    @Test
+    fun signed_out_line_is_exact_and_names_the_next_step() {
+        assertEquals(
+            "Signed out of Desk — not used for 14 days. Add it again.",
+            SettingsCopy.signedOut("Desk", 14),
+        )
+    }
 }
