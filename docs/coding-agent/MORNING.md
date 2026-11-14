@@ -8,7 +8,10 @@ The full trace lives in the SDD ledgers under `.superpowers/sdd/*/progress.md` (
 - **Plan 1 (laptop, agentd + plugins):** DONE on branch `rokid-coder/plan-1`, head `98e50c91`. agentd tests pass 375/375.
   - Every task was reviewed, followed by a final whole-branch review and a Codex sol diff review.
   - A live smoke test ran on Haiku and luna: `docs/coding-agent/claude/plan/2026-11-14-plan-1-smoke.md`.
-- **Plan 2 (phone + glasses):** the plan has been reviewed 3× by Codex and is ready. Execution is on branch `rokid-coder/plan-2`; see the progress note at the end of this file.
+- **Plan 2 (phone + glasses):** DONE (device-free) on branch `rokid-coder/plan-2`, head `6e7e0395`. Task 13 (phone-hub) is DEFERRED because `../CxrGlobal` is missing.
+  - Tests: Agents plugin 345/345, agentd 441/441, shared 460, bus-client 151. glasses-hub is 974/976; the 2 failures are pre-existing `GlassesFileStoreTest` ones, not ours.
+  - Every task was reviewed, with fix rounds where needed. Then a final whole-branch review, a Codex sol diff review, one fix wave and a re-review.
+  - **Nothing has run on a device yet.** Work through `docs/coding-agent/claude/plan/2026-11-14-plan-2-device-checklist.md` (50 items).
 - **Plan 3 (`rk` launchers):** the plan has been reviewed 3× by Codex and is ready. It runs after Plan 2, on `rokid-coder/plan-3`.
 
 ## Needs you: actions
@@ -48,5 +51,28 @@ The full trace lives in the SDD ledgers under `.superpowers/sdd/*/progress.md` (
     - the `pair` window also opening for wss-only pairing
     - a local DoS on the TLS sniffer
 
-## Plan 2/3 progress
+## Plan 2 decisions to review (ledger `.superpowers/sdd/2026-11-14-plan-2-phone-glasses/progress.md`, R71–R128)
+
+**Safety and security** (most important):
+- **R96/R104/R109:** one card on screen at a time. Taps only reach the card you can see, and the tap guard re-arms after every alert band.
+- **R114/R120:** the link where agentd dials the phone is mutual TLS, and the phone pins agentd's cert.
+- **R121:** the phone trusts a new computer only inside the "Add a computer" window. There is no silent first-use trust.
+- **R123:** the voice confirm shows everything that will be sent, at most 960 characters. Anything longer is refused, never cut.
+- **R125/R128:** approvals show the actual command first. If agentd had to cut the command, there is no Allow on the glasses.
+- **R126:** the phone steers only when agentd's `hello_ack` says `steering: true`. A rotated steer shows "Re-pair to allow approvals".
+
+**Behaviour:**
+- **R83:** an alert raised while no phone is linked arrives as new, with sound.
+- **R92:** no v1 or v2 double alert.
+- **R101:** safety state is shown on the board and menu, not in brief notices.
+- **R111:** the phone owns the settings.
+- **R112:** the CLI is `agentd`.
+
+**UI:**
+- **R88/R89/R90:** board tags, the file name kept on long paths, and an immediately updated "+N waiting".
+- **R95/R97:** wording.
+
+**Known interim (R33/R47):** until phone-hub Task 13, an alert you never touch gets no spoken reminder.
+
+## Plan 3 progress
 (updated at the end of the run)
