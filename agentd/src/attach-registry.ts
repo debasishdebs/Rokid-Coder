@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { isPidAlive } from "./launcher/claude-sessions";
 import { sessionKeyOf, type SessionKey } from "./protocol-v2";
 import type { AgentProvider, Logger } from "./types";
 
@@ -10,6 +11,16 @@ export interface AttachedEntry {
   id: string;
   mode: SessionMode;
   attachedAt: number;
+}
+
+/**
+ * `/rokid:off` on a launcher-bound session (R51). While `childPid` lives, no
+ * launcher may bind `key` again; `/rokid:on` for the session clears it.
+ */
+export interface ExplicitDetach {
+  key: SessionKey;
+  launcherId: string;
+  childPid: number;
 }
 
 export interface AttachChange {
@@ -60,6 +71,24 @@ function parseEntry(value: unknown): AttachedEntry | undefined {
   };
 }
 
+function parseExplicitDetach(value: unknown): ExplicitDetach | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.key !== "string" ||
+    !/^(claude|codex):./.test(record.key) ||
+    typeof record.launcherId !== "string" ||
+    record.launcherId.length === 0 ||
+    !Number.isInteger(record.childPid) ||
+    (record.childPid as number) <= 0
+  ) {
+    return undefined;
+  }
+  return { key: record.key as SessionKey, launcherId: record.launcherId, childPid: record.childPid as number };
+}
+
 /**
  * The opt-in list: only a session recorded here sends anything to the phone,
  * gets output forwarded, or is eligible for approvals. Identity is the exact
@@ -67,6 +96,7 @@ function parseEntry(value: unknown): AttachedEntry | undefined {
  */
 export class AttachRegistry {
   private readonly entries = new Map<SessionKey, AttachedEntry>();
+  private readonly explicitDetaches = new Map<SessionKey, ExplicitDetach>();
   private readonly listeners = new Set<AttachChangeListener>();
   private readonly file: string;
   private readonly now: () => number;
@@ -95,6 +125,9 @@ export class AttachRegistry {
       attachedAt: existing?.attachedAt ?? this.now(),
     };
     this.entries.set(key, entry);
+    // Opting back in is what ends an explicit detach.
+    const detached = this.explicitDetaches.get(key);
+    this.explicitDetaches.delete(key);
     try {
       this.persist();
     } catch (error) {
@@ -103,6 +136,9 @@ export class AttachRegistry {
         this.entries.set(key, existing);
       } else {
         this.entries.delete(key);
+      }
+      if (detached) {
+        this.explicitDetaches.set(key, detached);
       }
       throw error;
     }
@@ -116,14 +152,8 @@ export class AttachRegistry {
       return;
     }
     this.entries.delete(key);
-    try {
-      this.persist();
-    } catch (error) {
-      // Detaching is the closed direction: apply it in memory regardless.
-      this.logger?.error("attach_registry_persist_failed", {
-        reason: error instanceof Error ? error.message : String(error),
-      });
-    }
+    // Detaching is the closed direction: apply it in memory regardless.
+    this.persistOrLog();
     this.emit({ kind: "detached", entry: { ...entry } });
   }
 
@@ -137,6 +167,48 @@ export class AttachRegistry {
 
   list(): AttachedEntry[] {
     return [...this.entries.values()].map((entry) => ({ ...entry }));
+  }
+
+  /** Records an explicit detach. Like detach, it holds in memory even if it cannot be saved. */
+  recordExplicitDetach(entry: ExplicitDetach): void {
+    this.explicitDetaches.set(entry.key, { ...entry });
+    this.persistOrLog();
+  }
+
+  explicitDetach(key: SessionKey): ExplicitDetach | undefined {
+    const entry = this.explicitDetaches.get(key);
+    return entry ? { ...entry } : undefined;
+  }
+
+  dropExplicitDetach(key: SessionKey): void {
+    if (this.explicitDetaches.delete(key)) {
+      this.persistOrLog();
+    }
+  }
+
+  /**
+   * Startup: launcher mode exists only with a live binding, and no launcher is
+   * connected yet, so every launcher session is plugin until its launcher
+   * rebinds. Explicit detaches whose launcher child is gone are dropped. No
+   * change events: nothing is listening yet, and nothing was attached or detached.
+   */
+  reconcileLaunchers(isAlive: (pid: number) => boolean = isPidAlive): void {
+    let changed = false;
+    for (const [key, entry] of this.entries) {
+      if (entry.mode === "launcher") {
+        this.entries.set(key, { ...entry, mode: "plugin" });
+        changed = true;
+      }
+    }
+    for (const [key, entry] of this.explicitDetaches) {
+      if (!isAlive(entry.childPid)) {
+        this.explicitDetaches.delete(key);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.persistOrLog();
+    }
   }
 
   onChange(listener: AttachChangeListener): () => void {
@@ -191,15 +263,42 @@ export class AttachRegistry {
         dropped += 1;
       }
     }
+    const detaches = Array.isArray(record.explicitDetaches) ? record.explicitDetaches : [];
+    for (const raw of detaches) {
+      const entry = parseExplicitDetach(raw);
+      if (entry) {
+        this.explicitDetaches.set(entry.key, entry);
+      } else {
+        dropped += 1;
+      }
+    }
     if (dropped > 0) {
       this.logger?.warn("attach_registry_corrupt", { reason: "invalid_entries", dropped });
+    }
+  }
+
+  private persistOrLog(): void {
+    try {
+      this.persist();
+    } catch (error) {
+      this.logger?.error("attach_registry_persist_failed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
   private persist(): void {
     mkdirSync(path.dirname(this.file), { recursive: true });
     const temp = `${this.file}.${process.pid}.tmp`;
-    const body = `${JSON.stringify({ version: FILE_VERSION, entries: this.list() }, null, 2)}\n`;
+    const body = `${JSON.stringify(
+      {
+        version: FILE_VERSION,
+        entries: this.list(),
+        explicitDetaches: [...this.explicitDetaches.values()],
+      },
+      null,
+      2,
+    )}\n`;
     try {
       writeFileSync(temp, body, { mode: 0o600 });
       renameSync(temp, this.file);

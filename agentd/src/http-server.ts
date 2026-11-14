@@ -77,6 +77,9 @@ export class HookHttpServer {
           // Only the forwarder's header names the provider. Whatever the body
           // claims for itself is dropped, so a payload cannot pick its own.
           delete payload.__provider;
+          // Hooks never bind or steer a launcher session (R48): only the
+          // launcher socket speaks for a launcher.
+          delete payload.launcherId;
           const provider = request.headers["x-rokid-provider"];
           if (provider === "claude" || provider === "codex") {
             payload.__provider = provider;

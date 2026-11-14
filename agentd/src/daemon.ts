@@ -14,6 +14,8 @@ import { CodexMonitor } from "./codex/monitor";
 import { DEFAULT_WAIT_LIMIT_SEC, configPath, defaultStateDir, ensureConfig } from "./config";
 import { claudeSessionGone, discoverRecentSessions } from "./discovery";
 import { HookHttpServer } from "./http-server";
+import { claudeSessionsDir } from "./launcher/claude-sessions";
+import { LauncherHub } from "./launcher/launcher-hub";
 import { FileLogger } from "./logger";
 import { SessionStore } from "./session-store";
 import { DEFAULT_STOP_CONTINUATION_CAP, StopWait } from "./stop-wait";
@@ -58,6 +60,8 @@ export interface RunningDaemon {
   phoneV2: PhoneV2;
   /** Held tool approvals; each lives for the wait limit Y and ends with its alert. */
   approvals: ApprovalManager;
+  /** The `rk` launchers' socket and the session bindings it proves. */
+  launchers: LauncherHub;
   isTailing(sessionId: string): boolean;
   /** The once-a-minute housekeeping: stalled sessions, and approve-all for Claude sessions that are gone. */
   sweepSessions(): Promise<void>;
@@ -80,6 +84,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     file: path.join(config.rokidCoder.stateDir, "attached.json"),
     logger,
   });
+  // No launcher has reconnected yet, so no session can be in launcher mode.
+  attachRegistry.reconcileLaunchers();
   const approvalPolicy = new ApprovalPolicy({
     file: path.join(config.rokidCoder.stateDir, "approve-all.json"),
     logger,
@@ -130,6 +136,12 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     isAttached: (provider, id) => attachRegistry.isAttached(provider, id),
   });
   const claudeDir = process.env.NEXUS_AGENTD_CLAUDE_DIR || path.join(homedir(), ".claude");
+  const launchers = new LauncherHub({
+    configDir: config.rokidCoder.stateDir,
+    claudeSessionsDir: claudeSessionsDir(claudeDir),
+    logger,
+    registry: attachRegistry,
+  });
   const discovered = await discoverRecentSessions(path.join(claudeDir, "projects"), logger);
   for (const session of discovered) {
     sessions.addDiscovered(session);
@@ -584,10 +596,12 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     link.start();
     codex.start();
     phone.start();
+    await launchers.start();
   } catch (error) {
     clearInterval(heartbeatTimer);
     phone.stop();
     stopListeningForDetach();
+    await launchers.stop();
     stopWait.dispose();
     questionRelay.dispose();
     link.stop();
@@ -618,6 +632,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     codex,
     phoneV2: phone,
     approvals,
+    launchers,
     takeResetNotices,
     isTailing: (sessionId) => tailManager.isTailing(sessionId),
     sweepSessions,
@@ -628,6 +643,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       stopped = true;
       clearInterval(heartbeatTimer);
       stopListeningForDetach();
+      await launchers.stop();
       phone.stop();
       await codex.stop();
       approvals?.dispose();
