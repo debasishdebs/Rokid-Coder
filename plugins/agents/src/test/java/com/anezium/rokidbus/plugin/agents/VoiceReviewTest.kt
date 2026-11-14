@@ -252,28 +252,27 @@ class VoiceReviewTest {
     }
 
     @Test
-    fun read_all_offered_when_body_rows_exceed_viewport_even_below_old_threshold() {
-        // 100 words, about 600 characters: under the old 960-character budget, and no condensing at 250 words.
-        val said = words(100)
-        assertTrue(said.length < 720)
-        val run = heard(said)
-        val view = VoiceCard.view(VoiceKind.FOLLOWUP, run.capture.state)
+    fun read_all_offered_whenever_body_exceeds_one_row() {
+        // No viewport is measured, so only one BODY row is sure to be seen whole: a second one offers the reader.
+        val two = words(30)
+        assertEquals(2, VoiceCard.bodyRows(two).size)
+        val view = VoiceCard.view(VoiceKind.FOLLOWUP, VoiceCapture.State.Heard(two))
         assertNull(view.lead)
-
-        // Wrapped as the HUD draws BODY rows, at most three lines each, it needs more rows than the card shows at once.
-        val needed = VoiceCard.bodyRows(said)
-        assertTrue(needed.size > VoiceCard.BODY_ROWS)
         assertTrue(view.rows.any { it.act == VoiceAct.READ_ALL })
-        assertEquals(said, view.readAll)
+        assertEquals(two, view.readAll)
 
-        // What the card draws stays within its rows, each one within three HUD lines; the reader has the rest.
+        // A longer reply too, and what the card draws stays within its rows, each one within three HUD lines.
+        val run = heard(words(100))
+        assertEquals(words(100), VoiceCard.view(VoiceKind.FOLLOWUP, run.capture.state).readAll)
         val body = bodyText(run)
         assertTrue(body.size <= VoiceCard.BODY_ROWS)
         assertTrue(body.all { VoiceCard.bodyRows(it).size == 1 })
         assertTrue(body.last().endsWith("…"))
 
-        // A reply the card shows whole has no reader to open.
-        val short = VoiceCard.view(VoiceKind.FOLLOWUP, VoiceCapture.State.Heard(words(10)))
+        // A reply that fits one row is all on the card, with no reader to open.
+        val one = words(10)
+        assertEquals(1, VoiceCard.bodyRows(one).size)
+        val short = VoiceCard.view(VoiceKind.FOLLOWUP, VoiceCapture.State.Heard(one))
         assertNull(short.readAll)
         assertTrue(short.rows.none { it.act == VoiceAct.READ_ALL })
     }

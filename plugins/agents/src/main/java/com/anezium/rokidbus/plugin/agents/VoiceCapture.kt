@@ -209,12 +209,15 @@ data class VoiceView(
  * and that card opens on `Cancel`.
  */
 object VoiceCard {
-    /**
-     * The BODY rows, its lead row included, the heard card is sure to show at once over its selected
-     * row. The HUD windows a card's rows around the selection, by height, so more may fit; a reply
-     * needing more rows than this offers `Read all`.
-     */
+    /** The BODY rows, its lead row included, the heard card draws of a reply at most. */
     const val BODY_ROWS = 3
+
+    /**
+     * The BODY rows of a reply the wearer is sure to see whole. The HUD windows a card's rows around the
+     * selection by a height no plugin can measure, so only one is certain; a reply needing more offers
+     * `Read all`.
+     */
+    const val SURE_BODY_ROWS = 1
     const val ROW_CHARS = 240
 
     /** The HUD wraps a BODY row to at most this many lines and ellipsizes the rest (SurfaceHudView). */
@@ -260,13 +263,16 @@ object VoiceCard {
         return rows.flatMap { it.chunked(ROW_CHARS) }
     }
 
-    /** A heard reply as the card draws it: [lead] if it was condensed, [body] to fit the rows, [readAll] if [body] is not all of it. */
+    /**
+     * A heard reply as the card draws it: [lead] if it was condensed, [body] to fit the rows, and [readAll]
+     * whenever the reply needs more than [SURE_BODY_ROWS] rows, whether or not [body] holds all of it.
+     */
     data class Review(val lead: String?, val body: String, val readAll: String?)
 
     /**
      * What the card shows of [text] (U4/U13): the condensed display of it, under a lead row saying so. A display
-     * needing more [bodyRows] than the card is sure to show at once is cut to a preview that fits them, and the
-     * whole display is offered to the reader.
+     * needing more [bodyRows] than the wearer is sure to see is offered whole to the reader, and one needing more
+     * than the card draws is cut to a preview that fits them.
      */
     fun review(text: String, wordLimit: Int): Review {
         val shown = VoiceCondense.condense(text, wordLimit)
@@ -275,9 +281,11 @@ object VoiceCard {
         } else {
             null
         }
+        val needed = bodyRows(shown.display).size
+        if (needed <= SURE_BODY_ROWS) return Review(lead, shown.display, readAll = null)
         val room = BODY_ROWS - (lead?.let { bodyRows(it).size } ?: 0)
-        if (bodyRows(shown.display).size <= room) return Review(lead, shown.display, readAll = null)
-        return Review(lead, preview(shown.display, room), readAll = shown.display)
+        val body = if (needed <= room) shown.display else preview(shown.display, room)
+        return Review(lead, body, readAll = shown.display)
     }
 
     /** The most words of [display] that, with a closing `…`, still fit in [rows] rows. */
