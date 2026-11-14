@@ -5,22 +5,111 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const http = require("node:http");
+const { execFile } = require("node:child_process");
+const { PinStore } = require("../dist/tls.js");
 const { withTempDir } = require("./helpers/daemon.js");
 const { RK, until, waitDead, rkEnv, inPty, killLive, readJson, sttyState } = require("./helpers/rk.js");
 
 afterEach(killLive);
 
-const HINT = "Type rokid:on in Codex to attach this session.";
+const NEXT_STEP = "type rokid:on inside Codex to show this session on the glasses";
 const SIG = os.constants.signals;
+const plain = (text) => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+
+/** A stand-in agentd: answers GET /health on the port rk will probe. Close it in finally. */
+async function fakeAgentd(env) {
+  const server = http.createServer((req, res) => {
+    res.writeHead(req.url === "/health" ? 200 : 404, { "content-type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise((resolve) => server.listen(Number(env.NEXUS_AGENTD_HTTP_PORT), "127.0.0.1", resolve));
+  return { close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+/** Records one trusted phone in the pin file rk reads. */
+function pairPhone(configDir) {
+  new PinStore(path.join(configDir, "tls", "phone-pins.json")).add("AB".repeat(32));
+}
+
+/** rk codex with stderr on a pipe, so the hint is seen the way a script or log would see it. */
+function runPiped(env) {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [RK, "codex"], { env, timeout: 15000 }, (error, stdout, stderr) =>
+      resolve({ code: error ? error.code : 0, stdout, stderr }),
+    );
+  });
+}
 
 test("path_b_prints_attach_hint", async () => {
   await withTempDir(async (dir) => {
     const { env } = await rkEnv(dir);
     const run = inPty(process.execPath, [RK, "codex"], env);
     assert.deepEqual(await run.exited, { code: 0, signal: null });
-    assert.equal(run.out.split(HINT).length - 1, 1, run.out);
-    assert.ok(run.out.indexOf(HINT) < run.out.indexOf("fake-codex ready"), "the hint comes before Codex starts");
-    assert.equal(run.out.includes("Rokid-Coder launcher: attached"), false, "Path B never claims a binding");
+    const out = plain(run.out);
+    assert.equal(out.split(NEXT_STEP).length - 1, 1, out);
+    assert.ok(out.indexOf(NEXT_STEP) < out.indexOf("fake-codex ready"), "the hint comes before Codex starts");
+    assert.equal(out.includes("Rokid-Coder launcher: attached"), false, "Path B never claims a binding");
+  });
+});
+
+test("rk_codex_prints_next_step_hint", async () => {
+  await withTempDir(async (dir) => {
+    const { env, configDir } = await rkEnv(dir);
+    pairPhone(configDir);
+    const agentd = await fakeAgentd(env);
+    try {
+      const result = await runPiped(env);
+      assert.equal(result.code, 0);
+      // Plain text on a pipe: no colour codes, and on stderr so stdout stays Codex's.
+      assert.equal(/\x1b/.test(result.stderr), false, JSON.stringify(result.stderr));
+      assert.equal(result.stdout.includes("rokid:on"), false);
+      const lines = result.stderr.trimEnd().split("\n");
+      assert.ok(lines.length >= 3 && lines.length <= 6, result.stderr);
+      assert.ok(result.stderr.includes(NEXT_STEP), result.stderr);
+      assert.ok(/rokid:off[^\n]*rokid:status/.test(result.stderr), "one line on rokid:off and rokid:status");
+      assert.equal(result.stderr.includes("agentd run"), false, "agentd is up: no start hint");
+      assert.equal(result.stderr.includes("agentd pair"), false, "a phone is paired: no pair hint");
+    } finally {
+      await agentd.close();
+    }
+  });
+});
+
+test("rk_codex_hint_mentions_agentd_run_when_unreachable", async () => {
+  await withTempDir(async (dir) => {
+    const { env, configDir } = await rkEnv(dir); // the hook port has nothing listening
+    pairPhone(configDir);
+    const result = await runPiped(env);
+    assert.equal(result.code, 0, "Codex still starts");
+    assert.ok(/agentd isn't running[^\n]*agentd run/.test(result.stderr), result.stderr);
+    assert.equal(result.stderr.includes("agentd pair"), false);
+    assert.ok(result.stderr.trimEnd().split("\n").length <= 6, result.stderr);
+  });
+});
+
+test("rk_codex_hint_mentions_pair_when_unpaired", async () => {
+  await withTempDir(async (dir) => {
+    const { env } = await rkEnv(dir); // no pin file under the config dir
+    const agentd = await fakeAgentd(env);
+    try {
+      const result = await runPiped(env);
+      assert.equal(result.code, 0, "Codex still starts");
+      assert.ok(/No phone is paired[^\n]*agentd pair/.test(result.stderr), result.stderr);
+      assert.equal(result.stderr.includes("agentd run"), false);
+      assert.ok(result.stderr.trimEnd().split("\n").length <= 6, result.stderr);
+    } finally {
+      await agentd.close();
+    }
+  });
+});
+
+test("rk_codex_hint_is_bold_only_on_a_terminal", async () => {
+  await withTempDir(async (dir) => {
+    const { env } = await rkEnv(dir);
+    const run = inPty(process.execPath, [RK, "codex"], env);
+    assert.deepEqual(await run.exited, { code: 0, signal: null });
+    assert.ok(run.out.includes("\x1b[1mrokid:on\x1b[22m"), JSON.stringify(run.out));
   });
 });
 
