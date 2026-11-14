@@ -331,10 +331,13 @@ object AgentsRuntime {
      * Fed through [eventQueue], so the transport thread never suspends and a slow
      * collector can lose old actions but never a `LinkUp` or `LinkDown`.
      */
-    val events: MutableSharedFlow<AgentdEvent> = MutableSharedFlow(
+    private val _events = MutableSharedFlow<AgentdEvent>(
         replay = 0,
         extraBufferCapacity = 256,
     )
+
+    // Read-only on purpose, unlike the brief's MutableSharedFlow (R81): only eventQueue emits.
+    val events: SharedFlow<AgentdEvent> = _events.asSharedFlow()
 
     private val _link = MutableStateFlow<AgentdLinkState?>(null)
 
@@ -344,7 +347,7 @@ object AgentsRuntime {
     private val eventQueue = AgentdEventQueue(
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
         maxActions = 256,
-        sink = { event -> events.emit(event) },
+        sink = { event -> _events.emit(event) },
         onDropped = { total -> Log.w(LOG_TAG, "agentd events: dropped $total old actions") },
     )
 

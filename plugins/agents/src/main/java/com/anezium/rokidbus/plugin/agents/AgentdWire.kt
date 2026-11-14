@@ -33,6 +33,9 @@ class AgentdWire(private val raw: (String) -> Boolean) {
         object Sent : Result
         object MonitorOnly : Result
         object NoLink : Result
+
+        /** Not one JSON object on one line: nothing was written. */
+        object Refused : Result
     }
 
     /** Called once per authenticated connection, after hello_ack. */
@@ -49,14 +52,14 @@ class AgentdWire(private val raw: (String) -> Boolean) {
     }
 
     /**
-     * [line] must be exactly one JSON object on one line; anything else is a
-     * caller bug and throws [IllegalArgumentException] without writing.
+     * [line] must be exactly one JSON object on one line; anything else is
+     * [Result.Refused], whatever the link.
      *
      * Writes under the lock, so an unbind can never land between the check
      * and the write. [raw] must not block: it hands the line to the transport.
      */
     fun write(line: String): Result {
-        val frame = singleObject(line)
+        val frame = singleObject(line) ?: return Result.Refused
         // Untrimmed: " alert_shown" is not a monitor type, whatever it looks like.
         val steering = (frame.opt("type") as? String)?.let(FrameClass::isSteering) ?: true
         val bytes = frame.toString()
@@ -76,15 +79,12 @@ class AgentdWire(private val raw: (String) -> Boolean) {
         /** Unique across both transports, so a generation names one connection. */
         fun nextGeneration(): Long = generations.incrementAndGet()
 
-        private fun singleObject(line: String): JSONObject {
-            require('\n' !in line && '\r' !in line) { "A frame is one line" }
+        private fun singleObject(line: String): JSONObject? {
+            if ('\n' in line || '\r' in line) return null
             val tokener = JSONTokener(line)
-            val value = runCatching { tokener.nextValue() }.getOrNull()
-            require(value is JSONObject) { "A frame is one JSON object" }
-            require(runCatching { tokener.nextClean() }.getOrNull() == END) {
-                "Nothing may follow the frame"
-            }
-            return value
+            val value = runCatching { tokener.nextValue() }.getOrNull() as? JSONObject ?: return null
+            // Nothing may follow the one object.
+            return value.takeIf { runCatching { tokener.nextClean() }.getOrNull() == END }
         }
 
         private const val END = '\u0000'

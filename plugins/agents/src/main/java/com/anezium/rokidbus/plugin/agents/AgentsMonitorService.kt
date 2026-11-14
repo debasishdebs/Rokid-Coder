@@ -146,10 +146,8 @@ class AgentsMonitorService : Service() {
                 }
             }
             ACTION_SEND_V2 -> {
-                // A line that is not one JSON object is refused by the wire, unsent.
-                intent.getStringExtra(EXTRA_FRAME)?.let { frame ->
-                    runCatching { writeToAgentd(frame) }
-                }
+                // A line that is not one JSON object comes back Refused, unsent.
+                intent.getStringExtra(EXTRA_FRAME)?.let(::writeToAgentd)
             }
             else -> reconcile()
         }
@@ -167,6 +165,7 @@ class AgentsMonitorService : Service() {
 
     private fun combined(results: List<AgentdWire.Result>): AgentdWire.Result = when {
         AgentdWire.Result.Sent in results -> AgentdWire.Result.Sent
+        AgentdWire.Result.Refused in results -> AgentdWire.Result.Refused
         AgentdWire.Result.MonitorOnly in results -> AgentdWire.Result.MonitorOnly
         else -> AgentdWire.Result.NoLink
     }

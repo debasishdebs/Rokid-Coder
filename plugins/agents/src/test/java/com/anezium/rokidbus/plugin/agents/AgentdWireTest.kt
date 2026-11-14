@@ -29,7 +29,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -166,10 +165,10 @@ class AgentdWireTest {
         val action = frameOf("alert_action")
         // agentd splits on newlines: a monitor frame must not carry a steering one past the gate.
         listOf("$shown\n$action", "$shown\r\n$action", "$shown\r$action", "$shown\n").forEach { line ->
-            assertThrows(IllegalArgumentException::class.java) { wire.write(line) }
+            assertEquals(AgentdWire.Result.Refused, wire.write(line))
         }
         wire.bind(2L, secure = true)
-        assertThrows(IllegalArgumentException::class.java) { wire.write("$shown\n$action") }
+        assertEquals(AgentdWire.Result.Refused, wire.write("$shown\n$action"))
         assertTrue(written.isEmpty())
     }
 
@@ -186,11 +185,25 @@ class AgentdWireTest {
             "not json",
             "",
         ).forEach { line ->
-            assertThrows(line, IllegalArgumentException::class.java) { wire.write(line) }
+            assertEquals(line, AgentdWire.Result.Refused, wire.write(line))
         }
         assertTrue(written.isEmpty())
         // Whitespace around the one object is not content.
         assertEquals(AgentdWire.Result.Sent, wire.write("  $shown  "))
+    }
+
+    @Test
+    fun malformed_line_returns_refused_not_throws() {
+        val shown = AgentdProtocolCodec.alertShown("a")
+        val malformed = listOf("not json", "$shown\n$shown", "$shown\r", "$shown trailing", "[$shown]")
+        // Refused whatever the link: unbound, plaintext, trusted.
+        malformed.forEach { line -> assertEquals(line, AgentdWire.Result.Refused, wire.write(line)) }
+        wire.bind(1L, secure = false)
+        malformed.forEach { line -> assertEquals(line, AgentdWire.Result.Refused, wire.write(line)) }
+        wire.bind(2L, secure = true)
+        malformed.forEach { line -> assertEquals(line, AgentdWire.Result.Refused, wire.write(line)) }
+        assertTrue(written.isEmpty())
+        assertEquals(AgentdWire.Result.Sent, wire.write(shown))
     }
 
     @Test
