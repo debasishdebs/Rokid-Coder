@@ -1,0 +1,125 @@
+name: Upstream sync
+
+# Weekly, and by hand: merges upstream Rokid Nexus into vendor/nexus on a fresh
+# upstream-sync/<date> branch (scripts/upstream-sync.sh, 6a's merge-based
+# strategy), runs every suite on exactly that merge commit inside this run, and
+# then takes one action (scripts/upstream-sync-decide.mjs): nothing, a PR, or an
+# upstream-sync issue for a conflict, a suite failure or an error. GitHub runs
+# schedule and workflow_dispatch only from the default branch's copy of this file.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      upstream_url:
+        description: "The upstream repository"
+        type: string
+        default: "https://github.com/Anezium/Rokid-Nexus.git"
+      upstream_ref:
+        description: "The upstream branch or ref to merge"
+        type: string
+        default: "main"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: ${{ inputs.upstream_url || 'https://github.com/Anezium/Rokid-Nexus.git' }}
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.sync.outputs.code }}
+      changed: ${{ steps.sync.outputs.changed }}
+      branch: ${{ steps.sync.outputs.branch }}
+      merge_sha: ${{ steps.sync.outputs.merge_sha }}
+      report: ${{ steps.sync.outputs.report }}
+    steps:
+      # The whole history: git subtree finds the last squashed upstream commit in it.
+      - name: Check out the default branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Merge upstream on a sync branch
+        id: sync
+        run: |
+          set -uo pipefail
+          branch="upstream-sync/$(date -u +%F)"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch" || exit 1
+          bash scripts/upstream-sync.sh --remote "$UPSTREAM_URL" --ref "$UPSTREAM_REF" > "$RUNNER_TEMP/sync.log" 2>&1
+          code=$?
+          cat "$RUNNER_TEMP/sync.log"
+          node scripts/upstream-sync-decide.mjs outcome --code "$code" --log "$RUNNER_TEMP/sync.log" >> "$GITHUB_OUTPUT"
+
+      # The suites check the merge out by its SHA, so it is pushed first. The branch is ours alone:
+      # a second run on the same day replaces it.
+      - name: Push the sync branch
+        if: ${{ steps.sync.outputs.changed == 'true' }}
+        env:
+          BRANCH: ${{ steps.sync.outputs.branch }}
+        run: git push --force origin "HEAD:refs/heads/$BRANCH"
+
+  suites:
+    needs: sync
+    if: ${{ needs.sync.outputs.changed == 'true' }}
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ needs.sync.outputs.merge_sha }}
+
+  upstream:
+    needs: sync
+    if: ${{ needs.sync.outputs.changed == 'true' }}
+    uses: ./.github/workflows/upstream-validation.yml
+    secrets: inherit
+    with:
+      ref: ${{ needs.sync.outputs.merge_sha }}
+
+  report:
+    needs: [sync, suites, upstream]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v6
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Open the PR or the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BASE_BRANCH: ${{ github.ref_name }}
+          SYNC_RESULT: ${{ needs.sync.result }}
+          SYNC_CODE: ${{ needs.sync.outputs.code }}
+          SYNC_CHANGED: ${{ needs.sync.outputs.changed }}
+          SYNC_BRANCH: ${{ needs.sync.outputs.branch }}
+          SYNC_MERGE_SHA: ${{ needs.sync.outputs.merge_sha }}
+          SYNC_REPORT: ${{ needs.sync.outputs.report }}
+          SUITES_RESULT: ${{ needs.suites.result }}
+          SUITES_SHAS: ${{ needs.suites.outputs.product_shas }}
+          UPSTREAM_RESULT: ${{ needs.upstream.result }}
+          UPSTREAM_SHAS: ${{ needs.upstream.outputs.product_shas }}
+        run: node scripts/upstream-sync-decide.mjs report

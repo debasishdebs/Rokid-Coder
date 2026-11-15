@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Merge upstream Nexus into vendor/nexus (git subtree, squashed).
 #
-#   scripts/upstream-sync.sh [remote] [branch]     defaults: upstream main
+#   scripts/upstream-sync.sh [--remote <name or url>] [--ref <ref>]   defaults: upstream main
+#   scripts/upstream-sync.sh [remote] [branch]                        the same, positionally
 #
-# Exit 0: merged cleanly. The caller then runs every suite before opening a PR.
+# Exit 0: merged cleanly, or nothing new upstream. After a merge the last line
+#         is MERGE_SHA=<sha>; the caller then runs every suite on that commit
+#         before opening a PR. With nothing new, no MERGE_SHA line is printed.
 # Exit 2: the merge conflicts. It is aborted, and the conflicted files and the
 #         vendor/nexus/PATCHES.md rows that touch them are printed, for an issue.
 # Exit 3: refused before pulling: the tree or index is dirty, or a merge,
@@ -11,8 +14,23 @@
 # Exit 1: anything else (fetch failure).
 set -uo pipefail
 
-remote="${1:-upstream}"
-branch="${2:-main}"
+remote="upstream"
+branch="main"
+positional=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --remote | --ref)
+      [ "$#" -ge 2 ] || { echo "upstream-sync: $1 needs a value." >&2; exit 1; }
+      if [ "$1" = --remote ]; then remote="$2"; else branch="$2"; fi
+      shift 2
+      ;;
+    -*) echo "upstream-sync: unknown option $1." >&2; exit 1 ;;
+    *) positional+=("$1"); shift ;;
+  esac
+done
+[ "${#positional[@]}" -le 2 ] || { echo "upstream-sync: at most a remote and a branch." >&2; exit 1; }
+[ "${#positional[@]}" -ge 1 ] && remote="${positional[0]}"
+[ "${#positional[@]}" -ge 2 ] && branch="${positional[1]}"
 prefix="vendor/nexus"
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -35,8 +53,11 @@ fi
 # Read the recorded patches before the merge can touch the tree.
 patches="$(git show "HEAD:$prefix/PATCHES.md" 2>/dev/null || true)"
 
+before="$(git rev-parse HEAD)"
 if git subtree pull --prefix="$prefix" "$remote" "$branch" --squash \
   -m "Merge upstream Nexus $branch into $prefix"; then
+  after="$(git rev-parse HEAD)"
+  if [ "$after" != "$before" ]; then echo "MERGE_SHA=$after"; fi
   exit 0
 fi
 

@@ -1,0 +1,12 @@
+# The release's assets: the single list release.yml's draft and publish-release read.
+#   <release asset> | <kind> | <producing job or workflow> / <Actions artifact it is in>
+# payload: downloaded from that artifact of the release.yml run. generated: made by draft.
+# {version} is the version the rc tag names. If 6b's artifact names change, only this file
+# (and the checklist header) changes.
+rokid-coder-{version}.apk | payload | release.yml android / android-release
+rokid-coder-{version}.aab | payload | release.yml android / android-release
+rokid-coder-glasses-{version}.apk | payload | release.yml android / android-release
+rokid-coder-{version}-macos-arm64.dmg | payload | macos-installer.yml / macos-pkg-arm64
+rokid-coder-{version}-macos-x64.dmg | payload | macos-installer.yml / macos-pkg-x64
+rokid-coder-{version}-windows-x64.exe | payload | windows-installer.yml / windows-exe
+SHA256SUMS | generated | release.yml draft

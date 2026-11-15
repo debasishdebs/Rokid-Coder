@@ -22,10 +22,24 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
+      ref:
+        description: "The commit to build and test (a SHA); defaults to the event's commit"
+        type: string
+        default: ""
+      version:
+        description: "The version the caller releases: the build fails unless computer/package.json says it"
+        type: string
+        default: ""
       skip-bundles:
         description: "The caller already ran bundles.yml in this run (its bundle-linux-x64 artifact is used)"
         type: boolean
         default: false
+    outputs:
+      product_shas:
+        description: "job=commit, for the commit each job built or tested"
+        value: |
+          ${{ jobs.bundles.outputs.product_shas }}
+          windows-installer=${{ jobs.windows-installer.outputs.sha }}
 
 permissions:
   contents: read
@@ -34,6 +48,8 @@ jobs:
   bundles:
     if: ${{ !inputs.skip-bundles }}
     uses: ./.github/workflows/bundles.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
 
   windows-installer:
     name: Windows installer (Pester, NSIS)
@@ -41,6 +57,8 @@ jobs:
     if: ${{ !cancelled() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') }}
     # Pinned: its NetSecurity module carries the Hyper-V firewall cmdlets the metadata test binds against.
     runs-on: windows-2025
+    outputs:
+      sha: ${{ steps.tested.outputs.sha }}
     env:
       PESTER_VERSION: "5.7.1"
       NSIS_VERSION: "3.10"
@@ -50,6 +68,13 @@ jobs:
     steps:
       - name: Check out the revision
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Record the tested commit
+        id: tested
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up the pinned Node
         uses: actions/setup-node@v4
@@ -72,9 +97,12 @@ jobs:
 
       - name: Check the digest, the validation and the archive's layout
         id: bundle
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
           $version = node -p "require('./computer/package.json').version"
+          if ($env:EXPECTED_VERSION -and $version -ne $env:EXPECTED_VERSION) { throw "computer/package.json is $version, not the release's $env:EXPECTED_VERSION" }
           $archive = "rokid-coder-bundle-$version-linux-x64.tar.gz"
           $path = Join-Path 'bundle' $archive
           $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()

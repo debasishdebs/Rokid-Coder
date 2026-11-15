@@ -27,6 +27,15 @@ on:
       - ".github/workflows/macos-installer.yml"
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: "The commit to build and install-test (a SHA); defaults to the event's commit"
+        type: string
+        default: ""
+      version:
+        description: "The version the caller releases: the build fails unless the bundle (computer/package.json) says it"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -43,6 +52,8 @@ jobs:
   bundles:
     name: Bundles
     uses: ./.github/workflows/bundles.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
 
   package:
     name: Package ${{ matrix.arch }}
@@ -66,6 +77,8 @@ jobs:
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Set up the pinned Node
         uses: actions/setup-node@v4
@@ -96,6 +109,15 @@ jobs:
           set -euo pipefail
           node installer/bundle/verify-bundle.mjs "$BUNDLE" --static
           "$BUNDLE/bin/agentd" selfcheck --require-bundle
+
+      - name: Check the version is the release's
+        if: ${{ inputs.version }}
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version=$(plutil -extract version raw -o - "$BUNDLE/bundle.json")
+          [ "$version" = "$EXPECTED_VERSION" ] || { echo "the bundle is $version, not the release's $EXPECTED_VERSION"; exit 1; }
 
       - name: Build the release package and the two upgrade-test builds
         run: |
@@ -144,6 +166,8 @@ jobs:
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Fetch the package
         uses: actions/download-artifact@v4
@@ -261,6 +285,8 @@ jobs:
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Fetch the package
         uses: actions/download-artifact@v4
@@ -337,6 +363,8 @@ jobs:
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Check out 0.8.0
         uses: actions/checkout@v6
@@ -438,6 +466,8 @@ jobs:
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Check out 0.8.0
         uses: actions/checkout@v6
@@ -542,6 +572,8 @@ jobs:
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       # Only for the fake CLIs; the product runs on its bundled node.
       - name: Set up Node 22 for the fake CLIs

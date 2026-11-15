@@ -32,6 +32,20 @@ on:
       - ".github/workflows/bundles.yml"
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: "The commit to bundle (a SHA); defaults to the event's commit"
+        type: string
+        default: ""
+    outputs:
+      product_shas:
+        description: "job=commit, for the commit each job built or checked"
+        value: |
+          bundle-darwin-arm64=${{ jobs.darwin.outputs.darwin-arm64 }}
+          bundle-darwin-x64=${{ jobs.darwin.outputs.darwin-x64 }}
+          bundle-linux-build=${{ jobs.linux-build.outputs.sha }}
+          bundle-linux-clean-container-0=${{ jobs.linux-clean-container.outputs.container-0 }}
+          bundle-linux-clean-container-1=${{ jobs.linux-clean-container.outputs.container-1 }}
 
 permissions:
   contents: read
@@ -49,6 +63,9 @@ jobs:
           - target: darwin-x64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
+    outputs:
+      darwin-arm64: ${{ steps.tested.outputs.darwin-arm64 }}
+      darwin-x64: ${{ steps.tested.outputs.darwin-x64 }}
     env:
       TARGET: ${{ matrix.target }}
       MACOSX_DEPLOYMENT_TARGET: "13.0"
@@ -59,6 +76,12 @@ jobs:
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Record the built commit
+        id: tested
+        run: echo "$TARGET=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up the pinned Node
         uses: actions/setup-node@v4
@@ -147,9 +170,16 @@ jobs:
         working-directory: computer
     outputs:
       archive: ${{ steps.extract.outputs.archive }}
+      sha: ${{ steps.tested.outputs.sha }}
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Record the built commit
+        id: tested
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up the pinned Node
         uses: actions/setup-node@v4
@@ -200,11 +230,22 @@ jobs:
       matrix:
         image: ["ubuntu:22.04", "ubuntu:24.04"]
     runs-on: ubuntu-22.04
+    outputs:
+      container-0: ${{ steps.tested.outputs.container-0 }}
+      container-1: ${{ steps.tested.outputs.container-1 }}
     env:
       ARCHIVE: ${{ needs.linux-build.outputs.archive }}
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Record the checked commit
+        id: tested
+        env:
+          CELL: container-${{ strategy.job-index }}
+        run: echo "$CELL=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Download the archive
         uses: actions/download-artifact@v4

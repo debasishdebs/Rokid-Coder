@@ -5,6 +5,9 @@ name: Emulator
 # plugin runtime, store, updater, Patcher, cloud speech or kadb. The emulator job installs the
 # phone app and an unrelated app signed with another key, and proves the stranger can neither
 # bind nor start any of the phone app's services.
+#
+# release.yml calls this with `release-artifact`: then only release-install runs, against the
+# exact signed APKs and AAB release.yml's android job uploaded.
 
 on:
   push:
@@ -22,18 +25,49 @@ on:
       - "settings.gradle.kts"
       - ".github/workflows/emulator.yml"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The commit to test (a SHA); defaults to the event's commit"
+        type: string
+        default: ""
+      release-artifact:
+        description: "An artifact of this run holding the signed release APKs and AAB: install-test those instead"
+        type: string
+        default: ""
+    outputs:
+      product_shas:
+        description: "job=commit for each job of a test run"
+        value: |
+          emulator-release-checks=${{ jobs.release-checks.outputs.sha }}
+          emulator-unrelated-caller=${{ jobs.unrelated-caller.outputs.sha }}
+          emulator-coder-service=${{ jobs.coder-service.outputs.sha }}
+      dependency_shas:
+        description: "job=commit for the CxrGlobal checkouts"
+        value: |
+          emulator-release-checks-cxrglobal=${{ jobs.release-checks.outputs.cxrglobal }}
+          emulator-unrelated-caller-cxrglobal=${{ jobs.unrelated-caller.outputs.cxrglobal }}
+          emulator-coder-service-cxrglobal=${{ jobs.coder-service.outputs.cxrglobal }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: emulator-${{ github.ref }}
-  cancel-in-progress: true
+  # A test run and release.yml's install run of one commit are separate groups.
+  group: emulator-${{ inputs.ref || github.ref }}-${{ inputs.release-artifact }}
+  cancel-in-progress: ${{ !inputs.ref }}
+
+env:
+  CXRGLOBAL_SHA: 395be12ef69cf7d46d67c526168b78392a0b5484
 
 jobs:
   release-checks:
     name: Phone app release manifest, dex and dependency checks
+    if: ${{ !inputs.release-artifact }}
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.tested.outputs.sha }}
+      cxrglobal: ${{ steps.tested.outputs.cxrglobal }}
     defaults:
       run:
         working-directory: Rokid-Coder
@@ -41,6 +75,7 @@ jobs:
       - name: Check out the revision
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
           path: Rokid-Coder
 
       # The phone core links the CXR vendor library from the sibling checkout <repo>/../CxrGlobal.
@@ -48,8 +83,14 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Anezium/CxrGlobal
-          ref: v0.3.0
+          ref: ${{ env.CXRGLOBAL_SHA }}
           path: CxrGlobal
+
+      - name: Record the tested commits
+        id: tested
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "cxrglobal=$(git -C ../CxrGlobal rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -66,8 +107,12 @@ jobs:
 
   unrelated-caller:
     name: An unrelated app cannot bind or start the phone app's services
+    if: ${{ !inputs.release-artifact }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      sha: ${{ steps.tested.outputs.sha }}
+      cxrglobal: ${{ steps.tested.outputs.cxrglobal }}
     defaults:
       run:
         working-directory: Rokid-Coder
@@ -75,14 +120,21 @@ jobs:
       - name: Check out the revision
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
           path: Rokid-Coder
 
       - name: Check out CxrGlobal 0.3.0
         uses: actions/checkout@v6
         with:
           repository: Anezium/CxrGlobal
-          ref: v0.3.0
+          ref: ${{ env.CXRGLOBAL_SHA }}
           path: CxrGlobal
+
+      - name: Record the tested commits
+        id: tested
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "cxrglobal=$(git -C ../CxrGlobal rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -123,8 +175,12 @@ jobs:
 
   coder-service:
     name: The phone app's one service starts connected-device only at boot
+    if: ${{ !inputs.release-artifact }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      sha: ${{ steps.tested.outputs.sha }}
+      cxrglobal: ${{ steps.tested.outputs.cxrglobal }}
     defaults:
       run:
         working-directory: Rokid-Coder
@@ -132,14 +188,21 @@ jobs:
       - name: Check out the revision
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
           path: Rokid-Coder
 
       - name: Check out CxrGlobal 0.3.0
         uses: actions/checkout@v6
         with:
           repository: Anezium/CxrGlobal
-          ref: v0.3.0
+          ref: ${{ env.CXRGLOBAL_SHA }}
           path: CxrGlobal
+
+      - name: Record the tested commits
+        id: tested
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "cxrglobal=$(git -C ../CxrGlobal rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -179,4 +242,164 @@ jobs:
         with:
           name: coder-service-report
           path: Rokid-Coder/mobile/app/build/reports/androidTests/
+          if-no-files-found: warn
+
+  release-install:
+    name: Install the exact release APK on an emulator
+    if: ${{ inputs.release-artifact }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      sha: ${{ steps.tested.outputs.sha }}
+    env:
+      BUNDLETOOL_VERSION: "1.17.2"
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Record the tested commit
+        id: tested
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Fetch the release build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.release-artifact }}
+          path: ${{ runner.temp }}/release
+
+      - name: Read the release's identity from gradle.properties
+        run: |
+          set -euo pipefail
+          prop() { sed -n "s/^$1=//p" gradle.properties; }
+          version=$(prop rokid.versionName)
+          pin=$(prop rokid.releaseSignerSha256 | tr 'A-F' 'a-f')
+          [ -n "$pin" ] || { echo "rokid.releaseSignerSha256 is not set"; exit 1; }
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          {
+            echo "PHONE_ID=$(prop rokid.phoneApplicationId)"
+            echo "GLASSES_ID=$(prop rokid.glassesApplicationId)"
+            echo "VERSION_CODE=$(prop rokid.versionCode)"
+            echo "PIN=$pin"
+            echo "BUILD_TOOLS=$build_tools"
+            echo "PHONE_APK=$RUNNER_TEMP/release/rokid-coder-$version.apk"
+            echo "PHONE_AAB=$RUNNER_TEMP/release/rokid-coder-$version.aab"
+            echo "GLASSES_APK=$RUNNER_TEMP/release/rokid-coder-glasses-$version.apk"
+          } >> "$GITHUB_ENV"
+
+      - name: Write the signer check
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/signer.sh" <<'SH'
+          # signer.sh <apk>: exactly one signer, and it is the pinned key.
+          set -euo pipefail
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$1" > "$RUNNER_TEMP/certs.txt"
+          digests=$(sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")
+          [ "$(printf '%s\n' "$digests" | grep -c .)" = 1 ] || { echo "$1 does not have exactly one signer"; exit 1; }
+          [ "$digests" = "$PIN" ] || { echo "$1 is not signed by the pinned release key"; exit 1; }
+          echo "$1: signed by the pinned release key"
+          SH
+
+      - name: Check the APKs, the bundled glasses app and the AAB
+        run: |
+          set -euo pipefail
+          bash "$RUNNER_TEMP/signer.sh" "$PHONE_APK"
+          bash "$RUNNER_TEMP/signer.sh" "$GLASSES_APK"
+          badging() { "$BUILD_TOOLS/aapt2" dump badging "$1" | head -n 1; }
+          badging "$PHONE_APK" | grep -F "package: name='$PHONE_ID' versionCode='$VERSION_CODE'"
+          badging "$GLASSES_APK" | grep -F "package: name='$GLASSES_ID' versionCode='$VERSION_CODE'"
+
+          # The phone bundles exactly the glasses asset, and its glasses.json describes it.
+          unzip -p "$PHONE_APK" assets/glasses.apk > "$RUNNER_TEMP/bundled-glasses.apk"
+          cmp "$RUNNER_TEMP/bundled-glasses.apk" "$GLASSES_APK"
+          unzip -p "$PHONE_APK" assets/glasses.json > "$RUNNER_TEMP/glasses.json"
+          node -e '
+            const fs = require("fs");
+            const crypto = require("crypto");
+            const [json, apk] = process.argv.slice(1);
+            const meta = JSON.parse(fs.readFileSync(json, "utf8"));
+            const want = {
+              packageName: process.env.GLASSES_ID,
+              versionCode: Number(process.env.VERSION_CODE),
+              sha256: crypto.createHash("sha256").update(fs.readFileSync(apk)).digest("hex"),
+              signerSha256: process.env.PIN,
+            };
+            for (const [key, value] of Object.entries(want)) {
+              if (meta[key] !== value) throw new Error(`glasses.json ${key} is ${meta[key]}, expected ${value}`);
+            }
+            console.log("glasses.json matches the glasses asset");
+          ' "$RUNNER_TEMP/glasses.json" "$GLASSES_APK"
+
+          # The AAB: its jar signature, by the pinned key, and its manifest. Not -strict: that refuses
+          # every self-signed certificate, which every Android signing key is.
+          jarsigner -verify "$PHONE_AAB" | grep -Fx "jar verified."
+          aab_pin=$(keytool -printcert -jarfile "$PHONE_AAB" | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
+          [ "$aab_pin" = "$PIN" ] || { echo "the AAB is not signed by the pinned release key"; exit 1; }
+          curl -fsSL -o "$RUNNER_TEMP/bundletool.jar" "https://github.com/google/bundletool/releases/download/$BUNDLETOOL_VERSION/bundletool-all-$BUNDLETOOL_VERSION.jar"
+          manifest() { java -jar "$RUNNER_TEMP/bundletool.jar" dump manifest --bundle "$PHONE_AAB" --xpath "$1"; }
+          [ "$(manifest /manifest/@package)" = "$PHONE_ID" ]
+          [ "$(manifest /manifest/@android:versionCode)" = "$VERSION_CODE" ]
+
+      - name: Write the on-device check
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/on-device.sh" <<'SH'
+          set -euo pipefail
+          out="$RUNNER_TEMP/device"
+          mkdir -p "$out"
+          adb install "$PHONE_APK"
+          adb shell dumpsys package "$PHONE_ID" > "$out/package.txt"
+          grep -E "versionCode=$VERSION_CODE( |$)" "$out/package.txt"
+          # What is installed is the uploaded file, byte for byte, and signed by the pinned key.
+          installed=$(adb shell pm path "$PHONE_ID" | tr -d '\r' | sed -n 's/^package://p' | head -n 1)
+          adb pull "$installed" "$out/installed.apk"
+          cmp "$out/installed.apk" "$PHONE_APK"
+          bash "$RUNNER_TEMP/signer.sh" "$out/installed.apk"
+          # The launcher opens onboarding at WELCOME.
+          adb shell monkey -p "$PHONE_ID" -c android.intent.category.LAUNCHER 1
+          for _ in $(seq 1 30); do
+            if adb shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1 && adb pull /sdcard/ui.xml "$out/ui.xml" > /dev/null 2>&1 &&
+              grep -q "Setup takes a few minutes" "$out/ui.xml"; then
+              break
+            fi
+            sleep 2
+          done
+          grep -q "Setup takes a few minutes" "$out/ui.xml"
+          grep -q 'text="Start"' "$out/ui.xml"
+          echo "onboarding WELCOME is on screen"
+          SH
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install the release APK on an API 34 emulator and open it
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash "$RUNNER_TEMP/on-device.sh"
+
+      - name: Keep what the device showed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-install-device
+          path: ${{ runner.temp }}/device
           if-no-files-found: warn

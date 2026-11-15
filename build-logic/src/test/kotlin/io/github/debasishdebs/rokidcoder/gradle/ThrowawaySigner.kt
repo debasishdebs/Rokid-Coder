@@ -15,8 +15,10 @@ class ThrowawaySigner(dir: File, alias: String) {
     private val key: PrivateKey
     val certificate: X509Certificate
 
+    /** The PKCS12 keytool wrote; its key password is the store password, as release signing expects. */
+    val store = File(dir, "$alias.p12")
+
     init {
-        val store = File(dir, "$alias.p12")
         val keytool = File(System.getProperty("java.home"), "bin/keytool").absolutePath
         val process = ProcessBuilder(
             keytool, "-genkeypair", "-keystore", store.absolutePath, "-storetype", "PKCS12",
@@ -46,7 +48,7 @@ class ThrowawaySigner(dir: File, alias: String) {
     }
 
     companion object {
-        private const val PASSWORD = "throwaway"
+        const val PASSWORD = "throwaway"
 
         val fixtureApk: File get() = File(System.getProperty("fixtureApk"))
     }

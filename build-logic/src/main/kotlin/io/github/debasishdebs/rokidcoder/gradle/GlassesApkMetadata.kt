@@ -52,11 +52,11 @@ object SignerPin {
     const val PROPERTY = "rokid.releaseSignerSha256"
     private val DIGEST = Regex("[0-9a-fA-F]{64}")
 
-    /** Why [actual] may not ship under [pin], or null when it may. */
-    fun mismatch(actual: String, pin: String): String? = when {
+    /** Why [actual], the signer of [what], may not ship under [pin], or null when it may. */
+    fun mismatch(actual: String, pin: String, what: String = "The glasses APK signer"): String? = when {
         pin.isBlank() -> "$PROPERTY is not set: a release bundles only a glasses APK signed by the pinned key"
         !DIGEST.matches(pin) -> "$PROPERTY is not a 64-hex SHA-256 certificate digest"
-        !actual.equals(pin, ignoreCase = true) -> "The glasses APK signer does not match $PROPERTY"
+        !actual.equals(pin, ignoreCase = true) -> "$what does not match $PROPERTY"
         else -> null
     }
 }

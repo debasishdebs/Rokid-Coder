@@ -1,0 +1,61 @@
+name: Publish release
+
+# Promotes one tested rc's draft to the final release, by hand, after the
+# hardware gate (6c T13). It runs in the GitHub Environment `release`, whose
+# required reviewer approves each run. scripts/release-gate.mjs reads the device
+# checklist as committed on release/1.0.0 and refuses unless every required row
+# is PASS for this rc's line and the 6a, 6b and 6c execution reviews are READY;
+# scripts/publish-release.mjs then refuses unless the draft is exactly what a
+# fully successful release.yml run of the rc's commit built. A release or tag
+# made with GITHUB_TOKEN starts no push run, so nothing rebuilds.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: "The tested rc to publish, e.g. rokid-coder-v1.0.0-rc.3"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RC_TAG: ${{ inputs.rc_tag }}
+    steps:
+      - name: Refuse any branch but release/1.0.0
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/release/1.0.0" ]; then
+            echo "::error::publish-release runs only on release/1.0.0, whose checklist is the gate (this is $GITHUB_REF)"
+            exit 1
+          fi
+
+      # The whole history and every tag: the gate checks each Tested on rc and review commit is an
+      # ancestor of the rc commit.
+      - name: Check out release/1.0.0
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run the release gate on the committed checklist
+        run: node scripts/release-gate.mjs --rc "$RC_TAG"
+
+      - name: Promote exactly the tested rc
+        run: node scripts/publish-release.mjs promote --rc "$RC_TAG" --repo "$GITHUB_REPOSITORY" --work "$RUNNER_TEMP/publish"

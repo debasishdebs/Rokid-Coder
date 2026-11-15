@@ -1,6 +1,6 @@
 {
   "name": "nexus-agentd",
-  "version": "0.8.0",
+  "version": "1.0.0",
   "description": "PC-side monitoring daemon for Nexus Agents mission control",
   "license": "MIT",
   "private": true,

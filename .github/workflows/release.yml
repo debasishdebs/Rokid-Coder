@@ -1,0 +1,264 @@
+name: Release
+
+# An rc tag (rokid-coder-v<version>-rc.<n>) builds every asset of
+# scripts/release-assets.txt from the tag's commit, install-tests each on its
+# platform, and only then makes a DRAFT prerelease of exactly those files. A
+# final tag fails at once: publish-release.yml promotes a tested rc's draft.
+# The jobs API lists reusable calls only as expanded "<caller> / <child>" jobs,
+# so release-summary is the one stable job promotion checks, with draft.
+
+on:
+  push:
+    tags:
+      - "rokid-coder-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CXRGLOBAL_SHA: 395be12ef69cf7d46d67c526168b78392a0b5484
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      commit: ${{ steps.tag.outputs.commit }}
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v6
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Read the version from the tag
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/check-versions.mjs --tag "$TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Check every version field
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: node scripts/check-versions.mjs --expect "$VERSION"
+
+  # Every product, script and platform suite, on exactly this commit. The Windows host suite runs
+  # in the windows job below, which also builds the installer.
+  suites:
+    needs: verify
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ needs.verify.outputs.commit }}
+      skip-windows: true
+
+  android:
+    needs: verify
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: Rokid-Coder
+    steps:
+      - name: Check out the tag's commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.verify.outputs.commit }}
+          path: Rokid-Coder
+
+      # The phone core links the CXR vendor library from the sibling checkout <repo>/../CxrGlobal.
+      - name: Check out CxrGlobal 0.3.0
+        uses: actions/checkout@v6
+        with:
+          repository: Anezium/CxrGlobal
+          ref: ${{ env.CXRGLOBAL_SHA }}
+          path: CxrGlobal
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: true
+
+      - name: Decode the release keystore outside the checkout
+        env:
+          NEXUS_RELEASE_KEYSTORE_B64: ${{ secrets.NEXUS_RELEASE_KEYSTORE_B64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.NEXUS_RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.NEXUS_RELEASE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          for name in NEXUS_RELEASE_KEYSTORE_B64 RELEASE_KEYSTORE_PASSWORD RELEASE_KEY_ALIAS; do
+            if [ -z "${!name}" ]; then echo "::error::the release signing secret behind $name is not configured."; exit 1; fi
+          done
+          keystore="$RUNNER_TEMP/rokid-coder-release.p12"
+          umask 077
+          printf '%s' "$NEXUS_RELEASE_KEYSTORE_B64" | base64 --decode > "$keystore"
+          {
+            echo "NEXUS_RELEASE_KEYSTORE=$keystore"
+            echo "NEXUS_RELEASE_KEYSTORE_PASSWORD=$RELEASE_KEYSTORE_PASSWORD"
+            echo "NEXUS_RELEASE_KEY_ALIAS=$RELEASE_KEY_ALIAS"
+          } >> "$GITHUB_ENV"
+
+      # The pin first, then both signed releases, the AAB, and the phone app's manifest and dex checks
+      # on the release output (checkRelease: verifyReleaseChecks, the manifest policy, checkReleaseDex
+      # and checkReleaseDependencies).
+      - name: Build and check the signed release
+        run: |
+          ./gradlew \
+            :glasses-app:verifyReleaseSignerPin :mobile:app:verifyReleaseSignerPin \
+            :glasses-app:assembleRelease :mobile:app:assembleRelease :mobile:app:bundleRelease \
+            :mobile:app:checkReleaseManifest :mobile:app:checkRelease
+
+      - name: Check both APKs are signed by the pinned key, and name the assets
+        run: |
+          set -euo pipefail
+          pin=$(sed -n 's/^rokid.releaseSignerSha256=//p' gradle.properties | tr 'A-F' 'a-f')
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          one() {
+            mapfile -t found < <(find "$1" -maxdepth 1 -type f -name "$2")
+            [ "${#found[@]}" -eq 1 ] || { echo "::error::expected one $2 in $1, found ${#found[@]}" >&2; exit 1; }
+            printf '%s' "${found[0]}"
+          }
+          out="$RUNNER_TEMP/android-release"
+          mkdir -p "$out"
+          cp "$(one mobile/app/build/outputs/apk/release '*.apk')" "$out/rokid-coder-$VERSION.apk"
+          cp "$(one mobile/app/build/outputs/bundle/release '*.aab')" "$out/rokid-coder-$VERSION.aab"
+          cp "$(one glasses/app/build/outputs/apk/release '*.apk')" "$out/rokid-coder-glasses-$VERSION.apk"
+          for apk in "$out/rokid-coder-$VERSION.apk" "$out/rokid-coder-glasses-$VERSION.apk"; do
+            "$build_tools/apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/certs.txt"
+            digests=$(sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")
+            [ "$(printf '%s\n' "$digests" | grep -c .)" = 1 ] || { echo "::error::$apk does not have exactly one signer"; exit 1; }
+            [ "$digests" = "$pin" ] || { echo "::error::$apk is not signed by rokid.releaseSignerSha256"; exit 1; }
+          done
+          sha256sum "$out"/*
+
+      - name: Upload the Android assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          if-no-files-found: error
+          path: ${{ runner.temp }}/android-release/*
+
+      - name: Remove the decoded keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/rokid-coder-release.p12"
+
+  android-install:
+    needs: [verify, android]
+    uses: ./.github/workflows/emulator.yml
+    with:
+      ref: ${{ needs.verify.outputs.commit }}
+      release-artifact: android-release
+
+  macos:
+    needs: verify
+    uses: ./.github/workflows/macos-installer.yml
+    with:
+      ref: ${{ needs.verify.outputs.commit }}
+      version: ${{ needs.verify.outputs.version }}
+
+  # The macOS workflow's bundles.yml call already built this run's bundle-linux-x64; a second
+  # bundles.yml run would upload the same artifact names again.
+  windows:
+    needs: [verify, macos]
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      ref: ${{ needs.verify.outputs.commit }}
+      version: ${{ needs.verify.outputs.version }}
+      skip-bundles: true
+
+  release-summary:
+    needs: [verify, suites, android, android-install, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check every job succeeded, and record the provenance
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          COMMIT: ${{ needs.verify.outputs.commit }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/provenance"
+          node -e '
+            const needs = JSON.parse(process.env.RESULTS);
+            const required = ["verify", "suites", "android", "android-install", "macos", "windows"];
+            const results = Object.fromEntries(required.map((name) => [name, needs[name]?.result ?? "missing"]));
+            const failed = required.filter((name) => results[name] !== "success");
+            if (failed.length) throw new Error(`not every job succeeded: ${failed.map((name) => `${name} ${results[name]}`).join(", ")}`);
+            const provenance = { run_id: Number(process.env.RUN_ID), commit: process.env.COMMIT, results };
+            require("fs").writeFileSync(process.argv[1], `${JSON.stringify(provenance, null, 2)}\n`);
+            console.log(JSON.stringify(provenance));
+          ' "$RUNNER_TEMP/provenance/release-provenance.json"
+
+      - name: Upload the provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-provenance
+          if-no-files-found: error
+          path: ${{ runner.temp }}/provenance/release-provenance.json
+
+  draft:
+    needs: [verify, release-summary]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      COMMIT: ${{ needs.verify.outputs.commit }}
+    steps:
+      - name: Check out the tag's commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.verify.outputs.commit }}
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Name the payload artifacts (scripts/release-assets.txt)
+        id: payload
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: node scripts/publish-release.mjs artifacts --version "$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the payload artifacts of this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ steps.payload.outputs.pattern }}
+          path: ${{ runner.temp }}/artifacts
+
+      # Every payload asset (a missing one fails), SHA256SUMS over them, and the set checked.
+      - name: Assemble the release assets
+        run: >-
+          node scripts/publish-release.mjs assemble --tag "$TAG" --run "$GITHUB_RUN_ID" --commit "$COMMIT"
+          --from "$RUNNER_TEMP/artifacts" --out "$RUNNER_TEMP/assets" --notes "$RUNNER_TEMP/notes.md"
+
+      - name: Keep SHA256SUMS as this run's artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-sha256sums
+          if-no-files-found: error
+          path: ${{ runner.temp }}/assets/SHA256SUMS
+
+      # Only ever a draft prerelease; publish-release.yml promotes it after the hardware gate.
+      - name: Create the draft prerelease
+        run: >-
+          node scripts/publish-release.mjs create-draft --tag "$TAG" --repo "$GITHUB_REPOSITORY"
+          --out "$RUNNER_TEMP/assets" --notes "$RUNNER_TEMP/notes.md"

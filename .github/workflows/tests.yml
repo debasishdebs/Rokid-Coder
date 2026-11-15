@@ -1,27 +1,129 @@
 name: Tests
 
-# Every push and pull request runs the product suites: the computer daemon, the
-# vendored Nexus SDK and hubs, and the Agents app. upstream-validation.yml covers
-# the upstream modules we vendor but do not ship.
+# Every product, script and platform suite: the repo scripts and build plugins,
+# the computer daemon on Linux (which also stands for the WSL build) and macOS,
+# the vendored Nexus SDK and hubs and our apps, the emulator, and 6b's Windows
+# host tests. upstream-validation.yml covers the upstream modules we vendor but
+# do not ship. release.yml and upstream-sync.yml call this with `ref`, the exact
+# commit to test, which every called workflow checks out in turn; each job
+# reports the commit it tested (`product_shas`).
 
 on:
+  # Branches only: a release tag runs release.yml, which calls this for the tag's commit.
   push:
+    branches: ["**"]
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The commit to test (a SHA); defaults to the event's commit"
+        type: string
+        default: ""
+      skip-windows:
+        description: "Leave 6b's Windows workflow to the caller (release.yml runs it itself, for its artifact)"
+        type: boolean
+        default: false
+    outputs:
+      product_shas:
+        description: "job=commit, one per job, for the commit each job tested"
+        value: |
+          scripts=${{ jobs.scripts.outputs.sha }}
+          computer-ubuntu-latest=${{ jobs.computer.outputs.ubuntu-latest }}
+          computer-macos-latest=${{ jobs.computer.outputs.macos-latest }}
+          android=${{ jobs.android.outputs.sha }}
+          ${{ jobs.emulator.outputs.product_shas }}
+          ${{ jobs.windows.outputs.product_shas }}
+      dependency_shas:
+        description: "job=commit for the dependency checkouts (CxrGlobal)"
+        value: |
+          android-cxrglobal=${{ jobs.android.outputs.cxrglobal }}
+          ${{ jobs.emulator.outputs.dependency_shas }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  group: tests-${{ inputs.ref || github.ref }}
+  # A called run tests one fixed commit for its caller: never cancelled by a newer push.
+  cancel-in-progress: ${{ !inputs.ref }}
+
+env:
+  CXRGLOBAL_SHA: 395be12ef69cf7d46d67c526168b78392a0b5484
 
 jobs:
-  computer:
-    name: Computer and sync-script tests
+  scripts:
+    name: Repo scripts, build plugins and workflow lint
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.tested.outputs.sha }}
+    env:
+      ACTIONLINT_VERSION: "1.7.7"
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Record the tested commit
+        id: tested
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP/bin"
+          bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # Includes the release gate, publish, version, upstream-sync and workflow checks.
+      - name: Run the script tests
+        run: node --test scripts/test
+
+      - name: Check the docs for secrets and full fingerprints
+        run: node scripts/check-docs-secrets.mjs
+
+      - name: Run the build plugins' unit and TestKit tests
+        run: ./gradlew -p build-logic test
+
+      - name: Lint every workflow
+        run: actionlint -shellcheck= -pyflakes= .github/workflows/*.yml
+
+  computer:
+    name: Computer tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    outputs:
+      ubuntu-latest: ${{ steps.tested.outputs.ubuntu-latest }}
+      macos-latest: ${{ steps.tested.outputs.macos-latest }}
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Record the tested commit
+        id: tested
+        env:
+          CELL: ${{ matrix.os }}
+        run: echo "$CELL=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node 22
         uses: actions/setup-node@v4
@@ -39,12 +141,12 @@ jobs:
         working-directory: computer
         run: npm test
 
-      - name: Run the upstream-sync script tests
-        run: node --test scripts/test/
-
   android:
-    name: SDK, hub and Agents unit tests
+    name: SDK, hub and app unit tests
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.tested.outputs.sha }}
+      cxrglobal: ${{ steps.tested.outputs.cxrglobal }}
     defaults:
       run:
         working-directory: Rokid-Coder
@@ -52,6 +154,7 @@ jobs:
       - name: Check out the revision
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
           path: Rokid-Coder
 
       # The hubs link the CXR vendor library from the sibling checkout <repo>/../CxrGlobal.
@@ -59,8 +162,14 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Anezium/CxrGlobal
-          ref: v0.3.0
+          ref: ${{ env.CXRGLOBAL_SHA }}
           path: CxrGlobal
+
+      - name: Record the tested commits
+        id: tested
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "cxrglobal=$(git -C ../CxrGlobal rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -68,13 +177,20 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      # --continue runs every suite; check-test-results then judges them, allowing only the two
+      # known GlassesFileStoreTest failures by name.
       - name: Run the product unit tests
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           ./gradlew \
             :shared:test \
             :bus-client:testDebugUnitTest \
@@ -85,7 +201,21 @@ jobs:
             :glasses-hub:testDebugUnitTest \
             :glasses-app:testDebugUnitTest \
             :mobile:app:testDebugUnitTest \
-            --continue
+            --continue || echo "Gradle reported failures; check-test-results judges them."
+
+      - name: Check the test results
+        shell: bash
+        run: |
+          node scripts/check-test-results.mjs \
+            vendor/nexus/shared/build/test-results/test \
+            vendor/nexus/bus-client/build/test-results/testDebugUnitTest \
+            vendor/nexus/ink-engine/build/test-results/test \
+            vendor/nexus/phone-core/build/test-results/testDebugUnitTest \
+            vendor/nexus/phone-hub/build/test-results/testDebugUnitTest \
+            vendor/nexus/glasses-core/build/test-results/testDebugUnitTest \
+            vendor/nexus/glasses-hub/build/test-results/testDebugUnitTest \
+            glasses/app/build/test-results/testDebugUnitTest \
+            mobile/app/build/test-results/testDebugUnitTest
 
       # The hub suites now run as each upstream shell plus its core. Their union must keep every
       # identity and outcome of the pre-split baseline; a new test must pass.
@@ -133,3 +263,19 @@ jobs:
               exit 1
             fi
           done
+
+  emulator:
+    name: Emulator
+    uses: ./.github/workflows/emulator.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+
+  # Hosted Windows runners cannot run WSL2, and on Windows agentd runs inside WSL (R4): the Linux
+  # build of the computer suite runs on ubuntu above, and the Windows host's own code (Pester and
+  # the mocked-wsl.exe node tests) runs here.
+  windows:
+    name: Windows
+    if: ${{ !inputs.skip-windows }}
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}

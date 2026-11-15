@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+"use strict";
+// A stand-in for the GitHub CLI in the scripts' tests. It answers from the JSON
+// world in FAKE_GH_WORLD and appends every call (its argv) to FAKE_GH_LOG, so a
+// test reads exactly what a script asked GitHub to do. It never reaches GitHub.
+//
+// world = {
+//   api:       { "<path>": <json body> | { "$status": 404 } },          gh api <path>
+//   pages:     { "<path>": [<page>, ...] },                              gh api --paginate <path> --jq '.[]' | '.jobs[]'
+//   artifacts: { "<run id>/<name>": { "<file>": "<text>" } },            gh run download <id> --name <name> --dir <d>
+//   releases:  { "<tag>": { "<file>": "<text>" } },                      gh release download <tag> --dir <d>
+//   responses: [ { "args": [<argv prefix>], "stdout": "...", "status": 0 } ]   anything else
+// }
+const fs = require("fs");
+const path = require("path");
+
+const args = process.argv.slice(2);
+const world = JSON.parse(fs.readFileSync(process.env.FAKE_GH_WORLD, "utf8"));
+fs.appendFileSync(process.env.FAKE_GH_LOG, `${JSON.stringify(args)}\n`);
+
+const option = (name) => {
+  const at = args.indexOf(name);
+  return at >= 0 ? args[at + 1] : undefined;
+};
+const notFound = () => {
+  process.stderr.write("gh: Not Found (HTTP 404)\n");
+  process.exit(1);
+};
+const writeFiles = (dir, files) => {
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
+};
+
+if (args[0] === "api") {
+  const withValue = new Set(["--jq", "-q", "--method", "-X", "-H", "--header", "-f", "-F", "--field", "--raw-field", "--input"]);
+  let endpoint;
+  for (let i = 1; i < args.length; i++) {
+    if (withValue.has(args[i])) i++;
+    else if (!args[i].startsWith("-")) {
+      endpoint = args[i];
+      break;
+    }
+  }
+  if (args.includes("--paginate")) {
+    const pages = world.pages?.[endpoint];
+    if (!pages) notFound();
+    const jq = option("--jq");
+    const items = jq === ".[]" ? pages.flat() : jq === ".jobs[]" ? pages.flatMap((page) => page.jobs) : null;
+    if (!items) {
+      process.stderr.write(`fake gh: unsupported --jq ${jq}\n`);
+      process.exit(2);
+    }
+    for (const item of items) process.stdout.write(`${JSON.stringify(item)}\n`);
+    process.exit(0);
+  }
+  const body = world.api?.[endpoint];
+  if (body === undefined || body?.$status === 404) notFound();
+  process.stdout.write(`${JSON.stringify(body)}\n`);
+  process.exit(0);
+}
+
+if (args[0] === "run" && args[1] === "download") {
+  const files = world.artifacts?.[`${args[2]}/${option("--name")}`];
+  if (!files) {
+    process.stderr.write(`no artifact matches any of the names or patterns provided\n`);
+    process.exit(1);
+  }
+  writeFiles(option("--dir"), files);
+  process.exit(0);
+}
+
+if (args[0] === "release" && args[1] === "download") {
+  const files = world.releases?.[args[2]];
+  if (!files) {
+    process.stderr.write("release not found\n");
+    process.exit(1);
+  }
+  writeFiles(option("--dir"), files);
+  process.exit(0);
+}
+
+for (const response of world.responses ?? []) {
+  if (response.args.every((arg, i) => args[i] === arg)) {
+    process.stdout.write(response.stdout ?? "");
+    process.exit(response.status ?? 0);
+  }
+}
+process.exit(0);

@@ -20,6 +20,10 @@ gradlePlugin {
             id = "rokid.glasses-asset"
             implementationClass = "io.github.debasishdebs.rokidcoder.gradle.GlassesAssetPlugin"
         }
+        register("releaseSigning") {
+            id = "rokid.release-signing"
+            implementationClass = "io.github.debasishdebs.rokidcoder.gradle.ReleaseSigningPlugin"
+        }
     }
 }
 

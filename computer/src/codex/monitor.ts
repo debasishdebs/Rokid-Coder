@@ -33,6 +33,7 @@ import type {
 } from "../types";
 import { daemonEndpoint, resolveDaemonSocketPath } from "./daemon-socket";
 import { DETAIL_MESSAGE_LIMIT } from "../transcript-messages";
+import { agentdVersion } from "../version";
 import { codexThreadMessages, codexTurnMessages, codexTurnsMessages } from "./messages";
 import type {
   AdditionalFileSystemPermissions,
@@ -77,7 +78,7 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 // been written. Retry briefly; after that the slow sweep picks the thread up.
 const DEFAULT_ROLLOUT_RETRY_MS = 5_000;
 const MAX_ROLLOUT_RETRIES = 12;
-const CLIENT_VERSION = "0.8.0";
+const CLIENT_VERSION = agentdVersion();
 const RUN_CODEX_TIMEOUT_MS = 15_000;
 const MAX_MODEL_PAGES = 10;
 // thread/resume replays nothing, so what happened while we were away is read back

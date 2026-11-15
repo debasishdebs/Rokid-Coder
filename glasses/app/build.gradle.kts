@@ -1,19 +1,22 @@
 plugins {
     id("com.android.application")
+    // The same pinned NEXUS_RELEASE_* key as the phone app: one key signs both.
+    id("rokid.release-signing")
 }
-
-apply(from = rootProject.file("gradle/plugin-release-signing.gradle"))
 
 // Rokid Coder's pair, shared with the phone app (gradle.properties).
 val phoneApplicationId = providers.gradleProperty("rokid.phoneApplicationId").get()
 val glassesApplicationId = providers.gradleProperty("rokid.glassesApplicationId").get()
 
 // The phone reads the glasses app's version from its versionName as major * 10000 + minor * 100
-// + patch (R205), so the versionCode is derived from the name and never set on its own.
-val glassesVersionName = "1.0.0"
+// + patch (R205), so the versionCode derived from the name must be the release's rokid.versionCode.
+val glassesVersionName = providers.gradleProperty("rokid.versionName").get()
 val glassesVersionCode = glassesVersionName.split('.').map(String::toInt).let { parts ->
     require(parts.size == 3 && parts[1] in 0..99 && parts[2] in 0..99) { "versionName must be major.minor.patch" }
     parts[0] * 10000 + parts[1] * 100 + parts[2]
+}.also { derived ->
+    val released = providers.gradleProperty("rokid.versionCode").get().toInt()
+    require(derived == released) { "rokid.versionCode is $released, but rokid.versionName $glassesVersionName reads as $derived" }
 }
 
 android {

@@ -15,9 +15,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.2.10"
     // glasses.apk + glasses.json from :glasses-app's glassesApk configuration, per variant (R7).
     id("rokid.glasses-asset")
+    // The NEXUS_RELEASE_* key, pinned to rokid.releaseSignerSha256; an unsigned release fails.
+    id("rokid.release-signing")
 }
-
-apply(from = rootProject.file("gradle/plugin-release-signing.gradle"))
 
 // Rokid Coder's pair, shared with the glasses app (gradle.properties).
 val phoneApplicationId = providers.gradleProperty("rokid.phoneApplicationId").get()
@@ -32,8 +32,8 @@ android {
         applicationId = phoneApplicationId
         minSdk = 30
         targetSdk = 36
-        versionCode = 800
-        versionName = "0.8.0"
+        versionCode = providers.gradleProperty("rokid.versionCode").get().toInt()
+        versionName = providers.gradleProperty("rokid.versionName").get()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "PHONE_APPLICATION_ID", "\"$phoneApplicationId\"")
         buildConfigField("String", "GLASSES_APPLICATION_ID", "\"$glassesApplicationId\"")
