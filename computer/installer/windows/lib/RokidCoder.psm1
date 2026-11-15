@@ -629,6 +629,8 @@ function Invoke-MachineApply {
       Hyper-V scope of networks the host has left) is replaced, its earlier record
       kept as `previous`, so reverting this run re-creates it exactly;
     - a same-named rule nobody recorded that differs is never touched: Apply stops.
+    A failure part-way undoes this call's changes, newest first, before it is
+    rethrown, so a partial Apply leaves the machine as the call found it.
   #>
   param(
     [Parameter(Mandatory = $true)][ValidateSet('mirrored', 'nat')][string]$Mode,
@@ -648,18 +650,31 @@ function Invoke-MachineApply {
       }
       [pscustomobject]@{ Item = $item; Owned = $owned; Replace = $replace }
     })
-  foreach ($step in $work) {
-    $item = $step.Item
-    $previous = $null
-    if ($step.Replace) {
-      $previous = [pscustomobject]@{ kind = $step.Owned.kind; name = $step.Owned.name; ids = @($step.Owned.ids); runId = $step.Owned.runId; mode = $step.Owned.mode; parameters = $step.Owned.parameters }
+  $done = New-Object System.Collections.Generic.List[object]
+  try {
+    foreach ($step in $work) {
+      $item = $step.Item
+      $previous = $null
+      if ($step.Replace) {
+        $previous = [pscustomobject]@{ kind = $step.Owned.kind; name = $step.Owned.name; ids = @($step.Owned.ids); runId = $step.Owned.runId; mode = $step.Owned.mode; parameters = $step.Owned.parameters }
+      }
+      $entry = [pscustomobject]@{ kind = $item.Kind; name = $item.Name; ids = @(); runId = $RunId; mode = $Mode; parameters = $item.Parameters; previous = $previous }
+      $state.objects = @(@($state.objects) | Where-Object { -not ($_.kind -eq $item.Kind -and $_.name -eq $item.Name) }) + $entry
+      Write-MachineState -StatePath $StatePath -State $state
+      $done.Add($entry)
+      if ($step.Replace) { Remove-PlanObject -Object $step.Owned }
+      $entry.ids = @(New-PlanObject -Kind $item.Kind -Parameters $item.Parameters)
+      Write-MachineState -StatePath $StatePath -State $state
     }
-    $entry = [pscustomobject]@{ kind = $item.Kind; name = $item.Name; ids = @(); runId = $RunId; mode = $Mode; parameters = $item.Parameters; previous = $previous }
-    $state.objects = @(@($state.objects) | Where-Object { -not ($_.kind -eq $item.Kind -and $_.name -eq $item.Name) }) + $entry
-    Write-MachineState -StatePath $StatePath -State $state
-    if ($step.Replace) { Remove-PlanObject -Object $step.Owned }
-    $entry.ids = @(New-PlanObject -Kind $item.Kind -Parameters $item.Parameters)
-    Write-MachineState -StatePath $StatePath -State $state
+  } catch {
+    $failure = $_
+    $leftover = @()
+    for ($i = $done.Count - 1; $i -ge 0; $i--) {
+      try { $state = Undo-MachineObject -State $state -Object $done[$i] } catch { $leftover += "$($done[$i].name): $($_.Exception.Message)" }
+      Write-MachineState -StatePath $StatePath -State $state
+    }
+    if ($leftover.Count -gt 0) { throw "$($failure.Exception.Message); and this run's changes could not all be undone ($($leftover -join '; ')): they stay recorded for -Revert -RunId $RunId" }
+    throw $failure
   }
 }
 

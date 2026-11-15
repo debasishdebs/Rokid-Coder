@@ -41,7 +41,8 @@ ShowInstDetails show
 
 Var Mode
 Var RunId
-Var MachineApplied
+; 1 once this run asked machine.ps1 to Apply, whatever it returned: a partial Apply records what it made.
+Var MachineAttempted
 Var Distro
 Var DistroArg
 Var MirroredAvailable
@@ -56,6 +57,8 @@ Var RetireCheck
 Var NextButton
 
 !define MUI_ABORTWARNING
+; Cancel after "Apply firewall rules" takes this run's machine objects back out.
+!define MUI_CUSTOMFUNCTION_ABORT OnUserAbort
 !define MUI_FINISHPAGE_TEXT "$FinishText"
 !insertmacro MUI_PAGE_WELCOME
 Page custom ModePage ModePageLeave
@@ -91,7 +94,7 @@ Function .onInit
   ${EndIf}
   System::Call 'kernel32::GetTickCount() i .r0'
   StrCpy $RunId "run-$0"
-  StrCpy $MachineApplied 0
+  StrCpy $MachineAttempted 0
   StrCpy $Mode "nat"
   nsExec::ExecToStack '${PSRUN} "$PLUGINSDIR\win\preflight.ps1" -Recommend'
   Pop $0
@@ -102,6 +105,25 @@ Function .onInit
   ${Else}
     StrCpy $MirroredAvailable 0
   ${EndIf}
+FunctionEnd
+
+; This run's recorded firewall rules and port proxy, and nothing else (user-setup.ps1 asks for
+; no elevation when the run recorded none). Run on a failed install and on Cancel.
+Function RevertMachineRun
+  ${If} $MachineAttempted == 1
+    ; $R9, not $0: the install section still reports its own exit code from $0 after this.
+    nsExec::ExecToLog '${PSRUN} "$PLUGINSDIR\win\user-setup.ps1" -RevertMachine -RunId $RunId'
+    Pop $R9
+    ${If} $R9 == 0
+      StrCpy $MachineAttempted 0
+    ${Else}
+      MessageBox MB_ICONEXCLAMATION "The firewall rules this setup added could not be removed (exit $R9). Run the installer again and cancel it to retry, or remove the rules named RokidCoder-* yourself."
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+Function OnUserAbort
+  Call RevertMachineRun
 FunctionEnd
 
 ; ---- 1: the network mode, chosen first [6b-R1]
@@ -220,13 +242,13 @@ FunctionEnd
 
 Function OnApplyMachine
   Pop $0
+  ; Before the call: an Apply that fails part-way has still recorded (and undone) what it made.
+  StrCpy $MachineAttempted 1
   nsExec::ExecToStack '${PSRUN} "$PLUGINSDIR\win\user-setup.ps1" -ApplyMachine -Mode $Mode -RunId $RunId'
   Pop $0
   Pop $1
-  ${If} $0 == 0
-    StrCpy $MachineApplied 1
-  ${Else}
-    MessageBox MB_ICONEXCLAMATION "The firewall rules were not applied (exit $0). An administrator has to approve the prompt.$\r$\n$1"
+  ${If} $0 != 0
+    MessageBox MB_ICONEXCLAMATION "The firewall rules were not applied (exit $0), and what this attempt changed was put back. An administrator has to approve the prompt.$\r$\n$1"
   ${EndIf}
   Call RunPreflight
 FunctionEnd
@@ -265,11 +287,8 @@ Section "Rokid Coder"
   nsExec::ExecToLog '${PSRUN} "$INSTDIR\user-setup.ps1" -Install -Mode $Mode $DistroArg -Version ${VERSION} -Archive "$PLUGINSDIR\bundle\${ARCHIVE}" -Sha256File "$PLUGINSDIR\bundle\${ARCHIVE}.sha256"'
   Pop $0
   ${If} $0 != 0
-    ${If} $MachineApplied == 1
-      ; Only what THIS run's machine.ps1 -Apply created goes.
-      nsExec::ExecToLog '${PSRUN} "$INSTDIR\user-setup.ps1" -RevertMachine -RunId $RunId'
-      Pop $1
-    ${EndIf}
+    ; Only what THIS run's machine.ps1 -Apply created or replaced goes back.
+    Call RevertMachineRun
     MessageBox MB_ICONSTOP "Rokid Coder setup did not finish (exit $0), and what it changed was put back. The setup log is in WSL: ~/.rokid-coder/logs/setup.log"
     Abort
   ${EndIf}

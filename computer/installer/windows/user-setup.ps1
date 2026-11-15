@@ -3,7 +3,7 @@
 
   user-setup.ps1 -CheckSession
   user-setup.ps1 -ApplyMachine -Mode <mode> -RunId <id>     (the one UAC prompt: machine.ps1 -Apply)
-  user-setup.ps1 -RevertMachine -RunId <id>                 (a failed install: only this run's objects)
+  user-setup.ps1 -RevertMachine -RunId <id>                 (a failed or cancelled install: only this run's objects)
   user-setup.ps1 -ApplyWslConfig -Mode <mode>               (the consented .wslconfig change, then wsl --shutdown)
   user-setup.ps1 -Install -Mode <mode> -Distro <name> -Version <v> -Archive <tar.gz> -Sha256File <file>
 
@@ -35,6 +35,8 @@ try {
     exit (Invoke-MachineHelper -Action Apply -Mode $Mode -RunId $RunId)
   }
   if ($RevertMachine) {
+    # Nothing recorded for this run (its Apply was refused, or undid itself): no elevation is asked for.
+    if (-not (@((Read-MachineState -StatePath (Get-RokidPaths).MachineState).objects) | Where-Object { $_.runId -eq $RunId })) { exit 0 }
     exit (Invoke-MachineHelper -Action Revert -RunId $RunId)
   }
   if ($ApplyWslConfig) {

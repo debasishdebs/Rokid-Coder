@@ -199,6 +199,58 @@ Describe 'the machine plan' {
     @((Read-MachineState -StatePath $state).objects) | Should -BeNullOrEmpty
   }
 
+  It 'partial_apply_failure_undoes_this_calls_changes' {
+    $state = (Get-RokidPaths).MachineState
+    $old = @('192.168.1.0/24', '100.64.0.0/10')
+    $earlier = @(Get-MachinePlan -Mode mirrored -HyperVScope $old | Where-Object Kind -eq 'hyperv' | ForEach-Object {
+        [pscustomobject]@{ kind = 'hyperv'; name = $_.Name; ids = @($_.Name); runId = 'install'; mode = 'mirrored'; parameters = $_.Parameters }
+      })
+    Write-MachineState -StatePath $state -State ([pscustomobject]@{ schema = 1; objects = $earlier })
+    # A Repair: both Hyper-V rules have a stale scope, the host rules are missing; the second host rule fails.
+    Mock -ModuleName RokidCoder Get-HyperVScope { @('10.20.0.0/16', '100.64.0.0/10') }
+    Mock -ModuleName RokidCoder Get-PlanItemDrift { if ($Item.Kind -eq 'hyperv') { 'RemoteAddresses' } else { 'absent' } }
+    $script:live = New-Object System.Collections.Generic.List[string]
+    Mock -ModuleName RokidCoder New-NetFirewallHyperVRule { $script:live.Add("hyperv $Name $(@($RemoteAddresses) -join ',')"); [pscustomobject]@{ Name = $Name } }
+    Mock -ModuleName RokidCoder Remove-NetFirewallHyperVRule { $script:live.Add("-hyperv $Name") }
+    Mock -ModuleName RokidCoder New-NetFirewallRule { if ($Name -eq 'RokidCoder-discovery-host') { throw 'The group policy refused the rule' }; $script:live.Add("firewall $Name"); [pscustomobject]@{ Name = $Name } }
+    Mock -ModuleName RokidCoder Remove-NetFirewallRule { $script:live.Add("-firewall $Name") }
+    { Invoke-MachineApply -Mode mirrored -StatePath $state -RunId 'repair' } | Should -Throw '*group policy*'
+    # Undone newest first: the host rule it created goes, each replaced Hyper-V rule comes back as recorded.
+    $script:live | Should -Be @(
+      '-hyperv RokidCoder-wss', 'hyperv RokidCoder-wss 10.20.0.0/16,100.64.0.0/10',
+      '-hyperv RokidCoder-discovery', 'hyperv RokidCoder-discovery 10.20.0.0/16,100.64.0.0/10',
+      'firewall RokidCoder-wss-host',
+      '-firewall RokidCoder-discovery-host',
+      '-firewall RokidCoder-wss-host',
+      '-hyperv RokidCoder-discovery', 'hyperv RokidCoder-discovery 192.168.1.0/24,100.64.0.0/10',
+      '-hyperv RokidCoder-wss', 'hyperv RokidCoder-wss 192.168.1.0/24,100.64.0.0/10')
+    $after = @((Read-MachineState -StatePath $state).objects)
+    @($after | ForEach-Object { "$($_.name):$($_.runId)" } | Sort-Object) | Should -Be @('RokidCoder-discovery:install', 'RokidCoder-wss:install')
+    @($after | Where-Object { $_.runId -eq 'repair' }) | Should -BeNullOrEmpty -Because 'nothing of the failed call stays recorded'
+  }
+
+  It 'revert_machine_asks_no_elevation_when_the_run_recorded_nothing' {
+    $state = (Get-RokidPaths).MachineState
+    $userSetup = Join-Path $script:WindowsDir 'user-setup.ps1'
+    Mock Invoke-MachineHelper { 0 }
+    Write-MachineState -StatePath $state -State ([pscustomobject]@{ schema = 1; objects = @([pscustomobject]@{ kind = 'firewall'; name = 'RokidCoder-proxy'; ids = @('RokidCoder-proxy'); runId = 'earlier'; mode = 'nat'; parameters = @{} }) })
+    & $userSetup -RevertMachine -RunId 'cancelled-run'
+    $LASTEXITCODE | Should -Be 0
+    Should -Invoke Invoke-MachineHelper -Times 0 -Exactly -Because 'a refused or self-undone Apply left nothing of this run'
+    & $userSetup -RevertMachine -RunId 'earlier'
+    $LASTEXITCODE | Should -Be 0
+    Should -Invoke Invoke-MachineHelper -Times 1 -Exactly -ParameterFilter { $Action -eq 'Revert' -and $RunId -eq 'earlier' -and -not $All }
+  }
+
+  It 'nsis_compensates_this_runs_machine_objects_on_failure_and_cancel' {
+    $nsi = Get-Content -LiteralPath (Join-Path $script:WindowsDir 'installer.nsi') -Raw
+    $nsi | Should -Match '!define MUI_CUSTOMFUNCTION_ABORT OnUserAbort'
+    [regex]::Match($nsi, '(?s)Function OnUserAbort.*?FunctionEnd').Value | Should -Match 'Call RevertMachineRun'
+    $apply = [regex]::Match($nsi, '(?s)Function OnApplyMachine.*?FunctionEnd').Value
+    $apply.IndexOf('StrCpy $MachineAttempted 1') | Should -BeLessThan $apply.IndexOf('-ApplyMachine') -Because 'a partial Apply counts'
+    [regex]::Match($nsi, '(?s)Section "Rokid Coder".*?SectionEnd').Value | Should -Match '(?s)\$\{If\} \$0 != 0\s.*?Call RevertMachineRun'
+  }
+
   It 'failed_install_reverts_only_this_runs_machine_changes' {
     $state = (Get-RokidPaths).MachineState
     # An earlier install created the mirrored rules; this run adds NAT's.
