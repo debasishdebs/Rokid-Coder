@@ -86,6 +86,57 @@ test("sync_conflict_opens_issue_naming_patches", (t) => {
   assert.equal(s.git(s.product, "status", "--porcelain"), "");
 });
 
+test("refuses_when_a_merge_is_already_in_progress", (t) => {
+  const s = sandbox(t);
+  s.git(s.product, "checkout", "-q", "-b", "other");
+  s.write(path.join(s.product, "README.md"), "other\n");
+  s.git(s.product, "commit", "-q", "-am", "Diverge on other");
+  s.git(s.product, "checkout", "-q", "main");
+  s.write(path.join(s.product, "README.md"), "main\n");
+  s.git(s.product, "commit", "-q", "-am", "Diverge on main");
+  assert.throws(() => s.git(s.product, "merge", "other"));
+  const mergeHead = s.git(s.product, "rev-parse", "MERGE_HEAD");
+  const head = s.git(s.product, "rev-parse", "HEAD");
+  const status = s.git(s.product, "status", "--porcelain");
+  const index = s.git(s.product, "ls-files", "--stage");
+  const readme = fs.readFileSync(path.join(s.product, "README.md"), "utf8");
+
+  const result = s.sync();
+
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stderr, /in progress/);
+  assert.equal(s.git(s.product, "rev-parse", "MERGE_HEAD"), mergeHead);
+  assert.equal(s.git(s.product, "rev-parse", "HEAD"), head);
+  assert.equal(s.git(s.product, "status", "--porcelain"), status);
+  assert.equal(s.git(s.product, "ls-files", "--stage"), index);
+  assert.equal(fs.readFileSync(path.join(s.product, "README.md"), "utf8"), readme);
+});
+
+test("refuses_on_dirty_tree", (t) => {
+  const s = sandbox(t);
+  s.write(path.join(s.upstream, "hub", "New.kt"), "val added = true\n");
+  s.git(s.upstream, "add", "-A");
+  s.git(s.upstream, "commit", "-q", "-m", "Add a file upstream");
+  s.write(path.join(s.product, "README.md"), "edited\n");
+  const head = s.git(s.product, "rev-parse", "HEAD");
+
+  const result = s.sync();
+
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stderr, /uncommitted changes/);
+  assert.equal(s.git(s.product, "rev-parse", "HEAD"), head);
+  assert.equal(fs.readFileSync(path.join(s.product, "README.md"), "utf8"), "edited\n");
+  assert.equal(fs.existsSync(path.join(s.product, "vendor", "nexus", "hub", "New.kt")), false);
+
+  // A staged-only change is dirty too.
+  s.git(s.product, "checkout", "--", "README.md");
+  s.write(path.join(s.product, "README.md"), "staged\n");
+  s.git(s.product, "add", "README.md");
+  const staged = s.sync();
+  assert.equal(staged.status, 3, staged.stdout + staged.stderr);
+  assert.equal(s.git(s.product, "diff", "--cached", "--name-only"), "README.md");
+});
+
 test("sync_clean_upstream_commit_exits_0", (t) => {
   const s = sandbox(t);
   s.write(path.join(s.upstream, "hub", "New.kt"), "val added = true\n");
