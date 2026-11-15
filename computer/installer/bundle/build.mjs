@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { assertHashedLockfile } from "./lockfile.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const COMPUTER_DIR = path.resolve(HERE, "..", "..");
@@ -93,6 +94,8 @@ export function assembleApp(appDir, { nodeBin, stageDir, computerDir = COMPUTER_
   if (!fs.existsSync(path.join(computerDir, "dist", "cli.js"))) {
     throw new Error(`${computerDir}/dist is not built: run (cd computer && npm run build) first`);
   }
+  // npm ci checks each tarball against the lockfile's digest, so a package without one refuses the build.
+  assertHashedLockfile(path.join(repoRoot, "package-lock.json"));
   fs.mkdirSync(appDir, { recursive: true });
   fs.cpSync(path.join(computerDir, "dist"), path.join(appDir, "dist"), { recursive: true });
   fs.copyFileSync(path.join(computerDir, "package.json"), path.join(appDir, "package.json"));

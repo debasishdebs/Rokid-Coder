@@ -72,6 +72,40 @@ test("node_download_digest_mismatch_aborts_build", async (t) => {
   assert.deepEqual(fs.existsSync(path.join(out, ".cache")) ? fs.readdirSync(path.join(out, ".cache")) : [], [], "the bad download was not kept");
 });
 
+const loadLockfile = () => import(pathToFileURL(path.join(BUNDLE_DIR, "lockfile.mjs")).href);
+
+test("workspace_lockfile_pins_every_registry_package_by_digest", async () => {
+  const { unhashedPackages } = await loadLockfile();
+  const lock = JSON.parse(fs.readFileSync(path.join(REPO, "package-lock.json"), "utf8"));
+  assert.deepEqual(unhashedPackages(lock), []);
+  const check = spawnSync(process.execPath, [path.join(BUNDLE_DIR, "lockfile.mjs")], { encoding: "utf8" });
+  assert.equal(check.status, 0, check.stderr);
+});
+
+test("bundle_build_rejects_unhashed_registry_dependency", async (t) => {
+  const build = await loadBuild();
+  const { unhashedPackages } = await loadLockfile();
+  const repo = tempDir(t);
+  const lock = JSON.parse(fs.readFileSync(path.join(REPO, "package-lock.json"), "utf8"));
+  delete lock.packages["computer/node_modules/ws"].integrity;
+  lock.packages["computer/node_modules/selfsigned"].resolved = "https://example.invalid/selfsigned.tgz";
+  assert.deepEqual(unhashedPackages(lock), [
+    "computer/node_modules/selfsigned@5.5.0 has no registry resolved URL",
+    "computer/node_modules/ws@8.21.1 has no sha512 integrity",
+  ]);
+  fs.writeFileSync(path.join(repo, "package-lock.json"), JSON.stringify(lock));
+  for (const file of ["package.json", ".npmrc"]) fs.copyFileSync(path.join(REPO, file), path.join(repo, file));
+  const stage = path.join(repo, "stage");
+  assert.throws(
+    () => build.assembleApp(path.join(repo, "app"), { nodeBin: "/nonexistent/node", stageDir: stage, repoRoot: repo }),
+    /unhashed registry dependencies; refusing to build:\n {2}computer\/node_modules\/selfsigned@5\.5\.0 has no registry resolved URL\n {2}computer\/node_modules\/ws@8\.21\.1 has no sha512 integrity/,
+  );
+  assert.equal(fs.existsSync(stage) || fs.existsSync(path.join(repo, "app")), false, "nothing was written");
+  const check = spawnSync(process.execPath, [path.join(BUNDLE_DIR, "lockfile.mjs"), path.join(repo, "package-lock.json")], { encoding: "utf8" });
+  assert.equal(check.status, 1);
+  assert.match(check.stderr, /ws@8\.21\.1 has no sha512 integrity/);
+});
+
 test("archive_round_trip_preserves_modes_and_dotfiles", async (t) => {
   const build = await loadBuild();
   const verify = await loadVerify();

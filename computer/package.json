@@ -20,7 +20,8 @@
     "smoke": "npm run build && node test/smoke.js",
     "postinstall": "node scripts/postinstall.js",
     "bundle": "npm run build && node installer/bundle/build.mjs",
-    "test:installers": "node --test \"installer/**/test/*.test.js\""
+    "test:installers": "node --test \"installer/**/test/*.test.js\"",
+    "check:lockfile": "node installer/bundle/lockfile.mjs"
   },
   "dependencies": {
     "node-pty": "^1.1.0",
