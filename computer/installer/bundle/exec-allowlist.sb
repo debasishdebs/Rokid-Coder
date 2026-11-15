@@ -2,15 +2,20 @@
 ;; hooks_daemon_and_pty_under_exec_allowlist):
 ;;   sandbox-exec -f exec-allowlist.sb -D BUNDLE=<real bundle dir> -D WRAPPERS=<real ~/.rokid-coder/bin> <command>
 ;; Everything is allowed except exec, which is denied unless the file is in
-;; the bundle, is one of the user wrappers, or is a shell (/bin/sh re-execs
-;; bash or zsh on macOS) or /usr/bin/env. Both paths must be real paths
+;; the bundle, is one of the four user wrappers setup generates (the
+;; controlled run checks their content before it runs any), or is a shell
+;; (/bin/sh re-execs bash or zsh on macOS) or /usr/bin/env. Anything else in
+;; the wrapper dir is refused. Both paths must be real paths
 ;; (/private/var/..., not /var/...): the sandbox matches resolved vnodes.
 (version 1)
 (allow default)
 (deny process-exec)
 (allow process-exec
   (subpath (param "BUNDLE"))
-  (subpath (param "WRAPPERS"))
+  (literal (string-append (param "WRAPPERS") "/rokid-node"))
+  (literal (string-append (param "WRAPPERS") "/agentd"))
+  (literal (string-append (param "WRAPPERS") "/rk"))
+  (literal (string-append (param "WRAPPERS") "/rokid-setup"))
   (literal "/bin/sh")
   (literal "/bin/bash")
   (literal "/bin/zsh")

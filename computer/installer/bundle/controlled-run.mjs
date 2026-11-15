@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // The controlled run of a bundle, by the bundle's own node, with no toolchain:
 //   <bundle>/bin/rokid-node controlled-run.mjs <bundle> [--home <dir>]
-// It runs the four checks: `agentd --version --json`, `agentd selfcheck
+// It runs the five checks: the wrapper dir holds exactly the four generated
+// user wrappers, `agentd --version --json`, `agentd selfcheck
 // --require-bundle`, daemon startup + /health (execPath must be the bundled
 // node), and every bundled hook command, piped a rokid:on prompt under a
 // controlled env (HOME, PATH=/usr/bin:/bin, LANG, the port; nothing else).
@@ -73,10 +74,44 @@ function getHealth(port) {
   });
 }
 
+function wrappersModule(bundle) {
+  const require = createRequire(path.join(bundle, "app", "package.json"));
+  return require(path.join(bundle, "app", "dist", "wrappers.js"));
+}
+
 /** Writes the user wrappers into `<home>/.rokid-coder/bin` with the bundle's own wrappers module. */
 export function installWrappers(bundle, home) {
-  const require = createRequire(path.join(bundle, "app", "package.json"));
-  require(path.join(bundle, "app", "dist", "wrappers.js")).installUserWrappers(home, bundle);
+  wrappersModule(bundle).installUserWrappers(home, bundle);
+}
+
+/**
+ * The exec allowlist trusts exactly the four wrapper paths, so their dir must
+ * hold those four and nothing else, each a 0755 regular file with the
+ * content the bundle's wrappers module renders for this bundle.
+ */
+export function wrappersCheck(bundle, home) {
+  const { WRAPPER_NAMES, renderUserWrapper } = wrappersModule(bundle);
+  const bin = path.join(home, ".rokid-coder", "bin");
+  const problems = [];
+  const names = fs.readdirSync(bin).sort();
+  for (const name of names) {
+    if (!WRAPPER_NAMES.includes(name)) {
+      problems.push(`${name} is not a generated wrapper`);
+      continue;
+    }
+    const file = path.join(bin, name);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile()) {
+      problems.push(`${name} is not a regular file`);
+      continue;
+    }
+    if ((stat.mode & 0o777) !== 0o755) problems.push(`${name} has mode ${(stat.mode & 0o777).toString(8)}, not 755`);
+    if (fs.readFileSync(file, "utf8") !== renderUserWrapper(name, bundle)) problems.push(`${name} is not the wrapper setup generates`);
+  }
+  for (const name of WRAPPER_NAMES) {
+    if (!names.includes(name)) problems.push(`${name} is missing`);
+  }
+  return { name: "wrappers", ok: problems.length === 0, detail: problems.length === 0 ? names : problems };
 }
 
 export async function versionCheck(bundle, env) {
@@ -200,6 +235,9 @@ export async function controlledRun(bundle, { home } = {}) {
   const checks = [];
   try {
     installWrappers(root, realHome);
+    const wrappers = wrappersCheck(root, realHome);
+    checks.push(wrappers);
+    if (!wrappers.ok) throw new Error("the wrapper dir holds more or other than the four generated wrappers");
     const env = controlledEnv(realHome, 1);
     checks.push(await versionCheck(root, env));
     checks.push(await selfcheckCheck(root, env));
@@ -215,7 +253,7 @@ export async function controlledRun(bundle, { home } = {}) {
   } finally {
     if (ownHome) fs.rmSync(realHome, { recursive: true, force: true });
   }
-  return { ok: checks.length === 4 && checks.every((check) => check.ok), checks };
+  return { ok: checks.length === 5 && checks.every((check) => check.ok), checks };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {

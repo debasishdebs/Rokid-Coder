@@ -100,8 +100,10 @@ jobs:
           home="$(cd "$RUNNER_TEMP/controlled-home" && pwd -P)"
           allow=(sandbox-exec -f installer/bundle/exec-allowlist.sb -D "BUNDLE=$BUNDLE" -D "WRAPPERS=$home/.rokid-coder/bin")
           "${allow[@]}" "$BUNDLE/bin/rokid-node" installer/bundle/controlled-run.mjs "$BUNDLE" --home "$home" | tee "$RUNNER_TEMP/controlled-run.json"
-          # The profile bites: a toolchain compiler and the runner's own node are refused.
-          for probe in /usr/bin/cc "$(command -v node)"; do
+          # The profile bites: a toolchain compiler, the runner's own node and an
+          # executable beside the four wrappers are refused.
+          cp /usr/bin/true "$home/.rokid-coder/bin/extra"
+          for probe in /usr/bin/cc "$(command -v node)" "$home/.rokid-coder/bin/extra"; do
             if "${allow[@]}" /bin/sh -c "\"$probe\" --version" > "$RUNNER_TEMP/probe.log" 2>&1; then
               echo "$probe ran under the exec allowlist"; cat "$RUNNER_TEMP/probe.log"; exit 1
             fi
@@ -242,14 +244,16 @@ jobs:
               strace -f -e trace=execve -o /out/exec.log \
                 "$b/bin/rokid-node" /opt/checks/controlled-run.mjs "$b" --home "$home" > /out/controlled-run.json
               # Every exec that did not fail (an unfinished one counts as run): inside the
-              # bundle, a user wrapper the run wrote, or the hook runner.
+              # bundle, one of the four user wrappers the run wrote (their content is its
+              # wrappers check), or the hook runner.
+              w="$home/.rokid-coder/bin"
               grep "execve(\"" /out/exec.log | grep -v " = -1 " | grep -o "execve(\"[^\"]*\"" \
                 | sed "s/^execve(\"//; s/\"\$//" | sort -u > /out/execs.txt
               test -s /out/execs.txt
               bad=0
               while read -r exe; do
                 case "$exe" in
-                  "$b"/*|"$home"/.rokid-coder/bin/*|/bin/sh|/usr/bin/sh|/bin/dash) ;;
+                  "$b"/*|"$w/rokid-node"|"$w/agentd"|"$w/rk"|"$w/rokid-setup"|/bin/sh|/usr/bin/sh|/bin/dash) ;;
                   *) echo "exec outside the bundle: $exe"; bad=1 ;;
                 esac
               done < /out/execs.txt

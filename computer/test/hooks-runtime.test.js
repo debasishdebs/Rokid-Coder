@@ -33,6 +33,7 @@ test("hooks_never_call_bare_node", () => {
 });
 
 const net = require("node:net");
+const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const { bundleUnderTest, copyBundle, tempDir } = require("./helpers/bundle.js");
 const { installUserWrappers, WRAPPER_NAMES } = require("../dist/wrappers.js");
@@ -107,10 +108,58 @@ test("bundled_hooks_reach_daemon_with_controlled_env", async (t) => {
   }
 });
 
-test("controlled_run_passes_all_four_checks", async () => {
+test("controlled_run_passes_every_check", async () => {
   const run = await loadControlledRun();
   const { dir } = await bundleUnderTest();
   const result = await run.controlledRun(dir);
   assert.equal(result.ok, true, JSON.stringify(result.checks, null, 2));
-  assert.deepEqual(result.checks.map((check) => check.name), ["version", "selfcheck", "daemon", "hooks"]);
+  assert.deepEqual(result.checks.map((check) => check.name), ["wrappers", "version", "selfcheck", "daemon", "hooks"]);
+});
+
+test("controlled_run_wrapper_check_rejects_extra_or_altered_wrappers", async (t) => {
+  const run = await loadControlledRun();
+  const { dir } = await bundleUnderTest();
+  const home = tempDir(t, "rokid-controlled-");
+  run.installWrappers(dir, home);
+  assert.deepEqual(run.wrappersCheck(dir, home), { name: "wrappers", ok: true, detail: [...WRAPPER_NAMES].sort() });
+  const bin = path.join(home, ".rokid-coder", "bin");
+
+  fs.writeFileSync(path.join(bin, "extra"), "#!/bin/sh\n", { mode: 0o755 });
+  let check = run.wrappersCheck(dir, home);
+  assert.equal(check.ok, false);
+  assert.deepEqual(check.detail, ["extra is not a generated wrapper"]);
+  fs.rmSync(path.join(bin, "extra"));
+
+  fs.appendFileSync(path.join(bin, "rk"), "/usr/bin/curl https://example.invalid\n");
+  fs.chmodSync(path.join(bin, "agentd"), 0o775);
+  check = run.wrappersCheck(dir, home);
+  assert.equal(check.ok, false);
+  assert.deepEqual(check.detail, ["agentd has mode 775, not 755", "rk is not the wrapper setup generates"]);
+
+  const result = await run.controlledRun(dir, { home });
+  assert.equal(result.ok, true, "the run writes the wrappers again before it checks them");
+});
+
+test("exec_allowlist_refuses_an_extra_executable_beside_the_wrappers", async (t) => {
+  if (process.platform !== "darwin" || !fs.existsSync("/usr/bin/sandbox-exec")) {
+    t.skip("needs macOS sandbox-exec");
+    return;
+  }
+  const run = await loadControlledRun();
+  const { dir } = await bundleUnderTest();
+  const home = tempDir(t, "rokid-controlled-");
+  run.installWrappers(dir, home);
+  const bin = path.join(home, ".rokid-coder", "bin");
+  fs.copyFileSync("/usr/bin/true", path.join(bin, "extra"));
+  fs.chmodSync(path.join(bin, "extra"), 0o755);
+  const profile = path.join(__dirname, "..", "installer", "bundle", "exec-allowlist.sb");
+  const allow = ["-f", profile, "-D", `BUNDLE=${fs.realpathSync(dir)}`, "-D", `WRAPPERS=${bin}`];
+  const sandboxed = (file, args = []) => spawnSync("/usr/bin/sandbox-exec", [...allow, file, ...args], { encoding: "utf8", env: { HOME: home, PATH: "/usr/bin:/bin" } });
+
+  const wrapper = sandboxed(path.join(bin, "rokid-node"), ["-e", "process.stdout.write('ran')"]);
+  assert.equal(wrapper.status, 0, wrapper.stderr);
+  assert.equal(wrapper.stdout, "ran");
+  const extra = sandboxed(path.join(bin, "extra"));
+  assert.notEqual(extra.status, 0, "an executable the wrapper dir should not hold ran");
+  assert.match(extra.stderr, /Operation not permitted/);
 });
