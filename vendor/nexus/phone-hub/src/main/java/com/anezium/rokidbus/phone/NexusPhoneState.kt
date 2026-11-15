@@ -7,7 +7,7 @@ import java.util.concurrent.CopyOnWriteArraySet
 internal object NexusPhoneState {
     const val ACTION_LOG = "com.anezium.rokidbus.phone.LOG"
     const val AUTH_REQUEST = 42
-    const val PREFS = "rokidbus_phone"
+    const val PREFS = HubPrefs.PREFS
     const val PREF_TOKEN = "cxrl_token"
     const val PREF_GLASSES_APP_INSTALLED = "glasses_app_installed"
     const val PREF_GLASSES_SETUP_COMPLETE = "glasses_setup_complete"

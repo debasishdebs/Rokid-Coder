@@ -1,3 +1,5 @@
+@file:OptIn(HubShellApi::class)
+
 package com.anezium.rokidbus.phone
 
 import android.os.IBinder
@@ -27,12 +29,12 @@ class SppIngressTest {
         override fun onLinkState(state: Int) = Unit
         override fun onGlassesAiButton(active: Boolean) = Unit
     }
-    private val binder get() = field("binder") as IBusService
+    private val binder: IBusService get() = hub.core.busBinder()
     @Suppress("UNCHECKED_CAST")
     private val registrations get() = field("registrations") as MutableList<Any>
 
     @Before fun registerObserverWithoutStartingRadios() {
-        val type = BusHubService::class.java.declaredClasses.single { it.simpleName == "Registration" }
+        val type = HubCore::class.java.declaredClasses.single { it.simpleName == "Registration" }
         val constructor = type.declaredConstructors.single { it.parameterCount == 8 }.apply { isAccessible = true }
         registrations += constructor.newInstance(
             "observer", listOf("/hub"), Process.myUid() + 1,
@@ -57,19 +59,20 @@ class SppIngressTest {
     }
 
     @Test fun sppIngressDropsReservedControlsBeforeLocalDelivery() {
-        val ingress = BusHubService::class.java.getDeclaredMethod("routeRemote", BusEnvelope::class.java).apply { isAccessible = true }
+        val ingress = HubCore::class.java.getDeclaredMethod("routeRemote", BusEnvelope::class.java).apply { isAccessible = true }
         for (path in listOf("/hub/spp", "/hub/spp/", SppKeyProvisioning.PATH, "/hub/spp/unknown")) {
             val offer = FrameProtocol.fromJsonBytes(FrameProtocol.toJsonBytes(SppKeyProvisioning.offer(ByteArray(32) { 42 })))
-            ingress.invoke(hub, offer.copy(path = path))
-            ingress.invoke(hub, offer.copy(path = path, binary = byteArrayOf(1)))
+            ingress.invoke(hub.core, offer.copy(path = path))
+            ingress.invoke(hub.core, offer.copy(path = path, binary = byteArrayOf(1)))
         }
         assertTrue(received.isEmpty())
-        ingress.invoke(hub, BusEnvelope("/hub/spp-visible"))
+        ingress.invoke(hub.core, BusEnvelope("/hub/spp-visible"))
         assertEquals(listOf("/hub/spp-visible"), received)
     }
 
-    private fun field(name: String): Any = BusHubService::class.java.getDeclaredField(name).run {
+    // The bus and its registrations moved into the core the shell drives.
+    private fun field(name: String): Any = HubCore::class.java.getDeclaredField(name).run {
         isAccessible = true
-        requireNotNull(get(hub))
+        requireNotNull(get(hub.core))
     }
 }

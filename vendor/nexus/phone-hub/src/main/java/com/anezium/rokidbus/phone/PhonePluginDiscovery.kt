@@ -14,28 +14,6 @@ import com.anezium.rokidbus.shared.skills.SkillCatalogParseResult
 import com.anezium.rokidbus.shared.skills.SkillCatalogParser
 import com.anezium.rokidbus.shared.skills.SkillLimits
 
-/** What discovery found of a plugin's skill catalog. An invalid catalog never invalidates the plugin. */
-sealed interface PluginSkillsState {
-    data object Absent : PluginSkillsState
-    data class Invalid(val reason: String) : PluginSkillsState
-    data class Valid(val catalog: SkillCatalog) : PluginSkillsState
-}
-
-data class PhonePluginPrincipal(
-    val packageName: String,
-    val serviceComponent: ComponentName,
-    val uid: Int,
-    val signingDigestSha256: String,
-    val descriptor: PluginDescriptor,
-    val guardianServiceComponent: ComponentName? = null,
-    val skills: PluginSkillsState = PluginSkillsState.Absent,
-    /** Changes with every install of the package; skill references and invocations are bound to it. */
-    val packageRevision: Long = 0L,
-) {
-    val skillCatalog: SkillCatalog?
-        get() = (skills as? PluginSkillsState.Valid)?.catalog
-}
-
 sealed interface PhonePluginCandidate {
     val packageName: String
     val displayName: String

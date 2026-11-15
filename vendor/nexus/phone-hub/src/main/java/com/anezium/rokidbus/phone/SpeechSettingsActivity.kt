@@ -22,6 +22,7 @@ import android.widget.Toast
 import java.util.Locale
 import com.anezium.rokidbus.client.ui.BusTheme
 import com.anezium.rokidbus.client.ui.NexusUi
+import com.anezium.rokidbus.phone.speech.CloudSpeechReadiness
 import com.anezium.rokidbus.phone.speech.HubSecretStore
 import com.anezium.rokidbus.phone.speech.SpeechCredentialKind
 import com.anezium.rokidbus.phone.speech.SpeechCredits
@@ -814,7 +815,7 @@ class SpeechSettingsActivity : Activity() {
             BusHubService.cancelSpeechDictationTest()
             return
         }
-        if (settings.readiness(secrets) == SpeechReadiness.MISSING_MIC_PERMISSION) {
+        if (CloudSpeechReadiness.forSettings(settings, secrets) == SpeechReadiness.MISSING_MIC_PERMISSION) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO)
             return
         }
@@ -890,7 +891,7 @@ class SpeechSettingsActivity : Activity() {
     }
 
     private fun readinessGuidance(): String =
-        when (settings.readiness(secrets)) {
+        when (CloudSpeechReadiness.forSettings(settings, secrets)) {
             SpeechReadiness.READY -> "Tap and speak toward the glasses."
             SpeechReadiness.NO_ENGINE -> "Pick an engine above to get started."
             SpeechReadiness.MISSING_KEY -> "Add your ${settings.selectedEngine()?.provider?.displayName ?: "provider"} API key above."
@@ -900,7 +901,7 @@ class SpeechSettingsActivity : Activity() {
         }
 
     private fun renderReadiness() {
-        val readiness = settings.readiness(secrets)
+        val readiness = CloudSpeechReadiness.forSettings(settings, secrets)
         readinessValue.text = when (readiness) {
             SpeechReadiness.READY -> "Ready"
             SpeechReadiness.NO_ENGINE -> "Pick engine"
@@ -929,7 +930,7 @@ class SpeechSettingsActivity : Activity() {
             testTranscriptView.text = transcript
             testTranscriptView.setTextColor(if (transcriptFinal) NexusUi.INK else NexusUi.INK2)
         }
-        val ready = settings.readiness(secrets) == SpeechReadiness.READY
+        val ready = CloudSpeechReadiness.forSettings(settings, secrets) == SpeechReadiness.READY
         when {
             testActive -> {
                 testActionMeta.text = "STOP"
@@ -949,7 +950,7 @@ class SpeechSettingsActivity : Activity() {
             else -> {
                 // The mic permission is granted from this very card, so it is not a "set up above":
                 // it is an action, and it gets an action's colour.
-                val needsMic = settings.readiness(secrets) == SpeechReadiness.MISSING_MIC_PERMISSION
+                val needsMic = CloudSpeechReadiness.forSettings(settings, secrets) == SpeechReadiness.MISSING_MIC_PERMISSION
                 testActionMeta.text = if (needsMic) "ALLOW MIC ›" else "SET UP ABOVE"
                 testActionMeta.setTextColor(if (needsMic) NexusUi.AMBER else NexusUi.INK4)
                 testCard.background = NexusUi.pressedBordered(this, NexusUi.PANEL, 15)

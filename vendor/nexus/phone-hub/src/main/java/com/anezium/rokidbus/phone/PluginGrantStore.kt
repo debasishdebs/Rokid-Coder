@@ -5,12 +5,6 @@ import com.anezium.rokidbus.shared.plugin.PluginCapability
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class PluginGrantKey(
-    val packageName: String,
-    val pluginId: String,
-    val signingDigestSha256: String,
-)
-
 enum class PluginGrantDecision { APPROVED, DENIED }
 
 data class PluginGrant(
@@ -19,19 +13,6 @@ data class PluginGrant(
     val approvedCapabilities: Set<PluginCapability>,
     val decision: PluginGrantDecision,
     val enabled: Boolean,
-)
-
-sealed interface PluginGrantState {
-    data object Pending : PluginGrantState
-    data class Approved(val capabilities: Set<PluginCapability>) : PluginGrantState
-    data object Denied : PluginGrantState
-    data object Disabled : PluginGrantState
-}
-
-fun PhonePluginPrincipal.grantKey(): PluginGrantKey = PluginGrantKey(
-    packageName = packageName,
-    pluginId = descriptor.id,
-    signingDigestSha256 = signingDigestSha256,
 )
 
 interface PluginGrantStorage {

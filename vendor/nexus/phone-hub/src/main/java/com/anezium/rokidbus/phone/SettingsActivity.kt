@@ -23,6 +23,7 @@ import com.anezium.rokidbus.client.BusClient
 import com.anezium.rokidbus.client.BusEvent
 import com.anezium.rokidbus.client.ui.BusTheme
 import com.anezium.rokidbus.client.ui.NexusUi
+import com.anezium.rokidbus.phone.speech.CloudSpeechReadiness
 import com.anezium.rokidbus.phone.speech.HubSecretStore
 import com.anezium.rokidbus.phone.speech.SpeechReadiness
 import com.anezium.rokidbus.phone.speech.SpeechSettingsStore
@@ -917,7 +918,7 @@ class SettingsActivity : Activity() {
 
     private fun renderSpeechRow() {
         val value = speechValue ?: return
-        val ready = SpeechSettingsStore(this).readiness(HubSecretStore(this)) == SpeechReadiness.READY
+        val ready = CloudSpeechReadiness.forSettings(SpeechSettingsStore(this), HubSecretStore(this)) == SpeechReadiness.READY
         value.text = if (ready) "READY ›" else "SET UP ›"
         // Every other row here opens in the same bright green, so dimming this one made a
         // working screen look disabled. Amber is what the rest of the app uses to mean

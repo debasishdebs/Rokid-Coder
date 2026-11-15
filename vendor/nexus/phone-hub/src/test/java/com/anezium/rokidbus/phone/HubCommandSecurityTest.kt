@@ -41,6 +41,8 @@ class HubCommandSecurityTest {
         hub.getSharedPreferences("rokidbus_phone", 0).edit()
             .putBoolean("hub_enabled", true).putString("cxrl_token", "original").commit()
         field("startupBlockedByBluetoothPermission").set(hub, true)
+        // The gate lives in the core and starts off; a created, enabled hub has turned it on.
+        coreField("hubEnabled").set(hub.core, true)
         shadowOf(hub.application).denyPermissions(android.Manifest.permission.BLUETOOTH_CONNECT)
     }
 
@@ -78,9 +80,9 @@ class HubCommandSecurityTest {
     }
 
     @Test fun internalStartEnablesTheStoppedHub() {
-        field("hubEnabled").set(hub, false)
+        coreField("hubEnabled").set(hub.core, false)
         field("startupBlockedByBluetoothPermission").set(hub, false)
-        (field("sppLoopStarted").get(hub) as AtomicBoolean).set(true)
+        (coreField("sppLoopStarted").get(hub.core) as AtomicBoolean).set(true)
         hub.getSharedPreferences("rokidbus_phone", 0).edit()
             .putBoolean("hub_enabled", false).putString("cxrl_token", "").commit()
         shadowOf(hub.application).grantPermissions(android.Manifest.permission.BLUETOOTH_CONNECT)
@@ -89,9 +91,9 @@ class HubCommandSecurityTest {
     }
 
     @Test fun restartingRetainedHubRestoresRemoteNavigationWithoutDuplicateReceivers() {
-        field("hubEnabled").set(hub, false)
+        coreField("hubEnabled").set(hub.core, false)
         field("startupBlockedByBluetoothPermission").set(hub, false)
-        (field("sppLoopStarted").get(hub) as AtomicBoolean).set(true)
+        (coreField("sppLoopStarted").get(hub.core) as AtomicBoolean).set(true)
         hub.getSharedPreferences("rokidbus_phone", 0).edit().putString("cxrl_token", "").commit()
         shadowOf(hub.application).grantPermissions(android.Manifest.permission.BLUETOOTH_CONNECT)
         shadowOf(hub.application).grantPermissions(INTERNAL_CORE_PERMISSION)
@@ -120,7 +122,7 @@ class HubCommandSecurityTest {
     }
 
     @Test fun stickyRestartAndExternalEmptyStartDoNotEnableStoppedHub() {
-        field("hubEnabled").set(hub, false)
+        coreField("hubEnabled").set(hub.core, false)
         hub.getSharedPreferences("rokidbus_phone", 0).edit().putBoolean("hub_enabled", false).commit()
         assertEquals(Service.START_NOT_STICKY, hub.onStartCommand(null, 0, 1))
         assertEquals(Service.START_NOT_STICKY, hub.onStartCommand(command(null), 0, 2))
@@ -181,7 +183,7 @@ class HubCommandSecurityTest {
 
     @Test @Config(sdk = [30, 32, 34])
     fun startWithoutAuthorityPromotesBeforeStoppingDisabledHub() {
-        field("hubEnabled").set(hub, false)
+        coreField("hubEnabled").set(hub.core, false)
         shadowOf(hub.application).grantPermissions(android.Manifest.permission.BLUETOOTH_CONNECT)
         assertEquals(Service.START_NOT_STICKY, hub.onStartCommand(command(null), 0, 42))
         assertEquals(listOf("foreground:16", "remove:1", "stop:42"), lifecycle.events)
@@ -210,7 +212,7 @@ class HubCommandSecurityTest {
 
     @Test @Config(sdk = [34])
     fun blockedStartHandlesConnectedDevicePermissionDenial() {
-        field("speechMicrophoneForegroundRequested").set(hub, true)
+        coreField("speechMicrophoneForegroundRequested").set(hub.core, true)
         lifecycle.promotionFailure = SecurityException("connectedDevice permission denied")
         assertEquals(Service.START_NOT_STICKY, hub.onStartCommand(command("STOP"), 0, 8))
         assertEquals(listOf("foreground:16", "remove:1", "stop:8"), lifecycle.events)
@@ -225,7 +227,7 @@ class HubCommandSecurityTest {
 
     @Test
     fun internalStopDoesNotPromoteAlreadyDisabledHub() {
-        field("hubEnabled").set(hub, false)
+        coreField("hubEnabled").set(hub.core, false)
         field("startupBlockedByBluetoothPermission").set(hub, false)
         shadowOf(hub.application).grantPermissions(android.Manifest.permission.BLUETOOTH_CONNECT)
         val intent = HubCommandIntents.create(hub).setAction("com.anezium.rokidbus.phone.STOP")
@@ -272,4 +274,6 @@ class HubCommandSecurityTest {
     }
 
     private fun field(name: String) = BusHubService::class.java.getDeclaredField(name).apply { isAccessible = true }
+
+    private fun coreField(name: String) = HubCore::class.java.getDeclaredField(name).apply { isAccessible = true }
 }

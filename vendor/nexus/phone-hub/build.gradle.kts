@@ -53,6 +53,7 @@ android {
 dependencies {
     implementation(project(":shared"))
     implementation(project(":bus-client"))
+    implementation(project(":phone-core"))
     implementation(project(":ink-engine"))
     implementation("androidx.activity:activity:1.10.1")
     implementation("androidx.exifinterface:exifinterface:1.4.2")
