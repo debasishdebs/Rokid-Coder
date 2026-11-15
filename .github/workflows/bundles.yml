@@ -1,0 +1,314 @@
+name: Bundles
+
+# Builds the self-contained computer bundles (darwin-arm64, darwin-x64,
+# linux-x64), archives each one, and validates the EXACT archive that is
+# uploaded, on a native runner: extract, verify-bundle.mjs, selfcheck
+# --require-bundle and the controlled run (agentd --version, selfcheck, the
+# daemon's /health identity, every bundled hook). Only then is
+# <archive>.validated.json written beside it. The artifact bundle-<target>
+# holds the archive, its .sha256 and its .validated.json: never the directory,
+# since upload-artifact drops modes and dotfiles.
+
+on:
+  push:
+    paths:
+      - "computer/**"
+      - "plugin/**"
+      - ".claude-plugin/**"
+      - ".agents/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".npmrc"
+      - ".github/workflows/bundles.yml"
+  pull_request:
+    paths:
+      - "computer/**"
+      - "plugin/**"
+      - ".claude-plugin/**"
+      - ".agents/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".npmrc"
+      - ".github/workflows/bundles.yml"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  darwin:
+    name: Bundle ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+          # GitHub's supported Intel image (macos-13 was retired in Dec 2025).
+          - target: darwin-x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    defaults:
+      run:
+        shell: bash
+        working-directory: computer
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      - name: Set up the pinned Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: computer/runtime/node-version.txt
+
+      - name: Install the workspaces
+        working-directory: .
+        run: npm ci
+
+      - name: Build and archive the bundle
+        run: npm run bundle -- --target "$TARGET" --out dist-bundle --archive
+
+      - name: Extract the archive and check its digest
+        run: |
+          set -euo pipefail
+          name="rokid-coder-bundle-$(node -p 'require("./package.json").version')-$TARGET.tar.gz"
+          (cd dist-bundle && shasum -a 256 -c "$name.sha256")
+          mkdir -p "$RUNNER_TEMP/extracted"
+          tar -xzf "dist-bundle/$name" -C "$RUNNER_TEMP/extracted"
+          echo "ARCHIVE_NAME=$name" >> "$GITHUB_ENV"
+          echo "BUNDLE=$(cd "$RUNNER_TEMP/extracted" && pwd -P)" >> "$GITHUB_ENV"
+
+      - name: Verify the extracted bundle and run selfcheck
+        run: |
+          set -euo pipefail
+          node installer/bundle/verify-bundle.mjs "$BUNDLE" --sources ..
+          "$BUNDLE/bin/agentd" selfcheck --require-bundle
+
+      - name: Run the bundle tests on the extracted bundle
+        env:
+          ROKID_BUNDLE_DIR: ${{ env.BUNDLE }}
+        run: node --test --test-timeout=300000 test/bundle.test.js test/selfcheck.test.js test/hooks-runtime.test.js
+
+      - name: hooks_daemon_and_pty_under_exec_allowlist
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/controlled-home"
+          home="$(cd "$RUNNER_TEMP/controlled-home" && pwd -P)"
+          allow=(sandbox-exec -f installer/bundle/exec-allowlist.sb -D "BUNDLE=$BUNDLE" -D "WRAPPERS=$home/.rokid-coder/bin")
+          "${allow[@]}" "$BUNDLE/bin/rokid-node" installer/bundle/controlled-run.mjs "$BUNDLE" --home "$home" | tee "$RUNNER_TEMP/controlled-run.json"
+          # The profile bites: a toolchain compiler and the runner's own node are refused.
+          for probe in /usr/bin/cc "$(command -v node)"; do
+            if "${allow[@]}" /bin/sh -c "\"$probe\" --version" > "$RUNNER_TEMP/probe.log" 2>&1; then
+              echo "$probe ran under the exec allowlist"; cat "$RUNNER_TEMP/probe.log"; exit 1
+            fi
+            grep -q "Operation not permitted" "$RUNNER_TEMP/probe.log"
+          done
+
+      - name: Record the validation
+        env:
+          RUNNER_LABEL: ${{ matrix.runner }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const [archive, target, runner, controlled] = process.argv.slice(1);
+            const sha256 = fs.readFileSync(`${archive}.sha256`, "utf8").split(/\s+/)[0];
+            const run = JSON.parse(fs.readFileSync(controlled, "utf8"));
+            if (!run.ok) throw new Error("the controlled run failed");
+            const checks = ["verify-bundle", "selfcheck --require-bundle", "bundle tests",
+              ...run.checks.map((check) => `controlled-run:${check.name}`), "exec-allowlist:bites"];
+            fs.writeFileSync(`${archive}.validated.json`, `${JSON.stringify({ sha256, target, runner, checks }, null, 2)}\n`);
+          ' "dist-bundle/$ARCHIVE_NAME" "$TARGET" "$RUNNER_LABEL" "$RUNNER_TEMP/controlled-run.json"
+
+      - name: Upload the validated archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            computer/dist-bundle/${{ env.ARCHIVE_NAME }}
+            computer/dist-bundle/${{ env.ARCHIVE_NAME }}.sha256
+            computer/dist-bundle/${{ env.ARCHIVE_NAME }}.validated.json
+
+  linux-build:
+    name: Bundle linux-x64
+    runs-on: ubuntu-22.04
+    env:
+      TARGET: linux-x64
+    defaults:
+      run:
+        shell: bash
+        working-directory: computer
+    outputs:
+      archive: ${{ steps.extract.outputs.archive }}
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      - name: Set up the pinned Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: computer/runtime/node-version.txt
+
+      - name: Install the workspaces
+        working-directory: .
+        run: npm ci
+
+      - name: Build and archive the bundle
+        run: npm run bundle -- --target "$TARGET" --out dist-bundle --archive
+
+      - name: Extract the archive and check its digest
+        id: extract
+        run: |
+          set -euo pipefail
+          name="rokid-coder-bundle-$(node -p 'require("./package.json").version')-$TARGET.tar.gz"
+          (cd dist-bundle && sha256sum -c "$name.sha256")
+          mkdir -p "$RUNNER_TEMP/extracted"
+          tar -xzf "dist-bundle/$name" -C "$RUNNER_TEMP/extracted"
+          echo "archive=$name" >> "$GITHUB_OUTPUT"
+          echo "BUNDLE=$(cd "$RUNNER_TEMP/extracted" && pwd -P)" >> "$GITHUB_ENV"
+
+      - name: Run the bundle tests on the extracted bundle
+        env:
+          ROKID_BUNDLE_DIR: ${{ env.BUNDLE }}
+        run: |
+          set -euo pipefail
+          node installer/bundle/verify-bundle.mjs "$BUNDLE" --sources ..
+          node --test --test-timeout=300000 test/bundle.test.js test/selfcheck.test.js test/hooks-runtime.test.js
+
+      - name: Hand the archive to the clean-container runs
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-linux-x64-unvalidated
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            computer/dist-bundle/${{ steps.extract.outputs.archive }}
+            computer/dist-bundle/${{ steps.extract.outputs.archive }}.sha256
+
+  linux-clean-container:
+    name: bundle_runs_in_clean_container (${{ matrix.image }})
+    needs: linux-build
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:22.04", "ubuntu:24.04"]
+    runs-on: ubuntu-22.04
+    env:
+      ARCHIVE: ${{ needs.linux-build.outputs.archive }}
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      - name: Download the archive
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-linux-x64-unvalidated
+          path: ${{ runner.temp }}/archive
+
+      - name: Check the digest and extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd "$RUNNER_TEMP/archive" && sha256sum -c "$ARCHIVE.sha256")
+          mkdir -p "$RUNNER_TEMP/bundle" "$RUNNER_TEMP/out"
+          tar -xzf "$RUNNER_TEMP/archive/$ARCHIVE" -C "$RUNNER_TEMP/bundle"
+
+      - name: Run the four checks with no Node and no compiler, every exec traced
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$RUNNER_TEMP/bundle:/opt/rokid-bundle:ro" \
+            -v "$GITHUB_WORKSPACE/computer/installer/bundle:/opt/checks:ro" \
+            -v "$RUNNER_TEMP/out:/out" \
+            "$IMAGE" sh -c '
+              set -eu
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends strace > /dev/null
+              for tool in node nodejs npm cc gcc g++ make python3; do
+                if command -v "$tool"; then echo "$tool is in the clean container"; exit 1; fi
+              done
+              b=/opt/rokid-bundle
+              home=/tmp/controlled-home
+              mkdir -p "$home"
+              "$b/bin/rokid-node" /opt/checks/verify-bundle.mjs "$b"
+              strace -f -e trace=execve -o /out/exec.log \
+                "$b/bin/rokid-node" /opt/checks/controlled-run.mjs "$b" --home "$home" > /out/controlled-run.json
+              # Every exec that did not fail (an unfinished one counts as run): inside the
+              # bundle, a user wrapper the run wrote, or the hook runner.
+              grep "execve(\"" /out/exec.log | grep -v " = -1 " | grep -o "execve(\"[^\"]*\"" \
+                | sed "s/^execve(\"//; s/\"\$//" | sort -u > /out/execs.txt
+              test -s /out/execs.txt
+              bad=0
+              while read -r exe; do
+                case "$exe" in
+                  "$b"/*|"$home"/.rokid-coder/bin/*|/bin/sh|/usr/bin/sh|/bin/dash) ;;
+                  *) echo "exec outside the bundle: $exe"; bad=1 ;;
+                esac
+              done < /out/execs.txt
+              cat /out/execs.txt
+              exit "$bad"
+            '
+
+      - name: Keep this container's result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-check-${{ strategy.job-index }}
+          retention-days: 1
+          path: ${{ runner.temp }}/out
+
+  linux-validate:
+    name: Validate bundle linux-x64
+    needs: [linux-build, linux-clean-container]
+    runs-on: ubuntu-22.04
+    env:
+      ARCHIVE: ${{ needs.linux-build.outputs.archive }}
+    steps:
+      - name: Download the archive
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-linux-x64-unvalidated
+          path: bundle
+
+      - name: Download the container results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linux-check-*
+          path: checks
+
+      - name: Record the validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd bundle && sha256sum -c "$ARCHIVE.sha256")
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const [archive] = process.argv.slice(1);
+            const sha256 = fs.readFileSync(`${archive}.sha256`, "utf8").split(/\s+/)[0];
+            const runs = fs.readdirSync("checks").map((dir) => JSON.parse(fs.readFileSync(path.join("checks", dir, "controlled-run.json"), "utf8")));
+            if (runs.length !== 2 || !runs.every((run) => run.ok)) throw new Error("a clean-container run failed");
+            const checks = ["verify-bundle", "bundle tests (ubuntu-22.04 host)",
+              ...["ubuntu:22.04", "ubuntu:24.04"].flatMap((image) => [`${image}:no-toolchain`, `${image}:execve-inside-bundle`,
+                ...runs[0].checks.map((check) => `${image}:controlled-run:${check.name}`)])];
+            fs.writeFileSync(`${archive}.validated.json`, `${JSON.stringify({ sha256, target: "linux-x64",
+              runner: "ubuntu-22.04 build; ubuntu:22.04 and ubuntu:24.04 clean containers", checks }, null, 2)}\n`);
+          ' "bundle/$ARCHIVE"
+
+      - name: Upload the validated archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-linux-x64
+          if-no-files-found: error
+          path: |
+            bundle/${{ env.ARCHIVE }}
+            bundle/${{ env.ARCHIVE }}.sha256
+            bundle/${{ env.ARCHIVE }}.validated.json

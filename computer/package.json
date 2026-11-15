@@ -18,7 +18,9 @@
     "bundle:plugins": "node scripts/bundle-plugins.js",
     "test": "npm run build && node --test test/*.test.js",
     "smoke": "npm run build && node test/smoke.js",
-    "postinstall": "node scripts/postinstall.js"
+    "postinstall": "node scripts/postinstall.js",
+    "bundle": "npm run build && node installer/bundle/build.mjs",
+    "test:installers": "node --test \"installer/**/test/*.test.js\""
   },
   "dependencies": {
     "node-pty": "^1.1.0",
