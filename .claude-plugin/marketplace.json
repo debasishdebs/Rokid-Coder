@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "rokid",
-      "source": "./plugins/claude-code",
+      "source": "./plugin/claude-code",
       "description": "Opt a Claude Code session into Rokid-Coder with /rokid:on."
     }
   ]

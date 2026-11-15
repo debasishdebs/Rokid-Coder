@@ -1,0 +1,10 @@
+{
+  "name": "rokid-coder",
+  "private": true,
+  "description": "Rokid-Coder: the computer daemon and the Claude Code and Codex plugins.",
+  "workspaces": [
+    "computer",
+    "plugin/claude-code",
+    "plugin/codex"
+  ]
+}

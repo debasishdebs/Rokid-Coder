@@ -36,45 +36,34 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "RokidNexus"
-include(":shared")
-include(":bus-client")
-include(":plugin-lyrics")
-include(":plugin-media")
-include(":plugin-transit")
-include(":plugin-tasker")
-include(":plugin-assistant")
-include(":plugin-lens")
-include(":plugin-photosync")
-include(":plugin-relay")
-include(":plugin-nav")
-include(":plugin-feeds")
-include(":phone-hub")
-include(":glasses-hub")
-include(":phone-client-probe")
-include(":glasses-client-probe")
-include(":plugin-sample")
-include(":plugin-wireless-adb")
-include(":ink-engine")
-include(":kadb-compat")
-include(":plugin-patcher")
-project(":plugin-patcher").projectDir = file("plugins/patcher")
+rootProject.name = "RokidCoder"
 
-// Plugin modules live under plugins/ (one folder per plugin, each with its own
-// README and CHANGELOG); feeds moves there once the in-flight feeds branch lands.
-project(":plugin-lyrics").projectDir = file("plugins/lyrics")
-project(":plugin-media").projectDir = file("plugins/media")
-project(":plugin-transit").projectDir = file("plugins/transit")
-project(":plugin-tasker").projectDir = file("plugins/tasker")
-project(":plugin-assistant").projectDir = file("plugins/assistant")
-project(":plugin-lens").projectDir = file("plugins/lens")
-project(":plugin-photosync").projectDir = file("plugins/photosync")
-project(":plugin-relay").projectDir = file("plugins/relay")
-project(":plugin-nav").projectDir = file("plugins/nav")
-project(":plugin-sample").projectDir = file("plugins/sample")
-project(":plugin-wireless-adb").projectDir = file("plugins/wireless-adb")
+// Upstream Nexus is vendored at vendor/nexus (a git subtree; see vendor/nexus/PATCHES.md).
+// Its modules keep their upstream names so project paths and test identities stay stable.
+for (name in listOf("shared", "bus-client", "ink-engine", "kadb-compat", "phone-hub", "glasses-hub")) {
+    include(":$name")
+    project(":$name").projectDir = file("vendor/nexus/$name")
+}
 
-val cxrGlobalDirectory = file("../CxrGlobal")
+// Registered once they exist, so later tasks add a module without touching this file.
+val optionalModules = linkedMapOf(
+    ":phone-core" to "vendor/nexus/phone-core",
+    ":glasses-core" to "vendor/nexus/glasses-core",
+    ":mobile:app" to "mobile/app",
+    ":mobile:caller-test" to "mobile/caller-test",
+    ":mobile:agents" to "mobile/agents",
+    ":glasses-app" to "glasses/app",
+)
+for ((path, dir) in optionalModules) {
+    if (file(dir).exists()) {
+        include(path)
+        project(path).projectDir = file(dir)
+    }
+}
+
+// The CXR vendor library is the sibling checkout <repoRoot>/../CxrGlobal. vendor/CxrGlobal
+// links to it, so the standalone vendor/nexus build finds it at its own ../CxrGlobal.
+val cxrGlobalDirectory = rootDir.parentFile.resolve("CxrGlobal")
 val skipCxrGlobal = providers.gradleProperty("skipCxrGlobal")
     .map(String::toBoolean)
     .orElse(false)

@@ -1,8 +1,11 @@
 # Working in this repository
 
-Android/Kotlin. Phone hub, glasses hub, a shared bus client, and the plugins under
-`plugins/`. Start with `README.md` for what the product is; `plugins/AGENTS.md` covers
-plugin work specifically.
+Rokid-Coder: `computer/` (the Node daemon), `plugin/` (the Claude Code and Codex
+plugins), `mobile/` and `glasses/` (our Android apps), and upstream Rokid Nexus vendored
+at `vendor/nexus` (a git subtree). Start with `README.md`. Every change inside
+`vendor/nexus` is its own commit with a row in `vendor/nexus/PATCHES.md`; upstream's own
+rules for its modules are in `vendor/nexus/AGENTS.md` and `vendor/nexus/plugins/AGENTS.md`,
+and the rules below still apply to the vendored modules we build.
 
 Ink Surface crosses `:ink-engine`, `:shared`, `:bus-client`, `:phone-hub`, and
 `:glasses-hub`. Treat `docs/PLUGIN_SDK.md` as the public typed API and `BUSSPEC.md`
@@ -45,18 +48,20 @@ hubs refuse the whole plugin.
 This is the verified way to build and test a module:
 
 ```
-./gradlew :plugin-assistant:testDebugUnitTest :plugin-assistant:assembleDebug -PskipCxrGlobal=true
+./gradlew :mobile:agents:testDebugUnitTest :mobile:agents:assembleDebug
 ```
 
 Swap the module for whichever one you touched (`:phone-hub`, `:glasses-hub`,
-`:bus-client`, `:plugin-relay`, …).
+`:bus-client`, `:shared`, …). The upstream modules keep their upstream names and live in
+`vendor/nexus`. The upstream plugins are built only by the standalone `vendor/nexus`
+build (`cd vendor/nexus && ./gradlew :plugin-relay:testDebugUnitTest -PskipCxrGlobal=true`).
 
 The Ink compiler is a pure Kotlin module and can be checked directly with
 `./gradlew :ink-engine:test`; changes to its public session path normally also
 require `:shared:test`, `:bus-client:testDebugUnitTest`, and both hub test suites.
 
 **`-PskipCxrGlobal=true` is only for modules that do not link against the vendor CXR
-library.** It is right for the plugins. The hubs do link against it, so building
+library.** It is right for the upstream plugins. The hubs do link against it, so building
 `:phone-hub` or `:glasses-hub` with that flag fails with
 `Could not find com.example.cxrglobal:lib`. Build those without it:
 
@@ -66,7 +71,8 @@ library.** It is right for the plugins. The hubs do link against it, so building
 
 The flag works by substituting the `com.example.cxrglobal:lib` dependency with the
 sibling checkout at `../CxrGlobal` (see `settings.gradle.kts`), so that directory has to
-exist next to this one — including for a worktree.
+exist next to this one — including for a worktree. `vendor/CxrGlobal` links to it for the
+standalone `vendor/nexus` build.
 
 Gradle 9.5.1 and the Android SDK are already installed on this machine. Java 17 is the
 toolchain.

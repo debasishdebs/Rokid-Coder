@@ -8,7 +8,7 @@
       "name": "rokid",
       "source": {
         "source": "local",
-        "path": "./plugins/codex"
+        "path": "./plugin/codex"
       },
       "policy": {
         "installation": "AVAILABLE",

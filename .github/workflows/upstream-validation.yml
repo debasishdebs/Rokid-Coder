@@ -1,0 +1,114 @@
+name: Upstream validation
+
+# Builds vendor/nexus standalone, with upstream's own settings.gradle.kts, and runs
+# upstream's full test list: the SDK and hubs, and the plugins and Patcher we vendor
+# but do not ship. This keeps the vendored tree, with our patches on it, verified
+# the way upstream verifies it, so an upstream merge is judged against a green base.
+
+on:
+  push:
+    paths:
+      - "vendor/**"
+      - ".github/workflows/upstream-validation.yml"
+  pull_request:
+    paths:
+      - "vendor/**"
+      - ".github/workflows/upstream-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk-and-hubs:
+    name: Upstream SDK and hub unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Rokid-Coder/vendor/nexus
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+        with:
+          path: Rokid-Coder
+
+      # Upstream's settings look for ../CxrGlobal; vendor/CxrGlobal links to this checkout.
+      - name: Check out CxrGlobal 0.3.0
+        uses: actions/checkout@v6
+        with:
+          repository: Anezium/CxrGlobal
+          ref: v0.3.0
+          path: CxrGlobal
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Run the SDK and hub unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew \
+            :shared:testDebugUnitTest \
+            :bus-client:testDebugUnitTest \
+            :ink-engine:test \
+            :phone-hub:testDebugUnitTest \
+            :glasses-hub:testDebugUnitTest \
+            --continue
+
+  plugins:
+    name: Upstream plugin unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vendor/nexus
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Run every upstream plugin's unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew \
+            :plugin-assistant:testDebugUnitTest \
+            :plugin-relay:testDebugUnitTest \
+            :plugin-lens:testDebugUnitTest \
+            :plugin-lyrics:testDebugUnitTest \
+            :plugin-transit:testDebugUnitTest \
+            :plugin-feeds:testDebugUnitTest \
+            :plugin-media:testDebugUnitTest \
+            :plugin-tasker:testDebugUnitTest \
+            :plugin-photosync:testDebugUnitTest \
+            :plugin-wireless-adb:testDebugUnitTest \
+            :plugin-sample:testDebugUnitTest \
+            :plugin-nav:testDebugUnitTest \
+            -PskipCxrGlobal=true \
+            --continue
+
+      - name: Check Patcher bundle preparation
+        run: python3 -m unittest discover -s plugins/patcher/scripts
+
+      - name: Run Patcher unit tests
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MORPHE_PACKAGES_TOKEN || github.token }}
+        run: ./gradlew :plugin-patcher:testDebugUnitTest -PskipCxrGlobal=true

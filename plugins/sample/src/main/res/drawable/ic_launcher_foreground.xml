@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- The launcher icon reuses the plugin glyph (see ICON_DRAWABLE in the
-     manifest): draw your glyph once in nexus_glyph_sample.xml and the
-     in-app icon, the Android app icon, and the themed icon all follow.
-     20% keeps the glyph inside the adaptive-icon safe zone at the same
-     visual size as the rest of the ecosystem. -->
-<inset xmlns:android="http://schemas.android.com/apk/res/android"
-    android:drawable="@drawable/nexus_glyph_sample"
-    android:inset="20%" />
