@@ -218,6 +218,7 @@ class RokidBusAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         log("AccessibilityService destroyed")
         AssistantDisplayEpisode.end(DisplayHoldReleaseReason.SERVICE_DESTROYED)
+        AgentsDisplayEpisode.end(DisplayHoldReleaseReason.SERVICE_DESTROYED)
         displayStandbyWatchdog.stop()
         NexusSession.onServiceDestroyed()
         NexusInput.onServiceDestroyed()

@@ -657,6 +657,24 @@ class NoticeSurfaceContractTest {
     }
 
     @Test
+    fun shown_payload_shape() {
+        val identity = NoticeInteractionIdentity("notice-a", "question-a")
+        val payload = NoticeSurfaceContract.shownPayload("relay:notice", identity)
+
+        assertEquals(
+            setOf(
+                "noticeId",
+                NoticeSurfaceContract.FIELD_INSTANCE_ID,
+                NoticeSurfaceContract.FIELD_QUESTION_ID,
+            ),
+            payload.keys().asSequence().toSet(),
+        )
+        assertEquals("relay:notice", payload.getString("noticeId"))
+        assertEquals(identity, NoticeSurfaceContract.interactionIdentity(payload))
+        assertEquals("/notice/shown", BusPaths.NOTICE_SHOWN)
+    }
+
+    @Test
     fun `closed payload carries the reason`() {
         val payload = NoticeSurfaceContract.closedPayload("relay:notice", NoticeCloseReason.TIMEOUT)
 

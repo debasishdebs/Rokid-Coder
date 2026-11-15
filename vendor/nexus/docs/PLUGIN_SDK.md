@@ -790,6 +790,7 @@ data class NexusNoticeUpdate(
 )
 
 val supportsNoticeSurface: Boolean
+val supportsNoticeShownAck: Boolean
 fun showNotice(notice: NexusNotice): NexusSdkResult
 fun showNotice(notice: NexusNotice, imageBytes: ByteArray): NexusSdkResult
 fun updateNotice(update: NexusNoticeUpdate): NexusSdkResult
@@ -799,11 +800,13 @@ interface NexusPluginCallbacks {
     fun onNoticeInput(event: NexusInputEvent) = Unit
     fun onNoticeAction(id: String) = Unit
     fun onNoticeClosed(reason: NexusNoticeCloseReason) = Unit
+    fun onNoticeShown() = Unit
 }
 ```
 
 `NexusPluginService` forwards those to the overridable `onNexusNoticeInput`,
-`onNexusNoticeAction(id)`, and `onNexusNoticeClosed(reason)` hooks.
+`onNexusNoticeAction(id)`, `onNexusNoticeClosed(reason)`, and
+`onNexusNoticeShown()` hooks.
 
 Give a band up to three actions and the platform draws a row of glyph chips
 under the footer: forward and backward step along it, confirm fires the selected
@@ -872,6 +875,19 @@ separate replacement close. These filtering rules apply when the hub advertises
 interaction support; older hubs retain the legacy behavior described above.
 An SPP link-state change by itself does not retire the question or block its
 callbacks, because the notice may still be live over CXR.
+
+**`onNoticeShown` is optional and capability-gated.** It fires when the glasses
+have your current band attached to their window, the one proof that it reached
+the wearer's display (which may still be dark). It fires at most once per show:
+updates, selection moves and a rearm in place are the same show. A report for
+a band you have since replaced or hidden is dropped, under the same token rules
+as the other notice callbacks. Only a phone hub that routes it, paired with
+glasses that send it, sets `supportsNoticeShownAck`; everywhere else it is
+false and the callback never comes. No phone hub routes it yet (the phone-hub
+half is pending), so today it is always false. Never wait for it there: treat the wearer's
+action, input or `USER` close as the evidence instead. `TIMEOUT` and `REPLACED`
+are never evidence, since the glasses can time out a band that never attached.
+The notice protocol stays at v5, so hubs without the ack still pair.
 
 If a glasses-side send fails, the band shows *Delivery not confirmed* and
 does not offer a second answer automatically: a partial write may already have

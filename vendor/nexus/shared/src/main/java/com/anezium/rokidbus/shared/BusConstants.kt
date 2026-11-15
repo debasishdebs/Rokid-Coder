@@ -67,6 +67,10 @@ object BusPaths {
     const val NOTICE_INPUT = "/notice/input"
     const val NOTICE_ACTION = "/notice/action"
     const val NOTICE_CLOSED = "/notice/closed"
+
+    /** Optional, glasses to phone to owner once a band is attached; see [BusCapabilityBits.NOTICE_SHOWN_ACK]. */
+    const val NOTICE_SHOWN = "/notice/shown"
+
     const val ACTIVITY_START = "/activity/start"
     const val ACTIVITY_UPDATE = "/activity/update"
     const val ACTIVITY_END = "/activity/end"
@@ -258,6 +262,13 @@ object BusCapabilityBits {
 
     /** Phone-hosted fast file lanes when no shared Wi-Fi lane is available. */
     const val GLASSES_FILES_HOTSPOT = 1 shl 15
+
+    /**
+     * `/notice/shown`. The glasses announce that they send it, the phone that
+     * it routes it, and the plugin-facing bit is set only when both did. It
+     * rides on notice v5 rather than bumping it, so a stock hub still pairs.
+     */
+    const val NOTICE_SHOWN_ACK = 1 shl 16
 }
 
 object LinkStateBits {

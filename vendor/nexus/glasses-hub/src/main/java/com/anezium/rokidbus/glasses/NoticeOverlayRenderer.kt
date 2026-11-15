@@ -236,6 +236,7 @@ object NoticeOverlayRenderer {
             "renderer seq=${notice.seq} event=render attached=${container != null} " +
                 "fadeRunning=$fadeWasRunning",
         )
+        NoticeController.onBandAttached(notice)
         when (motion) {
             NoticeRenderMotion.ENTER -> {
                 // Measure once the content is in place: the band's height is what the

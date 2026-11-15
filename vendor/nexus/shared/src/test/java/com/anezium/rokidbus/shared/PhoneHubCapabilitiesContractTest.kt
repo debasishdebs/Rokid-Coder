@@ -32,6 +32,22 @@ class PhoneHubCapabilitiesContractTest {
     }
 
     @Test
+    fun `the shown ack is the phone's feature bit and a stock phone lacks it`() {
+        val advertised = PhoneHubCapabilitiesContract.parse(
+            PhoneHubCapabilitiesContract.toJson(
+                PhoneHubCapabilitiesContract.create(BusCapabilityBits.NOTICE_SHOWN_ACK, null),
+            ),
+        )
+
+        assertTrue(PhoneHubCapabilitiesContract.supportsNoticeShownAck(advertised))
+        assertFalse(
+            PhoneHubCapabilitiesContract.supportsNoticeShownAck(
+                PhoneHubCapabilitiesContract.parse(JSONObject().put("features", 0)),
+            ),
+        )
+    }
+
+    @Test
     fun `legacy capabilities key remains accepted`() {
         val parsed = PhoneHubCapabilitiesContract.parse(
             JSONObject()

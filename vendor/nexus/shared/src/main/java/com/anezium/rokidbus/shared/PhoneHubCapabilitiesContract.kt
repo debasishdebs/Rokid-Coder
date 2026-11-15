@@ -57,6 +57,10 @@ object PhoneHubCapabilitiesContract {
         ),
     )
 
+    /** The phone routes `/notice/shown` to the owner, so the glasses may send it. */
+    fun supportsNoticeShownAck(capabilities: PhoneHubCapabilities): Boolean =
+        capabilities.features and BusCapabilityBits.NOTICE_SHOWN_ACK != 0
+
     fun sanitizeHudTopInsetDp(value: Int): Int =
         value.coerceIn(MIN_HUD_TOP_INSET_DP, MAX_HUD_TOP_INSET_DP)
 

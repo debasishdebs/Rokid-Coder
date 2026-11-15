@@ -167,6 +167,7 @@ abstract class NexusPluginService : Service(), NexusPluginCallbacks {
     final override fun onNoticeInput(event: NexusInputEvent) = onNexusNoticeInput(event)
     final override fun onNoticeAction(id: String) = onNexusNoticeAction(id)
     final override fun onNoticeClosed(reason: NexusNoticeCloseReason) = onNexusNoticeClosed(reason)
+    final override fun onNoticeShown() = onNexusNoticeShown()
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     final override fun onActivityAction(id: String) = onNexusActivityAction(id)
     final override fun onActivityClosed(reason: String) = onNexusActivityClosed(reason)
@@ -239,6 +240,12 @@ abstract class NexusPluginService : Service(), NexusPluginCallbacks {
 
     /** This plugin's notice is gone, once, whatever ended it. */
     protected open fun onNexusNoticeClosed(reason: NexusNoticeCloseReason) = Unit
+
+    /**
+     * The glasses attached this plugin's current notice band. Optional: only
+     * when [NexusPluginClient.supportsNoticeShownAck] holds.
+     */
+    protected open fun onNexusNoticeShown() = Unit
 
     /** The wearer fired one of this plugin's current activity actions. */
     @Deprecated("Glasses hubs 1.7.0 and later draw activity actions but never let the wearer select them. Put a command in a notice or a surface.")

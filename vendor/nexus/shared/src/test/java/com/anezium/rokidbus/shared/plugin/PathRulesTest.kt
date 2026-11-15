@@ -131,6 +131,13 @@ class PathRulesTest {
     }
 
     @Test
+    fun notice_shown_is_direct_owner_scoped_reply() {
+        assertNull(PathRules.requiredCapability(BusPaths.NOTICE_SHOWN))
+        assertTrue(PathRules.isDirectReply(BusPaths.NOTICE_SHOWN))
+        assertTrue(PathRules.isOwnerScoped(BusPaths.NOTICE_SHOWN))
+    }
+
+    @Test
     fun `activity routes reuse surfaces and replies stay owner scoped`() {
         assertEquals(
             PluginCapability.SURFACES,

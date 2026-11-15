@@ -228,6 +228,85 @@ internal sealed interface NoticeAnswer {
     data class Input(val keyCode: Int) : NoticeAnswer
 }
 
+internal enum class DisplayEpisodeOwner { ASSISTANT, AGENTS }
+
+/**
+ * The display-hold signals a notice decision sends, in the order the episodes
+ * must receive them. A band replaced by a show never closes through
+ * [NoticeStateDecision.Closed], so the Agents end for it rides on the show.
+ * Each takeover goes before the signals themselves, so an engage always lands
+ * on a panel the other episode has let go of. Agents counts the actions still
+ * on offer, so an answered band ends its hold.
+ */
+internal fun noticeEpisodeSignals(
+    decision: NoticeStateDecision,
+    genuineEngagement: Boolean = false,
+    preserveOwnerClose: Boolean = false,
+): List<Pair<DisplayEpisodeOwner, AssistantEpisodeSignal>> {
+    val (assistant, agents) = when (decision) {
+        is NoticeStateDecision.Shown -> assistantEpisodeNoticeShownSignal(
+            surfaceId = decision.notice.surfaceId,
+            ownerPluginId = decision.notice.ownerPluginId,
+            seq = decision.notice.seq,
+            engaged = decision.notice.content.interactive,
+        ) to agentsEpisodeNoticeShownSignal(
+            surfaceId = decision.notice.surfaceId,
+            actionCount = decision.notice.liveActions.size,
+            seq = decision.notice.seq,
+        )
+        is NoticeStateDecision.Updated -> if (genuineEngagement) {
+            assistantEpisodeNoticeShownSignal(
+                surfaceId = decision.notice.surfaceId,
+                ownerPluginId = decision.notice.ownerPluginId,
+                seq = decision.notice.seq,
+                engaged = decision.notice.content.interactive,
+            )
+        } else {
+            assistantEpisodeNoticeRedrawSignal(
+                surfaceId = decision.notice.surfaceId,
+                seq = decision.notice.seq,
+                engaged = decision.notice.content.interactive,
+                reason = DisplayHoldRenewReason.BAND_UPDATE,
+            )
+        } to agentsEpisodeNoticeRedrawSignal(
+            surfaceId = decision.notice.surfaceId,
+            actionCount = decision.notice.liveActions.size,
+            seq = decision.notice.seq,
+            reason = DisplayHoldRenewReason.BAND_UPDATE,
+        )
+        is NoticeStateDecision.Answered -> assistantEpisodeNoticeRedrawSignal(
+            surfaceId = decision.notice.surfaceId,
+            seq = decision.notice.seq,
+            engaged = decision.notice.content.interactive,
+            reason = DisplayHoldRenewReason.BAND_ANSWER,
+        ) to agentsEpisodeNoticeRedrawSignal(
+            surfaceId = decision.notice.surfaceId,
+            actionCount = decision.notice.liveActions.size,
+            seq = decision.notice.seq,
+            reason = DisplayHoldRenewReason.BAND_ANSWER,
+        )
+        is NoticeStateDecision.Closed -> assistantEpisodeNoticeClosedSignal(
+            surfaceId = decision.surfaceId,
+            reason = decision.reason,
+            preserveOwnerClose = preserveOwnerClose,
+        ) to agentsEpisodeNoticeClosedSignal(decision.surfaceId, decision.reason)
+        NoticeStateDecision.DroppedStale,
+        NoticeStateDecision.Ignored,
+        -> return emptyList()
+    }
+    val replaced = (decision as? NoticeStateDecision.Shown)?.replacedNotice?.let {
+        DisplayEpisodeOwner.AGENTS to
+            agentsEpisodeNoticeClosedSignal(it.surfaceId, NoticeCloseReason.REPLACED)
+    }
+    return listOfNotNull(
+        replaced,
+        DisplayEpisodeOwner.ASSISTANT to displayEpisodeTakeoverSignal(agents),
+        DisplayEpisodeOwner.AGENTS to displayEpisodeTakeoverSignal(assistant),
+        DisplayEpisodeOwner.ASSISTANT to assistant,
+        DisplayEpisodeOwner.AGENTS to agents,
+    ).filter { (_, signal) -> signal != AssistantEpisodeSignal.None }
+}
+
 internal sealed interface NoticeStateDecision {
     data class Shown(
         val notice: NexusNoticeSurface,
@@ -545,6 +624,26 @@ internal class NoticeStateMachine {
     }
 }
 
+/**
+ * Tells the phone that a band is attached, once per show. A show is one
+ * interaction instance: a re-render, a selection move or a rearm in place is
+ * the same show, and its question id changing does not make it a new one.
+ * The path is optional on the wire: only a phone that announced
+ * `NOTICE_SHOWN_ACK` is told. A report the transport refused stays owed to
+ * the next render of that band.
+ */
+internal class NoticeShownReporter(private val send: (JSONObject) -> Boolean) {
+    private var reported: Pair<String, String>? = null
+
+    fun bandAttached(notice: NexusNoticeSurface, phoneSupportsAck: Boolean) {
+        if (!phoneSupportsAck) return
+        val identity = notice.interactionIdentity ?: return
+        val show = notice.surfaceId to identity.instanceId
+        if (show == reported) return
+        if (send(NoticeSurfaceContract.shownPayload(notice.surfaceId, identity))) reported = show
+    }
+}
+
 internal object NoticeController {
     private data class PendingNoticeImage(
         val key: ImageDecodeKey,
@@ -560,6 +659,11 @@ internal object NoticeController {
 
     private val main = Handler(Looper.getMainLooper())
     private val state = NoticeStateMachine()
+    private val shownReporter = NoticeShownReporter { payload ->
+        GlassesHub.sendToPhone(BusPaths.NOTICE_SHOWN, payload).also { sent ->
+            if (!sent) log("notice shown transport failed")
+        }
+    }
     private val listeners = CopyOnWriteArrayList<(NexusNoticeSurface?) -> Unit>()
     private val imageDecodeCoordinator = ImageDecodeCoordinator<Bitmap>()
     private var pendingNoticeImage: PendingNoticeImage? = null
@@ -782,6 +886,16 @@ internal object NoticeController {
 
     fun setPageCount(surfaceId: String, seq: Long, count: Int) {
         main.post { applyDecision(state.setPageCount(surfaceId, seq, count)) }
+    }
+
+    /**
+     * The renderer drew [notice] into its attached window. Attached, not merely
+     * accepted: a show the window manager refused, or one hidden behind a
+     * camera or session overlay, has reached no one yet.
+     */
+    fun onBandAttached(notice: NexusNoticeSurface) {
+        if (!state.isCurrentInteraction(notice)) return
+        shownReporter.bandAttached(notice, GlassesHub.phoneSupportsNoticeShownAck())
     }
 
     /**
@@ -1045,18 +1159,16 @@ internal object NoticeController {
         genuineEngagement: Boolean = false,
         preserveOwnerClose: Boolean = false,
     ) {
+        noticeEpisodeSignals(decision, genuineEngagement, preserveOwnerClose)
+            .forEach { (owner, signal) ->
+                when (owner) {
+                    DisplayEpisodeOwner.ASSISTANT -> AssistantDisplayEpisode.accept(serviceContext, signal)
+                    DisplayEpisodeOwner.AGENTS -> AgentsDisplayEpisode.accept(serviceContext, signal)
+                }
+            }
         when (decision) {
             is NoticeStateDecision.Shown -> {
                 resetRingInput()
-                AssistantDisplayEpisode.accept(
-                    serviceContext,
-                    assistantEpisodeNoticeShownSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        ownerPluginId = decision.notice.ownerPluginId,
-                        seq = decision.notice.seq,
-                        engaged = decision.notice.content.interactive,
-                    ),
-                )
                 log(
                     "notice state=shown seq=${decision.notice.seq} " +
                         "ttlMs=${decision.notice.content.ttlMs}",
@@ -1068,35 +1180,10 @@ internal object NoticeController {
                 if (pendingRingNotice?.let { !state.isCurrentInteraction(it) } == true) {
                     resetRingInput()
                 }
-                val signal = if (genuineEngagement) {
-                    assistantEpisodeNoticeShownSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        ownerPluginId = decision.notice.ownerPluginId,
-                        seq = decision.notice.seq,
-                        engaged = decision.notice.content.interactive,
-                    )
-                } else {
-                    assistantEpisodeNoticeRedrawSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        seq = decision.notice.seq,
-                        engaged = decision.notice.content.interactive,
-                        reason = DisplayHoldRenewReason.BAND_UPDATE,
-                    )
-                }
-                AssistantDisplayEpisode.accept(serviceContext, signal)
                 scheduleExpiry(decision.notice)
                 notifyChanged()
             }
             is NoticeStateDecision.Answered -> {
-                AssistantDisplayEpisode.accept(
-                    serviceContext,
-                    assistantEpisodeNoticeRedrawSignal(
-                        surfaceId = decision.notice.surfaceId,
-                        seq = decision.notice.seq,
-                        engaged = decision.notice.content.interactive,
-                        reason = DisplayHoldRenewReason.BAND_ANSWER,
-                    ),
-                )
                 // No expiry rescheduling: answering neither shortens nor extends
                 // the band's life, and the deadline it was already given still
                 // stands. The re-render is what makes the row leave the band.
@@ -1113,14 +1200,6 @@ internal object NoticeController {
                 notifyChanged()
             }
             is NoticeStateDecision.Closed -> {
-                AssistantDisplayEpisode.accept(
-                    serviceContext,
-                    assistantEpisodeNoticeClosedSignal(
-                        surfaceId = decision.surfaceId,
-                        reason = decision.reason,
-                        preserveOwnerClose = preserveOwnerClose,
-                    ),
-                )
                 clearPendingNoticeWake()
                 cancelExpiry()
                 resetRingInput()

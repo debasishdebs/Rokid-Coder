@@ -917,6 +917,23 @@ Glasses to phone to plugin:
   what disappeared. The SDK's current-question filter below can discard a close
   already queued for an older question; this is not an exactly-once callback
   guarantee for every `showNotice()` call.
+- `/notice/shown` — `{noticeId, noticeInstanceId, noticeQuestionId}`. **Optional
+  and capability-gated**, outside the v5 version match: the glasses announce
+  `BusCapabilityBits.NOTICE_SHOWN_ACK` (`1 shl 16`) in their hub capabilities,
+  the phone announces the same bit in its own, and the glasses send this path
+  only to a phone that did. It is sent once per show (interaction instance),
+  when the renderer has the band attached to its window; a refused write is
+  retried on the band's next render. A band hidden behind a camera or session
+  overlay, or one the window manager refused, is not reported. The phone-hub
+  half is pending: no phone hub announces the bit yet, so the glasses never
+  send the path today. When it lands, the phone checks the reported instance
+  against the notice it holds, without spending the band's answer, and
+  delivers it owner-scoped with its current `noticeClientToken`. The
+  plugin-facing `NOTICE_SHOWN_ACK` bit is to be set only when both hubs
+  announced it, so the SDK's `supportsNoticeShownAck` is false
+  with any hub that lacks it, and the plugin falls back to treating an action,
+  an input or a `user` close as display evidence. Like the other replies it is
+  a direct reply: the plugin declares no receive prefix for it.
 
 Both replies go through the same gate on the phone hub: the notice must be the
 one it currently holds, it must actually have asked for a gesture, and it only

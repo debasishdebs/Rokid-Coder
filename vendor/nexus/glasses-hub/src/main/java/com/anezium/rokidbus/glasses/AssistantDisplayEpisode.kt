@@ -25,6 +25,23 @@ internal object NoticeDisplayHoldPolicy {
         ownerPluginId: String,
         engaged: Boolean,
     ): Boolean = engaged && ownerPluginId.isNotBlank() && ownerPluginId != ASSISTANT_PLUGIN_ID
+
+    const val AGENTS_PLUGIN_ID = "agents"
+    private const val AGENTS_NOTICE_ID =
+        "$AGENTS_PLUGIN_ID:${NoticeSurfaceContract.LOCAL_SURFACE_ID}"
+
+    /**
+     * An Agents band holds while it asks the wearer something: approvals and
+     * questions carry actions, done, error and notice bands carry none. Keyed
+     * on the actions alone, not `interactive`: an approval leaves that false,
+     * and the done and error bands set it without asking anything.
+     * [actionCount] is the actions still on offer, so an answered band, which
+     * offers none, no longer holds.
+     */
+    fun agentsNoticeHoldsDisplay(surfaceId: String, actionCount: Int): Boolean =
+        surfaceId == AGENTS_NOTICE_ID && actionCount >= 1
+
+    fun agentsOwnsNotice(surfaceId: String): Boolean = surfaceId == AGENTS_NOTICE_ID
 }
 
 internal enum class DisplayHoldReleaseReason(val logValue: String) {
@@ -37,6 +54,10 @@ internal enum class DisplayHoldReleaseReason(val logValue: String) {
     RENDERER_ERROR("renderer_error"),
     SAFETY_CEILING("safety_ceiling"),
     HOLD_FAILURE("hold_failure"),
+    NOTICE_EXPIRED("notice_expired"),
+    NOTICE_REPLACED("notice_replaced"),
+    NO_ACTIONS("no_actions"),
+    SURFACE_PRESENTED("surface_presented"),
 }
 
 internal enum class DisplayHoldRenewReason(val logValue: String) {
@@ -203,6 +224,81 @@ internal fun assistantEpisodeSurfaceEndedSignal(
 } else {
     AssistantEpisodeSignal.None
 }
+
+internal fun agentsEpisodeNoticeShownSignal(
+    surfaceId: String,
+    actionCount: Int,
+    seq: Long,
+): AssistantEpisodeSignal = if (
+    NoticeDisplayHoldPolicy.agentsNoticeHoldsDisplay(surfaceId, actionCount)
+) {
+    AssistantEpisodeSignal.Engage(seq)
+} else {
+    AssistantEpisodeSignal.None
+}
+
+/**
+ * A redraw never re-arms. One that leaves no action on offer, whether the
+ * owner withdrew them or the wearer answered, ends the hold.
+ */
+internal fun agentsEpisodeNoticeRedrawSignal(
+    surfaceId: String,
+    actionCount: Int,
+    seq: Long,
+    reason: DisplayHoldRenewReason,
+): AssistantEpisodeSignal = when {
+    !NoticeDisplayHoldPolicy.agentsOwnsNotice(surfaceId) -> AssistantEpisodeSignal.None
+    NoticeDisplayHoldPolicy.agentsNoticeHoldsDisplay(surfaceId, actionCount) ->
+        AssistantEpisodeSignal.Renew(seq, reason)
+    else -> AssistantEpisodeSignal.End(DisplayHoldReleaseReason.NO_ACTIONS)
+}
+
+/**
+ * Unlike the Assistant, Agents has no card the band hands over to, so every
+ * close ends the hold.
+ */
+internal fun agentsEpisodeNoticeClosedSignal(
+    surfaceId: String,
+    reason: NoticeCloseReason,
+): AssistantEpisodeSignal {
+    if (!NoticeDisplayHoldPolicy.agentsOwnsNotice(surfaceId)) {
+        return AssistantEpisodeSignal.None
+    }
+    return AssistantEpisodeSignal.End(
+        when (reason) {
+            NoticeCloseReason.USER -> DisplayHoldReleaseReason.WEARER_DISMISSED
+            NoticeCloseReason.OWNER -> DisplayHoldReleaseReason.SESSION_CLOSED
+            NoticeCloseReason.TIMEOUT -> DisplayHoldReleaseReason.NOTICE_EXPIRED
+            NoticeCloseReason.REPLACED -> DisplayHoldReleaseReason.NOTICE_REPLACED
+            NoticeCloseReason.DISCONNECT -> DisplayHoldReleaseReason.LINK_LOSS
+        },
+    )
+}
+
+/**
+ * A new surface taking the screen ends the hold; an update to the surface
+ * already up does not, or a Lyrics or Media stream would cut every approval
+ * short.
+ */
+internal fun agentsEpisodeSurfacePresentedSignal(isHandoff: Boolean): AssistantEpisodeSignal =
+    if (isHandoff) {
+        AssistantEpisodeSignal.End(DisplayHoldReleaseReason.SURFACE_PRESENTED)
+    } else {
+        AssistantEpisodeSignal.None
+    }
+
+/**
+ * Assistant and Agents each hold through their own episode, but only one may
+ * hold the panel at a time: whichever engages ends the other. That includes an
+ * Agents approval shown over an Assistant card, whose hold outlives its band:
+ * the approval takes precedence, and the card is one touch from awake again.
+ */
+internal fun displayEpisodeTakeoverSignal(engaging: AssistantEpisodeSignal): AssistantEpisodeSignal =
+    if (engaging is AssistantEpisodeSignal.Engage) {
+        AssistantEpisodeSignal.End(DisplayHoldReleaseReason.ENGAGED_NOTICE_TAKEOVER)
+    } else {
+        AssistantEpisodeSignal.None
+    }
 
 /**
  * The one logical display owner for an engaged Assistant conversation.
@@ -372,8 +468,42 @@ internal object AssistantDisplayEpisode {
     const val OWNER_ID = "assistant:episode"
     const val DISPLAY_HOLD_CEILING_MS = 90_000L
 
+    private val runtime = DisplayEpisodeRuntime(
+        ownerId = OWNER_ID,
+        ceilingMs = DISPLAY_HOLD_CEILING_MS,
+        wakeLockTag = "rokidbus:assistant-episode",
+    )
+
+    fun accept(context: Context?, signal: AssistantEpisodeSignal) = runtime.accept(context, signal)
+
+    fun end(reason: DisplayHoldReleaseReason) = runtime.end(reason)
+
+    fun isActive(): Boolean = runtime.isActive()
+}
+
+/** Holds the panel for an Agents approval or question band. */
+internal object AgentsDisplayEpisode {
+    const val OWNER_ID = "agents:episode"
+    const val DISPLAY_HOLD_CEILING_MS = AssistantDisplayEpisode.DISPLAY_HOLD_CEILING_MS
+
+    private val runtime = DisplayEpisodeRuntime(
+        ownerId = OWNER_ID,
+        ceilingMs = DISPLAY_HOLD_CEILING_MS,
+        wakeLockTag = "rokidbus:agents-episode",
+    )
+
+    fun accept(context: Context?, signal: AssistantEpisodeSignal) = runtime.accept(context, signal)
+
+    fun end(reason: DisplayHoldReleaseReason) = runtime.end(reason)
+}
+
+private class DisplayEpisodeRuntime(
+    ownerId: String,
+    ceilingMs: Long,
+    private val wakeLockTag: String,
+) {
     private val main = Handler(Looper.getMainLooper())
-    private val lifecycle = AssistantEpisodeHoldLifecycle(DISPLAY_HOLD_CEILING_MS)
+    private val lifecycle = AssistantEpisodeHoldLifecycle(ceilingMs, ownerId)
     private var ceilingTask: Runnable? = null
 
     fun accept(context: Context?, signal: AssistantEpisodeSignal) {
@@ -404,7 +534,7 @@ internal object AssistantDisplayEpisode {
         val power = context?.getSystemService(PowerManager::class.java) ?: return null
         val wakeLock = power.newWakeLock(
             PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-            "rokidbus:assistant-episode",
+            wakeLockTag,
         ).apply { setReferenceCounted(false) }
         return object : DisplayHoldLease {
             override fun acquire(timeoutMs: Long) {

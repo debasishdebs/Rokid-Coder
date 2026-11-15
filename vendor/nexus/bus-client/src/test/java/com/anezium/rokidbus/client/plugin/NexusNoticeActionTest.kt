@@ -70,6 +70,9 @@ class NexusNoticeActionTest {
         override fun onNoticeClosed(reason: NexusNoticeCloseReason) {
             events += "closed:$reason"
         }
+        override fun onNoticeShown() {
+            events += "shown"
+        }
         override fun onRegistrationState(result: Int) = Unit
     }
 
@@ -417,6 +420,81 @@ class NexusNoticeActionTest {
         assertTrue(fixture.callbacks.events.isEmpty())
         fixture.deliver(BusPaths.NOTICE_INPUT, "current-input", fixture.lastToken())
         assertEquals(listOf("input:66"), fixture.callbacks.events)
+    }
+
+    @Test
+    fun notice_shown_delivered_only_for_own_current_notice() {
+        val fixture = approvedFixture(interactionVersion = 1)
+        fixture.client.showNotice(NexusNotice(title = "First", interactive = true))
+        val first = fixture.lastToken()
+        fixture.client.showNotice(NexusNotice(title = "Second", interactive = true))
+        val second = fixture.lastToken()
+
+        // A late report for the replaced band, a missing or foreign token, and
+        // another notice's id are all someone else's evidence.
+        fixture.deliver(BusPaths.NOTICE_SHOWN, "shown-old", first)
+        fixture.deliver(BusPaths.NOTICE_SHOWN, "shown-missing", null)
+        fixture.deliver(BusPaths.NOTICE_SHOWN, "shown-wrong", "a-different-token")
+        fixture.transport.listener.onMessage(
+            BusPaths.NOTICE_SHOWN,
+            "shown-other-notice",
+            pluginPayload()
+                .put("noticeId", "other:notice")
+                .put(NoticeSurfaceContract.FIELD_CLIENT_TOKEN, second),
+        )
+        fixture.transport.listener.onMessage(
+            BusPaths.NOTICE_SHOWN,
+            "shown-other-plugin",
+            JSONObject()
+                .put("pluginId", "other")
+                .put("noticeId", "hello:notice")
+                .put(NoticeSurfaceContract.FIELD_CLIENT_TOKEN, second),
+        )
+        assertTrue(fixture.callbacks.events.isEmpty())
+
+        fixture.deliver(BusPaths.NOTICE_SHOWN, "shown-current", second)
+        fixture.deliver(BusPaths.NOTICE_SHOWN, "shown-current", second)
+        assertEquals(listOf("shown"), fixture.callbacks.events)
+
+        // Once its owner hid it, the band is no longer this plugin's to report on.
+        fixture.client.hideNotice()
+        fixture.deliver(BusPaths.NOTICE_SHOWN, "shown-after-hide", second)
+        assertEquals(listOf("shown"), fixture.callbacks.events)
+    }
+
+    @Test
+    fun supports_notice_shown_ack_false_without_plugin_bit() {
+        // A stock phone hub never sets the plugin-facing bit, whatever the
+        // glasses announce; a new phone with stock glasses leaves it clear too
+        // (that intersection is the phone hub's).
+        val stock = approvedFixture(interactionVersion = 1)
+        assertTrue(stock.client.supportsNoticeSurface)
+        assertFalse(stock.client.supportsNoticeShownAck)
+
+        val acked = fixture().also { fixture ->
+            fixture.transport.featureBits =
+                BusCapabilityBits.NOTICE_SURFACE or BusCapabilityBits.NOTICE_SHOWN_ACK
+            fixture.transport.listener.onMessage(
+                BusPaths.PLUGIN_REGISTRATION,
+                "registration-acked",
+                registration(1),
+            )
+        }
+        // The ack is a property of the notice surface: no link, no notices, no ack.
+        assertFalse(acked.client.supportsNoticeShownAck)
+        acked.transport.listener.onLinkState(LinkStateBits.SPP_DATA_UP)
+        assertTrue(acked.client.supportsNoticeShownAck)
+
+        val ackWithoutNotice = fixture().also { fixture ->
+            fixture.transport.featureBits = BusCapabilityBits.NOTICE_SHOWN_ACK
+            fixture.transport.listener.onMessage(
+                BusPaths.PLUGIN_REGISTRATION,
+                "registration-ack-only",
+                registration(1),
+            )
+            fixture.transport.listener.onLinkState(LinkStateBits.SPP_DATA_UP)
+        }
+        assertFalse(ackWithoutNotice.client.supportsNoticeShownAck)
     }
 
     @Test

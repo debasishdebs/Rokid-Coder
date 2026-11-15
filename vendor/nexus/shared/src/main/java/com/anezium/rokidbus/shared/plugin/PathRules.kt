@@ -80,7 +80,7 @@ object PathRules {
      * third-party plugin to discover it needed one.
      */
     fun isDirectReply(path: String): Boolean = when (normalizeAbsolute(path)) {
-        BusPaths.NOTICE_CLOSED, BusPaths.NOTICE_INPUT, BusPaths.NOTICE_ACTION,
+        BusPaths.NOTICE_CLOSED, BusPaths.NOTICE_INPUT, BusPaths.NOTICE_ACTION, BusPaths.NOTICE_SHOWN,
         BusPaths.ACTIVITY_ACTION, BusPaths.ACTIVITY_CLOSED,
         BusPaths.TTS_STARTED, BusPaths.TTS_DONE,
         BusPaths.CAMERA_SNAPSHOT_RESULT, BusPaths.CAMERA_SNAPSHOT_ERROR,
@@ -94,7 +94,7 @@ object PathRules {
     }
 
     fun isOwnerScoped(path: String): Boolean = when (normalizeAbsolute(path)) {
-        BusPaths.NOTICE_CLOSED, BusPaths.NOTICE_INPUT, BusPaths.NOTICE_ACTION,
+        BusPaths.NOTICE_CLOSED, BusPaths.NOTICE_INPUT, BusPaths.NOTICE_ACTION, BusPaths.NOTICE_SHOWN,
         BusPaths.ACTIVITY_ACTION, BusPaths.ACTIVITY_CLOSED,
         BusPaths.TTS_STARTED, BusPaths.TTS_DONE,
         BusPaths.CAMERA_SNAPSHOT_RESULT, BusPaths.CAMERA_SNAPSHOT_ERROR,
