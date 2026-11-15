@@ -1,0 +1,8 @@
+{
+  "marketplaces": [
+    {
+      "name": "rokid-coder",
+      "source": { "source": "local", "path": "/home/example/.local/share/rokid-coder/1.0.0/plugins" }
+    }
+  ]
+}

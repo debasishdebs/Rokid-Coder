@@ -1,0 +1,18 @@
+{
+  "token": "fixtureTokenQ0r7Kd2mVx9LpW3sNa6Bt1Yc8Hf5Ze4Uj0Gi",
+  "wsPort": 8792,
+  "httpPort": 8791,
+  "machineId": "fixtureMachineIdT7p0q8",
+  "machineName": "fixture-mac",
+  "phoneHosts": [],
+  "tailnetDiscovery": true,
+  "allowTerminalInput": false,
+  "codex": {
+    "enabled": false,
+    "port": 8390,
+    "useSharedDaemon": true
+  },
+  "rokidCoder": {
+    "stateDir": "~/.rokid-coder"
+  }
+}

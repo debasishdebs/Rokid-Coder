@@ -1,0 +1,10 @@
+{
+  "plugins": [
+    {
+      "name": "rokid",
+      "marketplace": "rokid-coder",
+      "version": "1.0.0",
+      "path": "/home/example/.codex/plugins/rokid-coder/rokid"
+    }
+  ]
+}

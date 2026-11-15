@@ -1,0 +1,9 @@
+[
+  {
+    "id": "rokid@rokid-coder",
+    "version": "1.0.0",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "/Users/example/.claude/plugins/cache/rokid-coder/rokid/1.0.0"
+  }
+]

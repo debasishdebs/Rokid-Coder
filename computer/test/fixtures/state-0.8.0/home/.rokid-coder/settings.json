@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "waitLimitMs": 1800000,
+  "defaultModes": {
+    "claude": "ask",
+    "codex": "ask"
+  },
+  "pairingTtlDays": 14
+}
