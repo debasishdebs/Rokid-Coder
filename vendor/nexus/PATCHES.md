@@ -48,3 +48,5 @@ exception: CI checks their blob ids against upstream `15cd98ad`
 - `glasses-core/src/main/java/com/anezium/rokidbus/glasses/AuthenticatedSppServer.kt`
 - `phone-core/src/main/java/com/anezium/rokidbus/phone/PhoneSppPairing.kt`
 - `phone-core/src/main/java/com/anezium/rokidbus/phone/PhoneSppPairingStorage.kt`
+
+**Note on rename tracking (controller ruling R210, 2026-11-15):** `HubCore.kt` is 47.7% similar to upstream `BusHubService.kt`, below git's 50% rename threshold. An upstream edit to `phone-hub/.../BusHubService.kt` therefore shows as a modify/delete conflict on `git subtree pull`. `scripts/upstream-sync.sh` exits 2, the sync Action opens an issue, and the change is ported by hand into `phone-core/.../HubCore.kt` or the shell `BusHubShellService.kt`, per `docs/coding-agent/claude/design/adr-cores.md`.
