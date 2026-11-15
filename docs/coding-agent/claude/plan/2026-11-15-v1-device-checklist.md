@@ -136,6 +136,15 @@ The wording is 6b's (macOS: T7b Step 5, results also in `docs/coding-agent/relea
 | WINS-W8 | Windows gate | Uninstall. Expected: the task, proxy, firewall rules and plugins are gone and the state is kept; then purge removes the state. | Windows (WSL) | — | yes |  |  |  |
 | WINS-W9 | Windows gate | The `rk` safety suite on Windows. Steps: run it with `ROKID_RK_WINDOWS_VERIFIED=1`. Expected: it records whether the Windows launcher may be marked verified (U33). | Windows (WSL) | — | no |  |  | With LAUNCH-WIN-*, decides ROKID_RK_WINDOWS_VERIFIED. |
 
+## Plugin CLI contracts (R218)
+
+The parts of the `claude` and `codex` plugin commands that setup relies on but the recorded fixtures could not capture (`computer/test/fixtures/plugin-cli/*/meta.json`: `listJsonRecorded: false`). Both are required.
+
+| ID | Area | Item | Platform | CLI | Required | Tested on | Result | Notes |
+|---|---|---|---|---|---|---|---|---|
+| PLG-CODEX-ARGS | Plugin CLI | Codex's plugin argument form (R218). Steps: on a computer with the rc installed and its Codex plugin set up, run `codex --version`, then `codex plugin remove rokid@rokid-coder`, `codex plugin list --json`, `codex plugin add rokid@rokid-coder` and `codex plugin list --json` again; finish with `rokid-setup plugins status --json`. Expected: `remove` and `add` both accept the `rokid@rokid-coder` (plugin@marketplace) form and exit 0, the first list no longer shows the plugin as installed and the second does, and the status reports the Codex plugin installed. | macOS | Codex | yes |  |  | Record the `codex --version` output. |
+| PLG-LIST-JSON | Plugin CLI | The plugin CLIs' list JSON (R218). Steps: with the rc installed and its plugin set up in both CLIs, run `claude plugin list --json`, `claude plugin marketplace list --json`, `codex plugin list --json` and `codex plugin marketplace list --json`. Compare each output with its fixture: `plugin-list.json` and `marketplace-list.json` in `computer/test/fixtures/plugin-cli/claude-2.1.285/` and `computer/test/fixtures/plugin-cli/codex-0.169.0/`, whose `meta.json` `listFormat` says which top level to expect. Expected: each command exits 0 and its output has the fixture's shape: the same top level (an array for `listFormat: array`; an object with a `plugins` or `marketplaces` array for `listFormat: object`) and the same field names for the `rokid@rokid-coder` plugin and the `rokid-coder` marketplace. Values such as paths and versions may differ. | macOS | — | yes |  |  | Record both CLI versions. Any difference is a FAIL: the fixture and setup's parser change together. |
+
 ## Carried forward (not required)
 
 Still-valid items from the Plan 2 and Plan 4 checklist (`2026-11-14-plan-2-device-checklist.md`), rewritten for the single app. They are recorded for the next release and never block 1.0.
