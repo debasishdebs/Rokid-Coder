@@ -46,3 +46,15 @@ test("nsis_uninstaller_keeps_itself_and_its_registration_until_removal_succeeds"
     assert.equal(uninstall.indexOf(removal, at + 1), -1, `${removal} nowhere else`);
   }
 });
+
+test("nsis_failed_install_says_the_undo_may_be_incomplete", () => {
+  const section = block('Section "Rokid Coder"', "SectionEnd");
+  const failure = section.slice(section.indexOf("${If} $0 != 0"), section.indexOf("${EndIf}"));
+  const box = /MessageBox MB_ICONSTOP "([^"]*)"/.exec(failure);
+  assert.ok(box, "a failed install says so");
+  // The em dash as NSIS's code-point form: the script is read without a BOM.
+  assert.ok(box[1].startsWith("Setup stopped. Some changes may not have been undone ${U+2014} run the installer again to finish or undo."), box[1]);
+  assert.doesNotMatch(box[1], /put back/, "Call RevertMachineRun may not have undone everything");
+  assert.match(box[1], /exit \$0/);
+  assert.match(box[1], /~\/\.rokid-coder\/logs\/setup\.log/);
+});

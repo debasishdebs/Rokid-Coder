@@ -289,7 +289,7 @@ Section "Rokid Coder"
   ${If} $0 != 0
     ; Only what THIS run's machine.ps1 -Apply created or replaced goes back.
     Call RevertMachineRun
-    MessageBox MB_ICONSTOP "Rokid Coder setup did not finish (exit $0), and what it changed was put back. The setup log is in WSL: ~/.rokid-coder/logs/setup.log"
+    MessageBox MB_ICONSTOP "Setup stopped. Some changes may not have been undone ${U+2014} run the installer again to finish or undo.$\r$\n$\r$\n(exit $0) The setup log is in WSL: ~/.rokid-coder/logs/setup.log"
     Abort
   ${EndIf}
   WriteUninstaller "$INSTDIR\uninstall.exe"
