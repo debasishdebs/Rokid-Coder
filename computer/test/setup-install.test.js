@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { makeWorld, treeBytes } = require("./fixtures/plugin-cli/harness");
+const { makeWorld, treeBytes, NODE } = require("./fixtures/plugin-cli/harness");
 const { PinStore, normalizeFingerprint } = require("../dist/tls.js");
 
 const CONSENT = { legacy: { retireAutostart: true, removeInstallHooks: true } };
@@ -335,6 +335,42 @@ test("fresh_install_cli_installed_outside_path_reaches_daemon_env", async (t) =>
   assert.ok(fs.readFileSync(path.join(world.home, ".rokid-coder", "env"), "utf8").includes(local));
   assert.ok((await world.health()).path.split(":").includes(local), "the daemon runs with that dir on PATH");
   assert.equal(world.manifest().plugins.claude.status, "ok");
+});
+
+test("npm_cli_plugin_commands_run_with_its_resolved_node_including_recovery", async (t) => {
+  // An npm claude (a `#!/usr/bin/env node` script) whose node only the login shell finds: setup's own PATH has none.
+  const nodeDir = path.dirname(NODE);
+  const world = makeWorld(t, { loginPath: [nodeDir, "/usr/bin", "/bin"] });
+  world.cli("claude", { npm: true });
+  const b1 = world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1" });
+  const first = world.install(b1);
+  assert.equal(first.status, 0, first.output);
+  assert.equal(world.manifest().plugins.claude.status, "ok", first.output);
+  assert.equal(world.manifest().clis.claude.interpreter, path.join(nodeDir, "node"));
+  assert.equal(world.cliState("claude").plugins["rokid@rokid-coder"].version, "1.0.1");
+
+  // A failed upgrade's recovery puts the registration back through the same CLI.
+  const b2 = world.bundle("1.0.0-test.2", { pluginVersion: "1.0.2" });
+  const failed = world.install(b2, {}, { extraEnv: { ROKID_SETUP_FAIL_AT: "9" } });
+  assert.equal(failed.status, 1, failed.output);
+  assert.doesNotMatch(failed.output, /restoring the claude plugin/);
+  assert.equal(world.cliState("claude").marketplaces["rokid-coder"].path, path.join(b1, "plugins"));
+
+  // So do rollback, plugins sync and status, and uninstall.
+  assert.equal(world.install(b2).status, 0);
+  assert.equal(world.cliState("claude").plugins["rokid@rokid-coder"].version, "1.0.2");
+  const back = world.run(["rollback"]);
+  assert.equal(back.status, 0, back.output);
+  assert.equal(world.cliState("claude").plugins["rokid@rokid-coder"].version, "1.0.1");
+  const sync = world.run(["plugins", "sync", "--json"]);
+  assert.equal(sync.status, 0, sync.output);
+  assert.equal(JSON.parse(sync.stdout).claude.result, "ok");
+  const status = world.run(["plugins", "status", "--json"]);
+  assert.equal(JSON.parse(status.stdout).claude.plugin.version, "1.0.1", status.output);
+  const removed = world.run(["uninstall"]);
+  assert.equal(removed.status, 0, removed.output);
+  assert.doesNotMatch(removed.output, /could not be removed/);
+  assert.deepEqual(world.cliState("claude"), { marketplaces: {}, plugins: {} });
 });
 
 test("manual_agentd_on_ports_is_never_killed", async (t) => {

@@ -24,7 +24,7 @@ import { pairStep } from "./pair-step";
 import { AUTOSTART, type PlatformHooks, type RetiredRecord } from "./platform/index";
 import { createDriver, restorePlugin, syncPlugin } from "./plugins";
 import { profileFiles, readBlock, renderBlock, writeBlock } from "./profile-path";
-import { type ResolvedCli, envFilePath, resolveAll, writeDaemonEnv } from "./resolve-cli";
+import { type ResolvedCli, cliRunEnv, envFilePath, resolveAll, writeDaemonEnv } from "./resolve-cli";
 import {
   type StateLocations,
   checkSnapshot,
@@ -79,6 +79,8 @@ export class SetupError extends Error {}
 interface PluginUndo {
   cliPath: string;
   prior: PriorRegistration;
+  /** The PATH its plugin commands ran with (cliRunEnv), so the undo finds the same interpreter. */
+  path?: string;
 }
 
 export interface Journal {
@@ -280,7 +282,11 @@ export async function runRestore(ctx: SetupContext, plan: RestorePlan): Promise<
     const undo = plan.plugins?.[tool];
     if (undo) {
       await attempt(`restoring the ${tool} plugin`, () =>
-        restorePlugin(createDriver(tool, undo.cliPath, { home: ctx.home, env: ctx.env }), undo.prior, plan.ourRoots),
+        restorePlugin(
+          createDriver(tool, undo.cliPath, { home: ctx.home, env: undo.path ? { ...ctx.env, PATH: undo.path } : ctx.env }),
+          undo.prior,
+          plan.ourRoots,
+        ),
       );
     }
   }
@@ -538,16 +544,17 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     const daemonEnv = await writeDaemonEnv({ home: ctx.home, env: ctx.env });
     warnings.push(...daemonEnv.warnings);
     for (const cli of Object.values(daemonEnv.resolved)) {
-      if (cli) newManifest.clis[cli.tool] = { path: cli.path, version: cli.version };
+      if (cli) newManifest.clis[cli.tool] = { path: cli.path, version: cli.version, ...(cli.interpreter ? { interpreter: cli.interpreter } : {}) };
     }
     inject(ctx, 7);
 
     // 8: plugins, recording each CLI's registration before touching it [6b-R11]
     journal.steps[8] = { plugins: {} };
+    const pluginEnv = cliRunEnv(ctx.env, newManifest.clis);
     for (const tool of TOOLS) {
       const cli = newManifest.clis[tool];
       if (!cli) continue;
-      const driver = createDriver(tool, cli.path, { home: ctx.home, env: ctx.env });
+      const driver = createDriver(tool, cli.path, { home: ctx.home, env: pluginEnv });
       let prior: PriorRegistration = {};
       try {
         const status = await driver.status();
@@ -558,7 +565,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
       } catch {
         // syncPlugin reports it
       }
-      journal.steps[8].plugins[tool] = { cliPath: cli.path, prior };
+      journal.steps[8].plugins[tool] = { cliPath: cli.path, prior, path: pluginEnv.PATH };
       record();
       const outcome = await syncPlugin(driver, path.join(bundleDir, "plugins"));
       newManifest.plugins[tool] = outcome.record;
@@ -664,10 +671,11 @@ export async function rollback(ctx: SetupContext): Promise<number> {
     plan.start = { legacy: previous.retiredLegacy! };
   }
   plan.plugins = {};
+  const pluginPath = cliRunEnv(ctx.env, current.clis).PATH;
   for (const tool of TOOLS) {
     const cli = current.clis[tool];
     const prior = previous.pluginSources?.[tool];
-    if (cli && prior) plan.plugins[tool] = { cliPath: cli.path, prior };
+    if (cli && prior) plan.plugins[tool] = { cliPath: cli.path, prior, path: pluginPath };
   }
   const problems = await runRestore(ctx, plan);
   if (previous.manifest) {

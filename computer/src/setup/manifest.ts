@@ -8,6 +8,8 @@ export const TOOLS: readonly Tool[] = ["claude", "codex"];
 export interface CliRecord {
   path: string;
   version: string;
+  /** The interpreter its `#!` line names, as resolved at install: its plugin commands run with it on PATH. */
+  interpreter?: string;
 }
 
 /** A CLI's registration of our plugin, as the CLI itself reported it. */

@@ -12,7 +12,7 @@ import { type Health, type SetupContext, type SetupIo, SetupError, install, roll
 import { runAgentdPair } from "./pair-step";
 import { type PlatformName, isTestMode, loadPlatform } from "./platform/index";
 import { type PluginStatus, createDriver, removePlugin, syncPlugin } from "./plugins";
-import { resolveAll } from "./resolve-cli";
+import { cliRunEnv, resolveAll } from "./resolve-cli";
 import { stateLocations } from "./state";
 import { uninstall } from "./uninstall";
 
@@ -152,6 +152,7 @@ function requireManifest(home: string): InstallManifest {
 async function pluginsSync(ctx: SetupContext, tools: Tool[]): Promise<Record<string, unknown>> {
   const manifest = requireManifest(ctx.home);
   const resolved = await resolveAll({ home: ctx.home, env: ctx.env });
+  const pluginEnv = cliRunEnv(ctx.env, resolved);
   const results: Record<string, unknown> = {};
   for (const tool of tools) {
     const cli = resolved[tool];
@@ -159,8 +160,8 @@ async function pluginsSync(ctx: SetupContext, tools: Tool[]): Promise<Record<str
       results[tool] = { result: "absent" };
       continue;
     }
-    const outcome = await syncPlugin(createDriver(tool, cli.path, { home: ctx.home, env: ctx.env }), path.join(manifest.bundleDir, "plugins"));
-    manifest.clis[tool] = { path: cli.path, version: cli.version };
+    const outcome = await syncPlugin(createDriver(tool, cli.path, { home: ctx.home, env: pluginEnv }), path.join(manifest.bundleDir, "plugins"));
+    manifest.clis[tool] = { path: cli.path, version: cli.version, ...(cli.interpreter ? { interpreter: cli.interpreter } : {}) };
     manifest.plugins[tool] = outcome.record;
     results[tool] = { result: outcome.result, ...(outcome.record.detail ? { detail: outcome.record.detail } : {}) };
   }
@@ -253,13 +254,14 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
           const current = requireManifest(home);
           const roots = [current.bundleDir, current.previous?.bundleDir].filter((d): d is string => Boolean(d)).flatMap((d) => [d, path.dirname(d)]);
           const results: Record<string, unknown> = {};
+          const pluginEnv = cliRunEnv(env, current.clis);
           for (const tool of tools) {
             const cli = current.clis[tool];
             if (!cli) {
               results[tool] = { result: "absent" };
               continue;
             }
-            const removed = await removePlugin(createDriver(tool, cli.path, { home, env }), roots);
+            const removed = await removePlugin(createDriver(tool, cli.path, { home, env: pluginEnv }), roots);
             delete current.plugins[tool];
             results[tool] = { result: removed ? "removed" : "kept", ...(removed ? {} : { detail: "the rokid-coder marketplace is not ours" }) };
           }
@@ -269,10 +271,11 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
         }
         if (action === "status") {
           const resolved = await resolveAll({ home, env });
+          const pluginEnv = cliRunEnv(env, resolved);
           const results: Record<string, PluginStatus | { result: "absent" }> = {};
           for (const tool of tools) {
             const cli = resolved[tool];
-            results[tool] = cli ? await createDriver(tool, cli.path, { home, env }).status() : { result: "absent" };
+            results[tool] = cli ? await createDriver(tool, cli.path, { home, env: pluginEnv }).status() : { result: "absent" };
           }
           process.stdout.write(`${JSON.stringify(results)}\n`);
           return 0;

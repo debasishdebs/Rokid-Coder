@@ -6,7 +6,7 @@ import type { SetupContext } from "./orchestrator";
 import { SetupError } from "./orchestrator";
 import { createDriver, isUnder, removePlugin } from "./plugins";
 import { profileFiles, writeBlock } from "./profile-path";
-import { envFilePath } from "./resolve-cli";
+import { cliRunEnv, envFilePath } from "./resolve-cli";
 import { stateLocations } from "./state";
 
 function removeIfEmpty(dir: string): void {
@@ -44,11 +44,12 @@ export async function uninstall(ctx: SetupContext, options: { purge: boolean; ye
   const roots = [manifest?.bundleDir, manifest?.previous?.bundleDir]
     .filter((dir): dir is string => Boolean(dir))
     .flatMap((dir) => [dir, path.dirname(dir)]);
+  const pluginEnv = cliRunEnv(ctx.env, manifest?.clis ?? {});
   for (const tool of TOOLS) {
     const cli = manifest?.clis[tool];
     if (!cli) continue;
     try {
-      await removePlugin(createDriver(tool, cli.path, { home: ctx.home, env: ctx.env }), roots);
+      await removePlugin(createDriver(tool, cli.path, { home: ctx.home, env: pluginEnv }), roots);
     } catch (error) {
       ctx.io.write(`The ${tool} plugin could not be removed: ${error instanceof Error ? error.message : String(error)}\n`);
     }

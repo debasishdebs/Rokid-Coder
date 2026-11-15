@@ -151,15 +151,36 @@ export async function resolveAll(options: ResolveOptions): Promise<Partial<Recor
  * four system dirs, as 0.8.0's LaunchAgent script ordered them. Ahead, so a
  * distro's old /usr/bin/node never runs an npm CLI that needs the user's own.
  */
-export function daemonPath(resolved: Partial<Record<Tool, ResolvedCli>>): string {
+export function daemonPath(resolved: Partial<Record<Tool, CliLocation>>): string {
+  return [...new Set([...cliDirs(resolved), ...BASE_DAEMON_PATH])].join(":");
+}
+
+/** Where a CLI and the interpreter its `#!` line needs were found. */
+export interface CliLocation {
+  path: string;
+  interpreter?: string;
+}
+
+function cliDirs(clis: Partial<Record<Tool, CliLocation>>): string[] {
   const dirs: string[] = [];
-  for (const cli of Object.values(resolved)) {
+  for (const cli of Object.values(clis)) {
     if (!cli) continue;
     for (const file of [cli.path, cli.interpreter]) {
       if (file) dirs.push(path.dirname(file));
     }
   }
-  return [...new Set([...dirs, ...BASE_DAEMON_PATH])].join(":");
+  return dirs;
+}
+
+/**
+ * The env a CLI's plugin commands run with: each CLI's dir and its
+ * interpreter's dir ahead of the caller's PATH, as in the daemon PATH, so an
+ * npm CLI starts with the Node it was resolved with even when the caller's
+ * PATH has none.
+ */
+export function cliRunEnv(env: NodeJS.ProcessEnv, clis: Partial<Record<Tool, CliLocation>>): NodeJS.ProcessEnv {
+  const inherited = (env.PATH ?? "").split(":").filter(Boolean);
+  return { ...env, PATH: [...new Set([...cliDirs(clis), ...inherited, ...BASE_DAEMON_PATH])].join(":") };
 }
 
 function shellQuote(value: string): string {
