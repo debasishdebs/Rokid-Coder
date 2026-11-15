@@ -58,6 +58,8 @@ jobs:
       sha: ${{ steps.tested.outputs.sha }}
     env:
       ACTIONLINT_VERSION: "1.7.7"
+      # From actionlint_1.7.7_checksums.txt in the v1.7.7 release (the linux_amd64 tarball).
+      ACTIONLINT_SHA256: "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
@@ -87,7 +89,12 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bin"
           cd "$RUNNER_TEMP/bin"
-          bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$tarball" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$tarball"
+          [[ "$ACTIONLINT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "ACTIONLINT_SHA256 is not a SHA-256 digest; verify it for $ACTIONLINT_VERSION"; exit 1; }
+          echo "$ACTIONLINT_SHA256  $tarball" | sha256sum -c -
+          tar -xzf "$tarball" actionlint
+          rm "$tarball"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # Includes the release gate, publish, version, upstream-sync and workflow checks.

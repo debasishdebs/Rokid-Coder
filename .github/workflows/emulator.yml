@@ -274,6 +274,7 @@ jobs:
       sha: ${{ steps.tested.outputs.sha }}
     env:
       BUNDLETOOL_VERSION: "1.17.2"
+      BUNDLETOOL_SHA256: "2d4ad908faea64047c1cc9cb747e6aa667c6ab192e09607bd16b67246a8cd6ae"
     steps:
       - name: Check out the revision
         uses: actions/checkout@v6
@@ -368,7 +369,11 @@ jobs:
           jarsigner -verify "$PHONE_AAB" | grep -Fx "jar verified."
           aab_pin=$(keytool -printcert -jarfile "$PHONE_AAB" | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')
           [ "$aab_pin" = "$PIN" ] || { echo "the AAB is not signed by the pinned release key"; exit 1; }
+          # Google publishes no checksum for bundletool; this digest is of the 1.17.2 release asset as
+          # downloaded from GitHub. The jar is not run unless it matches, and a missing digest fails.
           curl -fsSL -o "$RUNNER_TEMP/bundletool.jar" "https://github.com/google/bundletool/releases/download/$BUNDLETOOL_VERSION/bundletool-all-$BUNDLETOOL_VERSION.jar"
+          [[ "$BUNDLETOOL_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "BUNDLETOOL_SHA256 is not a SHA-256 digest; verify it for $BUNDLETOOL_VERSION"; exit 1; }
+          echo "$BUNDLETOOL_SHA256  $RUNNER_TEMP/bundletool.jar" | sha256sum -c -
           manifest() { java -jar "$RUNNER_TEMP/bundletool.jar" dump manifest --bundle "$PHONE_AAB" --xpath "$1"; }
           [ "$(manifest /manifest/@package)" = "$PHONE_ID" ]
           [ "$(manifest /manifest/@android:versionCode)" = "$VERSION_CODE" ]

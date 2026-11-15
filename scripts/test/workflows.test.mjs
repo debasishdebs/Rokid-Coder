@@ -170,6 +170,35 @@ test("emulator.yml's checkRelease build signs with an ephemeral CI key and overr
   assert.deepEqual(overrides, ["emulator.yml"]);
 });
 
+test("every executable a workflow downloads is pinned by version and verified by SHA-256 before it runs", () => {
+  const pins = { "emulator.yml": ["BUNDLETOOL_VERSION", "BUNDLETOOL_SHA256"], "tests.yml": ["ACTIONLINT_VERSION", "ACTIONLINT_SHA256"] };
+  const problems = [];
+  for (const name of WORKFLOWS) {
+    const text = read(name);
+    const lines = text.split("\n");
+    lines.forEach((line, at) => {
+      if (line.trim().startsWith("#")) return;
+      if (/(bash|sh)\s+<\(\s*curl|curl[^|\n]*\|\s*(ba)?sh/.test(line)) problems.push(`${name}:${at + 1} pipes a download into a shell`);
+      if (!/\bcurl\b|\bwget\b/.test(line) || /https?:\/\/(127\.0\.0\.1|localhost)/.test(line)) return;
+      const rest = lines.slice(at + 1, at + 8).join("\n");
+      if (!/sha256sum -c/.test(rest)) problems.push(`${name}:${at + 1} downloads without a following sha256sum -c`);
+    });
+  }
+  assert.deepEqual(problems, []);
+
+  for (const [name, [version, digest]] of Object.entries(pins)) {
+    const text = read(name);
+    assert.match(text, new RegExp(`^\\s+${version}: "\\d+\\.\\d+\\.\\d+"$`, "m"), `${name} pins ${version}`);
+    assert.match(text, new RegExp(`^\\s+${digest}: "[0-9a-f]{64}"$`, "m"), `${name} commits ${digest}`);
+    // Fail closed: a missing or placeholder digest stops the job before the tool is used.
+    assert.match(text, new RegExp(`\\[\\[ "\\$${digest}" =~ \\^\\[0-9a-f\\]\\{64\\}\\$ \\]\\] \\|\\| \\{[^}]*exit 1`), `${name} rejects a missing ${digest}`);
+    assert.match(text, new RegExp(`echo "\\$${digest}  [^"]+" \\| sha256sum -c -`), `${name} verifies ${digest}`);
+  }
+  const bundletool = read("emulator.yml");
+  assert.ok(bundletool.indexOf("sha256sum -c -", bundletool.indexOf("bundletool.jar")) < bundletool.indexOf("java -jar"), "bundletool is verified before it runs");
+  assert.match(read("tests.yml"), /actionlint_\$\{ACTIONLINT_VERSION\}_linux_amd64\.tar\.gz/);
+});
+
 test("workflows_lint", (t) => {
   const found = spawnSync("actionlint", ["-version"], { encoding: "utf8" });
   if (found.error) {
