@@ -6,11 +6,14 @@ BeforeAll {
   $script:manifests = @{}
   $script:taskBinding = $null
   # $script:unreadable: distros whose install.json is there but cat cannot read it; $script:wslBroken: wsl.exe runs nothing.
-  $script:unreadable = @{}
+  $script:unreadable = @{}; $script:unsearchable = @{}
   $script:wslBroken = $false
   $script:fakeWsl = {
     if ($script:wslBroken) { return [pscustomobject]@{ ExitCode = 1; Output = @() } }
     if ($Path -eq '/usr/bin/true') { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
+    if ($Path -eq '/usr/bin/test' -and $Arguments[0] -eq '-x') {
+      return [pscustomobject]@{ ExitCode = $(if ($script:unsearchable[$Distro]) { 1 } else { 0 }); Output = @() }
+    }
     if ($Path -eq '/usr/bin/test' -and $Arguments[0] -eq '-e') {
       return [pscustomobject]@{ ExitCode = $(if ($script:manifests[$Distro] -or $script:unreadable[$Distro]) { 0 } else { 1 }); Output = @() }
     }
@@ -52,7 +55,7 @@ Describe 'uninstall' {
     $script:wsl = New-Object System.Collections.Generic.List[string]
     $script:setupExit = 0
     $script:manifests = @{}
-    $script:unreadable = @{}
+    $script:unreadable = @{}; $script:unsearchable = @{}
     $script:wslBroken = $false
     $script:taskBinding = $null
     Mock Invoke-WslExec $script:fakeWsl
@@ -166,9 +169,10 @@ Describe 'uninstall' {
       @{ Why = 'corrupt'; Set = { $script:manifests['Ubuntu'] = '{"schema":1,"binding":' }; Says = '*install.json*Ubuntu*not valid JSON*' }
       @{ Why = 'unreadable'; Set = { $script:unreadable['Ubuntu'] = $true }; Says = '*install.json*Ubuntu*could not be read*' }
       @{ Why = 'wsl.exe runs nothing'; Set = { $script:wslBroken = $true }; Says = '*install.json*Ubuntu*could not be read*' }
+      @{ Why = 'a directory on the way cannot be searched'; Set = { $script:manifests['Ubuntu'] = $null; $script:unsearchable['Ubuntu'] = $true }; Says = '*install.json*Ubuntu*cannot be searched*' }
     )
     foreach ($case in $cases) {
-      $script:manifests['Ubuntu'] = $good; $script:unreadable = @{}; $script:wslBroken = $false
+      $script:manifests['Ubuntu'] = $good; $script:unreadable = @{}; $script:unsearchable = @{}; $script:wslBroken = $false
       & $case.Set
       { Resolve-CommittedBinding } | Should -Throw $case.Says -Because $case.Why
       $warnings = @(& $script:Uninstall 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })

@@ -22,7 +22,8 @@ function functionBody(name) {
 }
 
 const BINDING = { distroName: "Ubuntu", linuxUser: "zoe", linuxHome: "/home/zoe smith" };
-const FILE = `${BINDING.linuxHome}/.rokid-coder/install.json`;
+const STATE = `${BINDING.linuxHome}/.rokid-coder`;
+const FILE = `${STATE}/install.json`;
 const COMMITTED = JSON.stringify({ schema: 1, binding: { bindingPath: { win: "C:\\x\\binding-1.json" } } });
 
 function fakeWindows(t, distros) {
@@ -39,7 +40,14 @@ function fakeWindows(t, distros) {
 function readInstallManifest(wsl, registered) {
   if (!registered) return null;
   const probe = wsl(["/usr/bin/test", "-e", FILE]);
-  if (probe.exitCode === 1 && wsl(["/usr/bin/true"]).exitCode === 0) return null;
+  if (probe.exitCode === 1 && wsl(["/usr/bin/true"]).exitCode === 0) {
+    // test -e also gives 1 behind an unsearchable directory: "not there" needs a searchable path.
+    const homeOk = wsl(["/usr/bin/test", "-x", BINDING.linuxHome]).exitCode === 0;
+    const dirAbsent = wsl(["/usr/bin/test", "-e", STATE]).exitCode === 1;
+    const dirOk = dirAbsent || wsl(["/usr/bin/test", "-x", STATE]).exitCode === 0;
+    if (homeOk && dirOk) return null;
+    throw new Error("could not be read: a directory on the way to it cannot be searched");
+  }
   if (probe.exitCode !== 0) throw new Error(`could not be read (wsl.exe exited ${probe.exitCode})`);
   const cat = wsl(["/usr/bin/cat", FILE]);
   if (cat.exitCode !== 0) throw new Error(`could not be read (wsl.exe exited ${cat.exitCode})`);
@@ -55,14 +63,20 @@ test("unreadable_or_corrupt_manifest_is_an_error_not_an_absent_install", (t) => 
   // The module makes exactly these calls, in this order, and only these are null.
   assert.match(body, /Get-LxssDistros\) \| Where-Object \{ \$_\.Name -eq \$Binding\.distroName \}\)\) \{ return \$null \}/, "an unregistered distro holds no install");
   const calls = [...body.matchAll(/& \$exec '([^']+)' @\(([^)]*)\)/g)].map((m) => [m[1], ...[...m[2].matchAll(/'([^']*)'|(\$file)/g)].map((a) => a[1] ?? "$file")]);
-  assert.deepEqual(calls, [["/usr/bin/test", "-e", "$file"], ["/usr/bin/true"], ["/usr/bin/cat", "$file"]]);
+  assert.deepEqual(calls, [["/usr/bin/test", "-e", "$file"], ["/usr/bin/true"], ["/usr/bin/test", "-x"], ["/usr/bin/test", "-e"], ["/usr/bin/test", "-x"], ["/usr/bin/cat", "$file"]]);
+  assert.match(body, /'\/usr\/bin\/test' @\('-x', \$Binding\.linuxHome\)/, "the home must be searchable");
+  assert.match(body, /'\/usr\/bin\/test' @\('-e', \$stateDir\)/);
+  assert.match(body, /'\/usr\/bin\/test' @\('-x', \$stateDir\)/);
   assert.match(body, /\$file = "\$\(\$Binding\.linuxHome\)\/\.rokid-coder\/install\.json"/);
   assert.doesNotMatch(body, /catch \{ \$null \}/, "a manifest that does not parse is never taken for no manifest");
   assert.equal((body.match(/return \$null/g) ?? []).length, 2, "null only for the unregistered distro and the absent file");
   assert.doesNotMatch(functionBody("Resolve-CommittedBinding"), /catch/, "Resolve-CommittedBinding lets it through");
 
   const answers = {
-    absent: { [`/usr/bin/test -e ${FILE}`]: { code: 1 }, [`/usr/bin/cat ${FILE}`]: { stdout: "", code: 1 }, "/usr/bin/true": { code: 0 } },
+    absent: { [`/usr/bin/test -e ${FILE}`]: { code: 1 }, [`/usr/bin/cat ${FILE}`]: { stdout: "", code: 1 }, "/usr/bin/true": { code: 0 }, [`/usr/bin/test -x ${BINDING.linuxHome}`]: { code: 0 }, [`/usr/bin/test -e ${STATE}`]: { code: 0 }, [`/usr/bin/test -x ${STATE}`]: { code: 0 } },
+    neverInstalled: { [`/usr/bin/test -e ${FILE}`]: { code: 1 }, "/usr/bin/true": { code: 0 }, [`/usr/bin/test -x ${BINDING.linuxHome}`]: { code: 0 }, [`/usr/bin/test -e ${STATE}`]: { code: 1 } },
+    homeUnsearchable: { [`/usr/bin/test -e ${FILE}`]: { code: 1 }, "/usr/bin/true": { code: 0 }, [`/usr/bin/test -x ${BINDING.linuxHome}`]: { code: 1 }, [`/usr/bin/test -e ${STATE}`]: { code: 1 } },
+    stateUnsearchable: { [`/usr/bin/test -e ${FILE}`]: { code: 1 }, "/usr/bin/true": { code: 0 }, [`/usr/bin/test -x ${BINDING.linuxHome}`]: { code: 0 }, [`/usr/bin/test -e ${STATE}`]: { code: 0 }, [`/usr/bin/test -x ${STATE}`]: { code: 1 } },
     unreadable: { [`/usr/bin/test -e ${FILE}`]: { code: 0 }, [`/usr/bin/cat ${FILE}`]: { stdout: "", code: 1 }, "/usr/bin/true": { code: 0 } },
     corrupt: { [`/usr/bin/test -e ${FILE}`]: { code: 0 }, [`/usr/bin/cat ${FILE}`]: { stdout: '{"schema":1,"binding":', code: 0 }, "/usr/bin/true": { code: 0 } },
     committed: { [`/usr/bin/test -e ${FILE}`]: { code: 0 }, [`/usr/bin/cat ${FILE}`]: { stdout: `${COMMITTED}\n`, code: 0 }, "/usr/bin/true": { code: 0 } },
@@ -79,6 +93,10 @@ test("unreadable_or_corrupt_manifest_is_an_error_not_an_absent_install", (t) => 
   assert.equal(fakeWindows(t, { Ubuntu: answers.absent })(["/usr/bin/cat", FILE]).exitCode, fakeWindows(t, { Ubuntu: answers.unreadable })(["/usr/bin/cat", FILE]).exitCode);
   assert.equal(verdict({ Ubuntu: answers.committed }), "committed");
   assert.equal(verdict({ Ubuntu: answers.absent }), "none");
+  assert.equal(verdict({ Ubuntu: answers.neverInstalled }), "none");
+  // An unsearchable directory on the way makes test -e say 1 too: never taken for "no install".
+  assert.equal(verdict({ Ubuntu: answers.homeUnsearchable }), "could not be read");
+  assert.equal(verdict({ Ubuntu: answers.stateUnsearchable }), "could not be read");
   assert.equal(verdict({ Ubuntu: answers.unreadable }), "could not be read");
   assert.equal(verdict({ Ubuntu: answers.corrupt }), "is not valid JSON");
   // Registered, but wsl.exe cannot start it: every call fails, /usr/bin/true too, so it is no proof of absence.

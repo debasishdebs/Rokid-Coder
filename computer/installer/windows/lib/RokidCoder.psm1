@@ -1113,8 +1113,17 @@ function Read-InstallManifest {
   $where = "The Rokid Coder install record $file in $($Binding.distroName)"
   # cat exits 1 for a missing and an unreadable file alike, and so does a wsl.exe that
   # ran nothing: test's 1 is "not there" only once /usr/bin/true shows the distro runs.
+  # A 1 from test -e is also what an unsearchable directory on the way gives, so "not there"
+  # also needs the home to be searchable and .rokid-coder to be either absent or searchable.
   $probe = & $exec '/usr/bin/test' @('-e', $file)
-  if ($probe.ExitCode -eq 1 -and (& $exec '/usr/bin/true' @()).ExitCode -eq 0) { return $null }
+  if ($probe.ExitCode -eq 1 -and (& $exec '/usr/bin/true' @()).ExitCode -eq 0) {
+    $stateDir = "$($Binding.linuxHome)/.rokid-coder"
+    $homeOk = (& $exec '/usr/bin/test' @('-x', $Binding.linuxHome)).ExitCode -eq 0
+    $dirAbsent = (& $exec '/usr/bin/test' @('-e', $stateDir)).ExitCode -eq 1
+    $dirOk = $dirAbsent -or (& $exec '/usr/bin/test' @('-x', $stateDir)).ExitCode -eq 0
+    if ($homeOk -and $dirOk) { return $null }
+    throw "$where could not be read: a directory on the way to it cannot be searched"
+  }
   if ($probe.ExitCode -ne 0) { throw "$where could not be read (wsl.exe exited $($probe.ExitCode))" }
   $run = & $exec '/usr/bin/cat' @($file)
   if ($run.ExitCode -ne 0) { throw "$where could not be read (wsl.exe exited $($run.ExitCode))" }
