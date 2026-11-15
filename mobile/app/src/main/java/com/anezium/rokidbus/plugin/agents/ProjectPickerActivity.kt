@@ -24,6 +24,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
 
 /**
  * Walks the linked computer's folders over the daemon link, one listing at a
@@ -163,7 +164,7 @@ class ProjectPickerActivity : Activity() {
         pendingRequestId = requestId
         breadcrumb.text = "LOADING…"
         hint.visibility = View.GONE
-        AgentsMonitorService.requestFolders(applicationContext, requestId, path)
+        CoderRuntime.fromActivity(this@ProjectPickerActivity) { requestFolders(requestId, path) }
         timeout?.cancel()
         timeout = uiScope.launch {
             delay(REQUEST_TIMEOUT_MS)

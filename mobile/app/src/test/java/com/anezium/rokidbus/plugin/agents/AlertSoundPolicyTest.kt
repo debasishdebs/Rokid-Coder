@@ -2,6 +2,7 @@ package com.anezium.rokidbus.plugin.agents
 
 import android.app.NotificationManager
 import com.anezium.rokidbus.shared.LinkStateBits
+import com.anezium.rokidbus.plugin.agents.service.CoderNotifications
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -214,8 +215,8 @@ class AlertSoundPolicyTest {
 
     @Test
     fun monitor_notification_title_counts_sessions() {
-        assertEquals("Agents monitoring · 0 sessions", AgentNotifications.monitorTitle(0))
-        assertEquals("Agents monitoring · 1 session", AgentNotifications.monitorTitle(1))
-        assertEquals("Agents monitoring · 3 sessions", AgentNotifications.monitorTitle(3))
+        assertEquals("Rokid Coder · 0 sessions", CoderNotifications.title(0))
+        assertEquals("Rokid Coder · 1 session", CoderNotifications.title(1))
+        assertEquals("Rokid Coder · 3 sessions", CoderNotifications.title(3))
     }
 }

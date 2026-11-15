@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
+import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
 
 /**
  * The Agents code on the glasses, in-process with the hub: the board, the menus, the alert
@@ -117,7 +118,7 @@ class AgentsCore(
             }
             override fun decideRequest(requestId: String, decision: ApprovalDecision): Boolean {
                 if (AgentsRuntime.store.approvals.value.none { it.requestId == requestId }) return false
-                AgentsMonitorService.decideApproval(applicationContext, requestId, decision)
+                CoderRuntime.decideApproval(requestId, decision)
                 return true
             }
             override fun cancelPairing() = glassesPairing.cancel()
@@ -132,12 +133,10 @@ class AgentsCore(
             clock = SystemClock::elapsedRealtime,
             host = object : GlassesPairingCard.Host {
                 override fun snapshot() = currentPairing()
-                override fun armWindow() = openGuidedDoor(configStore) {
-                    AgentsMonitorService.reconcile(applicationContext)
-                }
+                override fun armWindow() = openGuidedDoor(configStore)
                 override fun cancelWindow() {
                     configStore.cancelLinkWindow()
-                    AgentsMonitorService.reconcile(applicationContext)
+                    CoderRuntime.reconcile()
                 }
                 override fun openCard() = screen.openPairing()
                 override fun closeCard() = screen.close(ActiveCard.Kind.PAIRING)
@@ -215,7 +214,7 @@ class AgentsCore(
      * frees it, so a re-tap after a lost ack is a duplicate there and never types twice (R152).
      */
     private val controlSender = ControlSender(
-        write = { frame -> AgentsMonitorService.sendV2(applicationContext, frame) },
+        write = { frame -> CoderRuntime.sendV2(frame) },
         ownerOf = AgentsRuntime.store::ownerOf,
     )
     private var stopFollowingRemovals: (() -> Unit)? = null
@@ -376,7 +375,7 @@ class AgentsCore(
             }
         }
         if (configStore.load().shouldMonitor) {
-            AgentsMonitorService.reconcile(applicationContext)
+            CoderRuntime.reconcile()
         }
     }
 
@@ -586,7 +585,7 @@ class AgentsCore(
         screen.clear()
         selectedKey = session.key
         AgentsRuntime.store.openConversation(session)
-        AgentsMonitorService.openDetail(applicationContext, session)
+        CoderRuntime.openDetail(session)
         showBoard()
     }
 
@@ -654,7 +653,7 @@ class AgentsCore(
     private fun openConversation(session: AgentSession) {
         screen.open(ActiveCard.Kind.NONE)
         AgentsRuntime.store.openConversation(session)
-        AgentsMonitorService.openDetail(applicationContext, session)
+        CoderRuntime.openDetail(session)
         render(show = false)
     }
 
@@ -662,7 +661,7 @@ class AgentsCore(
         outputAlert = null
         if (AgentsRuntime.store.conversation.value == null) return
         AgentsRuntime.store.closeConversation()
-        AgentsMonitorService.closeDetail(applicationContext)
+        CoderRuntime.closeDetail()
     }
 
     // -------------------------------------------------------------------- reply
@@ -734,7 +733,7 @@ class AgentsCore(
                 syncThinkingTicker()
             }
         }
-        AgentsMonitorService.sendSessionInput(applicationContext, requestId, sessionId, trimmed)
+        CoderRuntime.sendSessionInput(requestId, sessionId, trimmed)
     }
 
     // ------------------------------------------------------------------- menu
@@ -879,7 +878,7 @@ class AgentsCore(
         AgentsRuntime.store.clearReplyNotSent(sessionKey)
         followupMsgIds[msgId] = sessionKey
         while (followupMsgIds.size > CONTROL_MSG_IDS) followupMsgIds.remove(followupMsgIds.keys.first())
-        AgentsMonitorService.sendV2(applicationContext, frame)
+        CoderRuntime.sendV2(frame)
     }
 
     /** The chooser says "Models unavailable" once agentd has been silent that long (R98). */
@@ -1196,8 +1195,7 @@ class AgentsCore(
         val requestId = UUID.randomUUID().toString()
         launchRequestId = requestId
         launchNote = "starting on ${step.machineName}…"
-        AgentsMonitorService.requestThreadStart(
-            applicationContext,
+        CoderRuntime.requestThreadStart(
             requestId,
             AgentProvider.CODEX,
             step.project.path,

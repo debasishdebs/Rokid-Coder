@@ -5,15 +5,18 @@
     <!--
         POST_NOTIFICATIONS is a documented Agents exception to plugins/AGENTS.md
         section 3.5 (R32). It is for one thing only: the visible, low-importance
-        "Agents monitoring" notification of the monitoring service, with Settings
-        and Stop. Agents never posts an alert or a session's text to the phone;
-        alerts belong on the glasses.
+        notification of the app's one service, with Settings and Stop. Agents
+        never posts an alert or a session's text to the phone; alerts belong on
+        the glasses.
     -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Push-to-talk. The service asks for the microphone type only while it is granted. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Boot and app update start the service again, connected-device only, once a screen of ours started it. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!--
         Why the notification is visible, and why the exemption below stays. A
         foreground service whose notification is never shown is not treated as a protected one on every
@@ -34,6 +37,7 @@
     </queries>
 
     <application
+        android:name=".RokidCoderApp"
         android:allowBackup="false"
         android:icon="@drawable/ic_agents"
         android:label="@string/app_name"
@@ -66,19 +70,22 @@
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
 
+        <!--
+            The app's only service: the glasses link, the Agents code and the agentd links. Nothing
+            outside the app starts or binds it; the microphone type is held only where Android allows.
+        -->
         <service
-            android:name=".AgentsMonitorService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="agent-session-monitoring" />
-        </service>
-
-        <!-- The glasses link and the Agents code, in this process. Nothing outside the app binds it. -->
-        <service
-            android:name=".AgentsHubService"
+            android:name=".service.CoderService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|microphone" />
+
+        <receiver
+            android:name=".service.CoderBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

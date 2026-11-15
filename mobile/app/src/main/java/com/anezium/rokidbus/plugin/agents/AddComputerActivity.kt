@@ -26,6 +26,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
 
 /**
  * The roads to a linked computer. A phone with no computer, or with one signed out or
@@ -108,7 +109,7 @@ class AddComputerActivity : Activity() {
             setOnClickListener {
                 val snapshot = currentPairing()
                 pairing.start(snapshot.baseline, snapshot.repairing)
-                openGuidedDoor(configStore) { AgentsMonitorService.reconcile(applicationContext) }
+                openGuidedDoor(configStore) { CoderRuntime.fromActivity(this@AddComputerActivity) { reconcile() } }
             }
         }
         doorArmed = LinearLayout(this).apply {
@@ -122,7 +123,7 @@ class AddComputerActivity : Activity() {
                         configStore.cancelLinkWindow()
                         pairing.cancel()
                         // Back to the normal rule: the listener beside a dialled slot goes.
-                        AgentsMonitorService.reconcile(applicationContext)
+                        CoderRuntime.fromActivity(this@AddComputerActivity) { reconcile() }
                     }
                 },
                 NexusUi.block(),
@@ -372,7 +373,7 @@ class AddComputerActivity : Activity() {
             is AgentdPairingParseResult.Valid -> {
                 pairingField.text.clear()
                 pairingSummary.text = "Connecting to ${parsed.target.host}:${parsed.target.port}…"
-                AgentsMonitorService.pairWithLine(applicationContext, parsed.target)
+                CoderRuntime.fromActivity(this@AddComputerActivity) { pairWithLine(parsed.target) }
             }
             is AgentdPairingParseResult.Invalid -> {
                 pairingSummary.text = parsed.reason

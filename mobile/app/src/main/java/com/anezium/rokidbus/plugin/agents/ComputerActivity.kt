@@ -19,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
 
 /**
  * One linked computer: its state, the project folders anchored on it, and the
@@ -71,7 +72,7 @@ class ComputerActivity : Activity() {
             addView(
                 NexusUi.textButton(this@ComputerActivity, "Forget this computer", danger = true).apply {
                     setOnClickListener {
-                        AgentsMonitorService.forgetMachine(applicationContext, machineId)
+                        CoderRuntime.fromActivity(this@ComputerActivity) { forgetMachine(machineId) }
                         toast("$machineName forgotten.")
                         finish()
                     }

@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
 
 /**
  * The plugin's settings, in Compose with the PCA theme. The pairing screens
@@ -72,7 +73,7 @@ class AgentsSettingsActivity : ComponentActivity() {
             refresh()
         }
         if (configStore.load().shouldMonitor) {
-            AgentsMonitorService.reconcile(applicationContext)
+            CoderRuntime.fromActivity(this@AgentsSettingsActivity) { reconcile() }
         }
     }
 
@@ -88,7 +89,7 @@ class AgentsSettingsActivity : ComponentActivity() {
             // Only the switch: a computer signed out for lack of use keeps its re-pair hint.
             configStore.setAgentdEnabled(checked)
             if (checked) askForNotifications()
-            AgentsMonitorService.reconcile(applicationContext)
+            CoderRuntime.fromActivity(this@AgentsSettingsActivity) { reconcile() }
             refresh()
         },
         onOpenComputer = { row ->
@@ -101,7 +102,7 @@ class AgentsSettingsActivity : ComponentActivity() {
         onForgetPaired = {
             val name = configStore.load().agentd?.name
             configStore.saveAgentd(null, enabled = configStore.load().agentdEnabled)
-            AgentsMonitorService.reconcile(applicationContext)
+            CoderRuntime.fromActivity(this@AgentsSettingsActivity) { reconcile() }
             refresh()
             if (name != null) toast("$name forgotten.")
         },
@@ -131,8 +132,8 @@ class AgentsSettingsActivity : ComponentActivity() {
         onPairingTtl = { days ->
             configStore.setPairingTtlDays(days)
             // Told to agentd now, and a shorter limit may sign a computer out right away.
-            AgentsMonitorService.pushSettings(applicationContext)
-            if (configStore.load().shouldMonitor) AgentsMonitorService.reconcile(applicationContext)
+            CoderRuntime.fromActivity(this@AgentsSettingsActivity) { pushSettings() }
+            if (configStore.load().shouldMonitor) CoderRuntime.fromActivity(this@AgentsSettingsActivity) { reconcile() }
             refresh()
         },
         // Quiet has the one store key (R74); it is not part of what agentd is told.
@@ -142,10 +143,8 @@ class AgentsSettingsActivity : ComponentActivity() {
         },
         onRevokeAll = {
             // One id per tap. The wire sends it only over a secure link; the button is off otherwise.
-            AgentsMonitorService.sendV2(
-                applicationContext,
-                AgentdProtocolCodec.modeRevokeAll(UUID.randomUUID().toString()),
-            )
+            val frame = AgentdProtocolCodec.modeRevokeAll(UUID.randomUUID().toString())
+            CoderRuntime.fromActivity(this@AgentsSettingsActivity) { sendV2(frame) }
         },
         onBatteryGrant = {
             // Re-arm before leaving: the wearer is about to change something, and the question
@@ -166,7 +165,7 @@ class AgentsSettingsActivity : ComponentActivity() {
     /** Saves the change on top of what is stored now (Quiet may have moved on the glasses) and tells agentd. */
     private fun changeAlerts(change: AlertSettings.() -> AlertSettings) {
         configStore.saveAlertSettings(configStore.alertSettings().change())
-        AgentsMonitorService.pushSettings(applicationContext)
+        CoderRuntime.fromActivity(this@AgentsSettingsActivity) { pushSettings() }
         refresh()
     }
 

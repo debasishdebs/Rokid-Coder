@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.plugin.agents
 
 import android.content.pm.PackageManager
+import com.anezium.rokidbus.plugin.agents.service.CoderService
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -21,7 +22,7 @@ class ServiceExposureTest {
         val app = RuntimeEnvironment.getApplication()
         val services = app.packageManager.getPackageInfo(app.packageName, PackageManager.GET_SERVICES).services.orEmpty()
 
-        assertTrue(services.any { it.name == AgentsHubService::class.java.name })
+        assertTrue(services.any { it.name == CoderService::class.java.name })
         assertEquals(emptyList<String>(), services.filter { it.exported }.map { it.name })
     }
 }

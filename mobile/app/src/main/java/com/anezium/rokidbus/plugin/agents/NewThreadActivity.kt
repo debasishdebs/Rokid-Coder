@@ -23,6 +23,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
 
 /**
  * A new session inside an anchored project: one prompt, one harness, and the
@@ -168,13 +169,9 @@ class NewThreadActivity : Activity() {
         pendingRequestId = requestId
         setBusy(true)
         showHint("Asking $machineName…")
-        AgentsMonitorService.requestThreadStart(
-            applicationContext,
-            requestId,
-            provider,
-            projectPath,
-            prompt,
-        )
+        CoderRuntime.fromActivity(this@NewThreadActivity) {
+            requestThreadStart(requestId, provider, projectPath, prompt)
+        }
         timeout?.cancel()
         timeout = uiScope.launch {
             delay(VERDICT_TIMEOUT_MS)

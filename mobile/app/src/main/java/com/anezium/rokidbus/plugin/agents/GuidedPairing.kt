@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.plugin.agents
 
+import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -118,7 +119,7 @@ internal fun pairingSnapshot(
  * explicit request to monitor, so monitoring is turned on; the window is armed; and [reconcile]
  * makes the monitor listen for it.
  */
-internal fun openGuidedDoor(store: AgentsConfigStore, reconcile: () -> Unit) {
+internal fun openGuidedDoor(store: AgentsConfigStore, reconcile: () -> Unit = CoderRuntime::reconcile) {
     if (!store.load().agentdEnabled) store.setAgentdEnabled(true)
     store.armLinkWindow()
     reconcile()
