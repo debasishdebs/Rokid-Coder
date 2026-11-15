@@ -74,6 +74,11 @@ dependencies {
     // A local TLS agentd for the pinned wss client, with a cert that names no host.
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
+
+    // The on-device boot check of the one service (emulator.yml).
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("junit:junit:4.13.2")
 }
 
 // What the release APK of the one phone app must never carry: an exported service of anyone
