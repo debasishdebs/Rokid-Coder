@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.phone
 
+import com.anezium.rokidbus.shared.AppIdentity
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.security.MessageDigest
@@ -8,13 +9,13 @@ class GlassesManualArmCommandParityTest {
     @Test
     fun commandSequenceMatchesGlassesOwnedDigest() {
         val material = buildString {
-            append(GlassesManualArmCommand.buildPrepare(WATCHDOG, BRIDGE))
+            append(GlassesManualArmCommand.buildPrepare(UPSTREAM, WATCHDOG, BRIDGE))
             append('\u0000')
             append(GlassesManualArmCommand.buildRestartAdbd())
             append('\u0000')
-            append(GlassesManualArmCommand.buildArm(restartWatchdog = false))
+            append(GlassesManualArmCommand.buildArm(UPSTREAM, restartWatchdog = false))
             append('\u0000')
-            append(GlassesManualArmCommand.buildArm(restartWatchdog = true))
+            append(GlassesManualArmCommand.buildArm(UPSTREAM, restartWatchdog = true))
         }
 
         assertEquals(EXPECTED_GLASSES_COMMAND_DIGEST, sha256(material))
@@ -25,6 +26,7 @@ class GlassesManualArmCommandParityTest {
         .joinToString("") { "%02x".format(it) }
 
     private companion object {
+        val UPSTREAM = AppIdentity("com.anezium.rokidbus.phone", "com.anezium.rokidbus.glasses")
         const val WATCHDOG = "#!/system/bin/sh\necho parity-watchdog\n"
         const val BRIDGE = "#!/system/bin/sh\necho parity-bridge\n"
         const val EXPECTED_GLASSES_COMMAND_DIGEST =

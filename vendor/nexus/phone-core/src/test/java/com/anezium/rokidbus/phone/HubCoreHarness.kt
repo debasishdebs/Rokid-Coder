@@ -17,6 +17,7 @@ import com.anezium.rokidbus.phone.speech.SpeechSttSessionFactory
 import com.anezium.rokidbus.phone.speech.SttSession
 import com.anezium.rokidbus.phone.speech.SttSessionListener
 import com.anezium.rokidbus.phone.speech.TranscriptionLanguage
+import com.anezium.rokidbus.shared.AppIdentity
 import com.anezium.rokidbus.shared.BusCapabilityBits
 import com.anezium.rokidbus.shared.BusEnvelope
 import com.anezium.rokidbus.shared.BusPaths
@@ -31,6 +32,12 @@ import org.robolectric.Shadows.shadowOf
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
 
+/** The upstream shells' pair. */
+internal val UPSTREAM_PAIR = AppIdentity("com.anezium.rokidbus.phone", "com.anezium.rokidbus.glasses")
+
+/** Rokid Coder's pair. */
+internal val ROKID_CODER_PAIR = AppIdentity("io.github.debasishdebs.rokidcoder", "io.github.debasishdebs.rokidcoder.glasses")
+
 internal val AGENTS_APP = InProcessApp(
     pluginId = "agents",
     displayName = "Agents",
@@ -43,6 +50,7 @@ internal val AGENTS_APP = InProcessApp(
 internal class HubCoreHarness(
     app: InProcessApp? = AGENTS_APP,
     hooks: HubShellHooks = HubShellHooks.None,
+    identity: AppIdentity = UPSTREAM_PAIR,
 ) {
     val context: Application = RuntimeEnvironment.getApplication()
     val cxr = FakeCxrTransport()
@@ -61,9 +69,9 @@ internal class HubCoreHarness(
         core = HubCore(
             context,
             if (hooks === HubShellHooks.None) {
-                HubCoreConfig(foreground = host, inProcessApp = app, log = { logs += it })
+                HubCoreConfig(foreground = host, identity = identity, inProcessApp = app, log = { logs += it })
             } else {
-                HubCoreConfig(foreground = host, hooks = hooks, log = { logs += it })
+                HubCoreConfig(foreground = host, identity = identity, hooks = hooks, log = { logs += it })
             },
             HubCoreSeams(
                 cxr = cxr,

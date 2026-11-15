@@ -11,6 +11,9 @@ require(glassesApkSignerSha256.split(',').all { it.matches(Regex("[0-9a-fA-F]{64
     "glassesApkSignerSha256 must contain a comma-separated list of 64-hex SHA-256 certificate digests, with no empty elements"
 }
 
+// This shell is upstream Nexus: it keeps upstream's phone id and drives upstream's glasses hub.
+val glassesApplicationId = "com.anezium.rokidbus.glasses"
+
 android {
     namespace = "com.anezium.rokidbus.phone"
     compileSdk = 36
@@ -21,6 +24,8 @@ android {
         targetSdk = 36
         versionCode = 10801
         versionName = "1.8.1"
+        buildConfigField("String", "PHONE_APPLICATION_ID", "\"$applicationId\"")
+        buildConfigField("String", "GLASSES_APPLICATION_ID", "\"$glassesApplicationId\"")
         buildConfigField("String", "GLASSES_APK_SIGNER_SHA256", "\"${glassesApkSignerSha256.lowercase()}\"")
     }
 
@@ -46,6 +51,23 @@ android {
     packaging {
         resources {
             excludes += "META-INF/versions/**"
+        }
+    }
+}
+
+// The unit tests check the components this app ships against its merged manifest: Robolectric
+// reads the real manifest only with Android resources included, which these suites predate.
+androidComponents {
+    onVariants { variant ->
+        val mergedManifest = variant.artifacts.get(com.android.build.api.artifact.SingleArtifact.MERGED_MANIFEST)
+        val testTaskName = "test${variant.name.replaceFirstChar(Char::uppercaseChar)}UnitTest"
+        tasks.withType<Test>().matching { it.name == testTaskName }.configureEach {
+            inputs.file(mergedManifest).withPathSensitivity(PathSensitivity.NONE)
+            jvmArgumentProviders.add(
+                CommandLineArgumentProvider {
+                    listOf("-Drokid.mergedManifest=${mergedManifest.get().asFile.absolutePath}")
+                },
+            )
         }
     }
 }

@@ -32,6 +32,7 @@ import com.anezium.rokidbus.client.IBusCallback
 import com.anezium.rokidbus.client.IBusService
 import com.anezium.rokidbus.client.PluginRegistrationResult
 import com.anezium.rokidbus.shared.ActivitySurfaceContract
+import com.anezium.rokidbus.shared.GlassesClasses
 import com.anezium.rokidbus.shared.EditableSurfaceContract
 import com.anezium.rokidbus.shared.BusCapabilityBits
 import com.anezium.rokidbus.shared.BusConstants
@@ -153,7 +154,6 @@ private const val EXTRA_MANUAL_PAIR_PORT = "manual_pair_port"
 private const val EXTRA_MANUAL_CODE = "manual_code"
 private const val PREF_ENABLED = "hub_enabled"
 private const val PREF_LAST_GLASSES_ADDRESS = "last_glasses_address"
-private const val GLASSES_HUB_PACKAGE = "com.anezium.rokidbus.glasses"
 private const val PREFS = "rokidbus_phone"
 private const val PREF_TOKEN = "cxrl_token"
 private const val UPDATE_NOTIFICATION_PREFERENCES = "update-notification-state"
@@ -479,7 +479,7 @@ class BusHubService : Service(), HubForegroundHost {
     private val coreDelegate = lazy {
         HubCore(
             this,
-            HubCoreConfig(foreground = this, hooks = hooks, journal = busJournal, log = ::log),
+            HubCoreConfig(foreground = this, identity = shellIdentity, hooks = hooks, journal = busJournal, log = ::log),
         )
     }
 
@@ -1780,7 +1780,7 @@ class BusHubService : Service(), HubForegroundHost {
         NexusPhoneState.setGlassesSetupHandoff(NexusPhoneState.SetupHandoff.SENDING)
         SetupJournal.record(applicationContext, fromGlasses = false, code = "start_requested")
         shellScope.launch {
-            val success = core.openOnGlasses("$GLASSES_HUB_PACKAGE.SetupEntryActivity")
+            val success = core.openOnGlasses(GlassesClasses.SETUP_ENTRY_ACTIVITY)
             log("glasses setup start result=$success")
             SetupJournal.record(
                 context = applicationContext,
@@ -1808,7 +1808,7 @@ class BusHubService : Service(), HubForegroundHost {
             return
         }
         shellScope.launch {
-            val success = core.openOnGlasses("$GLASSES_HUB_PACKAGE.MainActivity")
+            val success = core.openOnGlasses(GlassesClasses.MAIN_ACTIVITY)
             log("glasses app open result=$success")
         }
     }
@@ -2218,7 +2218,7 @@ class BusHubService : Service(), HubForegroundHost {
             return
         }
         val expected = GlassesApkMetadata(
-            packageName = GLASSES_HUB_PACKAGE,
+            packageName = core.identity.glassesApplicationId,
             // An unencodable release version can never match a signed APK; the core refuses it.
             versionCode = GlassesVersionCode.fromSemVersion(release.version) ?: -1L,
             sha256 = digest,

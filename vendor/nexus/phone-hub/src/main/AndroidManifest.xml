@@ -5,11 +5,11 @@
         android:name="com.anezium.rokidbus.permission.BIND_PLUGIN_GUARDIAN"
         android:protectionLevel="signature" />
     <permission
-        android:name="com.anezium.rokidbus.phone.permission.INTERNAL_CORE_CONTROL"
+        android:name="${applicationId}.permission.INTERNAL_CORE_CONTROL"
         android:protectionLevel="signature" />
 
     <uses-permission android:name="com.anezium.rokidbus.permission.BIND_PLUGIN_GUARDIAN" />
-    <uses-permission android:name="com.anezium.rokidbus.phone.permission.INTERNAL_CORE_CONTROL" />
+    <uses-permission android:name="${applicationId}.permission.INTERNAL_CORE_CONTROL" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- The Store detail screen's Remove card; without this, ACTION_DELETE is silently dropped. -->

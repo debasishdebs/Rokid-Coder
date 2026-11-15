@@ -1,5 +1,7 @@
 package com.anezium.rokidbus.phone
 
+import com.anezium.rokidbus.shared.AppIdentity
+import com.anezium.rokidbus.shared.GlassesClasses
 import java.security.MessageDigest
 import java.util.Base64
 
@@ -15,7 +17,7 @@ internal object GlassesManualArmCommand {
 
     data class RestartRequest(val oldAdbdPid: String)
 
-    fun buildPrepare(watchdogScript: String, bridgeScript: String): String {
+    fun buildPrepare(identity: AppIdentity, watchdogScript: String, bridgeScript: String): String {
         val watchdogBytes = watchdogScript.toByteArray()
         val encodedWatchdog = Base64.getEncoder().encodeToString(watchdogBytes)
         val watchdogHash = MessageDigest.getInstance("SHA-256")
@@ -27,7 +29,7 @@ internal object GlassesManualArmCommand {
             .digest(bridgeBytes)
             .joinToString("") { "%02x".format(it) }
         return buildString {
-            appendCommonVariables()
+            appendCommonVariables(identity)
             appendLine("pm grant \"\$PKG\" android.permission.WRITE_SECURE_SETTINGS >/dev/null 2>&1 || true")
             // Mirrors the glasses-side self-arm: best effort, for the glasses file explorer.
             appendLine("appops set \"\$PKG\" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true")
@@ -65,8 +67,8 @@ internal object GlassesManualArmCommand {
         appendLine("nohup sh -c 'sleep 2; setprop ctl.restart adbd' >/dev/null 2>&1 </dev/null &")
     }
 
-    fun buildArm(restartWatchdog: Boolean): String = buildString {
-        appendCommonVariables()
+    fun buildArm(identity: AppIdentity, restartWatchdog: Boolean): String = buildString {
+        appendCommonVariables(identity)
         appendLine("sh \"\$WATCHDOG\" ${if (restartWatchdog) "restart" else "start"}")
         appendLine("sh \"\$WATCHDOG\" repair")
         appendLine("sh \"\$BRIDGE\" ${if (restartWatchdog) "restart" else "start"}")
@@ -103,10 +105,10 @@ internal object GlassesManualArmCommand {
         return commonSucceeded(values) && values["watchdog"] == "1"
     }
 
-    private fun StringBuilder.appendCommonVariables() {
-        appendLine("PKG='$CLIENT_PACKAGE'")
-        appendLine("SVC='$ACCESSIBILITY_SERVICE'")
-        appendLine("SVC_SHORT='$ACCESSIBILITY_SERVICE_SHORT'")
+    private fun StringBuilder.appendCommonVariables(identity: AppIdentity) {
+        appendLine("PKG='${identity.glassesApplicationId}'")
+        appendLine("SVC='${identity.flattenedGlassesComponent(GlassesClasses.ACCESSIBILITY_SERVICE)}'")
+        appendLine("SVC_SHORT='${identity.shortGlassesComponent(GlassesClasses.ACCESSIBILITY_SERVICE)}'")
         appendLine("WATCHDOG='$WATCHDOG_REMOTE_PATH'")
         appendLine("BRIDGE='$BRIDGE_REMOTE_PATH'")
     }
@@ -178,11 +180,6 @@ internal object GlassesManualArmCommand {
             .toMap()
     }
 
-    private const val CLIENT_PACKAGE = "com.anezium.rokidbus.glasses"
-    private const val ACCESSIBILITY_SERVICE =
-        "com.anezium.rokidbus.glasses/com.anezium.rokidbus.glasses.RokidBusAccessibilityService"
-    private const val ACCESSIBILITY_SERVICE_SHORT =
-        "com.anezium.rokidbus.glasses/.RokidBusAccessibilityService"
     private const val WATCHDOG_REMOTE_PATH = "/data/local/tmp/rokid-nexus-a11y-watchdog.sh"
     private const val BRIDGE_REMOTE_PATH = "/data/local/tmp/rokid-nexus-cmd-bridge.sh"
 }

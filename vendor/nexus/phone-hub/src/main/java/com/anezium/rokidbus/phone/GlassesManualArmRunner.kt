@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.phone
 
 import com.anezium.rokidbus.phone.selfarm.adb.ManualAdbSession
+import com.anezium.rokidbus.shared.AppIdentity
 import com.anezium.rokidbus.phone.selfarm.adb.ManualShellResult
 import java.io.IOException
 
@@ -11,24 +12,27 @@ internal fun interface GlassesManualTlsReconnect {
 /** Phone-side orchestration mirror of glasses-hub SelfArmArmSequence. */
 internal object GlassesManualArmRunner {
     fun run(
+        identity: AppIdentity,
         initialSession: ManualAdbSession,
         dialogHost: String,
         reconnect: GlassesManualTlsReconnect,
     ) {
         var session = initialSession
+        val (watchdogSourcePath, bridgeSourcePath) = stagedScriptPaths(identity)
+        val cleanStagedAssets = "rm -f '$watchdogSourcePath' '$bridgeSourcePath'"
         try {
-            val watchdogScript = readStagedScript(session, WATCHDOG_SOURCE_PATH, "watchdog")
-            val bridgeScript = readStagedScript(session, BRIDGE_SOURCE_PATH, "command bridge")
-            runCatching { session.shell(CLEAN_STAGED_ASSETS_COMMAND) }
+            val watchdogScript = readStagedScript(session, watchdogSourcePath, "watchdog")
+            val bridgeScript = readStagedScript(session, bridgeSourcePath, "command bridge")
+            runCatching { session.shell(cleanStagedAssets) }
 
             val prepare = session.shell(
-                GlassesManualArmCommand.buildPrepare(watchdogScript, bridgeScript),
+                GlassesManualArmCommand.buildPrepare(identity, watchdogScript, bridgeScript),
             )
             if (prepare.exitCode != 0 || !GlassesManualArmCommand.prepareSucceeded(prepare.output)) {
                 throw IOException("Self-arm preparation failed: ${allOutput(prepare)}")
             }
 
-            var arm = session.shell(GlassesManualArmCommand.buildArm(restartWatchdog = true))
+            var arm = session.shell(GlassesManualArmCommand.buildArm(identity, restartWatchdog = true))
             if (arm.exitCode != 0 || !GlassesManualArmCommand.armSucceeded(arm.output)) {
                 throw IOException("Watchdog arm failed before network teardown: ${allOutput(arm)}")
             }
@@ -48,14 +52,14 @@ internal object GlassesManualArmRunner {
                 session.close()
                 session = reconnect.reconnect(dialogHost, request.oldAdbdPid, previousPort)
 
-                arm = session.shell(GlassesManualArmCommand.buildArm(restartWatchdog = true))
+                arm = session.shell(GlassesManualArmCommand.buildArm(identity, restartWatchdog = true))
                 if (arm.exitCode != 0 || !GlassesManualArmCommand.armSucceeded(arm.output)) {
                     throw IOException("Post-restart watchdog arm failed: ${allOutput(arm)}")
                 }
             }
             awaitPosture(session, requireSafe = true, timeoutMs = SAFE_POSTURE_TIMEOUT_MS)
         } finally {
-            runCatching { session.shell(CLEAN_STAGED_ASSETS_COMMAND) }
+            runCatching { session.shell(cleanStagedAssets) }
             runCatching { session.close() }
         }
     }
@@ -126,12 +130,12 @@ internal object GlassesManualArmRunner {
         val legacyLoopbackListening: Boolean,
     )
 
-    private const val WATCHDOG_SOURCE_PATH =
-        "/sdcard/Android/data/com.anezium.rokidbus.glasses/files/cmd_bridge/manual_selfarm/watchdog.sh"
-    private const val BRIDGE_SOURCE_PATH =
-        "/sdcard/Android/data/com.anezium.rokidbus.glasses/files/cmd_bridge/manual_selfarm/bridge.sh"
-    private const val CLEAN_STAGED_ASSETS_COMMAND =
-        "rm -f '$WATCHDOG_SOURCE_PATH' '$BRIDGE_SOURCE_PATH'"
+    /** Where the glasses stage the watchdog and the bridge for this session, in that order. */
+    fun stagedScriptPaths(identity: AppIdentity): List<String> {
+        val directory = "${identity.glassesExternalFilesPath}/cmd_bridge/manual_selfarm"
+        return listOf("$directory/watchdog.sh", "$directory/bridge.sh")
+    }
+
     private const val POSTURE_SENTINEL = "ROKID_NEXUS_NETWORK_POSTURE"
     private const val RESTART_DECISION_TIMEOUT_MS = 3_000L
     private const val SAFE_POSTURE_TIMEOUT_MS = 8_000L

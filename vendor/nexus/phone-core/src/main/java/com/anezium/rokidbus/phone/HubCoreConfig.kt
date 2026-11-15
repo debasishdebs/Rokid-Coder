@@ -2,6 +2,7 @@
 
 package com.anezium.rokidbus.phone
 
+import com.anezium.rokidbus.shared.AppIdentity
 import com.anezium.rokidbus.shared.plugin.PluginCapability
 
 /**
@@ -10,6 +11,8 @@ import com.anezium.rokidbus.shared.plugin.PluginCapability
  */
 class HubCoreConfig private constructor(
     val foreground: HubForegroundHost,
+    /** The shell's own phone application id and the glasses app it drives. */
+    val identity: AppIdentity,
     /** Our app: the one in-process app. The upstream shell: null. */
     val inProcessApp: InProcessApp?,
     /** The upstream shell's plugin runtime and extras. Our app: none. */
@@ -20,18 +23,20 @@ class HubCoreConfig private constructor(
 ) {
     constructor(
         foreground: HubForegroundHost,
+        identity: AppIdentity,
         inProcessApp: InProcessApp? = null,
         journal: PluginBusJournal = PluginBusJournal(),
         log: (String) -> Unit = {},
-    ) : this(foreground, inProcessApp, HubShellHooks.None, journal, log)
+    ) : this(foreground, identity, inProcessApp, HubShellHooks.None, journal, log)
 
     @HubShellApi
     constructor(
         foreground: HubForegroundHost,
+        identity: AppIdentity,
         hooks: HubShellHooks,
         journal: PluginBusJournal = PluginBusJournal(),
         log: (String) -> Unit = {},
-    ) : this(foreground, null, hooks, journal, log)
+    ) : this(foreground, identity, null, hooks, journal, log)
 
     init {
         require(inProcessApp == null || hooks.foreground() == null) {

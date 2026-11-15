@@ -30,7 +30,10 @@ internal class FakeCxrTransport : CxrTransport {
     val appCallbacks = CopyOnWriteArrayList<IGlassAppCbk>()
     val brightness = CopyOnWriteArrayList<Int>()
 
-    override fun configCXRSession(session: CxrDefs.CXRSession): Boolean = true
+    /** Every CXR session the core configured. */
+    val sessions = CopyOnWriteArrayList<CxrDefs.CXRSession>()
+
+    override fun configCXRSession(session: CxrDefs.CXRSession): Boolean = sessions.add(session)
     override fun setCXRLinkCbk(cbk: ICXRLinkCbk?) { linkCallback = cbk }
     override fun setCXRCustomCmdCbk(cbk: ICustomCmdCbk?) { customCmdCallback = cbk }
     override fun setCXRAudioCbk(cbk: IAudioStreamCbk?) { audioCallback = cbk }

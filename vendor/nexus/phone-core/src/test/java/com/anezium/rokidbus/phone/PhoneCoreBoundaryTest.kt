@@ -56,7 +56,7 @@ class PhoneCoreBoundaryTest {
     @Test
     fun in_process_app_builds_its_core_without_opting_in() {
         val host = RecordingHost()
-        val core = HubCore(RuntimeEnvironment.getApplication(), HubCoreConfig(foreground = host, inProcessApp = AGENTS_APP))
+        val core = HubCore(RuntimeEnvironment.getApplication(), HubCoreConfig(foreground = host, identity = UPSTREAM_PAIR, inProcessApp = AGENTS_APP))
         assertTrue(core.surface().state.lifecycle == SurfaceState.Lifecycle.CLOSED)
         core.close()
     }

@@ -26,8 +26,8 @@ import com.anezium.rokidbus.shared.RemotePointerContract
 import java.util.ArrayDeque
 import java.util.UUID
 
-internal const val INTERNAL_CORE_PERMISSION =
-    "com.anezium.rokidbus.phone.permission.INTERNAL_CORE_CONTROL"
+internal val INTERNAL_CORE_PERMISSION =
+    "${shellIdentity.phoneApplicationId}.permission.INTERNAL_CORE_CONTROL"
 
 /** Owns the private phone-UI edge and translates it to versioned core bus messages. */
 internal class PhoneCoreRemoteBridge(

@@ -37,7 +37,7 @@ internal class AndroidGlassesManualPairingBackend(context: Context) : GlassesMan
         adbClient.connect(endpoint.host, endpoint.port)
 
     override fun arm(session: ManualAdbSession, dialogHost: String) {
-        GlassesManualArmRunner.run(session, dialogHost) { host, oldAdbdPid, preferredPort ->
+        GlassesManualArmRunner.run(shellIdentity, session, dialogHost) { host, oldAdbdPid, preferredPort ->
             reconnectAfterAdbdRestart(host, oldAdbdPid, preferredPort)
         }
     }

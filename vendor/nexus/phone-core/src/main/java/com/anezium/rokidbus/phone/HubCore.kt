@@ -95,12 +95,12 @@ import com.anezium.rokidbus.phone.speech.AndroidSttSessionFactory
 import com.anezium.rokidbus.phone.speech.SpeechEngine
 import com.anezium.rokidbus.phone.speech.SpeechEngineRegistry
 import com.anezium.rokidbus.phone.speech.SpeechReadiness
+import com.anezium.rokidbus.shared.AppIdentity
 import com.anezium.rokidbus.shared.plugin.PluginDescriptor
 import android.content.ComponentName
 
 private const val TAG = "ROKIDBUS-PHONE"
 private const val PREF_LAST_GLASSES_ADDRESS = "last_glasses_address"
-private const val GLASSES_HUB_PACKAGE = "com.anezium.rokidbus.glasses"
 private const val PREFS = "rokidbus_phone"
 private const val PREF_TOKEN = "cxrl_token"
 private const val LOCAL_BINARY_MAX_BYTES = 512 * 1024
@@ -565,6 +565,9 @@ class HubCore internal constructor(
     }
 
     private val hooks: HubShellHooks = config.hooks
+
+    /** The shell's application-id pair; the core names an app only through it. */
+    val identity: AppIdentity = config.identity
     private val applicationContext: Context get() = context.applicationContext
     private val packageManager: PackageManager get() = context.packageManager
     private val packageName: String get() = context.packageName
@@ -683,7 +686,7 @@ class HubCore internal constructor(
         link = { cxrLink },
         linkUp = ::isCxrUp,
         wifiEnabled = ::isPhoneWifiEnabled,
-        sessionPackage = GLASSES_HUB_PACKAGE,
+        sessionPackage = identity.glassesApplicationId,
         workDirectory = { File(context.noBackupFilesDir, "glasses-install") },
         announcedVersionName = { remoteGlassesVersionName },
     )
@@ -2741,7 +2744,7 @@ class HubCore internal constructor(
             configCXRSession(
                 CxrDefs.CXRSession(
                     CxrDefs.CXRSessionType.CUSTOMAPP,
-                    GLASSES_HUB_PACKAGE,
+                    identity.glassesApplicationId,
                 ),
             )
             setCXRLinkCbk(linkCallback)
