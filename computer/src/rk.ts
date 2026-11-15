@@ -5,6 +5,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { offerCliInstall, realCliInstallIo, resolveCli, type CliTool } from "./launcher/cli-install";
 import { claudeSessionsDir, findOwnedClaudeSession } from "./launcher/claude-sessions";
 import { LauncherClient } from "./launcher/launcher-client";
 import { offerPairing } from "./launcher/pair-prompt";
@@ -77,20 +78,28 @@ function errorMessage(error: unknown): string {
 }
 
 function resolveExecutable(bin: string): string | undefined {
-  const candidates = bin.includes("/")
-    ? [path.resolve(bin)]
-    : (process.env.PATH ?? "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, bin));
-  for (const candidate of candidates) {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      if (fs.statSync(candidate).isFile()) {
-        return candidate;
-      }
-    } catch {
-      // try the next one
-    }
+  return resolveCli(bin, process.env, os.homedir());
+}
+
+/**
+ * The CLI to run, found before anything else is printed or touched (6b-R2), so an
+ * install offer happens on a cooked terminal. A missing default CLI is offered for
+ * install; a `ROKID_RK_*_BIN` override that is missing is only an error.
+ */
+async function resolveOrOfferInstall(tool: CliTool, bin: string): Promise<string | undefined> {
+  const found = resolveExecutable(bin);
+  if (found || bin !== tool) {
+    return found;
   }
-  return undefined;
+  const io = realCliInstallIo();
+  try {
+    if ((await offerCliInstall(tool, io)) !== "installed") {
+      return undefined;
+    }
+  } finally {
+    io.close();
+  }
+  return resolveExecutable(bin);
 }
 
 /** Only a socket that is provably this user's is connected to; anything else is as good as absent. */
@@ -235,6 +244,11 @@ class LauncherLink {
 
 async function runClaude(args: string[]): Promise<void> {
   const bin = process.env.ROKID_RK_CLAUDE_BIN || "claude";
+  const file = await resolveOrOfferInstall("claude", bin);
+  if (!file) {
+    process.stderr.write(`rk: could not start claude: ${bin}: command not found\n`);
+    process.exit(127);
+  }
   const socketPath = launcherSocketPath();
 
   // Everything is said before the TUI starts, so nothing lands in the middle of it.
@@ -255,10 +269,6 @@ async function runClaude(args: string[]): Promise<void> {
   const bell = new BellGate();
   let child: PtyChild;
   try {
-    const file = resolveExecutable(bin);
-    if (!file) {
-      throw new Error(`${bin}: command not found`);
-    }
     if (process.stdin.isTTY && saved !== "failed") {
       process.stdin.setRawMode(true);
     }
@@ -596,7 +606,7 @@ async function runCodex(args: string[]): Promise<void> {
     process.exit(2);
   }
   const bin = process.env.ROKID_RK_CODEX_BIN || "codex";
-  const file = resolveExecutable(bin);
+  const file = await resolveOrOfferInstall("codex", bin);
   if (!file) {
     process.stderr.write(`rk: could not start codex: ${bin}: command not found\n`);
     process.exit(127);

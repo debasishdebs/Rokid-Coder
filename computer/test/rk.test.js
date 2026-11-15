@@ -432,7 +432,8 @@ test("spawn_failure_exit_127_and_terminal_restored", async () => {
     assert.equal(read("rc"), "127");
     assert.equal(sttyState(read("after")), sttyState(read("before")));
     assert.ok(run.out.includes("rk: could not start claude: "), run.out);
-    assert.ok(run.out.includes("\x1b[?25h\x1b[?2004l"), "the restore sequences are written");
+    // 6b-R2: the CLI is resolved before anything else, so the terminal was never touched.
+    assert.equal(run.out.includes("Rokid-Coder launcher"), false, "no banner before the resolution");
     assert.deepEqual(terminalModes(run.out), { cursorHidden: false, bracketedPaste: false });
   });
 });
