@@ -101,9 +101,30 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      # checkRelease consumes the signed release APK, and the release glasses asset needs a signer pin.
+      # This isolated validation build signs with a key made here, for this job only, and overrides
+      # rokid.releaseSignerSha256 with that key's certificate digest. The committed pin in
+      # gradle.properties stays empty for shipping; nothing built here is uploaded.
+      - name: Make an ephemeral CI signing key
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/ci-release.p12"
+          password=$(openssl rand -hex 24)
+          echo "::add-mask::$password"
+          keytool -genkeypair -storetype PKCS12 -keystore "$key" -storepass "$password" -keypass "$password" \
+            -alias ci-release -keyalg RSA -keysize 2048 -validity 2 -dname "CN=Rokid-Coder CI validation" 2> /dev/null
+          pin=$(keytool -exportcert -alias ci-release -keystore "$key" -storepass "$password" | sha256sum | cut -d' ' -f1)
+          [[ "$pin" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "NEXUS_RELEASE_KEYSTORE=$key"
+            echo "NEXUS_RELEASE_KEYSTORE_PASSWORD=$password"
+            echo "NEXUS_RELEASE_KEY_ALIAS=ci-release"
+            echo "CI_SIGNER_SHA256=$pin"
+          } >> "$GITHUB_ENV"
+
       # The runner's SDK has cmdline-tools, so checkReleaseDex lists classes with apkanalyzer.
       - name: Run the release checks
-        run: ./gradlew :mobile:app:checkRelease :mobile:app:dependencies --configuration releaseRuntimeClasspath
+        run: ./gradlew "-Prokid.releaseSignerSha256=$CI_SIGNER_SHA256" :mobile:app:checkRelease :mobile:app:dependencies --configuration releaseRuntimeClasspath
 
   unrelated-caller:
     name: An unrelated app cannot bind or start the phone app's services

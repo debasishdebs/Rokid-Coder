@@ -146,6 +146,30 @@ test("release.yml builds only from rc tags, and publish-release.yml is manual an
   assert.ok(gateAt > 0 && promoteAt > gateAt, "the gate runs before the promotion");
 });
 
+test("emulator.yml's checkRelease build signs with an ephemeral CI key and overrides the pin for that build only", () => {
+  const text = read("emulator.yml");
+  const make = text.indexOf("Make an ephemeral CI signing key");
+  const run = text.indexOf("./gradlew", make);
+  assert.ok(make > 0 && run > make, "the key is made before the release checks run");
+  const step = text.slice(make, run);
+  assert.match(step, /keytool -genkeypair/);
+  assert.match(step, /-storetype PKCS12/);
+  assert.match(step, /keytool -exportcert[^\n]*\| sha256sum/);
+  for (const name of ["NEXUS_RELEASE_KEYSTORE", "NEXUS_RELEASE_KEYSTORE_PASSWORD", "NEXUS_RELEASE_KEY_ALIAS", "CI_SIGNER_SHA256"]) {
+    assert.match(step, new RegExp(`echo "${name}=`), name);
+  }
+  assert.match(step, /::add-mask::/);
+  assert.doesNotMatch(step, /secrets\./, "the CI key is not a repository secret");
+  const gradleLine = text.slice(run).split("\n")[0];
+  assert.match(gradleLine, /"-Prokid\.releaseSignerSha256=\$CI_SIGNER_SHA256"/);
+  assert.match(gradleLine, /:mobile:app:checkRelease/);
+  // The shipping pin stays empty in the repository, and no other workflow overrides it.
+  const properties = fs.readFileSync(path.join(ROOT, "gradle.properties"), "utf8");
+  assert.match(properties, /^rokid\.releaseSignerSha256=$/m);
+  const overrides = WORKFLOWS.filter((name) => /-Prokid\.releaseSignerSha256/.test(read(name)));
+  assert.deepEqual(overrides, ["emulator.yml"]);
+});
+
 test("workflows_lint", (t) => {
   const found = spawnSync("actionlint", ["-version"], { encoding: "utf8" });
   if (found.error) {
