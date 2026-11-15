@@ -202,6 +202,7 @@ test("setup_command_refuses_root_and_rederives_home", { skip }, (t) => {
     ["install", "--platform", "darwin", "--bundle", bundle].map((a) => `arg=${a}`).join("|"),
   );
   assert.doesNotMatch(ok.output, /another user/);
+  assert.equal(ok.stderr, "", "a first run, with no setup.log yet, prints nothing of its own");
 });
 
 test("setup_command_says_so_when_the_handoff_was_for_another_user", { skip }, (t) => {

@@ -54,13 +54,14 @@ if [ -n "$latest" ]; then
 fi
 
 log="$home/.rokid-coder/logs/setup.log"
-before=$(wc -c < "$log" 2>/dev/null | tr -d ' ')
+before=0
+[ -f "$log" ] && before=$(wc -c < "$log" | tr -d ' ')
 HOME=$home SHELL=$shell USER=$user LOGNAME=$user "$bundle/bin/rokid-setup" install --platform darwin --bundle "$bundle" "$@"
 status=$?
 
 # The pairing step is the reachability check: when it did not finish, macOS may be keeping the
 # phone's traffic from agentd (install-launchagent.sh:166-172).
-if tail -c +"$((${before:-0} + 1))" "$log" 2>/dev/null | grep -q "Not paired yet"; then
+if tail -c +"$((before + 1))" "$log" 2>/dev/null | grep -q "Not paired yet"; then
   cat <<EOF
 
 If the phone never reaches this computer, macOS may be withholding local
