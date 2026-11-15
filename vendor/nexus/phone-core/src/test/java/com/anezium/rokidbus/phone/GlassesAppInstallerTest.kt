@@ -279,19 +279,30 @@ class GlassesAppInstallerTest {
     fun query_launch_and_third_party_upload_share_the_slot_fifo() {
         val query = requireNotNull(slot.tryAcquire(GlassesAppSlot.Kind.QUERY))
         val order = CopyOnWriteArrayList<String>()
-        val launch = GlobalScope.async(Dispatchers.IO) {
-            slot.acquire(GlassesAppSlot.Kind.LAUNCH).also { order += "launch" }
+        val acquired = CopyOnWriteArrayList<GlassesAppSlot.Op>()
+        val waiters = mutableListOf<Deferred<GlassesAppSlot.Op>>()
+        try {
+            // UNDISPATCHED runs each coroutine on this thread up to the point where
+            // acquire() enqueues its waiter and suspends, so the queue order is
+            // launch, install by construction, with no timing involved.
+            waiters += GlobalScope.async(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+                slot.acquire(GlassesAppSlot.Kind.LAUNCH).also { acquired += it; order += "launch" }
+            }
+            waiters += GlobalScope.async(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+                slot.acquire(GlassesAppSlot.Kind.INSTALL).also { acquired += it; order += "install" }
+            }
+            assertNull(slot.tryAcquire(GlassesAppSlot.Kind.THIRD_PARTY_UPLOAD))
+            query.finish()
+            await(waiters[0]).finish()
+            await(waiters[1]).finish()
+            assertEquals(listOf("launch", "install"), order.toList())
+        } finally {
+            // Release whatever was acquired so a failed assertion cannot leave the
+            // slot held; finish() is idempotent. Cancel waiters still queued.
+            query.finish()
+            acquired.forEach { it.finish() }
+            waiters.forEach { it.cancel() }
         }
-        Thread.sleep(50)
-        val install = GlobalScope.async(Dispatchers.IO) {
-            slot.acquire(GlassesAppSlot.Kind.INSTALL).also { order += "install" }
-        }
-        Thread.sleep(50)
-        assertNull(slot.tryAcquire(GlassesAppSlot.Kind.THIRD_PARTY_UPLOAD))
-        query.finish()
-        await(launch).finish()
-        await(install).finish()
-        assertEquals(listOf("launch", "install"), order.toList())
     }
 
     @Test
