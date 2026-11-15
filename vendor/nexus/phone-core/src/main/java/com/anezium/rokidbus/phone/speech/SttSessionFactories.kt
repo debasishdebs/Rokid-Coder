@@ -5,6 +5,8 @@ import android.content.Context
 internal class AndroidSttSessionFactory(
     context: Context,
     private val foregroundController: AndroidSttForegroundController,
+    /** Null in production: the platform's SpeechRecognizer. */
+    private val environment: AndroidRecognizerEnvironment? = null,
 ) : SpeechSttSessionFactory {
     private val appContext = context.applicationContext
 
@@ -23,6 +25,7 @@ internal class AndroidSttSessionFactory(
             language = language,
             patience = patience,
             listener = listener,
+            environment = environment ?: PlatformAndroidRecognizerEnvironment(appContext),
             foregroundController = foregroundController,
         )
     }

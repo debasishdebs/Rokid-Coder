@@ -2,6 +2,7 @@
 
 package com.anezium.rokidbus.phone
 
+import com.anezium.rokidbus.phone.speech.AndroidRecognizerEnvironment
 import com.anezium.rokidbus.shared.AppIdentity
 import com.anezium.rokidbus.shared.plugin.PluginCapability
 
@@ -69,4 +70,6 @@ internal data class HubCoreSeams(
     val ttsOutput: PhoneTtsOutput? = null,
     val ttsRoute: (() -> PhoneTtsRoute)? = null,
     val sppDataUp: () -> Boolean = { false },
+    /** The Android recognizer's platform, for the debug-only `SpeechTestSeam`. */
+    val recognizer: AndroidRecognizerEnvironment? = null,
 )

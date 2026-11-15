@@ -861,7 +861,7 @@ private fun longestSuffixPrefixOverlap(left: List<String>, right: List<String>):
     return 0
 }
 
-private class PlatformAndroidRecognizerEnvironment(
+internal class PlatformAndroidRecognizerEnvironment(
     private val context: Context,
 ) : AndroidRecognizerEnvironment {
     override val sdkInt: Int

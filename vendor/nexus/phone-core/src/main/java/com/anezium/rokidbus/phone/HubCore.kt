@@ -710,7 +710,7 @@ class HubCore internal constructor(
         phoneTtsDispatcher.initialize()
         speech.register(
             SpeechEngine.ANDROID_RECOGNIZER,
-            AndroidSttSessionFactory(applicationContext, microphoneForeground),
+            AndroidSttSessionFactory(applicationContext, microphoneForeground, seams.recognizer),
         ) { SpeechReadiness.READY }
         speechSettingsStore = SpeechSettingsStore(applicationContext)
         speechSessionManager = SpeechSessionManager(
