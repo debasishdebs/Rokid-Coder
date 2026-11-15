@@ -7,11 +7,11 @@
     <string name="about_title">About Rokid Coder</string>
     <string name="about_intro">Your Claude Code and Codex sessions on your Rokid glasses.</string>
     <string name="about_privacy_heading">Privacy</string>
-    <string name="about_privacy_summary">Rokid Coder runs no servers and collects nothing.</string>
+    <string name="about_privacy_summary">Rokid Coder has no hosted backend or telemetry, runs no servers in the cloud, and collects nothing.</string>
     <string name="about_privacy_paths_intro">Data leaves your devices only through services you already use:</string>
     <string name="about_privacy_path_cli">The Claude/Anthropic and Codex/OpenAI command-line tools you run on your computer.</string>
     <string name="about_privacy_path_speech">Your Android speech engine, which may be online.</string>
     <string name="about_privacy_path_tailscale">Tailscale, if you choose it.</string>
-    <string name="about_privacy_no_extras">The 1.0 app has no cloud speech engines and no analytics.</string>
+    <string name="about_privacy_no_extras">The 1.0 app has no cloud speech engines and no analytics. On your computer, the agentd helper listens on a loopback port for the hooks of the sessions you attach and on a LAN TLS port for your phone, and it keeps its state in local files; the app keeps its state in its own storage on your phone. TLS protects the application sessions between your phone and your computer. Two things are not TLS: plaintext UDP discovery, which carries no secrets, and the loopback HTTP hooks, which never leave your computer.</string>
     <string name="about_privacy_link">Read the full privacy note</string>
 </resources>
