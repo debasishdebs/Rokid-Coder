@@ -163,9 +163,9 @@ test("emulator.yml's checkRelease build signs with an ephemeral CI key and overr
   const gradleLine = text.slice(run).split("\n")[0];
   assert.match(gradleLine, /"-Prokid\.releaseSignerSha256=\$CI_SIGNER_SHA256"/);
   assert.match(gradleLine, /:mobile:app:checkRelease/);
-  // The shipping pin stays empty in the repository, and no other workflow overrides it.
+  // The shipping pin is the release key's lowercase-hex digest (or unset), and no other workflow overrides it.
   const properties = fs.readFileSync(path.join(ROOT, "gradle.properties"), "utf8");
-  assert.match(properties, /^rokid\.releaseSignerSha256=$/m);
+  assert.match(properties, /^rokid\.releaseSignerSha256=([0-9a-f]{64})?$/m);
   const overrides = WORKFLOWS.filter((name) => /-Prokid\.releaseSignerSha256/.test(read(name)));
   assert.deepEqual(overrides, ["emulator.yml"]);
 });
