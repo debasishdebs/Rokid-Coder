@@ -26,6 +26,7 @@ export const LEGACY_MENTIONS = [
   ".github/workflows/macos-installer.yml",
   "computer/README.md",
   "computer/installer/macos/test/ci/state-check.js",
+  "computer/installer/macos/test/state-check.test.js",
   "computer/installer/windows/lib/RokidCoder.psm1",
   "computer/src/setup/legacy.ts",
   "computer/src/setup/manifest.ts",
@@ -36,13 +37,16 @@ export const LEGACY_MENTIONS = [
   "computer/src/setup/state.ts",
   "computer/test/fixtures/plugin-cli/harness.js",
   "computer/test/setup-install.test.js",
+  "computer/test/setup-legacy-hooks.test.js",
   "computer/test/setup-platform-darwin.test.js",
   "computer/test/setup-platform-wsl.test.js",
   "computer/test/setup-plugins.test.js",
   "computer/test/setup-state.test.js",
   "mobile/app/CHANGELOG.md",
   "scripts/check-versions.mjs",
+  "scripts/test/publish.test.mjs",
   "scripts/test/versions.test.mjs",
+  "scripts/test/workflows.test.mjs",
 ];
 
 const LOCKFILE = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|gradle\.lockfile)$/;

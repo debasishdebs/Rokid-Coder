@@ -182,5 +182,6 @@ test("the schema is T11's required-row list, with 6b's gate rows", () => {
   for (const id of ["MACG-M1", "MACG-M2", "MACG-M3", ...Array.from({ length: 8 }, (_, i) => `WINS-W${i + 1}`)]) assert.ok(ids.includes(id), id);
   assert.deepEqual(SCHEMA.rows.filter((row) => row.smoke).map((row) => row.id).sort(),
     ["ALERT-MAC-CC", "ALERT-MAC-CX", "ALERT-WIN-CC", "ALERT-WIN-CX", "INSTALL-MAC", "INSTALL-WIN", "PAIR-MAC", "PAIR-WIN"]);
-  assert.equal(ids.length, 73);
+  assert.ok(ids.includes("PLG-CODEX-ARGS") && ids.includes("PLG-LIST-JSON"), "R218 rows");
+  assert.equal(ids.length, 75);
 });

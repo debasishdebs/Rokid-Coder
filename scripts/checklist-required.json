@@ -16,78 +16,388 @@
     ]
   },
   "rows": [
-    { "id": "ATTACH-MAC-CC", "platform": "macOS", "cli": "Claude Code" },
-    { "id": "ATTACH-MAC-CX", "platform": "macOS", "cli": "Codex" },
-    { "id": "APPROVE-MAC-CC", "platform": "macOS", "cli": "Claude Code" },
-    { "id": "APPROVE-MAC-CX", "platform": "macOS", "cli": "Codex" },
-    { "id": "REPLY-MAC-CC", "platform": "macOS", "cli": "Claude Code" },
-    { "id": "REPLY-MAC-CX", "platform": "macOS", "cli": "Codex" },
-    { "id": "ALERT-MAC-CC", "platform": "macOS", "cli": "Claude Code", "smoke": true },
-    { "id": "ALERT-MAC-CX", "platform": "macOS", "cli": "Codex", "smoke": true },
-    { "id": "DND-MAC-CC", "platform": "macOS", "cli": "Claude Code" },
-    { "id": "DND-MAC-CX", "platform": "macOS", "cli": "Codex" },
-    { "id": "RECONNECT-MAC-CC", "platform": "macOS", "cli": "Claude Code" },
-    { "id": "RECONNECT-MAC-CX", "platform": "macOS", "cli": "Codex" },
-    { "id": "EXPIRY-MAC-CC", "platform": "macOS", "cli": "Claude Code" },
-    { "id": "EXPIRY-MAC-CX", "platform": "macOS", "cli": "Codex" },
-    { "id": "REVOKE-MAC-CC", "platform": "macOS", "cli": "Claude Code" },
-    { "id": "REVOKE-MAC-CX", "platform": "macOS", "cli": "Codex" },
-    { "id": "LAUNCH-MAC-CC", "platform": "macOS", "cli": "Claude Code" },
-    { "id": "LAUNCH-MAC-CX", "platform": "macOS", "cli": "Codex" },
-    { "id": "ATTACH-WIN-CC", "platform": "Windows (WSL)", "cli": "Claude Code" },
-    { "id": "ATTACH-WIN-CX", "platform": "Windows (WSL)", "cli": "Codex" },
-    { "id": "APPROVE-WIN-CC", "platform": "Windows (WSL)", "cli": "Claude Code" },
-    { "id": "APPROVE-WIN-CX", "platform": "Windows (WSL)", "cli": "Codex" },
-    { "id": "REPLY-WIN-CC", "platform": "Windows (WSL)", "cli": "Claude Code" },
-    { "id": "REPLY-WIN-CX", "platform": "Windows (WSL)", "cli": "Codex" },
-    { "id": "ALERT-WIN-CC", "platform": "Windows (WSL)", "cli": "Claude Code", "smoke": true },
-    { "id": "ALERT-WIN-CX", "platform": "Windows (WSL)", "cli": "Codex", "smoke": true },
-    { "id": "DND-WIN-CC", "platform": "Windows (WSL)", "cli": "Claude Code" },
-    { "id": "DND-WIN-CX", "platform": "Windows (WSL)", "cli": "Codex" },
-    { "id": "RECONNECT-WIN-CC", "platform": "Windows (WSL)", "cli": "Claude Code" },
-    { "id": "RECONNECT-WIN-CX", "platform": "Windows (WSL)", "cli": "Codex" },
-    { "id": "EXPIRY-WIN-CC", "platform": "Windows (WSL)", "cli": "Claude Code" },
-    { "id": "EXPIRY-WIN-CX", "platform": "Windows (WSL)", "cli": "Codex" },
-    { "id": "REVOKE-WIN-CC", "platform": "Windows (WSL)", "cli": "Claude Code" },
-    { "id": "REVOKE-WIN-CX", "platform": "Windows (WSL)", "cli": "Codex" },
-    { "id": "INSTALL-MAC", "platform": "macOS", "cli": "—", "smoke": true },
-    { "id": "PAIR-MAC", "platform": "macOS", "cli": "—", "smoke": true },
-    { "id": "UPGRADE-MAC", "platform": "macOS", "cli": "—" },
-    { "id": "UNINSTALL-MAC", "platform": "macOS", "cli": "—" },
-    { "id": "REC-KILL-MAC", "platform": "macOS", "cli": "—" },
-    { "id": "REC-OFFLINE-MAC", "platform": "macOS", "cli": "—" },
-    { "id": "REC-MISMATCH-MAC", "platform": "macOS", "cli": "—" },
-    { "id": "INSTALL-WIN", "platform": "Windows (WSL)", "cli": "—", "smoke": true },
-    { "id": "PAIR-WIN", "platform": "Windows (WSL)", "cli": "—", "smoke": true },
-    { "id": "UPGRADE-WIN", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "UNINSTALL-WIN", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "REC-KILL-WIN", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "REC-OFFLINE-WIN", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "REC-MISMATCH-WIN", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "GLS-INSTALL", "platform": "phone/glasses", "cli": "—" },
-    { "id": "GLS-NEWER", "platform": "phone/glasses", "cli": "—" },
-    { "id": "GLS-UPSTREAM", "platform": "phone/glasses", "cli": "—" },
-    { "id": "CXR-AUTH", "platform": "phone/glasses", "cli": "—" },
-    { "id": "SPEECH", "platform": "phone/glasses", "cli": "—" },
-    { "id": "BOOT-VOICE", "platform": "phone/glasses", "cli": "—" },
-    { "id": "STOP-PERSIST", "platform": "phone/glasses", "cli": "—" },
-    { "id": "COEXIST", "platform": "phone/glasses", "cli": "—" },
-    { "id": "SAS-MISMATCH", "platform": "phone/glasses", "cli": "—" },
-    { "id": "SAS-SECOND", "platform": "phone/glasses", "cli": "—" },
-    { "id": "TS-STATES", "platform": "phone/glasses", "cli": "—" },
-    { "id": "CHIME-BT", "platform": "phone/glasses", "cli": "—" },
-    { "id": "CHIME-NOSPEAKER", "platform": "phone/glasses", "cli": "—" },
-    { "id": "ABOUT", "platform": "phone/glasses", "cli": "—" },
-    { "id": "MACG-M1", "platform": "macOS", "cli": "—" },
-    { "id": "MACG-M2", "platform": "macOS", "cli": "—" },
-    { "id": "MACG-M3", "platform": "macOS", "cli": "—" },
-    { "id": "WINS-W1", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "WINS-W2", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "WINS-W3", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "WINS-W4", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "WINS-W5", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "WINS-W6", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "WINS-W7", "platform": "Windows (WSL)", "cli": "—" },
-    { "id": "WINS-W8", "platform": "Windows (WSL)", "cli": "—" }
+    {
+      "id": "ATTACH-MAC-CC",
+      "platform": "macOS",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "ATTACH-MAC-CX",
+      "platform": "macOS",
+      "cli": "Codex"
+    },
+    {
+      "id": "APPROVE-MAC-CC",
+      "platform": "macOS",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "APPROVE-MAC-CX",
+      "platform": "macOS",
+      "cli": "Codex"
+    },
+    {
+      "id": "REPLY-MAC-CC",
+      "platform": "macOS",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "REPLY-MAC-CX",
+      "platform": "macOS",
+      "cli": "Codex"
+    },
+    {
+      "id": "ALERT-MAC-CC",
+      "platform": "macOS",
+      "cli": "Claude Code",
+      "smoke": true
+    },
+    {
+      "id": "ALERT-MAC-CX",
+      "platform": "macOS",
+      "cli": "Codex",
+      "smoke": true
+    },
+    {
+      "id": "DND-MAC-CC",
+      "platform": "macOS",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "DND-MAC-CX",
+      "platform": "macOS",
+      "cli": "Codex"
+    },
+    {
+      "id": "RECONNECT-MAC-CC",
+      "platform": "macOS",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "RECONNECT-MAC-CX",
+      "platform": "macOS",
+      "cli": "Codex"
+    },
+    {
+      "id": "EXPIRY-MAC-CC",
+      "platform": "macOS",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "EXPIRY-MAC-CX",
+      "platform": "macOS",
+      "cli": "Codex"
+    },
+    {
+      "id": "REVOKE-MAC-CC",
+      "platform": "macOS",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "REVOKE-MAC-CX",
+      "platform": "macOS",
+      "cli": "Codex"
+    },
+    {
+      "id": "LAUNCH-MAC-CC",
+      "platform": "macOS",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "LAUNCH-MAC-CX",
+      "platform": "macOS",
+      "cli": "Codex"
+    },
+    {
+      "id": "ATTACH-WIN-CC",
+      "platform": "Windows (WSL)",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "ATTACH-WIN-CX",
+      "platform": "Windows (WSL)",
+      "cli": "Codex"
+    },
+    {
+      "id": "APPROVE-WIN-CC",
+      "platform": "Windows (WSL)",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "APPROVE-WIN-CX",
+      "platform": "Windows (WSL)",
+      "cli": "Codex"
+    },
+    {
+      "id": "REPLY-WIN-CC",
+      "platform": "Windows (WSL)",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "REPLY-WIN-CX",
+      "platform": "Windows (WSL)",
+      "cli": "Codex"
+    },
+    {
+      "id": "ALERT-WIN-CC",
+      "platform": "Windows (WSL)",
+      "cli": "Claude Code",
+      "smoke": true
+    },
+    {
+      "id": "ALERT-WIN-CX",
+      "platform": "Windows (WSL)",
+      "cli": "Codex",
+      "smoke": true
+    },
+    {
+      "id": "DND-WIN-CC",
+      "platform": "Windows (WSL)",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "DND-WIN-CX",
+      "platform": "Windows (WSL)",
+      "cli": "Codex"
+    },
+    {
+      "id": "RECONNECT-WIN-CC",
+      "platform": "Windows (WSL)",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "RECONNECT-WIN-CX",
+      "platform": "Windows (WSL)",
+      "cli": "Codex"
+    },
+    {
+      "id": "EXPIRY-WIN-CC",
+      "platform": "Windows (WSL)",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "EXPIRY-WIN-CX",
+      "platform": "Windows (WSL)",
+      "cli": "Codex"
+    },
+    {
+      "id": "REVOKE-WIN-CC",
+      "platform": "Windows (WSL)",
+      "cli": "Claude Code"
+    },
+    {
+      "id": "REVOKE-WIN-CX",
+      "platform": "Windows (WSL)",
+      "cli": "Codex"
+    },
+    {
+      "id": "INSTALL-MAC",
+      "platform": "macOS",
+      "cli": "—",
+      "smoke": true
+    },
+    {
+      "id": "PAIR-MAC",
+      "platform": "macOS",
+      "cli": "—",
+      "smoke": true
+    },
+    {
+      "id": "UPGRADE-MAC",
+      "platform": "macOS",
+      "cli": "—"
+    },
+    {
+      "id": "UNINSTALL-MAC",
+      "platform": "macOS",
+      "cli": "—"
+    },
+    {
+      "id": "REC-KILL-MAC",
+      "platform": "macOS",
+      "cli": "—"
+    },
+    {
+      "id": "REC-OFFLINE-MAC",
+      "platform": "macOS",
+      "cli": "—"
+    },
+    {
+      "id": "REC-MISMATCH-MAC",
+      "platform": "macOS",
+      "cli": "—"
+    },
+    {
+      "id": "INSTALL-WIN",
+      "platform": "Windows (WSL)",
+      "cli": "—",
+      "smoke": true
+    },
+    {
+      "id": "PAIR-WIN",
+      "platform": "Windows (WSL)",
+      "cli": "—",
+      "smoke": true
+    },
+    {
+      "id": "UPGRADE-WIN",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "UNINSTALL-WIN",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "REC-KILL-WIN",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "REC-OFFLINE-WIN",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "REC-MISMATCH-WIN",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "GLS-INSTALL",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "GLS-NEWER",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "GLS-UPSTREAM",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "CXR-AUTH",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "SPEECH",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "BOOT-VOICE",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "STOP-PERSIST",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "COEXIST",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "SAS-MISMATCH",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "SAS-SECOND",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "TS-STATES",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "CHIME-BT",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "CHIME-NOSPEAKER",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "ABOUT",
+      "platform": "phone/glasses",
+      "cli": "—"
+    },
+    {
+      "id": "MACG-M1",
+      "platform": "macOS",
+      "cli": "—"
+    },
+    {
+      "id": "MACG-M2",
+      "platform": "macOS",
+      "cli": "—"
+    },
+    {
+      "id": "MACG-M3",
+      "platform": "macOS",
+      "cli": "—"
+    },
+    {
+      "id": "WINS-W1",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "WINS-W2",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "WINS-W3",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "WINS-W4",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "WINS-W5",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "WINS-W6",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "WINS-W7",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "WINS-W8",
+      "platform": "Windows (WSL)",
+      "cli": "—"
+    },
+    {
+      "id": "PLG-CODEX-ARGS",
+      "platform": "macOS",
+      "cli": "Codex"
+    },
+    {
+      "id": "PLG-LIST-JSON",
+      "platform": "macOS",
+      "cli": "—"
+    }
   ]
 }
