@@ -155,3 +155,17 @@ Plan: `docs/coding-agent/claude/plan/2026-11-15-plan-5-cleanup.md`. Your answers
 - **Worktrees removed (U21).** Their branches are kept for the trace.
 
 **Next: Plan 6 (product-ready + Play Store).** We're in the design discussion now.
+
+
+## Rokid-Coder 1.0 (Plans 6a, 6b, 6c), 2026-11-16: CODE-COMPLETE on `release/1.0.0`
+Every plan was built in parallel and got one Codex review plus a fix wave. The final Codex check is READY. The details, user actions and gates are in `docs/coding-agent/HANDOFF.md` (2026-11-16 entry).
+
+**What's left is yours:**
+- **The signing key and GitHub secrets.** Send me the cert SHA-256 for `rokid.releaseSignerSha256`.
+- **GitHub settings:**
+  - make `release/1.0.0` the default branch
+  - create the `release` Environment with you as the required reviewer
+  - allow Actions to create PRs
+- **Push `rokid-coder-v1.0.0-rc.1`.** CI's first run will likely need one fix round.
+- **Run the gates:** the device checklist `docs/coding-agent/claude/plan/2026-11-15-v1-device-checklist.md` (75 required rows), Windows W1–W9, and macOS 13 M1–M3.
+- **Approve publish-release.**

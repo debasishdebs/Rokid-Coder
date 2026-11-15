@@ -62,6 +62,20 @@ Last updated 2026-11-15. The detailed SDD ledgers exist only on the original Mac
   - installer prerequisite checks
   - Tailscale as an optional connector
   - Nexus as the embedded core, with a coexistence warning
+- **2026-11-16: Plans 6b and 6c are BUILT; Codex final check READY. Rokid-Coder 1.0 is CODE-COMPLETE on `release/1.0.0`.**
+  - Suites at the end: computer 856/0 (2 skipped); installers 36/0; scripts 55/0 (+1 skipped: actionlint not installed locally); `:mobile:app` 600/0; phone-core 391/0; app + upstream shell assemble.
+  - The emulator tests pass on a local API 34 AVD: an unrelated app can't reach our services; boot = connectedDevice only, then +microphone once the app is opened; voice across two background sessions.
+  - R8 finding: the app does NOT need REQUEST_INSTALL_PACKAGES.
+  - **Not yet run anywhere:**
+    - GitHub CI: bundles (darwin-x64, linux-x64), macos-installer, windows-installer (Pester ×43, NSIS), release, upstream-sync. Expect one CI iteration.
+    - The user's hardware gates: the 1.0 device checklist (75 required rows), Windows W1–W9, the macOS 13 VM M1–M3.
+  - **USER ACTIONS before release:**
+    1. Create the PKCS12 release key (keytool, alias rokid-coder). Add the secrets NEXUS_RELEASE_KEYSTORE_B64 / _PASSWORD / NEXUS_RELEASE_KEY_ALIAS, and give the cert SHA-256 for `rokid.releaseSignerSha256` (committed empty, so release builds fail until it is set).
+    2. GitHub settings:
+       - make `release/1.0.0` the default branch
+       - create an Environment `release` with the user as required reviewer
+       - allow Actions to create PRs
+    3. Push an rc tag `rokid-coder-v1.0.0-rc.1` to get the draft release. Run the device checklist, W1–W9 and M1–M3 on it. Then run publish-release (manual, approval-gated).
 - **2026-11-15/16: Plan 6a is BUILT and COMPLETE on release/1.0.0.**
   - Done: T1 restructure, T2 core split, T3 one phone app, T6 SAS pairing, T12 identity + glasses app.
   - Codex final review → fix wave → READY.
