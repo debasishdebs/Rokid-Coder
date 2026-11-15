@@ -290,10 +290,13 @@ test("snapshot_taken_only_after_quiesce", async (t) => {
   world.scenario({ daemonWrites: writes(world) });
   await world.seed08();
   await world.legacy08({ claude: world.cli("claude") });
-  // The old agent is writing state right now.
+  // The old agent is writing state right now: its first state is there once it is up, and a later write follows.
   const first = fs.readFileSync(writes(world), "utf8");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.notEqual(fs.readFileSync(writes(world), "utf8"), first);
+  const deadline = Date.now() + 5000;
+  while (fs.readFileSync(writes(world), "utf8") === first && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.notEqual(fs.readFileSync(writes(world), "utf8"), first, "the old agent wrote again within 5 s");
 
   assert.equal(world.install(world.bundle("1.0.0-test.1"), CONSENT).status, 0);
   const snapshot = world.manifest().previous.snapshot;
