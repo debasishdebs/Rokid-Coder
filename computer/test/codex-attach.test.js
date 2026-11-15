@@ -159,7 +159,7 @@ test("codex_plugin_package_is_wired", () => {
   // header it sends is what makes the daemon read the payload as Codex's.
   const handlers = readJson("plugin", "codex", "hooks", "hooks.json").hooks.UserPromptSubmit.flatMap((group) => group.hooks);
   assert.equal(handlers.length, 1);
-  assert.match(handlers[0].command, /^ROKID_CODER_PROVIDER=codex node "\$\{PLUGIN_ROOT\}\/bin\/hook-forward\.js"$/);
+  assert.match(handlers[0].command, /^ROKID_CODER_PROVIDER=codex "\$HOME\/\.rokid-coder\/bin\/rokid-node" "\$\{PLUGIN_ROOT\}\/bin\/hook-forward\.js"$/);
 
   const built = fs.readFileSync(path.resolve(__dirname, "..", "dist", "hook-forward.js"), "utf8");
   assert.equal(

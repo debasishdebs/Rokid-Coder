@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROKID_CODER_PROVIDER=codex node \"${PLUGIN_ROOT}/bin/hook-forward.js\"",
+            "command": "ROKID_CODER_PROVIDER=codex \"$HOME/.rokid-coder/bin/rokid-node\" \"${PLUGIN_ROOT}/bin/hook-forward.js\"",
             "timeout": 30
           }
         ]
