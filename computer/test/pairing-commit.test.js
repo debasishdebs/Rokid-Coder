@@ -383,6 +383,138 @@ function phone_commit(phone) {
   phone.sendRaw({ type: "pair_committed", v: 2, attempt: phone.state.attempt });
 }
 
+// ---------------------------------------------------------------- the pins lock, across processes
+
+const { spawn, spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const TLS_JS = path.join(__dirname, "..", "dist", "tls.js");
+
+/** A second node process, as the CLI is, with the same tls.js; `script` sees PinStore, withPinsLock, fs and sleep. */
+function secondProcess(script) {
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `const fs = require("node:fs");
+       const { PinStore, withPinsLock } = require(${JSON.stringify(TLS_JS)});
+       const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+       ${script}`,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  const exited = new Promise((resolve) => child.on("exit", (code) => resolve({ code, output })));
+  track(() => child.kill());
+  return { child, exited };
+}
+
+/** Blocks this process (as the lock's holder does) until `file` exists. */
+function blockUntilExists(file, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!fs.existsSync(file)) {
+    if (Date.now() > deadline) throw new Error(`${file} never appeared`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  }
+}
+
+test("two_process_forget_during_promotion_never_restores_trust", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "phone-pins.json");
+  const fp = (await phoneCert("two-process-phone")).fingerprint256;
+  const prefix = fp.slice(0, 20);
+  const attempt = "0123456789abcdef";
+  const waiting = path.join(dir, "cli-waiting");
+  const done = path.join(dir, "cli-done");
+  let paused = false;
+  const pins = new PinStore(file, {
+    afterLockedReload: (operation) => {
+      if (operation !== "promote" || paused) return;
+      paused = true;
+      // Paused after the reload, holding the lock: the CLI's forget arrives exactly now.
+      blockUntilExists(waiting);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      assert.equal(fs.existsSync(done), false, "the other process's forget landed inside the promotion");
+    },
+  });
+
+  // 1. The forget arrives between the promotion's read and its write: it waits, then wins.
+  pins.addProvisional(fp, attempt);
+  const cli = secondProcess(`
+    fs.writeFileSync(${JSON.stringify(waiting)}, "1");
+    const removed = new PinStore(${JSON.stringify(file)}, { lockWaitMs: 10000 }).forget(${JSON.stringify(prefix)});
+    fs.writeFileSync(${JSON.stringify(done)}, JSON.stringify(removed));
+  `);
+  assert.equal(pins.promote(fp, attempt), true);
+  const first = await cli.exited;
+  assert.equal(first.code, 0, first.output);
+  assert.deepEqual(JSON.parse(fs.readFileSync(done, "utf8")), [fp]);
+  assert.equal(new PinStore(file).has(fp), false, "the promotion restored a forgotten pairing");
+  assert.equal(new PinStore(file).provisional(fp), undefined);
+
+  // 2. The other process holds the lock first and forgets: the promotion waits, then finds nothing to promote.
+  pins.addProvisional(fp, attempt);
+  const held = path.join(dir, "cli-held");
+  const holder = secondProcess(`
+    withPinsLock(${JSON.stringify(dir)}, () => {
+      new PinStore(${JSON.stringify(file)}).forget(${JSON.stringify(prefix)});
+      fs.writeFileSync(${JSON.stringify(held)}, "1");
+      sleep(300);
+    });
+  `);
+  await waitUntil(() => fs.existsSync(held), "the other process never took the lock");
+  assert.equal(pins.promote(fp, attempt), false);
+  assert.equal((await holder.exited).code, 0);
+  assert.equal(new PinStore(file).has(fp), false);
+  assert.deepEqual(new PinStore(file).provisionalEntries(), []);
+});
+
+test("stale_lock_recovered_and_live_lock_respected", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "phone-pins.json");
+  const lock = path.join(dir, "phone-pins.lock");
+  const [a, b, c] = await Promise.all(["lock-a", "lock-b", "lock-c"].map(async (name) => (await phoneCert(name)).fingerprint256));
+
+  // A holder that died: taken over at once.
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, "owner"), `${dead}:dead`);
+  let started = Date.now();
+  new PinStore(file).add(a);
+  assert.ok(Date.now() - started < 1000, "a dead holder's lock was waited on");
+  assert.equal(fs.existsSync(lock), false);
+
+  // A live holder that has held it past the stale age: taken over too.
+  const sleeper = secondProcess("sleep(10000);");
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, "owner"), `${sleeper.child.pid}:hung`);
+  const old = new Date(Date.now() - 11_000);
+  fs.utimesSync(lock, old, old);
+  new PinStore(file).add(b);
+  assert.equal(new PinStore(file).has(b), true);
+  sleeper.child.kill();
+
+  // A live, fresh lock is respected: the change fails closed and writes nothing.
+  const held = path.join(dir, "held");
+  const holder = secondProcess(`
+    withPinsLock(${JSON.stringify(dir)}, () => {
+      fs.writeFileSync(${JSON.stringify(held)}, "1");
+      sleep(1500);
+    });
+  `);
+  await waitUntil(() => fs.existsSync(held), "the holder never took the lock");
+  started = Date.now();
+  assert.throws(() => new PinStore(file, { lockWaitMs: 200 }).add(c), /locked by another process/);
+  assert.ok(Date.now() - started >= 200);
+  assert.ok(fs.readFileSync(path.join(lock, "owner"), "utf8").startsWith(`${holder.child.pid}:`), "a live lock was broken");
+  assert.equal(new PinStore(file).has(c), false);
+  assert.equal((await holder.exited).code, 0);
+  new PinStore(file).add(c);
+  assert.equal(new PinStore(file).has(c), true);
+  assert.equal(fs.existsSync(lock), false, "the lock is released");
+});
+
 test("legacy_provisional_file_migrates_into_pin_store", async () => {
   const dir = await tempDir();
   const now = Date.now();

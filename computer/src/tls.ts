@@ -13,6 +13,7 @@ import {
   statSync,
   unlinkSync,
   watch,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import path from "node:path";
@@ -35,6 +36,11 @@ const TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 /** How long `phones allow-next` leaves the door open for one more phone. */
 export const ALLOW_NEXT_WINDOW_MS = 2 * 60 * 1000;
 const CERT_LOCK_STALE_MS = 30_000;
+/** A pins lock whose holder died, or held this long, is taken over. */
+export const PINS_LOCK_STALE_MS = 10_000;
+/** How long a pin change waits for another process's before it fails closed. */
+const PINS_LOCK_WAIT_MS = 3_000;
+const PINS_LOCK_NAME = "phone-pins.lock";
 const CERT_LOCK_WAIT_MS = 10_000;
 
 export interface AgentCert {
@@ -277,6 +283,123 @@ export function watchFiles(files: string[], intervalMs: number, onChange: () => 
   };
 }
 
+// ---- the pins lock ----
+
+/** Locks this process holds, with their depth: a pin change made inside another is not a second acquire. */
+const heldPinsLocks = new Map<string, number>();
+const lockSleeper = new Int32Array(new SharedArrayBuffer(4));
+
+function pinsLockPath(dir: string): string {
+  return path.join(dir, PINS_LOCK_NAME);
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function lockOwner(lock: string): string | undefined {
+  try {
+    return readFileSync(path.join(lock, "owner"), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Takes over a lock whose holder is dead, or that is older than
+ * PINS_LOCK_STALE_MS. The lock is renamed away before it is removed, and only
+ * if its owner is still the one judged stale, so a lock someone just took is
+ * left alone.
+ */
+function breakStaleLock(lock: string): void {
+  let ageMs: number;
+  try {
+    ageMs = Date.now() - statSync(lock).mtimeMs;
+  } catch {
+    return;
+  }
+  const owner = lockOwner(lock);
+  const pid = owner === undefined ? NaN : Number(owner.split(":")[0]);
+  const dead = Number.isInteger(pid) && pid > 0 && !pidAlive(pid);
+  if (!dead && ageMs <= PINS_LOCK_STALE_MS) {
+    return;
+  }
+  if (lockOwner(lock) !== owner) {
+    return;
+  }
+  const aside = `${lock}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    renameSync(lock, aside);
+  } catch {
+    return;
+  }
+  rmSync(aside, { recursive: true, force: true });
+}
+
+/**
+ * Runs `fn` holding the phone-pins lock in `dir`: a directory made with mkdir,
+ * which is atomic, so agentd and the CLI never interleave a read-validate-write
+ * of the pins file. Synchronous, as PinStore is. Waits at most `waitMs` for
+ * another process, then throws: a pin change that cannot be made safely is not
+ * made. Reentrant within this process.
+ */
+export function withPinsLock<T>(dir: string, fn: () => T, { waitMs = PINS_LOCK_WAIT_MS }: { waitMs?: number } = {}): T {
+  const lock = pinsLockPath(dir);
+  const depth = heldPinsLocks.get(lock) ?? 0;
+  if (depth > 0) {
+    heldPinsLocks.set(lock, depth + 1);
+    try {
+      return fn();
+    } finally {
+      heldPinsLocks.set(lock, depth);
+    }
+  }
+  privateDir(dir);
+  const token = `${process.pid}:${randomBytes(8).toString("hex")}`;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      mkdirSync(lock, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+      breakStaleLock(lock);
+      if (Date.now() >= deadline) {
+        throw new Error(`The phone pins at ${dir} are locked by another process`);
+      }
+      Atomics.wait(lockSleeper, 0, 0, 10);
+      continue;
+    }
+    try {
+      writeFileSync(path.join(lock, "owner"), token, { mode: 0o600 });
+    } catch (error) {
+      rmSync(lock, { recursive: true, force: true });
+      throw error;
+    }
+    break;
+  }
+  heldPinsLocks.set(lock, 1);
+  try {
+    return fn();
+  } finally {
+    heldPinsLocks.delete(lock);
+    // Taken over as stale meanwhile: the lock is someone else's now.
+    if (lockOwner(lock) === token) {
+      rmSync(lock, { recursive: true, force: true });
+    }
+  }
+}
+
+function pinsLockHeld(dir: string): boolean {
+  return (heldPinsLocks.get(pinsLockPath(dir)) ?? 0) > 0;
+}
+
 export interface PinEntry {
   /** Normalised fingerprint. */
   fp: string;
@@ -336,15 +459,29 @@ export class PinStore {
   private readonly writeFile: (file: string, content: string) => void;
   private readonly clock: () => number;
   private readonly logger?: Logger;
+  private readonly lockWaitMs?: number;
+  private readonly afterLockedReload?: (operation: string) => void;
 
-  /** Without a file the set lives only as long as the process. `writeFile` and `now` are for tests. */
+  /**
+   * Without a file the set lives only as long as the process. `writeFile`,
+   * `now`, `lockWaitMs` and `afterLockedReload` (called inside the lock, after
+   * the reload and before anything is decided) are for tests.
+   */
   constructor(
     private readonly file?: string,
-    options: { writeFile?: (file: string, content: string) => void; now?: () => number; logger?: Logger } = {},
+    options: {
+      writeFile?: (file: string, content: string) => void;
+      now?: () => number;
+      logger?: Logger;
+      lockWaitMs?: number;
+      afterLockedReload?: (operation: string) => void;
+    } = {},
   ) {
     this.writeFile = options.writeFile ?? writePrivate;
     this.clock = options.now ?? Date.now;
     this.logger = options.logger;
+    this.lockWaitMs = options.lockWaitMs;
+    this.afterLockedReload = options.afterLockedReload;
     this.reload();
     this.absorbLegacyProvisional();
   }
@@ -381,16 +518,21 @@ export class PinStore {
    */
   isTrusted(fp: string, now: number, ttlMs: number): boolean {
     this.reload();
-    this.clampToNow(now);
-    const entry = this.durableEntry(fp);
-    if (!entry) {
+    const check = (): boolean => {
+      this.clampToNow(now);
+      const entry = this.durableEntry(fp);
+      if (!entry) {
+        return false;
+      }
+      if (!isStale(entry, now, ttlMs)) {
+        return true;
+      }
+      this.expire(now, ttlMs);
       return false;
-    }
-    if (!isStale(entry, now, ttlMs)) {
-      return true;
-    }
-    this.expire(now, ttlMs);
-    return false;
+    };
+    // Read on every steering frame: the lock is taken only when there is something to write.
+    const entry = this.durableEntry(fp);
+    return this.pendingClamp(now) || (entry !== undefined && isStale(entry, now, ttlMs)) ? this.mutate("isTrusted", check) : check();
   }
 
   /**
@@ -399,17 +541,20 @@ export class PinStore {
    */
   touch(fp: string, now: number): void {
     this.reload();
-    this.clampToNow(now);
     const entry = this.durableEntry(fp);
-    if (!entry) {
+    if (!entry || (!this.pendingClamp(now) && now >= entry.lastUsedAt && now - entry.lastUsedAt < TOUCH_INTERVAL_MS)) {
       return;
     }
-    if (!this.needsWrite && now >= entry.lastUsedAt && now - entry.lastUsedAt < TOUCH_INTERVAL_MS) {
-      return;
-    }
-    const next = new Map(this.phones);
-    next.set(entry.fp, { ...entry, lastUsedAt: now });
-    this.commit(next, this.allowNextUntil, this.pinnedBefore);
+    this.mutate("touch", () => {
+      this.clampToNow(now);
+      const current = this.durableEntry(fp);
+      if (!current || (now >= current.lastUsedAt && now - current.lastUsedAt < TOUCH_INTERVAL_MS)) {
+        return;
+      }
+      const next = new Map(this.phones);
+      next.set(current.fp, { ...current, lastUsedAt: now });
+      this.commit(next, this.allowNextUntil, this.pinnedBefore);
+    });
   }
 
   /**
@@ -417,43 +562,48 @@ export class PinStore {
    * writes back what was migrated from an older file format or corrected on read.
    */
   expire(now: number, ttlMs: number): string[] {
-    this.reload();
-    this.clampToNow(now);
-    const gone = [...this.phones.values()].filter((entry) => isDurable(entry) && isStale(entry, now, ttlMs));
-    if (gone.length === 0 && !this.needsWrite) {
-      return [];
-    }
-    const remaining = new Map(this.phones);
-    for (const entry of gone) {
-      remaining.delete(entry.fp);
-    }
-    this.commit(remaining, this.allowNextUntil, this.pinnedBefore);
-    for (const entry of gone) {
-      this.logger?.info("phone_pairing_expired", {
-        fingerprint: shortFingerprint(entry.fp),
-        unused_days: Math.floor((now - Math.min(entry.lastUsedAt, now)) / DAY_MS),
-      });
-    }
-    return gone.map((entry) => entry.fp);
+    return this.mutate("expire", () => {
+      this.clampToNow(now);
+      const gone = [...this.phones.values()].filter((entry) => isDurable(entry) && isStale(entry, now, ttlMs));
+      if (gone.length === 0 && !this.needsWrite) {
+        return [];
+      }
+      const remaining = new Map(this.phones);
+      for (const entry of gone) {
+        remaining.delete(entry.fp);
+      }
+      this.commit(remaining, this.allowNextUntil, this.pinnedBefore);
+      for (const entry of gone) {
+        this.logger?.info("phone_pairing_expired", {
+          fingerprint: shortFingerprint(entry.fp),
+          unused_days: Math.floor((now - Math.min(entry.lastUsedAt, now)) / DAY_MS),
+        });
+      }
+      return gone.map((entry) => entry.fp);
+    });
+  }
+
+  /** True when what was read must be written back: a migration, or a last use in the future. */
+  private pendingClamp(now: number): boolean {
+    return this.needsWrite || [...this.phones.values()].some((entry) => entry.lastUsedAt > now);
   }
 
   /**
    * A last use in the future means the clock went back since it was recorded.
    * It counts as now from here on, and the correction is written once, so an
-   * unused pairing never gains the rolled-back time as extra life.
+   * unused pairing never gains the rolled-back time as extra life. Only ever
+   * called holding the lock.
    */
   private clampToNow(now: number): void {
-    let changed = false;
+    if (!this.pendingClamp(now)) {
+      return;
+    }
+    const next = new Map<string, StoredPin>();
     for (const entry of this.phones.values()) {
-      if (entry.lastUsedAt > now) {
-        entry.lastUsedAt = now;
-        changed = true;
-      }
+      next.set(entry.fp, entry.lastUsedAt > now ? { ...entry, lastUsedAt: now } : entry);
     }
     // Also what `reload` corrected or migrated: written once, then no longer pending.
-    if (changed || this.needsWrite) {
-      this.commit(new Map(this.phones), this.allowNextUntil, this.pinnedBefore);
-    }
+    this.commit(next, this.allowNextUntil, this.pinnedBefore);
   }
 
   isEmpty(): boolean {
@@ -471,11 +621,12 @@ export class PinStore {
     if (!normalized) {
       throw new Error("not a SHA-256 certificate fingerprint");
     }
-    this.reload();
-    // A phone admitted through the empty set used up an open window too.
-    const next = new Map(this.phones);
-    next.set(normalized, { fp: normalized, addedAt: this.phones.get(normalized)?.addedAt ?? now, lastUsedAt: now, state: "durable" });
-    this.commit(next, 0, true);
+    this.mutate("add", () => {
+      // A phone admitted through the empty set used up an open window too.
+      const next = new Map(this.phones);
+      next.set(normalized, { fp: normalized, addedAt: this.phones.get(normalized)?.addedAt ?? now, lastUsedAt: now, state: "durable" });
+      this.commit(next, 0, true);
+    });
   }
 
   /** The live provisional pin for `fp`, if any: it never admits a link by itself. */
@@ -497,96 +648,103 @@ export class PinStore {
     if (!normalized) {
       throw new Error("not a SHA-256 certificate fingerprint");
     }
-    this.reload();
-    if (this.durableEntry(normalized)) {
-      throw new Error("that phone is already pinned");
-    }
-    const entry: ProvisionalPin = { fp: normalized, addedAt: now, lastUsedAt: now, state: "provisional", attempt, provisionalUntil: now + ttlMs };
-    const next = new Map(this.phones);
-    next.set(normalized, entry);
-    this.commit(next, this.allowNextUntil, true);
-    return { ...entry };
+    return this.mutate("addProvisional", () => {
+      if (this.durableEntry(normalized)) {
+        throw new Error("that phone is already pinned");
+      }
+      const entry: ProvisionalPin = { fp: normalized, addedAt: now, lastUsedAt: now, state: "provisional", attempt, provisionalUntil: now + ttlMs };
+      const next = new Map(this.phones);
+      next.set(normalized, entry);
+      this.commit(next, this.allowNextUntil, true);
+      return { ...entry };
+    });
   }
 
   /**
    * Step 3: the provisional pin of exactly this attempt, still live, becomes
    * durable in one write. False, with nothing written, when that entry is gone
    * (forgotten, rotated away, dropped), expired, or another attempt's. Throws
-   * when the write fails, which leaves the provisional entry as it was.
+   * when the write fails, which leaves the provisional entry as it was. The
+   * check and the write happen under the pins lock, so no other process's
+   * forget can land between them.
    */
   promote(fp: string, attempt: string, now: number = this.clock()): boolean {
-    this.reload();
-    const normalized = normalizeFingerprint(fp);
-    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
-    if (!entry || isDurable(entry) || entry.attempt !== attempt || entry.provisionalUntil <= now) {
-      return false;
-    }
-    const next = new Map(this.phones);
-    next.set(entry.fp, { fp: entry.fp, addedAt: entry.addedAt, lastUsedAt: now, state: "durable" });
-    this.commit(next, this.allowNextUntil, this.pinnedBefore);
-    return true;
+    return this.mutate("promote", () => {
+      const normalized = normalizeFingerprint(fp);
+      const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+      if (!entry || isDurable(entry) || entry.attempt !== attempt || entry.provisionalUntil <= now) {
+        return false;
+      }
+      const next = new Map(this.phones);
+      next.set(entry.fp, { fp: entry.fp, addedAt: entry.addedAt, lastUsedAt: now, state: "durable" });
+      this.commit(next, this.allowNextUntil, this.pinnedBefore);
+      return true;
+    });
   }
 
   /** The phone could not store the credentials: this attempt's provisional pin goes, and nothing else. */
   dropProvisional(fp: string, attempt: string): boolean {
-    this.reload();
-    const normalized = normalizeFingerprint(fp);
-    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
-    if (!entry || isDurable(entry) || entry.attempt !== attempt) {
-      return false;
-    }
-    const next = new Map(this.phones);
-    next.delete(entry.fp);
-    this.commit(next, this.allowNextUntil, this.pinnedBefore);
-    return true;
+    return this.mutate("dropProvisional", () => {
+      const normalized = normalizeFingerprint(fp);
+      const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+      if (!entry || isDurable(entry) || entry.attempt !== attempt) {
+        return false;
+      }
+      const next = new Map(this.phones);
+      next.delete(entry.fp);
+      this.commit(next, this.allowNextUntil, this.pinnedBefore);
+      return true;
+    });
   }
 
   /** Purges provisional pins past their deadline; returns their fingerprints. */
   expireProvisional(now: number = this.clock()): string[] {
-    this.reload();
-    const gone = [...this.phones.values()].filter((entry) => !isDurable(entry) && entry.provisionalUntil <= now).map((entry) => entry.fp);
-    if (gone.length > 0) {
-      const next = new Map(this.phones);
-      for (const fp of gone) {
-        next.delete(fp);
+    return this.mutate("expireProvisional", () => {
+      const gone = [...this.phones.values()].filter((entry) => !isDurable(entry) && entry.provisionalUntil <= now).map((entry) => entry.fp);
+      if (gone.length > 0) {
+        const next = new Map(this.phones);
+        for (const fp of gone) {
+          next.delete(fp);
+        }
+        this.commit(next, this.allowNextUntil, this.pinnedBefore);
       }
-      this.commit(next, this.allowNextUntil, this.pinnedBefore);
-    }
-    return gone;
+      return gone;
+    });
   }
 
   /** Removes the phone whose fingerprint is `fp` or starts with it, pinned or provisional; returns what was removed. */
   forget(fp: string): string[] {
-    this.reload();
     const wanted = fp.replace(/:/g, "").toUpperCase();
     if (wanted.length < 8 || !/^[0-9A-F]+$/.test(wanted)) {
       throw new Error("give at least 8 hex digits of the fingerprint");
     }
-    const hits = [...this.phones.keys()].filter((phone) => phone.replace(/:/g, "").startsWith(wanted));
-    if (hits.length > 1) {
-      throw new Error("that matches more than one phone; give more of the fingerprint");
-    }
-    if (hits.length > 0) {
-      const remaining = new Map(this.phones);
-      for (const hit of hits) {
-        remaining.delete(hit);
+    return this.mutate("forget", () => {
+      const hits = [...this.phones.keys()].filter((phone) => phone.replace(/:/g, "").startsWith(wanted));
+      if (hits.length > 1) {
+        throw new Error("that matches more than one phone; give more of the fingerprint");
       }
-      this.commit(remaining, this.allowNextUntil, this.pinnedBefore);
-    }
-    return hits;
+      if (hits.length > 0) {
+        const remaining = new Map(this.phones);
+        for (const hit of hits) {
+          remaining.delete(hit);
+        }
+        this.commit(remaining, this.allowNextUntil, this.pinnedBefore);
+      }
+      return hits;
+    });
   }
 
   /** Empties the set, provisional pins included. Not a fresh install: a new phone then needs `phones allow-next`. */
   forgetAll(): void {
-    this.reload();
-    this.commit(new Map(), 0, this.pinnedBefore);
+    this.mutate("forgetAll", () => this.commit(new Map(), 0, this.pinnedBefore));
   }
 
   /** Lets one more unknown phone be trusted on first use until `now` + the window. */
   armAllowNext(now: number, windowMs: number = ALLOW_NEXT_WINDOW_MS): number {
-    this.reload();
-    this.commit(this.phones, now + windowMs, this.pinnedBefore);
-    return this.allowNextUntil;
+    return this.mutate("armAllowNext", () => {
+      this.commit(this.phones, now + windowMs, this.pinnedBefore);
+      return this.allowNextUntil;
+    });
   }
 
   allowNextOpen(now: number): boolean {
@@ -597,9 +755,34 @@ export class PinStore {
   /** Called when a phone was admitted through the window: it admits exactly one. */
   closeAllowNext(): void {
     this.reload();
-    if (this.allowNextUntil !== 0) {
-      this.commit(this.phones, 0, this.pinnedBefore);
+    if (this.allowNextUntil === 0) {
+      return;
     }
+    this.mutate("closeAllowNext", () => {
+      if (this.allowNextUntil !== 0) {
+        this.commit(this.phones, 0, this.pinnedBefore);
+      }
+    });
+  }
+
+  /**
+   * Every change to the file: under the pins lock, from a fresh read, so the
+   * decision `fn` makes is about what is on disk now and nothing another
+   * process writes can land between that read and this write.
+   */
+  private mutate<T>(operation: string, fn: () => T): T {
+    if (!this.file) {
+      return fn();
+    }
+    return withPinsLock(
+      path.dirname(this.file),
+      () => {
+        this.reload();
+        this.afterLockedReload?.(operation);
+        return fn();
+      },
+      this.lockWaitMs === undefined ? {} : { waitMs: this.lockWaitMs },
+    );
   }
 
   // A pin file that cannot be read is an error, not an empty store: starting
@@ -687,6 +870,9 @@ export class PinStore {
   /** Writes the new state and keeps it only once the write succeeded: a pin the disk lacks is no pin. */
   private commit(phones: Map<string, StoredPin>, allowNextUntil: number, pinnedBefore: boolean): void {
     if (this.file) {
+      if (!pinsLockHeld(path.dirname(this.file))) {
+        throw new Error("phone pins changed without the pins lock");
+      }
       privateDir(path.dirname(this.file));
       this.writeFile(
         this.file,
@@ -749,17 +935,18 @@ export class PinStore {
     } catch {
       found = [];
     }
-    this.reload();
-    const next = new Map(this.phones);
-    for (const entry of found) {
-      if (!next.has(entry.fp)) {
-        next.set(entry.fp, entry);
+    this.mutate("absorbLegacyProvisional", () => {
+      const next = new Map(this.phones);
+      for (const entry of found) {
+        if (!next.has(entry.fp)) {
+          next.set(entry.fp, entry);
+        }
       }
-    }
-    if (next.size !== this.phones.size) {
-      this.commit(next, this.allowNextUntil, this.pinnedBefore);
-    }
-    unlinkSync(legacy);
+      if (next.size !== this.phones.size) {
+        this.commit(next, this.allowNextUntil, this.pinnedBefore);
+      }
+      unlinkSync(legacy);
+    });
   }
 }
 
