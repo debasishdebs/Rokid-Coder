@@ -93,12 +93,21 @@ class CoderService : Service(), HubForegroundHost {
     /**
      * The core's speech asking for the microphone (true) or releasing it (false). A held type
      * answers both at once with no new start; a refusal sets the pointer and shows it on the glasses.
+     * Without a held type, only a visible app may ask Android for it: from the background the
+     * answer is the open-app pointer, never a start Android is left to refuse.
      */
     override fun promote(microphone: Boolean): Throwable? {
-        if (microphone && !promotion.microphoneHeld && !microphoneGranted()) {
-            refreshVoice()
-            pointVoiceOnGlasses()
-            return SecurityException("RECORD_AUDIO is not granted")
+        if (microphone && !promotion.microphoneHeld) {
+            val refusal = when {
+                !microphoneGranted() -> SecurityException("RECORD_AUDIO is not granted")
+                !processStarted() -> SecurityException("the app is not open")
+                else -> null
+            }
+            if (refusal != null) {
+                refreshVoice()
+                pointVoiceOnGlasses()
+                return refusal
+            }
         }
         val failure = promoteService(microphone)
         if (microphone && failure != null) pointVoiceOnGlasses()

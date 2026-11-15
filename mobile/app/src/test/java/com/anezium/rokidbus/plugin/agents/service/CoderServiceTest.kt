@@ -294,6 +294,33 @@ class CoderServiceTest {
     }
 
     @Test
+    fun speech_before_app_open_never_asks_android_for_the_microphone() {
+        grantMicrophone(true)
+        ServicePrefs(app).recordForegroundStart()
+        val service = deliver(bootIntent())
+        // After boot and before the app opens: whatever Android would answer, the service does not ask.
+        processStarted = false
+
+        val failure = service.promote(microphone = true)
+        idle()
+
+        assertNotNull(failure)
+        assertEquals("no microphone start from the background", listOf(false), starts.map { it.microphone })
+        assertEquals(VoiceAvailability.NEEDS_APP_OPEN, CoderService.voice.value)
+        assertEquals(VoiceAvailability.OPEN_APP, glassesNotices().single().body)
+
+        // Opened once, the type is held: a later session from the background needs no visible screen.
+        processStarted = true
+        CoderAppLifecycle.observer(app).onStart(processOwner)
+        deliverNextStart()
+        assertTrue(starts.last().microphone)
+        processStarted = false
+        assertNull(service.promote(microphone = true))
+        assertNull(service.promote(microphone = false))
+        assertEquals(VoiceAvailability.AVAILABLE, CoderService.voice.value)
+    }
+
+    @Test
     fun promotion_failure_shows_pointer_not_silence() {
         grantMicrophone(true)
         microphoneRefusal = { SecurityException("not in the foreground") }
