@@ -26,6 +26,7 @@ import com.anezium.rokidbus.plugin.agents.SasDoor
 import com.anezium.rokidbus.plugin.agents.SasWssDialer
 import com.anezium.rokidbus.plugin.agents.historyHeading
 import com.anezium.rokidbus.plugin.agents.inboundListenerPlan
+import com.anezium.rokidbus.plugin.agents.onboarding.PairReadyWindow
 import com.anezium.rokidbus.plugin.agents.runPairingTtlTick
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -77,12 +78,14 @@ internal class AgentdLinks(context: Context) : CoderCommands {
             // A refused slot is dialled again while a guided attempt's window is open (R198).
             repairRedial = configStore::isLinkWindowOpen,
             onSecureConnected = AgentsRuntime::announceSecureConnection,
+            onSecureLinkClosed = AgentsRuntime::announceSecureLinkClosed,
         )
     }
     private val linkServer by lazy {
         AgentdLinkServer(
             AgentsRuntime.store, configStore, serviceScope, tlsIdentity,
             onSecureConnected = AgentsRuntime::announceSecureConnection,
+            onSecureLinkClosed = AgentsRuntime::announceSecureLinkClosed,
             // A bound link ended: the listener may have been kept only for it.
             onLinkEnded = {
                 // The shared connection state shows the inbound computer: the dialled slot's own state goes back.
@@ -99,6 +102,7 @@ internal class AgentdLinks(context: Context) : CoderCommands {
                 recordForCert = configStore::pairingRecordForCert,
                 onPaired = ::onPaired,
                 onPairReady = { ready -> sasDialer.dial(ready.host, ready.wsPort, expectedFp = null, peerName = ready.machineName) },
+                pairReadyOpener = { PairReadyWindow.opener },
             ),
         )
     }

@@ -43,12 +43,19 @@ class AgentdClient(
      * Outside an attempt, AUTH_FAILED stays final.
      */
     private val repairRedial: () -> Boolean = { false },
-    /** A secure hello_ack bound the link: the pairing's stable id ([GuidedPairing.dialledId]) and the name shown. */
-    private val onSecureConnected: (machineId: String, machineName: String) -> Unit = { _, _ -> },
+    /**
+     * A secure hello_ack bound the link: this connection's key, the pairing's stable id
+     * ([GuidedPairing.dialledId]), the name shown, and the host dialled.
+     */
+    private val onSecureConnected: (key: LinkKey, machineId: String, machineName: String, remoteAddress: String?) -> Unit =
+        { _, _, _, _ -> },
+    /** That connection ended, however it ended. */
+    private val onSecureLinkClosed: (LinkKey) -> Unit = {},
     onEvent: (AgentdEvent) -> Unit = AgentsRuntime::emitEvent,
 ) {
     private var loopJob: Job? = null
     private val sockets = GenerationSlot<WebSocket>()
+    private val connectionIds = java.util.concurrent.atomic.AtomicLong()
 
     /** OkHttp only enqueues, so this never blocks the caller's thread. */
     private val wire = AgentdWire { line -> sockets.current()?.send(line) ?: false }
@@ -252,6 +259,7 @@ class AgentdClient(
         val ended = CompletableDeferred<ConnectionOutcome>()
         val connected = AtomicBoolean(false)
         val owner = LinkOwner()
+        val key = LinkKey(LinkTransport.OUTBOUND, connectionIds.incrementAndGet())
         // The dialled computer is known by its pinned fingerprint: the owner of the sessions it reports.
         val machineId = GuidedPairing.dialledId(config.fp.orEmpty())
         lateinit var deadlines: ConnectionDeadlines
@@ -263,6 +271,7 @@ class AgentdClient(
         fun finish(outcome: ConnectionOutcome) {
             ended.complete(outcome)
             link.end(owner)
+            if (connected.get()) onSecureLinkClosed(key)
         }
 
         deadlines = ConnectionDeadlines(this) { detail ->
@@ -307,8 +316,10 @@ class AgentdClient(
                         touchUsed()
                         _needsRepair.value = false
                         onSecureConnected(
+                            key,
                             machineId,
                             action.machineName?.takeIf(String::isNotBlank) ?: config.name,
+                            config.host,
                         )
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
@@ -426,6 +437,7 @@ class AgentdClient(
                     )
                 } else {
                     link.end(owner)
+                    if (connected.get()) onSecureLinkClosed(key)
                 }
             }
         }
@@ -439,6 +451,7 @@ class AgentdClient(
         } finally {
             // Unbound before the slot is cleared, so no write outlives this connection's trust.
             link.end(owner)
+            if (connected.get()) onSecureLinkClosed(key)
             deadlines.clearAll()
         }
     }

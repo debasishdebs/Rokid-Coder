@@ -178,6 +178,9 @@ class AlertDirector(
         }
     }
 
+    /** Onboarding's test alert, through the coordinator and onto the band like any other (never to agentd). */
+    fun raiseLocalTestAlert(provider: AgentProvider) = post { apply(coordinator.raiseLocalTestAlert(provider)) }
+
     /**
      * The hub's `/notice/shown` for the band up now: display evidence (R33). It
      * counts for the band that was up when it arrived, never for one that has

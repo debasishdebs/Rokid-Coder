@@ -437,7 +437,7 @@ class AgentdWireTest {
         val linkEnds: AtomicInteger = AtomicInteger(),
         besideDialled: Boolean = false,
         onLinkEnded: () -> Unit = {},
-        onSecureConnected: (String, String) -> Unit = { _, _ -> },
+        onSecureConnected: (LinkKey, String, String, String?) -> Unit = { _, _, _, _ -> },
     ) {
         val events = CopyOnWriteArrayList<AgentdEvent>()
         val server = AgentdLinkServer(
@@ -491,7 +491,7 @@ class AgentdWireTest {
         linkEnds: AtomicInteger = AtomicInteger(),
         besideDialled: Boolean = false,
         onLinkEnded: () -> Unit = {},
-        onSecureConnected: (String, String) -> Unit = { _, _ -> },
+        onSecureConnected: (LinkKey, String, String, String?) -> Unit = { _, _, _, _ -> },
         block: (LanLink) -> Unit,
     ) {
         tlsServerSocket(FixturePhoneTlsIdentity(), 0).use { listener ->
@@ -692,7 +692,7 @@ class AgentdWireTest {
         val bound = CountDownLatch(1)
         val release = CountDownLatch(1)
         // The serving thread is held after its bind, before it announces the link.
-        val gate: (String, String) -> Unit = { _, _ ->
+        val gate: (LinkKey, String, String, String?) -> Unit = { _, _, _, _ ->
             bound.countDown()
             release.await(5, TimeUnit.SECONDS)
         }

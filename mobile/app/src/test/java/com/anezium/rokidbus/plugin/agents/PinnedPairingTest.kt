@@ -406,7 +406,7 @@ class PinnedPairingTest {
             OkHttpClient(), sessions, test, "test", identity,
             pinnedClient = { pinned },
             repairRedial = { windowOpen },
-            onSecureConnected = { id, name -> connected += id to name },
+            onSecureConnected = { _, id, name, _ -> connected += id to name },
         ) {}
 
         fun settle() = test.testScheduler.runCurrent()

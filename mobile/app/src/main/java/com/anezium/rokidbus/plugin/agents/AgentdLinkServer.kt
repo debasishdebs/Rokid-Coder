@@ -48,8 +48,11 @@ class AgentdLinkServer internal constructor(
     private val scope: CoroutineScope,
     private val onMachineTrusted: (String) -> Unit,
     private val tlsIdentity: PhoneTlsIdentity,
-    /** A secure bind just happened: the computer's id and name. */
-    private val onSecureConnected: (machineId: String, machineName: String) -> Unit = { _, _ -> },
+    /** A secure bind just happened: this connection's key, the computer's id and name, and its address. */
+    private val onSecureConnected: (key: LinkKey, machineId: String, machineName: String, remoteAddress: String?) -> Unit =
+        { _, _, _, _ -> },
+    /** That bound connection ended, however it ended. */
+    private val onSecureLinkClosed: (LinkKey) -> Unit = {},
     /** A link that was bound has ended: the service decides whether this listener still has a job. */
     private val onLinkEnded: () -> Unit = {},
     onEvent: (AgentdEvent) -> Unit,
@@ -65,7 +68,9 @@ class AgentdLinkServer internal constructor(
         configStore: AgentsConfigStore,
         scope: CoroutineScope,
         tlsIdentity: PhoneTlsIdentity,
-        onSecureConnected: (machineId: String, machineName: String) -> Unit = { _, _ -> },
+        onSecureConnected: (key: LinkKey, machineId: String, machineName: String, remoteAddress: String?) -> Unit =
+            { _, _, _, _ -> },
+        onSecureLinkClosed: (LinkKey) -> Unit = {},
         onLinkEnded: () -> Unit = {},
         onMachineTrusted: (String) -> Unit = {},
         door: SasDoor? = null,
@@ -85,6 +90,7 @@ class AgentdLinkServer internal constructor(
         onMachineTrusted = onMachineTrusted,
         tlsIdentity = tlsIdentity,
         onSecureConnected = onSecureConnected,
+        onSecureLinkClosed = onSecureLinkClosed,
         onLinkEnded = onLinkEnded,
         onEvent = AgentsRuntime::emitEvent,
         door = door,
@@ -95,6 +101,7 @@ class AgentdLinkServer internal constructor(
     private var serverSocket: ServerSocket? = null
     private var discoverySocket: DatagramSocket? = null
     private val clientLock = Any()
+    private val connectionIds = java.util.concurrent.atomic.AtomicLong()
 
     @Volatile private var client: LinkConnection? = null
 
@@ -223,6 +230,7 @@ class AgentdLinkServer internal constructor(
         var bound = false
         var first = true
         var sas: SasResponder? = null
+        val key = LinkKey(LinkTransport.INBOUND, connectionIds.incrementAndGet())
         try {
             // Before the writer and the first line: nothing is read or written until TLS is up.
             connection.handshake()
@@ -265,7 +273,7 @@ class AgentdLinkServer internal constructor(
                         if (!bind(connection)) return@lines false
                         bound = true
                         touchMachineSeen(decision.hello.machineId)
-                        onSecureConnected(decision.hello.machineId, decision.hello.machineName)
+                        onSecureConnected(key, decision.hello.machineId, decision.hello.machineName, connection.remoteAddress)
                         announce(connection, decision.hello)
                     }
                     is AgentdInboundDecision.AuthRejected -> {
@@ -306,6 +314,7 @@ class AgentdLinkServer internal constructor(
                 }
             }
             connection.close()
+            if (bound) onSecureLinkClosed(key)
             if (wasActive) {
                 // A connection refused at bind was never this machine's use of the link.
                 if (bound) connection.machineId?.let(touchMachineSeen)
@@ -510,8 +519,7 @@ class AgentdLinkServer internal constructor(
                     } else {
                         // agentd's window, waiting for a phone on its pairing screen to dial its wss.
                         PairReady.parse(String(packet.data, packet.offset, packet.length, Charsets.UTF_8))
-                            // Only into a window the wearer opened: an announcement never opens one.
-                            ?.takeIf { door?.open?.invoke() == true && door.attempts.acceptPairReady(it) }
+                            ?.takeIf { ready -> door?.let { admitPairReady(it, ready) } == true }
                             ?.let { door?.onPairReady?.invoke(it) }
                     }
                 }
@@ -525,6 +533,17 @@ class AgentdLinkServer internal constructor(
             if (!scope.isActive) return
             kotlinx.coroutines.delay(RETRY_DELAY_MS)
         }
+    }
+
+    /**
+     * Into a window the wearer opened, or one the pairing screen on view opens for it (onboarding,
+     * §13.5): nothing else lets an announcement open one. The pairing-screen, once-per-attempt and
+     * spacing rules of [PairingAttemptsModel.acceptPairReady] hold either way.
+     */
+    private fun admitPairReady(door: SasDoor, ready: PairReady): Boolean {
+        val opener = if (door.open()) null else door.pairReadyOpener() ?: return false
+        if (!door.attempts.acceptPairReady(ready)) return false
+        return opener?.invoke() ?: true
     }
 
     private fun isDaemonBeacon(packet: DatagramPacket): Boolean {

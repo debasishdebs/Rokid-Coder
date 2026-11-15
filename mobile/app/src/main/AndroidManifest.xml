@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!--
@@ -30,10 +31,23 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
+    <!--
+        Exactly what the app may see (merged_manifest_queries_match_allowlist). The core adds Hi Rokid,
+        its authorization and media-stream intents and TTS; the CXR SDK adds its Hi Rokid service.
+    -->
     <queries>
-        <!-- Package visibility so the away-from-home setup can tell whether
-             Tailscale is already on this phone. -->
+        <!-- The Tailscale connector: whether Tailscale is on this phone. -->
         <package android:name="com.tailscale.ipn" />
+        <!-- Coexistence: upstream Rokid Nexus holds the same glasses link while its hub runs. -->
+        <package android:name="com.anezium.rokidbus.phone" />
+        <!-- The core's Android recognizer lists RecognitionService implementations by this intent. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <!-- :bus-client's hub lookup, for plugins of a hub; this app hosts no plugin and talks to no hub. -->
+        <intent tools:node="remove">
+            <action android:name="com.anezium.rokidbus.action.HUB" />
+        </intent>
     </queries>
 
     <application
@@ -44,6 +58,26 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Agents"
         android:usesCleartextTraffic="false">
+
+        <!-- The launcher: the guided setup until it is done, the home screen after. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".onboarding.OnboardingActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".connectors.ConnectorsActivity"
+            android:exported="false" />
 
         <activity
             android:name=".AgentsSettingsActivity"

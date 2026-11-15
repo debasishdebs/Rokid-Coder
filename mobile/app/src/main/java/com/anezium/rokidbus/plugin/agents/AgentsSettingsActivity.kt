@@ -34,6 +34,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
+import com.anezium.rokidbus.plugin.agents.connectors.ConnectorsActivity
+import com.anezium.rokidbus.plugin.agents.onboarding.OnboardingActivity
 
 /**
  * The plugin's settings, in Compose with the PCA theme. The pairing screens
@@ -160,6 +162,8 @@ class AgentsSettingsActivity : ComponentActivity() {
             openAppInfo(this)
         },
         onUninstall = { startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName"))) },
+        onConnectors = { startActivity(Intent(this, ConnectorsActivity::class.java)) },
+        onGlassesApp = { startActivity(OnboardingActivity.glassesApp(this)) },
     )
 
     /** Saves the change on top of what is stored now (Quiet may have moved on the glasses) and tells agentd. */

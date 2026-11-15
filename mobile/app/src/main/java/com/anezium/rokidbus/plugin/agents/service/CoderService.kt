@@ -107,6 +107,7 @@ class CoderService : Service(), HubForegroundHost {
 
     override fun onLinkStateChanged(linkState: Int) {
         this.linkState = linkState
+        CoderRuntime.publishLinkState(linkState)
         updateNotification()
     }
 
@@ -129,6 +130,7 @@ class CoderService : Service(), HubForegroundHost {
         val hub = (coreFactory?.invoke(this, this) ?: HubCoderCore(this, this)).also { core = it }
         hub.start()
         agents = AgentsCore(hub.surface, this).also(AgentsCore::start)
+        CoderRuntime.attachCore(hub)
         CoderRuntime.attach(agentdLinks)
         agentdLinks.reconcile()
         sessionsWatch = mainScope.launch {
@@ -151,12 +153,15 @@ class CoderService : Service(), HubForegroundHost {
         sessionsWatch?.cancel()
         sessionsWatch = null
         links?.let(CoderRuntime::detach)
+        if (core != null) CoderRuntime.attachCore(null)
         agents?.close()
         agents = null
         core?.close()
         core = null
         links?.close()
         links = null
+        // Stop and the service's end: the transports are gone, so is every link they held.
+        AgentsRuntime.clearSecureLinks()
         promotion.reset()
         foreground = false
         refreshVoice()

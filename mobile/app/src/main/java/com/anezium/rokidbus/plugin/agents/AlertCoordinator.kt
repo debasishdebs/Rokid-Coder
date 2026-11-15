@@ -98,6 +98,27 @@ class AlertCoordinator(
         }
     }
 
+    /**
+     * Onboarding's test alert: a local Done band, shown and sounded like a NEW one, so the wearer's
+     * sound for Done applies. agentd never hears of it: it is no episode, so nothing on its band
+     * (shown, a tap, a dismiss) sends a frame.
+     */
+    fun raiseLocalTestAlert(provider: AgentProvider): List<Effect> {
+        episode = null
+        val alert = AgentdAction.Alert(
+            id = "local-test-${newMsgId()}",
+            sessionKey = "${provider.wireValue}:onboarding",
+            kind = AlertKind.DONE,
+            title = TEST_ALERT_TITLE,
+            body = TEST_ALERT_TITLE,
+            actions = emptyList(),
+            question = null,
+            waiting = 0,
+            reason = AlertReason.NEW,
+        )
+        return listOf(Effect.Show(alert, wake = true, sound = true))
+    }
+
     /** agentd closed the alert for a reason the glasses did not cause. */
     fun onAlertClosed(id: String, reason: String): List<Effect> {
         val effects = mutableListOf<Effect>(Effect.Closed(id, reason))
@@ -311,6 +332,7 @@ class AlertCoordinator(
         const val ALREADY_ANSWERED = "Already answered"
         const val NOT_SENT_BODY = "Answer on laptop"
         const val NOT_CONNECTED = "Computer not connected"
+        const val TEST_ALERT_TITLE = "Test alert — Rokid Coder is set up"
         private const val QUESTION_ANSWER = "question_answer"
         private const val REJECTION_CHARS = 120
         private const val REFUSED = "refused"

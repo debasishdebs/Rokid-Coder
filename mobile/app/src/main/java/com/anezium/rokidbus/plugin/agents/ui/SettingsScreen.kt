@@ -166,6 +166,10 @@ internal class SettingsActions(
     val onBatteryGrant: () -> Unit,
     val onBatteryAppInfo: () -> Unit,
     val onUninstall: () -> Unit,
+    /** Settings → Connectors → Tailscale. */
+    val onConnectors: () -> Unit = {},
+    /** The bundled glasses app: install or update it on the glasses. */
+    val onGlassesApp: () -> Unit = {},
 )
 
 @Composable
@@ -193,6 +197,22 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
 
         item { SectionLabel("Computers") }
         item { ComputersCard(state, actions) }
+
+        item { SectionLabel("Glasses") }
+        item {
+            SettingsCard {
+                NoticeText("The Rokid Coder Glasses app that comes with this phone app.", tag = "glasses_app_hint")
+                SecondaryAction("Glasses app", actions.onGlassesApp, tag = "glasses_app")
+            }
+        }
+
+        item { SectionLabel("Connectors") }
+        item {
+            SettingsCard {
+                NoticeText("Use Rokid Coder away from home.", tag = "connectors_hint")
+                SecondaryAction("Tailscale", actions.onConnectors, tag = "connectors_tailscale")
+            }
+        }
 
         item { SectionLabel("Security") }
         item { SecurityCard(state, actions) }

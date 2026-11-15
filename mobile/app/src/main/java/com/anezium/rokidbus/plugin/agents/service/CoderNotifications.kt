@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
 import com.anezium.rokidbus.plugin.agents.AgentsSettingsActivity
+import com.anezium.rokidbus.plugin.agents.MainActivity
 import com.anezium.rokidbus.plugin.agents.R
 import com.anezium.rokidbus.shared.LinkStateBits
 
@@ -67,7 +68,7 @@ class CoderNotifications(private val context: Context) {
      */
     private fun openApp(): PendingIntent {
         val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?: Intent(context, AgentsSettingsActivity::class.java)
+            ?: Intent(context, MainActivity::class.java)
         return PendingIntent.getActivity(
             context,
             REQUEST_OPEN,

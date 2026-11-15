@@ -13,6 +13,8 @@ plugins {
     id("com.android.application")
     // AGP 9.2.0 compiles Kotlin with its built-in KGP 2.2.10 (see :buildEnvironment); the Compose compiler must match.
     id("org.jetbrains.kotlin.plugin.compose") version "2.2.10"
+    // glasses.apk + glasses.json from :glasses-app's glassesApk configuration, per variant (R7).
+    id("rokid.glasses-asset")
 }
 
 apply(from = rootProject.file("gradle/plugin-release-signing.gradle"))
@@ -325,6 +327,15 @@ val checkReleaseDependencies = tasks.register<CheckReleaseDependencies>("checkRe
 }
 
 androidComponents {
+    // What the phone holds the bundled glasses APK's signer to. A release: the pin, rokid.releaseSignerSha256,
+    // never the asset's own value. A debug build: empty, so the app takes glasses.json's signer, which is not a pin.
+    onVariants { variant ->
+        val pin = if (variant.buildType == "release") glassesAsset.releaseSignerSha256 else provider { "" }
+        variant.buildConfigFields?.put(
+            "GLASSES_SIGNER_SHA256",
+            pin.map { com.android.build.api.variant.BuildConfigField("String", "\"$it\"", "The glasses signer pin; empty on debug") },
+        )
+    }
     onVariants(selector().withBuildType("release")) { variant ->
         releaseManifestPolicy.configure { manifest.set(variant.artifacts.get(SingleArtifact.MERGED_MANIFEST)) }
         checkReleaseDex.configure {
@@ -332,6 +343,15 @@ androidComponents {
             sdkDirectory.set(sdkComponents.sdkDirectory)
         }
     }
+}
+
+// The onboarding manifest tests read the release merged manifest, and 6a's checkReleaseManifest policy
+// runs first: a release manifest it refuses (REQUEST_INSTALL_PACKAGES, a plugin query) fails the suite.
+tasks.withType<Test>().configureEach {
+    dependsOn(releaseManifestPolicy)
+    val merged = layout.buildDirectory.file("intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml")
+    inputs.file(merged).withPropertyName("releaseMergedManifest").withPathSensitivity(PathSensitivity.NONE)
+    systemProperty("releaseMergedManifest", merged.get().asFile.absolutePath)
 }
 
 tasks.register("checkRelease") {

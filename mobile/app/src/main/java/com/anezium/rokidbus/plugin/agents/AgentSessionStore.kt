@@ -21,6 +21,15 @@ data class LinkMachine(
     val overTailnet: Boolean,
 )
 
+/** Which transport holds a link: the phone dialled agentd, or agentd dialled the phone. */
+enum class LinkTransport { OUTBOUND, INBOUND }
+
+/** One connection of one transport; a reconnect is a new key. */
+data class LinkKey(val transport: LinkTransport, val connectionId: Long)
+
+/** What a secure link is to: the computer, the name it gave, and the address it is reached at. */
+data class SecureLink(val machineId: String, val name: String, val remoteAddress: String?)
+
 private const val MAX_NOT_APPLIED = 32
 private const val NOT_APPLIED_MS = 30_000L
 
@@ -571,9 +580,29 @@ object AgentsRuntime {
      * secure inbound bind, and nothing else, so only a connection that really steers can end a guided
      * attempt. Stamped on the clock the attempt starts on.
      */
-    internal fun announceSecureConnection(machineId: String, name: String) {
+    internal fun announceSecureConnection(key: LinkKey, machineId: String, name: String, remoteAddress: String?) {
+        _activeSecureLinks.update { it + (key to SecureLink(machineId, name, remoteAddress)) }
         guidedPairing.onSecureConnected(machineId, name, SystemClock.elapsedRealtime())
     }
+
+    /** The connection [key] names closed or failed: on every end of it, in both transports. Idempotent. */
+    internal fun announceSecureLinkClosed(key: LinkKey) {
+        _activeSecureLinks.update { if (key in it) it - key else it }
+    }
+
+    /** Stop, and the service's end: no transport holds a link any more. */
+    internal fun clearSecureLinks() {
+        _activeSecureLinks.value = emptyMap()
+    }
+
+    private val _activeSecureLinks = MutableStateFlow<Map<LinkKey, SecureLink>>(emptyMap())
+
+    /**
+     * Every secure link open now, by connection: added only by [announceSecureConnection], removed
+     * when that connection ends. A state, so a late reader (onboarding's LAPTOP_DONE, the Tailscale
+     * status) sees the links already up.
+     */
+    val activeSecureLinks: StateFlow<Map<LinkKey, SecureLink>> = _activeSecureLinks.asStateFlow()
 
     private val _linkSecure = MutableStateFlow(false)
 

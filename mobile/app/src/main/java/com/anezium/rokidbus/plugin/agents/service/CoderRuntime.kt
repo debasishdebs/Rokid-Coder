@@ -58,6 +58,25 @@ object CoderRuntime : CoderCommands {
     @Volatile private var target: CoderCommands? = null
     private val pending = ArrayDeque<CoderRuntime.() -> Unit>()
 
+    private val _linkState = MutableStateFlow(0)
+
+    /** The glasses link's [com.anezium.rokidbus.shared.LinkStateBits], as the core last reported them. */
+    val linkState: StateFlow<Int> = _linkState.asStateFlow()
+
+    /** The running service's glasses core, or null while it is down. */
+    @Volatile internal var core: CoderCore? = null
+        private set
+
+    @MainThread
+    internal fun attachCore(core: CoderCore?) {
+        this.core = core
+        if (core == null) _linkState.value = 0
+    }
+
+    internal fun publishLinkState(state: Int) {
+        _linkState.value = state
+    }
+
     /**
      * Runs [command] now if the service is up; otherwise starts it from this visible activity and
      * runs the command once it is. A start Android would not allow drops the command.
@@ -94,6 +113,7 @@ object CoderRuntime : CoderCommands {
         target = null
         pending.clear()
         _ready.value = false
+        attachCore(null)
     }
 
     override fun reconcile() {

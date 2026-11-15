@@ -385,6 +385,11 @@ class SasDoor(
     val recordForCert: (String) -> PairingRecord?,
     val onPaired: (PairingRecord) -> Unit = {},
     val onPairReady: (PairReady) -> Unit = {},
+    /**
+     * While the window is shut: what opens one for an announcement, or null. Only onboarding's
+     * pairing screen sets one (§13.5); Add a computer waits for the wearer's tap.
+     */
+    val pairReadyOpener: () -> (() -> Boolean)? = { null },
 )
 
 /**

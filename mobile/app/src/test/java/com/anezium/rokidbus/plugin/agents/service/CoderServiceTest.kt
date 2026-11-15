@@ -67,6 +67,8 @@ class CoderServiceTest {
     @Before
     fun setUp() {
         CoderRuntime.reset()
+        // The app points the predicate at onboarding (OnboardingFlowTest); these tests are about the service.
+        CoderAppLifecycle.autoStartAllowed = { true }
         CoderService.processStarted = { processStarted }
         CoderService.starterFactory = {
             ForegroundStarter { id, notification, types ->
