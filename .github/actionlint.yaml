@@ -1,0 +1,5 @@
+# Runner labels newer than the pinned actionlint (1.7.7) knows. They are real GitHub-hosted
+# images (the Intel macOS runner that replaced the retired macos-13); declare them so lint passes.
+self-hosted-runner:
+  labels:
+    - macos-15-intel

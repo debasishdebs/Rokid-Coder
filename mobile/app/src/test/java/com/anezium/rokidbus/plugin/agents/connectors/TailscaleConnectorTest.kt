@@ -172,6 +172,7 @@ class TailscaleConnectorTest {
     fun the_inbound_transport_announces_each_secure_link_and_its_close() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         tlsServerSocket(FixturePhoneTlsIdentity(), 0).use { listener ->
+            listener.soTimeout = 10_000
             val server = AgentdLinkServer(
                 store = AgentSessionStore(),
                 authorizeMachine = { _, _ -> MachineTrustResult.TRUSTED },
@@ -185,6 +186,7 @@ class TailscaleConnectorTest {
                 onEvent = {},
             )
             val dialer = agentdContext().socketFactory.createSocket(InetAddress.getLoopbackAddress(), listener.localPort)
+                .apply { soTimeout = 10_000 }
             val connection = LinkConnection(listener.accept())
             val serving = thread { server.serve(connection) }
             val fromPhone = BufferedReader(InputStreamReader(dialer.getInputStream(), Charsets.UTF_8))

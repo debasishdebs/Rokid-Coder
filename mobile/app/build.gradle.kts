@@ -352,6 +352,11 @@ tasks.withType<Test>().configureEach {
     val merged = layout.buildDirectory.file("intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml")
     inputs.file(merged).withPropertyName("releaseMergedManifest").withPathSensitivity(PathSensitivity.NONE)
     systemProperty("releaseMergedManifest", merged.get().asFile.absolutePath)
+    // Robolectric installs Conscrypt as the JVM's first security provider, so every later TLS test in the
+    // worker runs on it. Its certificate check reads InetAddress.holder() by reflection, which Java 17
+    // refuses without this. (Where Conscrypt has no native library, as on Apple silicon, the JDK's own
+    // TLS runs instead and never needed it.)
+    jvmArgs("--add-opens=java.base/java.net=ALL-UNNAMED")
 }
 
 tasks.register("checkRelease") {

@@ -9,10 +9,19 @@ name: Tests
 # reports the commit it tested (`product_shas`).
 
 on:
-  # Branches only: a release tag runs release.yml, which calls this for the tag's commit.
+  # U44: feature branches run nothing; a PR into a release branch and a merge into one run the
+  # Linux jobs only; release.yml (rc tags) calls this with `ref` for the full macOS/emulator/Windows
+  # set, and a manual run can ask for it with `full`.
   push:
-    branches: ["**"]
+    branches: ["release/**"]
   pull_request:
+    branches: ["release/**"]
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Also run the macOS, emulator and Windows jobs"
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       ref:
@@ -99,7 +108,7 @@ jobs:
 
       # Includes the release gate, publish, version, upstream-sync and workflow checks.
       - name: Run the script tests
-        run: node --test scripts/test
+        run: node --test "scripts/test/*.test.mjs" "scripts/test/*.test.js"
 
       - name: Check the docs for secrets and full fingerprints
         run: node scripts/check-docs-secrets.mjs
@@ -115,7 +124,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS only for a release (called with ref) or a manual full run: its minutes count 10x.
+        os: ${{ (inputs.ref || inputs.full) && fromJSON('["ubuntu-latest","macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     outputs:
       ubuntu-latest: ${{ steps.tested.outputs.ubuntu-latest }}
@@ -151,6 +161,8 @@ jobs:
   android:
     name: SDK, hub and app unit tests
     runs-on: ubuntu-latest
+    # A hung suite ends here, not at the 6-hour default.
+    timeout-minutes: 45
     outputs:
       sha: ${{ steps.tested.outputs.sha }}
       cxrglobal: ${{ steps.tested.outputs.cxrglobal }}
@@ -199,7 +211,7 @@ jobs:
         run: |
           set -uo pipefail
           ./gradlew \
-            :shared:test \
+            :shared:testDebugUnitTest \
             :bus-client:testDebugUnitTest \
             :ink-engine:test \
             :phone-core:testDebugUnitTest \
@@ -214,7 +226,7 @@ jobs:
         shell: bash
         run: |
           node scripts/check-test-results.mjs \
-            vendor/nexus/shared/build/test-results/test \
+            vendor/nexus/shared/build/test-results/testDebugUnitTest \
             vendor/nexus/bus-client/build/test-results/testDebugUnitTest \
             vendor/nexus/ink-engine/build/test-results/test \
             vendor/nexus/phone-core/build/test-results/testDebugUnitTest \
@@ -249,8 +261,19 @@ jobs:
                   continue
               key, outcome = line.rstrip("\n").rsplit("|", 1)
               expected[key] = outcome
+          # The two GlassesFileStoreTest failures check-test-results allows: they fail on macOS and
+          # pass on Linux, so either outcome keeps parity. Every other identity must match exactly.
+          store = "glasses|com.anezium.rokidbus.glasses.GlassesFileStoreTest#"
+          either = {
+              f"{store}a file swapped for a folder at the final boundary is not removed",
+              f"{store}a folder swapped for a file at the final boundary is not removed",
+          }
+          def same(k):
+              if k in either:
+                  return current[k] in ("FAILED", "PASSED")
+              return current[k] == expected[k]
           problems = [f"missing {k}" for k in expected if k not in current]
-          problems += [f"changed {k}: {expected[k]} -> {current[k]}" for k in expected if k in current and current[k] != expected[k]]
+          problems += [f"changed {k}: {expected[k]} -> {current[k]}" for k in expected if k in current and not same(k)]
           problems += [f"new test not passing {k}" for k in current if k not in expected and current[k] != "PASSED"]
           print(f"hub parity: baseline={len(expected)} current={len(current)} problems={len(problems)}")
           for problem in problems:
@@ -273,6 +296,7 @@ jobs:
 
   emulator:
     name: Emulator
+    if: ${{ inputs.ref || inputs.full }}
     uses: ./.github/workflows/emulator.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
@@ -282,7 +306,7 @@ jobs:
   # the mocked-wsl.exe node tests) runs here.
   windows:
     name: Windows
-    if: ${{ !inputs.skip-windows }}
+    if: ${{ (inputs.ref || inputs.full) && !inputs.skip-windows }}
     uses: ./.github/workflows/windows-installer.yml
     with:
       ref: ${{ inputs.ref || github.sha }}

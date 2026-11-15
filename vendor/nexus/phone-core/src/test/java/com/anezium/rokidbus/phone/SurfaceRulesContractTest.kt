@@ -160,6 +160,8 @@ class SurfaceRulesContractTest {
         harness.await("accepted") { old.events.any { it.startsWith("started:") } }
         handle.stop()
         harness.await("old ended") { old.stops().isNotEmpty() }
+        // Until the hub ends the old session too, a new start is refused BUSY (BUSSPEC STT sessions).
+        harness.await("old session ended at the hub") { harness.speechSessionsEnded() == 1 }
         val oldEngine = harness.stt.sessions.last()
         val fresh = RecordingSpeech()
         surface.startSpeech(null, fresh)

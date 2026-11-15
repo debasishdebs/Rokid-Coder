@@ -16,7 +16,7 @@ No additional findings beyond the completed T6 reviews. Its pairing implementati
 
 T12 — Spec verdict: PARTIAL.
 
-- [Minor] `vendor/nexus/PATCHES.md:34`: the three identity rows reference worktree commits outside release history. Replace `61cdba1e`, `1f64c7d9`, `ad28c63a` with the merged commits `a9d477d0`, `3dbbeac9`, `958475b8`. Otherwise a fresh clone cannot reliably inspect the patches named by sync diagnostics.
+- [Minor] `vendor/nexus/PATCHES.md:34`: the three identity rows reference worktree commits outside release history. Replace `61cdba1e`, `1f64c7d9`, `ad28c63a` with the merged commits `ab9aafbb`, `fca31d01`, `e82a2985`. Otherwise a fresh clone cannot reliably inspect the patches named by sync diagnostics.
 
 Verification: the saved parity records contain identical identities and outcomes—3,661 product and 1,181 upstream. All six relocated module trees match their pre-move blobs. All seven protected SPP files match upstream byte-for-byte. These are static checks, not fresh test runs.
 

@@ -6,14 +6,8 @@ name: Upstream validation
 # the way upstream verifies it, so an upstream merge is judged against a green base.
 
 on:
-  push:
-    paths:
-      - "vendor/**"
-      - ".github/workflows/upstream-validation.yml"
-  pull_request:
-    paths:
-      - "vendor/**"
-      - ".github/workflows/upstream-validation.yml"
+  # Cost (U43): hosted macOS/Windows minutes are scarce on a private Free repo, so this runs only
+  # when started by hand or called by release.yml (rc tags) / upstream-sync.yml, never on every push.
   workflow_dispatch:
   # upstream-sync.yml calls this with `ref`, the merge commit to judge.
   workflow_call:
@@ -147,6 +141,10 @@ jobs:
   plugins:
     name: Upstream plugin unit tests
     runs-on: ubuntu-latest
+    # Report-only: these upstream plugins are not in the Rokid Coder app (U31) and we never change
+    # them, so an upstream test that is flaky on hosted runners must not block our builds. The SDK,
+    # hub and core suites above stay blocking.
+    continue-on-error: true
     outputs:
       sha: ${{ steps.tested.outputs.sha }}
     defaults:

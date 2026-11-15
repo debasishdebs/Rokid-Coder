@@ -58,6 +58,7 @@ internal class HubCoreHarness(
     val stt = FakeSttFactory()
     val host = RecordingHost()
     val logs = CopyOnWriteArrayList<String>()
+    val journal = PluginBusJournal().apply { enabled.set(true) }
     @Volatile var sppUp = true
 
     val core: HubCore
@@ -69,9 +70,9 @@ internal class HubCoreHarness(
         core = HubCore(
             context,
             if (hooks === HubShellHooks.None) {
-                HubCoreConfig(foreground = host, identity = identity, inProcessApp = app, log = { logs += it })
+                HubCoreConfig(foreground = host, identity = identity, inProcessApp = app, journal = journal, log = { logs += it })
             } else {
-                HubCoreConfig(foreground = host, identity = identity, hooks = hooks, log = { logs += it })
+                HubCoreConfig(foreground = host, identity = identity, hooks = hooks, journal = journal, log = { logs += it })
             },
             HubCoreSeams(
                 cxr = cxr,
@@ -119,8 +120,7 @@ internal class HubCoreHarness(
         shadowOf(Looper.getMainLooper()).idle()
     }
 
-    // Generous: hosted CI runners are several times slower than a laptop; a pass returns early.
-    fun await(what: String, timeoutMs: Long = 20_000, condition: () -> Boolean) {
+    fun await(what: String, timeoutMs: Long = 5_000, condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             shadowOf(Looper.getMainLooper()).idle()
@@ -129,6 +129,14 @@ internal class HubCoreHarness(
         }
         shadowOf(Looper.getMainLooper()).idle()
         if (!condition()) fail("timed out waiting for $what")
+    }
+
+    /**
+     * Speech sessions the hub has ended: each `/stt/session/ended` it delivered. The SDK reports a
+     * stop's CANCELLED at once, but the hub ends the session later and answers a start BUSY until then.
+     */
+    fun speechSessionsEnded(): Int = journal.snapshot().count {
+        it.direction == PluginBusJournal.Direction.HUB_TO_PLUGIN && it.path == SttWireProtocol.SESSION_ENDED_PATH
     }
 
     /** The glasses open the app from their launcher. */

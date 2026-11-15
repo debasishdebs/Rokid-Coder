@@ -81,6 +81,10 @@ class IdentityLiteralCheckTest {
             "glasses-core/src/main/assets/rokid-nexus-a11y-watchdog.sh" to "SVC_SHORT=\"",
             "glasses-core/src/main/assets/rokid-nexus-cmd-bridge.sh" to "CHANNEL=\"",
             "glasses-core/src/main/assets/rokid-nexus-cmd-bridge.sh" to "PACKAGE=\"",
+            // Coexistence (U39): the phone app detects an installed upstream Rokid Nexus by its id,
+            // which it must name exactly; it never acts as or targets that app.
+            "mobile/app/src/main/AndroidManifest.xml" to "<package android:name=\"com.anezium.rokidbus.phone\"",
+            "mobile/app/src/main/java/com/anezium/rokidbus/plugin/agents/onboarding/OnboardingCopy.kt" to "const val NEXUS_PACKAGE =",
         )
     }
 }

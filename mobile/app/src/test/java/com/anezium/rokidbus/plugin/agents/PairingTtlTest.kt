@@ -304,6 +304,7 @@ class PairingTtlTest {
             now,
         )
         tlsServerSocket(identity, 0).use { listener ->
+            listener.soTimeout = 10_000
             val serving = thread(isDaemon = true) {
                 server.serve(LinkConnection(listener.accept()))
             }
@@ -410,7 +411,8 @@ class PairingTtlTest {
         val context = SSLContext.getInstance("TLS").apply { init(keyManagers, arrayOf(acceptAny), null) }
         val socket = context.socketFactory.createSocket(InetAddress.getLoopbackAddress(), listener.localPort) as SSLSocket
         socket.soTimeout = 5_000
-        socket.startHandshake()
+        // A failed handshake closes the socket, so the phone's side sees the end and nothing is left open.
+        runCatching { socket.startHandshake() }.onFailure { socket.close() }.getOrThrow()
         return Agentd(socket)
     }
 

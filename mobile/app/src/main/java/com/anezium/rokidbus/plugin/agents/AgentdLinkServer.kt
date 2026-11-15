@@ -658,10 +658,15 @@ internal class LinkConnection(private val socket: Socket) {
 
     val remoteAddress: String? get() = socket.inetAddress?.hostAddress
 
-    private val writer: BufferedWriter =
+    // Taken on first use, after [handshake]: Conscrypt's (Android's) TLS socket blocks in getOutputStream
+    // and getInputStream until the handshake completes, which here would be on the accept loop and with
+    // no deadline yet.
+    private val writer: BufferedWriter by lazy {
         BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
-    private val reader: BufferedReader =
+    }
+    private val reader: BufferedReader by lazy {
         BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+    }
 
     init {
         socket.tcpNoDelay = true

@@ -748,7 +748,11 @@ test("live_foreign_socket_not_unlinked", async () => {
     const configDir = path.join(dir, "rc");
     await fsp.mkdir(configDir, { mode: 0o700 });
     const sockPath = path.join(configDir, "launcher.sock");
-    const foreign = net.createServer((socket) => socket.end("foreign\n"));
+    // The hub's liveness probe hangs up at once; on Linux that resets this side, so swallow it.
+    const foreign = net.createServer((socket) => {
+      socket.on("error", () => {});
+      socket.end("foreign\n");
+    });
     await new Promise((resolve) => foreign.listen(sockPath, resolve));
     try {
       const { events, logger } = capturingLogger();

@@ -26,7 +26,7 @@
 ## Global Constraints
 
 **Branch and commits**
-- Branch `rokid-coder/plan-4`, created from the `rokid-coder/plan-3` head `3a623c2c`. Local commits only; never push.
+- Branch `rokid-coder/plan-4`, created from the `rokid-coder/plan-3` head `2345187e`. Local commits only; never push.
 - Imperative messages, no AI attribution, no `Co-Authored-By` trailer (repo AGENTS.md).
 
 **Tests**
