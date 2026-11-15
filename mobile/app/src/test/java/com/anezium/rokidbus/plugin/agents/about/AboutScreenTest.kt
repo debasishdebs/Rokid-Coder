@@ -2,6 +2,7 @@ package com.anezium.rokidbus.plugin.agents.about
 
 import android.content.Intent
 import com.anezium.rokidbus.plugin.agents.BuildConfig
+import com.anezium.rokidbus.plugin.agents.R
 import com.anezium.rokidbus.plugin.agents.onboarding.clickText
 import com.anezium.rokidbus.plugin.agents.onboarding.visibleTexts
 import org.junit.Assert.assertEquals
@@ -24,14 +25,15 @@ class AboutScreenTest {
         val texts = activity.visibleTexts()
 
         assertTrue("the version is shown: $texts", texts.any { BuildConfig.VERSION_NAME in it })
+        // The sentences themselves are held to PRIVACY.md by PrivacyTextTest; here, that each is shown.
         for (line in listOf(
-            "Rokid Coder runs no servers and collects nothing.",
-            "Data leaves your devices only through services you already use:",
-            "The Claude/Anthropic and Codex/OpenAI command-line tools you run on your computer.",
-            "Your Android speech engine, which may be online.",
-            "Tailscale, if you choose it.",
-            "The 1.0 app has no cloud speech engines and no analytics.",
-        )) {
+            R.string.about_privacy_summary,
+            R.string.about_privacy_paths_intro,
+            R.string.about_privacy_path_cli,
+            R.string.about_privacy_path_speech,
+            R.string.about_privacy_path_tailscale,
+            R.string.about_privacy_no_extras,
+        ).map(activity::getString)) {
             assertTrue("\"$line\" is shown: $texts", line in texts)
         }
 
