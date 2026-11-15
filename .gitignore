@@ -1,0 +1,29 @@
+.gradle/
+build/
+*/build/
+local.properties
+.kotlin/
+__pycache__/
+
+# Reverse-engineering / on-device scratch artifacts (not source)
+/tmp_launcher/
+/nx_*.xml
+/nx_*.png
+/design-mockups/*.png
+.claude/settings.local.json
+
+# Field-test photos and one-shot Codex run specs (session scratch)
+/.lens-test-photos/
+/.codex-spec-*.md
+/.release-v*/
+
+.gradle-user/
+.gradle-sandbox-home/
+.gradle-sandbox-project/
+
+/scratchpad/
+/.claude/
+/release-assets/
+
+# Site assets are copied from docs/assets at build time
+/site/assets/

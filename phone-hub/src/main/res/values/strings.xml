@@ -1,0 +1,288 @@
+<resources>
+    <!-- Product name: identical in every language. -->
+    <string name="app_name" translatable="false">Rokid Nexus</string>
+
+    <!-- ===== First-run wizard ===== -->
+    <string name="onb_section_title">Get started</string>
+
+    <string name="onb_authorize_title">Connect your glasses</string>
+    <string name="onb_authorize_body">Authorize Nexus in the Hi Rokid app so it can reach your glasses.</string>
+    <string name="onb_authorize_action">Authorize</string>
+
+    <string name="onb_bluetooth_title">Allow Bluetooth</string>
+    <string name="onb_bluetooth_body">Nexus needs the nearby-devices permission to hold the glasses link.</string>
+    <string name="onb_bluetooth_action">Allow</string>
+
+    <string name="onb_install_title">Install Nexus on your glasses</string>
+    <string name="onb_install_body">Nexus downloads the latest glasses app and installs it over Hi Rokid.</string>
+    <string name="onb_install_action">Install Nexus</string>
+    <string name="onb_install_action_check">Check again</string>
+    <string name="onb_install_action_retry">Retry install</string>
+    <string name="onb_install_action_checking">Checking…</string>
+    <string name="onb_install_action_resolving">Finding release…</string>
+    <string name="onb_install_action_downloading">Downloading…</string>
+    <string name="onb_install_action_installing">Installing…</string>
+    <string name="onb_install_action_wifi">Turn on Wi-Fi</string>
+    <string name="onb_install_status_connect_first">Connect your glasses first.</string>
+    <string name="onb_install_status_ready">Ready to check the glasses.</string>
+    <string name="onb_install_status_querying">Checking whether Nexus is installed…</string>
+    <string name="onb_install_status_not_installed">Ready to install over Hi Rokid.</string>
+    <string name="onb_install_status_resolving">Finding the latest glasses app…</string>
+    <string name="onb_install_status_downloading">Downloading the glasses app…</string>
+    <string name="onb_install_status_downloading_pct">Downloading… %1$d%%</string>
+    <string name="onb_install_status_installing">Installing on your glasses…</string>
+    <string name="onb_install_status_installed">Nexus is installed on your glasses.</string>
+    <string name="onb_install_status_wifi_needed">The app reaches the glasses over Wi-Fi — turn it on first.</string>
+
+    <string name="onb_adb_title">Turn on ADB debugging</string>
+    <string name="onb_adb_body">In the Hi Rokid app, open the developer section and turn on ADB debugging. Without it your glasses still pair, and setup stops halfway.</string>
+    <string name="onb_adb_action">Open Hi Rokid</string>
+    <string name="onb_adb_action_done">I turned it on</string>
+    <string name="onb_adb_status">Nexus has no way to read this switch, so it has to ask.</string>
+
+    <string name="onb_glasses_title">Set up your glasses</string>
+    <string name="onb_glasses_body">Put the glasses on and tap Automatic setup. Nexus opens the one switch you need to flip, then finishes the rest on its own.</string>
+    <string name="onb_glasses_action">Automatic setup</string>
+    <string name="onb_glasses_action_open_app">Open glasses app</string>
+    <string name="onb_glasses_action_guided">Manual setup</string>
+    <string name="onb_how_it_works">HOW IT WORKS  ›</string>
+    <string name="onb_glasses_status_starting">Opening setup on the glasses…</string>
+    <string name="onb_glasses_status_open_failed">Could not reach the glasses. Open the Nexus app on the lens instead.</string>
+    <string name="onb_glasses_status_duration">Usually 1–2 minutes.</string>
+    <string name="onb_glasses_status_support">Support code: %1$s</string>
+    <string name="onb_progress_section_title">Glasses setup</string>
+    <string name="onb_progress_running">IN PROGRESS</string>
+    <string name="onb_progress_attention">NEEDS ATTENTION</string>
+    <string name="onb_progress_no_action">No action needed right now. Keep the glasses on while Nexus finishes.</string>
+    <string name="onb_progress_accessibility_action">On the glasses, switch on Rokid Nexus Glasses. This is the only switch Nexus asks you to change.</string>
+    <string name="onb_progress_wifi_action">If this does not resume automatically, connect the glasses to Wi-Fi from the Hi Rokid app.</string>
+    <string name="onb_progress_guided_action">Open Manual setup on this phone to finish the remaining step.</string>
+
+    <string name="onb_notifications_title">Allow notifications</string>
+    <string name="onb_notifications_body">Nexus keeps a quiet status notification while it holds the glasses link.</string>
+    <string name="onb_notifications_action">Allow</string>
+
+    <string name="onb_installs_title">Allow app installs</string>
+    <string name="onb_installs_body">Plugins and app updates install like regular Android apps, so Android asks you to approve Nexus as an install source.</string>
+    <string name="onb_installs_action">Open settings</string>
+
+    <string name="onb_plugin_title">Add your first plugin</string>
+    <string name="onb_plugin_body">Open the Store and install a plugin, then approve its access.</string>
+    <string name="onb_plugin_action">Open the Store</string>
+
+    <!-- Live setup phase, mirrored from the glasses. One line, honest about what is happening. -->
+    <string name="onb_phase_unknown">Getting ready…</string>
+    <string name="onb_phase_waiting_for_accessibility">Switch on “Rokid Nexus Glasses” on the lens.</string>
+    <string name="onb_phase_enabling_wifi">Turning on Wi-Fi on the glasses…</string>
+    <string name="onb_phase_waiting_for_wifi">Waiting for the glasses to join Wi-Fi.</string>
+    <string name="onb_phase_enabling_developer_options">Unlocking developer options on the glasses…</string>
+    <string name="onb_phase_opening_wireless_debugging">Opening Wireless Debugging on the glasses…</string>
+    <string name="onb_phase_reading_pairing_dialog">Reading the pairing details…</string>
+    <string name="onb_phase_pairing_locally">Pairing the glasses securely…</string>
+    <string name="onb_phase_pairing_via_phone">Finishing the pairing from your phone…</string>
+    <string name="onb_phase_arming">Arming Nexus on the glasses…</string>
+    <string name="onb_phase_complete">Your glasses are ready.</string>
+    <string name="onb_phase_manual_required">Automatic setup could not finish — use manual setup.</string>
+    <string name="onb_phase_failed">Setup stopped before it finished.</string>
+
+    <!-- ===== Manual setup (the fallback when the automatic path cannot finish) =====
+         The resource keys still read guided_* for churn reasons; the surface is called Manual
+         setup everywhere the owner can see it, paired with Automatic setup on the home screen. -->
+    <string name="guided_title">Manual setup</string>
+    <string name="guided_intro">Nexus checks what is already in place, then walks you through only what is missing. Every screen it can open on the glasses is also a button here.</string>
+
+    <string name="manual_open_glasses_app">Open Nexus on the glasses</string>
+    <string name="manual_log_title">Setup log</string>
+    <string name="manual_log_hint">What setup tried, and where it stopped. Share it if you need help.</string>
+    <string name="manual_log_empty">Nothing recorded yet.</string>
+    <string name="manual_log_share">Share this log</string>
+    <string name="manual_log_share_subject">Rokid Nexus setup log</string>
+    <string name="manual_open_group">Open on the glasses</string>
+    <string name="manual_open_hint">Use these when a screen does not open on its own. Wireless debugging is the one Nexus most often cannot reach by itself.</string>
+    <string name="manual_open_accessibility">Accessibility settings</string>
+    <string name="manual_open_developer">Developer options</string>
+    <string name="manual_open_wireless">Wireless debugging</string>
+
+    <string name="guided_preflight_title">Before we start</string>
+    <string name="guided_check_link">Glasses connected</string>
+    <string name="guided_check_link_fail">Connect your glasses in the Hi Rokid app.</string>
+    <string name="guided_check_glasses_app">Nexus running on the glasses</string>
+    <string name="guided_check_glasses_app_fail">Nexus is not open on the glasses yet. Every step here is a message to the lens, so it has to be running first.</string>
+    <string name="guided_check_accessibility">Rokid Nexus Glasses switched on</string>
+    <string name="guided_check_accessibility_fail">Switch on “Rokid Nexus Glasses” from the lens. This is the one step Nexus cannot do for you.</string>
+    <string name="guided_check_wifi">Glasses on Wi-Fi</string>
+    <string name="guided_check_wifi_fail">Connect the glasses to Wi-Fi from the Hi Rokid app.</string>
+    <string name="guided_check_developer">Developer options available</string>
+    <string name="guided_check_developer_fail">Nexus unlocks this during the next step, as long as ADB debugging is on in Hi Rokid.</string>
+    <string name="guided_adb_reminder">Before anything else: ADB debugging has to be on in the Hi Rokid app, developer section. Nexus cannot read that switch, and with it off your glasses pair normally and setup goes nowhere.</string>
+    <string name="guided_check_pending">Checking…</string>
+    <string name="guided_check_skipped">Already done</string>
+
+    <string name="guided_action_prepare">Prepare pairing</string>
+    <string name="guided_action_continue">Continue</string>
+    <string name="guided_action_recheck">Check again</string>
+    <string name="guided_action_cancel">Cancel</string>
+
+    <string name="guided_status_waiting">Waiting for the glasses…</string>
+    <string name="guided_status_opening_app">Opening Nexus on the glasses…</string>
+    <string name="guided_status_acked">The glasses opened it.</string>
+    <string name="guided_status_pairing">Pairing…</string>
+    <string name="guided_status_success">Your glasses are set up.</string>
+    <string name="guided_status_blocked">The glasses did not open that screen. Follow the step below on the lens.</string>
+
+    <!-- One instruction at a time. The labeled variant wins whenever the glasses told us the
+         exact wording they resolved, so a French phone can guide an English lens. -->
+    <string name="guided_step_open_labeled">On the glasses, open “%1$s”.</string>
+    <string name="guided_step_developer_generic">On the glasses, open Settings and go to the developer options screen.</string>
+    <string name="guided_step_wireless_generic">On the glasses, open the wireless debugging screen inside developer options.</string>
+    <string name="guided_step_pairing_generic">On the glasses, choose the option that pairs the device with a pairing code.</string>
+    <string name="guided_step_confirm">Tap Continue once that screen is open on the lens.</string>
+
+    <string name="guided_advanced_title">Advanced manual entry</string>
+    <string name="guided_advanced_body">Only needed if Nexus still cannot read the pairing details. The glasses show them on the pairing screen.</string>
+    <string name="guided_advanced_endpoint_label">Pairing address (IP:port)</string>
+    <string name="guided_advanced_endpoint_hint">192.168.1.20:37135</string>
+    <string name="guided_advanced_code_label">Pairing code</string>
+    <string name="guided_advanced_code_hint">6 digits</string>
+    <string name="guided_advanced_submit">Pair now</string>
+    <string name="guided_error_endpoint_empty">Enter the address shown on the glasses.</string>
+    <string name="guided_error_endpoint_format">Use the form IP:port, for example 192.168.1.20:37135.</string>
+    <string name="guided_error_endpoint_ip">That is not a valid IPv4 address.</string>
+    <string name="guided_error_endpoint_port">The port must be between 1 and 65535.</string>
+    <string name="guided_error_code_empty">Enter the 6-digit code shown on the glasses.</string>
+    <string name="guided_error_code_format">The pairing code is 6 digits.</string>
+
+    <string name="guided_error_link_down">Lost the link to the glasses. Reconnect, then try again.</string>
+    <string name="guided_error_pair_refused">The pairing request could not be started. Check that your phone is connected to the glasses, then try again.</string>
+    <string name="guided_error_rejected">The glasses refused that step.</string>
+    <string name="guided_error_timeout">The glasses did not answer in time.</string>
+    <string name="guided_error_pairing_refused">The pairing code was not accepted. Read it again from the lens.</string>
+    <string name="guided_error_generic">That step did not go through.</string>
+    <string name="guided_support_code">Support code: %1$s</string>
+
+    <string name="guided_wordmark">MANUAL SETUP</string>
+
+    <!-- ===== Re-pair glasses (Settings > Maintenance, the same screen after setup) ===== -->
+    <string name="repair_pair_title">Re-pair glasses</string>
+    <string name="repair_pair_wordmark">RE-PAIR GLASSES</string>
+    <string name="repair_pair_intro">The glasses keep a small helper running, and bring it back after every restart through a pairing of their own. A reinstall or a reset can lose that pairing. Re-pairing has the glasses open their own Wireless debugging screen and pair themselves: keep them on and leave them be while it runs.</string>
+    <string name="guided_check_self_pairing">Glasses paired to maintain themselves</string>
+    <string name="repair_pair_needed">Everything else is in place; what is missing is the glasses\' own pairing. Pairing from this phone brings the helper back too, but only until the glasses restart.</string>
+    <string name="repair_pair_action">Re-pair glasses</string>
+    <string name="repair_pair_again">Re-pair anyway</string>
+    <string name="repair_pair_offer">Helper keeps stopping? Re-pair glasses</string>
+    <string name="repair_pair_status_paired">Your glasses are set up and paired to maintain themselves.</string>
+    <string name="repair_pair_asking">Asking the glasses to pair themselves…</string>
+    <string name="guided_working_pairing_title">Pairing…</string>
+    <string name="guided_working_pairing_body">Connecting to your glasses. Keep them on.</string>
+    <string name="guided_working_connecting_title">Almost there…</string>
+    <string name="guided_working_connecting_body">Securing the connection to your glasses.</string>
+    <string name="guided_working_arming_title">Finishing setup…</string>
+    <string name="guided_working_arming_body">Arming Nexus on your glasses. Don’t take them off yet.</string>
+    <string name="guided_done_title">You’re all set</string>
+    <string name="guided_done_body">Your glasses are armed and the plugin launcher is ready. This pairing belongs to the phone, so if the helper stops after the glasses restart, use Settings, then Re-pair glasses.</string>
+    <string name="guided_failed_title">That didn’t work</string>
+    <string name="guided_failed_check_label">WHAT TO CHECK</string>
+    <string name="guided_failed_check_wifi">The glasses and this phone are on the same Wi-Fi</string>
+    <string name="guided_failed_check_code">The code was still valid — it rotates every few minutes</string>
+    <string name="guided_failed_check_retry">Running the checks again from the top</string>
+    <string name="guided_failed_action">Try again</string>
+    <string name="guided_unavailable_title">Not connected</string>
+    <string name="guided_unavailable_body">Nexus isn’t linked to your glasses right now. Go back, make sure the glasses are connected, and open manual setup again.</string>
+
+    <!-- Illustration of the pairing dialog the glasses show, so the owner knows which number is which. -->
+    <string name="guided_mock_dialog_title">Pair with device</string>
+    <string name="guided_mock_code_label">Wi-Fi pairing code</string>
+    <string name="guided_mock_code_pointer">→ the 6-digit code box</string>
+    <string name="guided_mock_endpoint_label">IP address &amp; Port</string>
+    <string name="guided_mock_endpoint_pointer">→ before the “:” is the IP address · after it is the pairing port</string>
+
+    <!-- TalkBack -->
+    <string name="a11y_step_done">Step %1$d, done: %2$s</string>
+    <string name="a11y_step_active">Step %1$d, in progress: %2$s</string>
+    <string name="a11y_step_pending">Step %1$d, not started: %2$s</string>
+    <string name="a11y_check_pass">Check passed: %1$s</string>
+    <string name="a11y_check_fail">Check failed: %1$s</string>
+    <string name="a11y_busy">Working, please wait.</string>
+
+    <!-- ===== System-wide glasses keyboard and remote ===== -->
+    <string name="remote_input_title">Glasses control</string>
+    <string name="remote_input_keyboard_section">Live keyboard</string>
+    <string name="remote_input_remote_section">Remote</string>
+    <string name="remote_input_hint">Type here</string>
+    <string name="remote_input_live_help">Every edit appears on the glasses immediately. There is no Send button.</string>
+    <string name="remote_input_auto_open_help">Let Nexus open this screen by itself when a glasses app asks for text. Without it, you get a notification to tap.</string>
+    <string name="remote_input_auto_open_allow">Allow</string>
+    <string name="remote_input_glasses_keyboard_help">The glasses are using %1$s, so what you type here can’t reach them.</string>
+    <string name="remote_input_glasses_keyboard_rokid">Rokid’s keyboard</string>
+    <string name="remote_input_glasses_keyboard_other">another keyboard</string>
+    <string name="remote_input_glasses_keyboard_use">Use Nexus keyboard on glasses</string>
+    <string name="remote_input_glasses_keyboard_switching">Switching…</string>
+    <string name="remote_input_glasses_keyboard_done">The glasses now use the Nexus keyboard</string>
+    <string name="remote_input_glasses_keyboard_failed">The glasses did not take the change. Try again.</string>
+    <string name="remote_input_glasses_keyboard_keep">Keep Nexus keyboard on glasses</string>
+    <string name="remote_input_glasses_keyboard_keep_help">Takes it back whenever Rokid’s keyboard replaces it. Turn off to type through Hi Rokid instead. A keyboard you installed yourself is never replaced.</string>
+    <string name="remote_input_glasses_keyboard_permission">Nexus lost the permission to change it. Redo the glasses setup (Settings → Manual glasses setup), then try again.</string>
+    <string name="remote_input_prompt_channel">Keyboard requests</string>
+    <string name="remote_input_prompt_title">The glasses are asking for text</string>
+    <string name="remote_input_prompt_body">Tap to type it on your phone.</string>
+    <string name="remote_input_enter">Enter</string>
+    <string name="remote_input_close">Close</string>
+    <string name="remote_input_previous">Previous</string>
+    <string name="remote_input_next">Next</string>
+    <string name="remote_input_select">Select</string>
+    <string name="remote_input_back">Back</string>
+    <string name="remote_input_remote_help">Drag the pad to move the pointer on the glasses; tap it to click, hold to long-press. Or press the cross to step through what is on screen.</string>
+    <string name="remote_input_up">Up</string>
+    <string name="remote_input_down">Down</string>
+    <string name="remote_input_left">Left</string>
+    <string name="remote_input_right">Right</string>
+    <string name="remote_input_trackpad_section">Trackpad</string>
+    <string name="remote_input_trackpad_help">Drag to move the pointer on the glasses. Tap to click, hold to long-press.</string>
+    <string name="remote_input_trackpad_description">Trackpad. Drag to move the glasses pointer, tap to click.</string>
+    <string name="remote_input_status_connecting">Checking the glasses link</string>
+    <string name="remote_input_status_connecting_body">Nexus is asking the glasses for the active field.</string>
+    <string name="remote_input_status_disconnected">Glasses disconnected</string>
+    <string name="remote_input_status_disconnected_body">Reconnect the glasses to use the keyboard and remote.</string>
+    <string name="remote_input_status_waiting">Ready for a text field</string>
+    <string name="remote_input_status_waiting_body">Select a field on the glasses. The phone keyboard will open here.</string>
+    <string name="remote_input_status_ready">Text field active</string>
+    <string name="remote_input_status_ready_body">Typing is live. Nexus does not read or display the existing field contents.</string>
+    <string name="remote_input_private_mode">PRIVATE INPUT · CAPTURES, AUTOFILL AND SAVING OFF</string>
+    <string name="remote_input_no_remote_content">REMOTE CONTENT IS NEVER MIRRORED</string>
+
+    <!-- ===== Native glasses apps skeleton ===== -->
+    <string name="native_apps_title">Glasses apps</string>
+    <string name="native_apps_intro">Open ordinary Android apps that live on the glasses. Installation support will connect here without turning them into Nexus plugins.</string>
+    <string name="native_apps_section">On your glasses</string>
+    <string name="native_apps_loading">Checking your glasses</string>
+    <string name="native_apps_loading_body">Nexus is waiting for the glasses app catalogue.</string>
+    <string name="native_apps_empty">No native apps yet</string>
+    <string name="native_apps_empty_body">Compatible native apps will appear here when discovery is connected.</string>
+    <string name="native_apps_error">Apps unavailable</string>
+    <string name="native_apps_refresh">Refresh</string>
+    <string name="native_apps_retry">Try again</string>
+    <string name="native_apps_open">Open</string>
+    <string name="native_apps_install">Install</string>
+    <string name="native_apps_back">Go back</string>
+    <string name="native_apps_patcher_hint">YouTube and Reddit setup and updates live in Patcher.</string>
+    <string name="glasses_files_fast_permission">ALLOW NEARBY WI-FI FOR FASTER TRANSFERS</string>
+    <string name="voice_title">VOICE</string>
+    <string name="voice_intro">Answers use your phone\'s voice and play through your glasses or earbuds. If neither can play them, nothing is spoken — never the phone\'s own speaker.</string>
+    <string name="voice_language">Speech language</string>
+    <string name="voice_follow_phone">Follow phone language</string>
+    <string name="voice_independent_language">Independent of phone and recognition language</string>
+    <string name="voice_speed">Speed</string>
+    <string name="voice_section">Voice</string>
+    <string name="voice_default">Default</string>
+    <string name="voice_hear_sample">Hear it</string>
+    <string name="voice_engine_not_ready">Start the hub and wait for its speech engine to be ready to choose a voice.</string>
+    <string name="voice_no_data">No voices are available for %1$s in your current speech engine. Install voice data or choose another engine in Android text-to-speech settings.</string>
+    <string name="voice_download_required">Voice data missing — download in Android text-to-speech settings</string>
+    <string name="voice_needs_network">Needs network</string>
+    <string name="voice_on_device">On device</string>
+    <string name="voice_sample_unavailable">Cannot play the preview. Check that the hub is ready, the voice data is available, and your glasses or earbuds are connected; speech may also be busy.</string>
+    <string name="voice_sample_ru" translatable="false">Вот как я буду читать ваши ответы.</string>
+    <string name="voice_sample_fr" translatable="false">Voilà comment je vais lire vos réponses.</string>
+    <string name="voice_sample_en" translatable="false">This is how I will read your answers.</string>
+</resources>
