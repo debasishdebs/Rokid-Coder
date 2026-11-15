@@ -55,11 +55,7 @@ internal class SelfArmLocalAdbBootstrapper(
             timeoutMs = INITIAL_SESSION_TIMEOUT_MS,
         )
         return try {
-            val watchdogScript = appContext.assets.open(SelfArmConstants.WATCHDOG_ASSET)
-                .bufferedReader()
-                .use { it.readText() }
-                .replace("\r\n", "\n")
-                .replace("\r", "\n")
+            val watchdogScript = SelfArmController.ensureInternalWatchdog(appContext).readText()
             val bridgeScript = SelfArmController.ensureInternalCommandBridge(appContext).readText()
             val result = runSequence(
                 context = appContext,
@@ -195,6 +191,7 @@ internal class SelfArmLocalAdbBootstrapper(
         ): SelfArmSequenceResult {
             val appContext = context.applicationContext
             return SelfArmArmSequence.run(
+                identity = GlassesCoreConfig.of(appContext).identity,
                 initialSession = initialSession,
                 watchdogScript = watchdogScript,
                 bridgeScript = bridgeScript,

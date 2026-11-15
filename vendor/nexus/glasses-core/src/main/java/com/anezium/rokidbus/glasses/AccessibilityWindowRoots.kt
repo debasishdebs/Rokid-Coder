@@ -164,8 +164,7 @@ internal object AccessibilityWindowRoots {
         if (
             value.isBlank() ||
             value == ownPackage ||
-            value == ROKID_SYSCONFIG_PACKAGE ||
-            value == "com.anezium.rokidbus.glasses"
+            value == ROKID_SYSCONFIG_PACKAGE
         ) {
             return
         }

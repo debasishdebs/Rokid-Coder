@@ -814,6 +814,14 @@ cleanup_loop() {
   log_line "bridge loop stopped"
 }
 
+# The APK ships the asset with upstream's channel and package; this bridge's own secret, channel
+# and package carry over into its successor, as the app rendered them.
+render_update_candidate() {
+  sed -e "s|$PLACEHOLDER|$SECRET|" \
+    -e "s|^CHANNEL=\".*\"\$|CHANNEL=\"$CHANNEL\"|" \
+    -e "s|^PACKAGE=\".*\"\$|PACKAGE=\"$PACKAGE\"|" "$1"
+}
+
 # The bridge is spawned by the self-arm ADB session, and on a device whose ADB key has gone stale
 # that session never opens again - so a bridge started months ago would keep running old code and
 # reject every command added since, with no way to replace it short of re-onboarding.
@@ -849,7 +857,7 @@ self_update_if_needed() {
     rm -f "$candidate"
     return 0
   fi
-  if ! sed "s|$PLACEHOLDER|$SECRET|" "$candidate" > "$rendered" || ! sh -n "$rendered" 2>/dev/null; then
+  if ! render_update_candidate "$candidate" > "$rendered" || ! sh -n "$rendered" 2>/dev/null; then
     log_line "self-update rejected version=$candidate_version reason=syntax"
     rm -f "$candidate" "$rendered"
     return 0

@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.glasses
 
+import com.anezium.rokidbus.shared.AppIdentity
 import java.security.MessageDigest
 import java.util.Base64
 
@@ -14,7 +15,7 @@ internal object SelfArmSessionCommand {
         val oldAdbdPid: String,
     )
 
-    fun buildPrepare(watchdogScript: String, bridgeScript: String): String {
+    fun buildPrepare(identity: AppIdentity, watchdogScript: String, bridgeScript: String): String {
         val watchdogBytes = watchdogScript.toByteArray()
         val encodedWatchdog = Base64.getEncoder().encodeToString(watchdogBytes)
         val watchdogHash = MessageDigest.getInstance("SHA-256")
@@ -26,7 +27,7 @@ internal object SelfArmSessionCommand {
             .digest(bridgeBytes)
             .joinToString("") { "%02x".format(it) }
         return buildString {
-            appendCommonVariables()
+            appendCommonVariables(identity)
             appendLine("pm grant \"\$PKG\" android.permission.WRITE_SECURE_SETTINGS >/dev/null 2>&1 || true")
             // Best effort: the glasses file explorer works without it, just limited to what scoped
             // storage shows an ordinary app.
@@ -71,8 +72,8 @@ internal object SelfArmSessionCommand {
         )
     }
 
-    fun buildArm(restartWatchdog: Boolean): String = buildString {
-        appendCommonVariables()
+    fun buildArm(identity: AppIdentity, restartWatchdog: Boolean): String = buildString {
+        appendCommonVariables(identity)
         appendLine("sh \"\$WATCHDOG\" ${if (restartWatchdog) "restart" else "start"}")
         appendLine("sh \"\$WATCHDOG\" repair")
         appendLine("sh \"\$BRIDGE\" ${if (restartWatchdog) "restart" else "start"}")
@@ -100,8 +101,8 @@ internal object SelfArmSessionCommand {
      * so the owner's repair can tell a helper that was already running from one the arm just
      * brought back. Kept out of [buildArm], which the phone mirrors byte for byte.
      */
-    fun buildHelperStatus(): String = buildString {
-        appendCommonVariables()
+    fun buildHelperStatus(identity: AppIdentity): String = buildString {
+        appendCommonVariables(identity)
         appendHelperStatus()
         appendLine(
             "echo '$HELPER_STATUS_SENTINEL watchdog='\"\$WATCHDOG_RUNNING\"" +
@@ -142,10 +143,10 @@ internal object SelfArmSessionCommand {
     fun armBridgeRunning(output: String): Boolean =
         sentinelValues(output, ARM_SENTINEL)?.get("bridge") == "1"
 
-    private fun StringBuilder.appendCommonVariables() {
-        appendLine("PKG='${SelfArmConstants.CLIENT_PACKAGE}'")
-        appendLine("SVC='${SelfArmConstants.ACCESSIBILITY_SERVICE}'")
-        appendLine("SVC_SHORT='${SelfArmConstants.ACCESSIBILITY_SERVICE_SHORT}'")
+    private fun StringBuilder.appendCommonVariables(identity: AppIdentity) {
+        appendLine("PKG='${identity.glassesApplicationId}'")
+        appendLine("SVC='${identity.selfArmAccessibilityService}'")
+        appendLine("SVC_SHORT='${identity.selfArmAccessibilityServiceShort}'")
         appendLine("WATCHDOG='${SelfArmConstants.WATCHDOG_REMOTE_PATH}'")
         appendLine("BRIDGE='${SelfArmConstants.BRIDGE_REMOTE_PATH}'")
     }

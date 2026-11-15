@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.glasses
 
+import com.anezium.rokidbus.shared.AppIdentity
 import java.io.Closeable
 import java.io.IOException
 
@@ -46,6 +47,7 @@ internal data class SelfArmSequenceOperations(
 
 internal object SelfArmArmSequence {
     fun run(
+        identity: AppIdentity,
         initialSession: SelfArmShellSession,
         watchdogScript: String,
         bridgeScript: String,
@@ -58,10 +60,10 @@ internal object SelfArmArmSequence {
         val outputs = mutableListOf<String>()
         try {
             commandDispatched = true
-            val helperRunningBefore = probeHelperRunning(session, operations)
-            val prepareCommand = SelfArmSessionCommand.buildPrepare(watchdogScript, bridgeScript)
+            val helperRunningBefore = probeHelperRunning(identity, session, operations)
+            val prepareCommand = SelfArmSessionCommand.buildPrepare(identity, watchdogScript, bridgeScript)
             val classicArmCommand = if (session.transport == SelfArmShellTransport.CLASSIC_LOOPBACK) {
-                SelfArmSessionCommand.buildArm(restartWatchdog)
+                SelfArmSessionCommand.buildArm(identity, restartWatchdog)
             } else {
                 ""
             }
@@ -93,7 +95,7 @@ internal object SelfArmArmSequence {
                 val armStep = executeStepWithTransportRetry(
                     step = "arm",
                     initialSession = session,
-                    command = SelfArmSessionCommand.buildArm(restartWatchdog),
+                    command = SelfArmSessionCommand.buildArm(identity, restartWatchdog),
                     operations = operations,
                 )
                 session = armStep.session
@@ -167,7 +169,7 @@ internal object SelfArmArmSequence {
                 val postRestartArmStep = executeStepWithTransportRetry(
                     step = "post-restart arm",
                     initialSession = session,
-                    command = SelfArmSessionCommand.buildArm(restartWatchdog),
+                    command = SelfArmSessionCommand.buildArm(identity, restartWatchdog),
                     operations = operations,
                 )
                 session = postRestartArmStep.session
@@ -215,12 +217,13 @@ internal object SelfArmArmSequence {
      * it killed is reconnected by the prepare step's own transport retry.
      */
     private fun probeHelperRunning(
+        identity: AppIdentity,
         session: SelfArmShellSession,
         operations: SelfArmSequenceOperations,
     ): Boolean? {
         val running = try {
             SelfArmSessionCommand.helperRunning(
-                session.shell(SelfArmSessionCommand.buildHelperStatus()).output,
+                session.shell(SelfArmSessionCommand.buildHelperStatus(identity)).output,
             )
         } catch (exception: InterruptedException) {
             throw exception

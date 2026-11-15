@@ -11,13 +11,13 @@ class SelfArmSessionCommandTest {
     @Test
     fun commandSequencePublishesParityDigestForPhoneMirror() {
         val material = buildString {
-            append(SelfArmSessionCommand.buildPrepare(PARITY_WATCHDOG, PARITY_BRIDGE))
+            append(SelfArmSessionCommand.buildPrepare(UPSTREAM_PAIR, PARITY_WATCHDOG, PARITY_BRIDGE))
             append('\u0000')
             append(SelfArmSessionCommand.buildRestartAdbd())
             append('\u0000')
-            append(SelfArmSessionCommand.buildArm(restartWatchdog = false))
+            append(SelfArmSessionCommand.buildArm(UPSTREAM_PAIR, restartWatchdog = false))
             append('\u0000')
-            append(SelfArmSessionCommand.buildArm(restartWatchdog = true))
+            append(SelfArmSessionCommand.buildArm(UPSTREAM_PAIR, restartWatchdog = true))
         }
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(material.toByteArray())
@@ -29,6 +29,7 @@ class SelfArmSessionCommandTest {
     @Test
     fun prepareInstallsAndDisablesLegacyWithoutStartingOrRestarting() {
         val command = SelfArmSessionCommand.buildPrepare(
+            UPSTREAM_PAIR,
             watchdogScript = "#!/system/bin/sh\necho watchdog\n",
             bridgeScript = "#!/system/bin/sh\necho bridge\n",
         )
@@ -70,8 +71,8 @@ class SelfArmSessionCommandTest {
 
     @Test
     fun armStartsOrRestartsWithoutTouchingAdbd() {
-        val start = SelfArmSessionCommand.buildArm(restartWatchdog = false)
-        val restart = SelfArmSessionCommand.buildArm(restartWatchdog = true)
+        val start = SelfArmSessionCommand.buildArm(UPSTREAM_PAIR, restartWatchdog = false)
+        val restart = SelfArmSessionCommand.buildArm(UPSTREAM_PAIR, restartWatchdog = true)
 
         assertTrue(start.contains("sh \"\$WATCHDOG\" start"))
         assertTrue(start.contains("sh \"\$BRIDGE\" start"))
@@ -129,7 +130,7 @@ class SelfArmSessionCommandTest {
 
     @Test
     fun helperStatusProbeOnlyReadsTheScriptsStatus() {
-        val probe = SelfArmSessionCommand.buildHelperStatus()
+        val probe = SelfArmSessionCommand.buildHelperStatus(UPSTREAM_PAIR)
 
         assertTrue(probe.contains("sh \"\$WATCHDOG\" status"))
         assertTrue(probe.contains("sh \"\$BRIDGE\" status"))

@@ -14,6 +14,7 @@ class SelfArmArmSequenceTest {
         val session = FakeSession(37201, SelfArmShellTransport.PAIRED_TLS, events)
 
         val result = SelfArmArmSequence.run(
+            identity = UPSTREAM_PAIR,
             initialSession = session,
             watchdogScript = "script",
             bridgeScript = "bridge",
@@ -42,6 +43,7 @@ class SelfArmArmSequenceTest {
         )
 
         val result = SelfArmArmSequence.run(
+            identity = UPSTREAM_PAIR,
             initialSession = session,
             watchdogScript = "script",
             bridgeScript = "bridge",
@@ -70,6 +72,7 @@ class SelfArmArmSequenceTest {
                 helperStatus = helperStatus,
             )
             val result = SelfArmArmSequence.run(
+                identity = UPSTREAM_PAIR,
                 initialSession = session,
                 watchdogScript = "script",
                 bridgeScript = "bridge",
@@ -87,7 +90,7 @@ class SelfArmArmSequenceTest {
 
         val (alreadyRunning, commands) = run(HELPER_RUNNING, SelfArmShellTransport.PAIRED_TLS)
         assertEquals(true, alreadyRunning)
-        assertEquals(SelfArmSessionCommand.buildHelperStatus(), commands.first())
+        assertEquals(SelfArmSessionCommand.buildHelperStatus(UPSTREAM_PAIR), commands.first())
         assertEquals(false, run(HELPER_STOPPED, SelfArmShellTransport.PAIRED_TLS).first)
         // One of the two down is not "already running": the arm had to start the other.
         assertEquals(
@@ -97,7 +100,7 @@ class SelfArmArmSequenceTest {
         // Classic ADB folds the arm into the prepare command; the probe still comes first.
         val (classic, classicCommands) = run(HELPER_STOPPED, SelfArmShellTransport.CLASSIC_LOOPBACK)
         assertEquals(false, classic)
-        assertEquals(SelfArmSessionCommand.buildHelperStatus(), classicCommands.first())
+        assertEquals(SelfArmSessionCommand.buildHelperStatus(UPSTREAM_PAIR), classicCommands.first())
         assertEquals(null, run("no sentinel\n", SelfArmShellTransport.PAIRED_TLS).first)
     }
 
@@ -119,6 +122,7 @@ class SelfArmArmSequenceTest {
         )
 
         val result = SelfArmArmSequence.run(
+            identity = UPSTREAM_PAIR,
             initialSession = session,
             watchdogScript = "script",
             bridgeScript = "bridge",
@@ -144,6 +148,7 @@ class SelfArmArmSequenceTest {
         val reconnected = FakeSession(37201, SelfArmShellTransport.PAIRED_TLS, events)
 
         val result = SelfArmArmSequence.run(
+            identity = UPSTREAM_PAIR,
             initialSession = initial,
             watchdogScript = "script",
             bridgeScript = "bridge",
@@ -183,6 +188,7 @@ class SelfArmArmSequenceTest {
         val tls = FakeSession(37201, SelfArmShellTransport.PAIRED_TLS, events)
 
         val result = SelfArmArmSequence.run(
+            identity = UPSTREAM_PAIR,
             initialSession = classic,
             watchdogScript = "script",
             bridgeScript = "bridge",
@@ -240,6 +246,7 @@ class SelfArmArmSequenceTest {
         var reconnectCount = 0
 
         val result = SelfArmArmSequence.run(
+            identity = UPSTREAM_PAIR,
             initialSession = initial,
             watchdogScript = "script",
             bridgeScript = "bridge",
@@ -260,7 +267,7 @@ class SelfArmArmSequenceTest {
         assertEquals(1, reconnectCount)
         assertEquals(
             2,
-            commands.count { it == SelfArmSessionCommand.buildPrepare("script", "bridge") },
+            commands.count { it == SelfArmSessionCommand.buildPrepare(UPSTREAM_PAIR, "script", "bridge") },
         )
         assertTrue(events.contains("arm:start"))
     }
@@ -292,6 +299,7 @@ class SelfArmArmSequenceTest {
         val reconnects = mutableListOf<Pair<String?, Int?>>()
 
         val result = SelfArmArmSequence.run(
+            identity = UPSTREAM_PAIR,
             initialSession = initial,
             watchdogScript = "script",
             bridgeScript = "bridge",
@@ -309,7 +317,7 @@ class SelfArmArmSequenceTest {
 
         assertTrue(result.restartedAdbd)
         assertEquals(listOf(null to 37201), reconnects)
-        assertEquals(2, commands.count { it == SelfArmSessionCommand.buildArm(true) })
+        assertEquals(2, commands.count { it == SelfArmSessionCommand.buildArm(UPSTREAM_PAIR, true) })
         assertTrue(events.contains("safe"))
         assertTrue(logs.contains("adbd restart stream died; assuming restart and reconnecting"))
     }
@@ -336,6 +344,7 @@ class SelfArmArmSequenceTest {
 
         try {
             SelfArmArmSequence.run(
+                identity = UPSTREAM_PAIR,
                 initialSession = failingSession(),
                 watchdogScript = "script",
                 bridgeScript = "bridge",
@@ -380,6 +389,7 @@ class SelfArmArmSequenceTest {
         )
 
         SelfArmArmSequence.run(
+            identity = UPSTREAM_PAIR,
             initialSession = initial,
             watchdogScript = "script",
             bridgeScript = "bridge",
@@ -396,11 +406,11 @@ class SelfArmArmSequenceTest {
 
         assertEquals(
             listOf(
-                SelfArmSessionCommand.buildHelperStatus(),
-                SelfArmSessionCommand.buildPrepare("script", "bridge"),
-                SelfArmSessionCommand.buildArm(restartWatchdog = true),
+                SelfArmSessionCommand.buildHelperStatus(UPSTREAM_PAIR),
+                SelfArmSessionCommand.buildPrepare(UPSTREAM_PAIR, "script", "bridge"),
+                SelfArmSessionCommand.buildArm(UPSTREAM_PAIR, restartWatchdog = true),
                 SelfArmSessionCommand.buildRestartAdbd(),
-                SelfArmSessionCommand.buildArm(restartWatchdog = true),
+                SelfArmSessionCommand.buildArm(UPSTREAM_PAIR, restartWatchdog = true),
             ),
             commands,
         )

@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.glasses
 
+import com.anezium.rokidbus.shared.AppIdentity
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -163,27 +164,27 @@ internal object SelfArmController {
         }
     }
 
-    internal fun servicesWithNexusService(current: String?): String {
+    internal fun servicesWithNexusService(identity: AppIdentity, current: String?): String {
         val clean = current?.trim().orEmpty()
-        if (clean.isBlank() || clean == "null") return SelfArmConstants.ACCESSIBILITY_SERVICE
+        if (clean.isBlank() || clean == "null") return identity.selfArmAccessibilityService
         val services = clean.split(':').filter { it.isNotBlank() }
-        if (services.any(::isNexusAccessibilityService)) return clean
-        return (services + SelfArmConstants.ACCESSIBILITY_SERVICE).joinToString(":")
+        if (services.any { isNexusAccessibilityService(identity, it) }) return clean
+        return (services + identity.selfArmAccessibilityService).joinToString(":")
     }
 
-    internal fun accessibilityRepairNeeded(current: String?, accessibilityEnabled: Int): Boolean =
+    internal fun accessibilityRepairNeeded(identity: AppIdentity, current: String?, accessibilityEnabled: Int): Boolean =
         accessibilityEnabled != 1 ||
-            current.orEmpty().split(':').none(::isNexusAccessibilityService)
+            current.orEmpty().split(':').none { isNexusAccessibilityService(identity, it) }
 
-    private fun isNexusAccessibilityService(service: String): Boolean =
-        service == SelfArmConstants.ACCESSIBILITY_SERVICE ||
-            service == SelfArmConstants.ACCESSIBILITY_SERVICE_SHORT
+    private fun isNexusAccessibilityService(identity: AppIdentity, service: String): Boolean =
+        service == identity.selfArmAccessibilityService ||
+            service == identity.selfArmAccessibilityServiceShort
 
-    internal fun buildPrepareCommand(watchdogScript: String, bridgeScript: String): String =
-        SelfArmSessionCommand.buildPrepare(watchdogScript, bridgeScript)
+    internal fun buildPrepareCommand(identity: AppIdentity, watchdogScript: String, bridgeScript: String): String =
+        SelfArmSessionCommand.buildPrepare(identity, watchdogScript, bridgeScript)
 
-    internal fun buildArmCommand(restartWatchdog: Boolean): String =
-        SelfArmSessionCommand.buildArm(restartWatchdog)
+    internal fun buildArmCommand(identity: AppIdentity, restartWatchdog: Boolean): String =
+        SelfArmSessionCommand.buildArm(identity, restartWatchdog)
 
     internal fun buildStopCommand(): String = buildString {
         appendLine("sh '${SelfArmConstants.WATCHDOG_REMOTE_PATH}' stop >/dev/null 2>&1 || true")
@@ -388,6 +389,7 @@ internal object SelfArmController {
         runCatching {
             val resolver = context.contentResolver
             accessibilityRepairNeeded(
+                GlassesCoreConfig.of(context).identity,
                 Settings.Secure.getString(resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES),
                 Settings.Secure.getInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0),
             )
@@ -407,7 +409,7 @@ internal object SelfArmController {
             Settings.Secure.putString(
                 resolver,
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-                servicesWithNexusService(current),
+                servicesWithNexusService(GlassesCoreConfig.of(context).identity, current),
             )
             Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
             log("Self-arm direct accessibility repair completed")
@@ -424,8 +426,9 @@ internal object SelfArmController {
         val file = File(File(context.filesDir, "self-arm"), SelfArmConstants.WATCHDOG_ASSET)
         val currentVersion = if (file.exists()) watchdogScriptVersion(file) else null
         if (currentVersion == SelfArmConstants.WATCHDOG_VERSION) return file
-        val script = context.assets.open(SelfArmConstants.WATCHDOG_ASSET).bufferedReader().use { it.readText() }
+        val asset = context.assets.open(SelfArmConstants.WATCHDOG_ASSET).bufferedReader().use { it.readText() }
             .replace("\r\n", "\n").replace("\r", "\n")
+        val script = SelfArmScripts.renderWatchdog(asset, GlassesCoreConfig.of(context).identity)
         val dir = file.parentFile ?: error("Watchdog has no parent directory")
         if (!dir.isDirectory && !dir.mkdirs() && !dir.isDirectory) error("Could not create self-arm directory")
         file.writeText(script)
@@ -457,7 +460,10 @@ internal object SelfArmController {
         }
         val assetScript = context.assets.open(SelfArmConstants.BRIDGE_ASSET).bufferedReader().use { it.readText() }
             .replace("\r\n", "\n").replace("\r", "\n")
-        val script = SelfArmCommandBridgeClient.renderBridgeScript(assetScript, secretHex)
+        val script = SelfArmCommandBridgeClient.renderBridgeScript(
+            SelfArmScripts.renderBridgeIdentity(assetScript, GlassesCoreConfig.of(context).identity),
+            secretHex,
+        )
         val dir = file.parentFile ?: error("Bridge has no parent directory")
         if (!dir.isDirectory && !dir.mkdirs() && !dir.isDirectory) error("Could not create self-arm directory")
         file.writeText(script)

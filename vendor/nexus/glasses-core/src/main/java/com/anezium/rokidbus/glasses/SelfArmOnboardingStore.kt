@@ -33,6 +33,7 @@ internal object SelfArmOnboardingStore {
         val accessibilityEnabled = runCatching {
             val resolver = appContext.contentResolver
             !SelfArmController.accessibilityRepairNeeded(
+                GlassesCoreConfig.of(appContext).identity,
                 Settings.Secure.getString(resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES),
                 Settings.Secure.getInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0),
             )

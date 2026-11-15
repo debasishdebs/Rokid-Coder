@@ -3,6 +3,7 @@
 
     <!-- Every component comes from :glasses-core; the shell is the installable app around it. -->
     <application
+        android:name=".GlassesHubApplication"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"

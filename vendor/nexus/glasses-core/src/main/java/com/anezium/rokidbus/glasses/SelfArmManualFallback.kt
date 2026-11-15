@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.glasses
 
+import com.anezium.rokidbus.shared.AppIdentity
 import android.content.Context
 import android.content.ComponentName
 import android.content.Intent
@@ -97,10 +98,13 @@ internal const val WIRELESS_DEBUGGING_FRAGMENT_CLASS =
  * glasses also remove them on close and timeout.
  */
 internal object SelfArmManualArmAssets {
-    const val WATCHDOG_SHELL_PATH =
-        "/sdcard/Android/data/com.anezium.rokidbus.glasses/files/cmd_bridge/manual_selfarm/watchdog.sh"
-    const val BRIDGE_SHELL_PATH =
-        "/sdcard/Android/data/com.anezium.rokidbus.glasses/files/cmd_bridge/manual_selfarm/bridge.sh"
+    /** Where the phone reads the staged watchdog: [stage]'s file, as adb shell sees it. */
+    fun watchdogShellPath(identity: AppIdentity): String =
+        "${identity.glassesExternalFilesPath}/cmd_bridge/$DIRECTORY_NAME/$WATCHDOG_NAME"
+
+    /** Where the phone reads the staged bridge. */
+    fun bridgeShellPath(identity: AppIdentity): String =
+        "${identity.glassesExternalFilesPath}/cmd_bridge/$DIRECTORY_NAME/$BRIDGE_NAME"
 
     fun stage(context: Context) {
         val appContext = context.applicationContext

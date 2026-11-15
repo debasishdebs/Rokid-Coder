@@ -23,7 +23,6 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import com.anezium.rokidbus.client.BusClient
 import com.anezium.rokidbus.client.BusEvent
-import com.anezium.rokidbus.client.HubTarget
 import com.anezium.rokidbus.shared.BusCapabilityBits
 import com.anezium.rokidbus.shared.BusPaths
 import com.anezium.rokidbus.shared.CameraLinkEndpointOffer
@@ -198,7 +197,7 @@ class CameraActivity : Activity(), TextureView.SurfaceTextureListener {
                 BusPaths.CAMERA_FREEZE_RESULT,
                 BusPaths.CAMERA_LINK_OFFER,
             ),
-            hubTarget = HubTarget.GLASSES,
+            hubTarget = GlassesCoreConfig.of(this).hubTarget,
         ) { event -> handleBusEvent(event) }
         busClient = client
         client.connect()

@@ -30,7 +30,7 @@ class SelfArmPairingIntentResumeTest {
         Settings.Secure.putString(
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-            SelfArmConstants.ACCESSIBILITY_SERVICE,
+            UPSTREAM_PAIR.selfArmAccessibilityService,
         )
         Settings.Secure.putInt(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
         SelfArmOnboardingStore.invalidateSession(context)

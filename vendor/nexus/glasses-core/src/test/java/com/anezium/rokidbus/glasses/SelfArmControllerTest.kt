@@ -19,42 +19,45 @@ class SelfArmControllerTest {
     @Test
     fun nexusServiceIsOnlyAddedWhenMissing() {
         assertEquals(
-            SelfArmConstants.ACCESSIBILITY_SERVICE,
-            SelfArmController.servicesWithNexusService(null),
+            UPSTREAM_PAIR.selfArmAccessibilityService,
+            SelfArmController.servicesWithNexusService(UPSTREAM_PAIR, null),
         )
         assertEquals(
-            "other.service/.A:${SelfArmConstants.ACCESSIBILITY_SERVICE}",
-            SelfArmController.servicesWithNexusService("other.service/.A"),
+            "other.service/.A:${UPSTREAM_PAIR.selfArmAccessibilityService}",
+            SelfArmController.servicesWithNexusService(UPSTREAM_PAIR, "other.service/.A"),
         )
         assertEquals(
-            "other.service/.A:${SelfArmConstants.ACCESSIBILITY_SERVICE}",
+            "other.service/.A:${UPSTREAM_PAIR.selfArmAccessibilityService}",
             SelfArmController.servicesWithNexusService(
-                "other.service/.A:${SelfArmConstants.ACCESSIBILITY_SERVICE}",
+            UPSTREAM_PAIR,
+                "other.service/.A:${UPSTREAM_PAIR.selfArmAccessibilityService}",
             ),
         )
         assertEquals(
-            "other.service/.A:${SelfArmConstants.ACCESSIBILITY_SERVICE_SHORT}",
+            "other.service/.A:${UPSTREAM_PAIR.selfArmAccessibilityServiceShort}",
             SelfArmController.servicesWithNexusService(
-                "other.service/.A:${SelfArmConstants.ACCESSIBILITY_SERVICE_SHORT}",
+            UPSTREAM_PAIR,
+                "other.service/.A:${UPSTREAM_PAIR.selfArmAccessibilityServiceShort}",
             ),
         )
     }
 
     @Test
     fun repairIsOnlyNeededWhenNexusAccessibilitySettingsAreBroken() {
-        assertFalse(SelfArmController.accessibilityRepairNeeded(SelfArmConstants.ACCESSIBILITY_SERVICE, 1))
-        assertFalse(SelfArmController.accessibilityRepairNeeded(SelfArmConstants.ACCESSIBILITY_SERVICE_SHORT, 1))
-        assertTrue(SelfArmController.accessibilityRepairNeeded("other.service/.A", 1))
-        assertTrue(SelfArmController.accessibilityRepairNeeded(SelfArmConstants.ACCESSIBILITY_SERVICE, 0))
+        assertFalse(SelfArmController.accessibilityRepairNeeded(UPSTREAM_PAIR, UPSTREAM_PAIR.selfArmAccessibilityService, 1))
+        assertFalse(SelfArmController.accessibilityRepairNeeded(UPSTREAM_PAIR, UPSTREAM_PAIR.selfArmAccessibilityServiceShort, 1))
+        assertTrue(SelfArmController.accessibilityRepairNeeded(UPSTREAM_PAIR, "other.service/.A", 1))
+        assertTrue(SelfArmController.accessibilityRepairNeeded(UPSTREAM_PAIR, UPSTREAM_PAIR.selfArmAccessibilityService, 0))
     }
 
     @Test
     fun selfArmCommandsKeepPreparationAndArmSeparate() {
         val prepare = SelfArmController.buildPrepareCommand(
+            UPSTREAM_PAIR,
             watchdogScript = "#!/system/bin/sh\necho watchdog\n",
             bridgeScript = "#!/system/bin/sh\necho bridge\n",
         )
-        val arm = SelfArmController.buildArmCommand(restartWatchdog = false)
+        val arm = SelfArmController.buildArmCommand(UPSTREAM_PAIR, restartWatchdog = false)
 
         assertTrue(prepare.contains("pm grant \"\$PKG\" android.permission.WRITE_SECURE_SETTINGS"))
         assertTrue(prepare.contains("settings put secure enabled_accessibility_services"))

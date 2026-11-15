@@ -18,7 +18,7 @@ internal object SelfArmAccessibilityHandoff {
     enum class Landing { DETAILS, LIST, UNAVAILABLE }
 
     fun open(context: Context): Landing {
-        val details = detailsIntent()
+        val details = detailsIntent(context)
         // Ask the package manager instead of inferring from Build.VERSION: the action is not in
         // the public SDK, so whether this ROM's Settings registered it is a fact about the
         // firmware, not about the platform level. Resolving first also stops us reporting a
@@ -34,8 +34,8 @@ internal object SelfArmAccessibilityHandoff {
      * Android 12+ builds but were never promoted to the public SDK — so they are spelled out here
      * and the caller always keeps the plain list as a fallback.
      */
-    private fun detailsIntent(): Intent {
-        val component = serviceComponent().flattenToString()
+    private fun detailsIntent(context: Context): Intent {
+        val component = serviceComponent(context).flattenToString()
         return Intent(ACTION_ACCESSIBILITY_DETAILS_SETTINGS)
             .setPackage(SETTINGS_PACKAGE)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -53,10 +53,8 @@ internal object SelfArmAccessibilityHandoff {
     private fun listIntent(): Intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
 
-    private fun serviceComponent(): ComponentName = ComponentName(
-        SelfArmConstants.CLIENT_PACKAGE,
-        "${SelfArmConstants.CLIENT_PACKAGE}.RokidBusAccessibilityService",
-    )
+    private fun serviceComponent(context: Context): ComponentName =
+        GlassesCoreConfig.of(context).identity.glassesComponent(RokidBusAccessibilityService::class.java.name)
 
     private fun start(context: Context, intent: Intent): Boolean =
         runCatching { context.startActivity(intent) }.isSuccess
