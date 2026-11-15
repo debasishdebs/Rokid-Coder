@@ -381,6 +381,8 @@ jobs:
           legacy=$(cd ../legacy-0.8.0 && pwd -P)
           (cd "$legacy/agentd" && npm ci && npm run build)
           cp -R test/fixtures/state-0.8.0/home/. "$HOME/"
+          # The fixture's pins were last used in November 2025: without this, 0.8.0's startup expiry empties them.
+          node "$CI_DIR/state-check.js" refresh-pins "$HOME" "$RUNNER_TEMP/pins.expected"
           "$HOME/.local/bin/claude" plugin marketplace add "$legacy"
           "$HOME/.local/bin/claude" plugin install rokid@rokid-coder
           "$legacy/agentd/scripts/install-launchagent.sh"
@@ -389,6 +391,7 @@ jobs:
             sleep 1
           done
           lsof -nP -iTCP:8791,8792 -sTCP:LISTEN
+          node "$CI_DIR/state-check.js" trusted "$HOME" "$RUNNER_TEMP/pins.expected"
           node "$CI_DIR/state-check.js" secrets "$HOME" "$RUNNER_TEMP/secrets.before"
           echo "LEGACY=$legacy" >> "$GITHUB_ENV"
 
@@ -410,6 +413,7 @@ jobs:
             [ "$exe" = "$BUNDLE_DIR/node/bin/node" ] || { echo "port $port is held by $exe"; exit 1; }
           done
           "$BUNDLE_DIR/bin/rokid-node" "$CI_DIR/state-check.js" secrets "$HOME" "$RUNNER_TEMP/secrets.after" "$BUNDLE_DIR"
+          "$BUNDLE_DIR/bin/rokid-node" "$CI_DIR/state-check.js" trusted "$HOME" "$RUNNER_TEMP/pins.expected" "$BUNDLE_DIR"
           cmp -s "$RUNNER_TEMP/secrets.before" "$RUNNER_TEMP/secrets.after" || { echo "the token, machineId or pinned phone changed"; exit 1; }
           echo "token, machineId and pin unchanged"
 
@@ -477,6 +481,8 @@ jobs:
           legacy=$(cd ../legacy-0.8.0 && pwd -P)
           (cd "$legacy/agentd" && npm ci && npm run build)
           cp -R test/fixtures/state-0.8.0/home/. "$HOME/"
+          # The fixture's pins were last used in November 2025: without this, 0.8.0's startup expiry empties them.
+          node "$CI_DIR/state-check.js" refresh-pins "$HOME" "$RUNNER_TEMP/pins.expected"
           "$HOME/.local/bin/claude" plugin marketplace add "$legacy"
           "$HOME/.local/bin/claude" plugin install rokid@rokid-coder
           "$legacy/agentd/scripts/install-launchagent.sh"
@@ -485,6 +491,7 @@ jobs:
             sleep 1
           done
           lsof -nP -iTCP:8791,8792 -sTCP:LISTEN
+          node "$CI_DIR/state-check.js" trusted "$HOME" "$RUNNER_TEMP/pins.expected"
           node "$CI_DIR/state-check.js" state "$HOME" "$RUNNER_TEMP/state.before"
           { echo "LEGACY=$legacy"; echo "LEGACY_NODE=$(realpath "$(command -v node)")"; } >> "$GITHUB_ENV"
 
@@ -509,6 +516,7 @@ jobs:
           done
           node "$CI_DIR/state-check.js" state "$HOME" "$RUNNER_TEMP/state.after"
           node "$CI_DIR/state-check.js" compare "$RUNNER_TEMP/state.before" "$RUNNER_TEMP/state.after"
+          node "$CI_DIR/state-check.js" trusted "$HOME" "$RUNNER_TEMP/pins.expected"
           [ "$(plutil -extract marketplaces.rokid-coder.path raw -o - "$HOME/.fake-plugin-cli/claude/state.json")" = "$LEGACY" ]
           if launchctl print "gui/$uid/$LABEL" > /dev/null 2>&1; then echo "$LABEL was left behind"; exit 1; fi
           [ ! -e "$HOME/Library/LaunchAgents/$LABEL.plist" ] || { echo "$LABEL's plist was left behind"; exit 1; }
