@@ -2,8 +2,8 @@ package com.anezium.rokidbus.plugin.agents
 
 import android.view.KeyEvent
 import com.anezium.rokidbus.client.plugin.NexusRowTone
-import com.anezium.rokidbus.client.plugin.NexusSpeechCallbacks
-import com.anezium.rokidbus.client.plugin.NexusSpeechSession
+import com.anezium.rokidbus.phone.SpeechHandle
+import com.anezium.rokidbus.phone.SpeechListener
 import com.anezium.rokidbus.shared.plugin.NexusInputEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -36,7 +36,7 @@ class VoiceReviewTest {
             override val surfaceShown = false
             override val secure = true
             override fun render() = Unit
-            override fun speechSession(callbacks: NexusSpeechCallbacks): NexusSpeechSession? = null
+            override fun startSpeech(listener: SpeechListener): SpeechHandle? = null
             override fun sendFollowup(sessionKey: String, text: String) {
                 sent += sessionKey to text
             }

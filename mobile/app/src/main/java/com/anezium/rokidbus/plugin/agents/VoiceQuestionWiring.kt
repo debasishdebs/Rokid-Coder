@@ -6,11 +6,11 @@ import com.anezium.rokidbus.client.plugin.NexusCardLine
 import com.anezium.rokidbus.client.plugin.NexusReader
 import com.anezium.rokidbus.client.plugin.NexusRowTone
 import com.anezium.rokidbus.client.plugin.NexusSdkResult
-import com.anezium.rokidbus.client.plugin.NexusSpeechCallbacks
 import com.anezium.rokidbus.client.plugin.NexusSpeechError
-import com.anezium.rokidbus.client.plugin.NexusSpeechSession
 import com.anezium.rokidbus.client.plugin.NexusSpeechState
 import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
+import com.anezium.rokidbus.phone.SpeechHandle
+import com.anezium.rokidbus.phone.SpeechListener
 import com.anezium.rokidbus.shared.plugin.NexusInputEvent
 
 internal sealed interface VoiceTarget {
@@ -49,7 +49,8 @@ internal class VoiceQuestionWiring(
         val surfaceShown: Boolean
         val secure: Boolean
         fun render()
-        fun speechSession(callbacks: NexusSpeechCallbacks): NexusSpeechSession?
+        /** One speech run on the glasses; null when there is nothing to run it on. */
+        fun startSpeech(listener: SpeechListener): SpeechHandle?
         fun sendFollowup(sessionKey: String, text: String)
         fun brief(title: String, body: String, safety: Boolean = false)
 
@@ -70,15 +71,15 @@ internal class VoiceQuestionWiring(
         screen.stopVoice()
         val run = VoiceRun(target)
         screen.openVoice(run)
-        val session = host.speechSession(object : NexusSpeechCallbacks {
+        val session = host.startSpeech(object : SpeechListener {
             // A start the wearer gave up on is stopped by the capture itself, once the hub accepts it (R105).
-            override fun onSpeechStarted(realtime: Boolean) = onVoiceEvent(run) { it.onStarted() }
-            override fun onSpeechState(state: NexusSpeechState) = Unit
-            override fun onSpeechPartial(text: String) {
+            override fun onStarted(realtime: Boolean) = onVoiceEvent(run) { it.onStarted() }
+            override fun onState(state: NexusSpeechState) = Unit
+            override fun onPartial(text: String) {
                 if (screen.voice === run) run.capture.onPartial(text)
             }
-            override fun onSpeechFinal(text: String) = onVoiceEvent(run) { it.onFinal(text) }
-            override fun onSpeechStopped(reason: NexusSpeechStopReason, error: NexusSpeechError?) {
+            override fun onFinal(text: String) = onVoiceEvent(run) { it.onFinal(text) }
+            override fun onStopped(reason: NexusSpeechStopReason, error: NexusSpeechError?) {
                 onVoiceEvent(run) { it.onStopped(reason) }
             }
         })
@@ -86,7 +87,7 @@ internal class VoiceQuestionWiring(
             run.capture.onStartRefused(NexusSdkResult.NOT_REGISTERED)
         } else {
             run.capture.attach { session.stop() }
-            run.capture.onStartRefused(session.start("auto"))
+            run.capture.onStartRefused(session.result)
         }
         voiceChanged(run)
     }

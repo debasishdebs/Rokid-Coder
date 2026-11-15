@@ -314,8 +314,10 @@ as it always would. Being away means being asked later, never being decided for.
 
 Unlike ordinary dormant Nexus plugins, this product explicitly requires a
 monitoring foreground service and alerts while its HUD is closed. The
-network owner is therefore a separate, non-exported `AgentsMonitorService`;
-the one exported `AgentsPluginService` remains the normal SDK adapter.
+network owner is therefore a separate, non-exported `AgentsMonitorService`.
+The glasses side, `AgentsCore`, runs in this app's own process on the phone
+core's `GlassesSurface`, hosted by the non-exported `AgentsHubService`; no
+service of this app is exported.
 
 ### The monitoring notification
 
@@ -566,11 +568,11 @@ and the fixtures in `contracts/`.
 
 ## Build and test
 
-The module is `:mobile:agents` in the repository's root build, against the
+The module is `:mobile:app` in the repository's root build, against the
 vendored SDK projects in `vendor/nexus`. From the repository root, with JDK 17:
 
 ```bash
-./gradlew :mobile:agents:testDebugUnitTest :mobile:agents:assembleDebug
+./gradlew :mobile:app:testDebugUnitTest :mobile:app:assembleDebug
 ```
 
 The on-glasses checks that no unit test can cover are listed in

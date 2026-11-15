@@ -1,26 +1,26 @@
 package com.anezium.rokidbus.plugin.agents
 
-import android.content.Intent
+import android.content.Context
 import android.os.SystemClock
 import android.view.KeyEvent
+import androidx.annotation.MainThread
 import com.anezium.rokidbus.client.plugin.NexusCard
 import com.anezium.rokidbus.client.plugin.NexusCardLine
 import com.anezium.rokidbus.client.plugin.NexusNotice
 import com.anezium.rokidbus.client.plugin.NexusNoticeCloseReason
 import com.anezium.rokidbus.client.plugin.NexusNoticeUpdate
-import com.anezium.rokidbus.client.plugin.NexusPluginService
 import com.anezium.rokidbus.client.plugin.NexusReader
 import com.anezium.rokidbus.client.plugin.NexusReaderSegment
 import com.anezium.rokidbus.client.plugin.NexusReaderSegmentKind
 import com.anezium.rokidbus.client.plugin.NexusRowTone
-import com.anezium.rokidbus.client.plugin.NexusSdkResult
-import com.anezium.rokidbus.client.plugin.NexusSpeechCallbacks
-import com.anezium.rokidbus.client.plugin.NexusSpeechSession
-import com.anezium.rokidbus.client.plugin.NexusSurfaceSession
-import com.anezium.rokidbus.client.plugin.NexusTtsCallbacks
-import com.anezium.rokidbus.client.plugin.NexusTtsDoneReason
-import com.anezium.rokidbus.client.plugin.NexusTtsSession
-import com.anezium.rokidbus.shared.BusPaths
+import com.anezium.rokidbus.phone.GlassesDeviceInfo
+import com.anezium.rokidbus.phone.GlassesSurface
+import com.anezium.rokidbus.phone.NoticeCallbacks
+import com.anezium.rokidbus.phone.SpeechHandle
+import com.anezium.rokidbus.phone.SpeechListener
+import com.anezium.rokidbus.phone.SurfaceListener
+import com.anezium.rokidbus.phone.SurfaceState
+import com.anezium.rokidbus.phone.TtsCallbacks
 import com.anezium.rokidbus.shared.EditableSurfaceField
 import com.anezium.rokidbus.shared.plugin.NexusInputEvent
 import kotlinx.coroutines.CoroutineScope
@@ -37,25 +37,37 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 import java.util.UUID
 
+/**
+ * The Agents code on the glasses, in-process with the hub: the board, the menus, the alert
+ * bands, voice and the spoken cue, all through [glasses] and nothing else. Main thread only,
+ * as every [GlassesSurface] call and callback is. The host owns the lifecycle: [start] once,
+ * [close] once.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
-class AgentsPluginService : NexusPluginService(), AlertGlasses {
+class AgentsCore(
+    private val glasses: GlassesSurface,
+    context: Context,
+) : AlertGlasses, SurfaceListener {
+    private val applicationContext: Context = context.applicationContext
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val configStore by lazy { AgentsConfigStore(applicationContext) }
     private val dnd by lazy { InterruptionFilterReader(applicationContext) }
-    private var surface: NexusSurfaceSession? = null
+
+    /** The glasses while this app holds the HUD, or is asking to adopt it; null once it closed. */
+    private var surface: GlassesSurface? = null
     private var surfaceShown = false
 
     /**
-     * The spoken cue's session, made on the first cue. The hub releases it when
-     * the surface closes, so a refused speak drops it and the next cue makes
-     * a fresh one. [glassesVolume] and [glassesWorn] are what the hub last said
-     * about the glasses; null until it says anything.
+     * The hub's rejection of the reply field's show, bound to its attempt; a new
+     * surface starts with none, as a fresh SDK session did.
      */
-    private var tts: NexusTtsSession? = null
+    private var onSurfaceRejected: ((String) -> Unit)? = null
+
     private val chime by lazy { ChimePlayer(applicationContext) }
+
+    /** What the hub last said about the glasses; null until it says anything. */
     private var glassesVolume: Int? = null
     private var glassesWorn: Boolean? = null
 
@@ -99,7 +111,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 answers.onQuestionInput(flow, event)
             override fun menuInput(event: NexusInputEvent) = onMenuInput(event)
             override fun boardInput(event: NexusInputEvent) = onBoardInput(event)
-            override fun startVoice(target: VoiceTarget) = answers.startVoice(target)
+            override fun startVoice(target: VoiceTarget) = this@AgentsCore.startVoice(target)
             override fun confirmAlert(alertId: String, action: String) {
                 AgentsRuntime.alertDirector?.onCardConfirm(alertId, action)
             }
@@ -163,13 +175,13 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         VoiceQuestionWiring(
             screen,
             object : VoiceQuestionWiring.Host {
-                override val surfaceShown: Boolean get() = this@AgentsPluginService.surfaceShown
+                override val surfaceShown: Boolean get() = this@AgentsCore.surfaceShown
                 override val secure: Boolean get() = secureLink
                 override fun render() = render(show = false)
-                override fun speechSession(callbacks: NexusSpeechCallbacks): NexusSpeechSession? =
-                    nexusSpeechSession(callbacks)
+                override fun startSpeech(listener: SpeechListener): SpeechHandle =
+                    glasses.startSpeech(VOICE_LANGUAGE, listener)
                 override fun sendFollowup(sessionKey: String, text: String) =
-                    this@AgentsPluginService.sendFollowup(sessionKey, text)
+                    this@AgentsCore.sendFollowup(sessionKey, text)
                 override fun brief(title: String, body: String, safety: Boolean) =
                     showBriefNotice(title, body, safety)
                 override val voiceWordLimit: Int get() = configStore.voiceWordLimit()
@@ -177,7 +189,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         )
     }
 
-    private val band by lazy { AlertBand({ nexusClient }, screen) }
+    private val band by lazy { AlertBand(glasses, screen) }
 
     /** The Done or error alert whose summary heads the open conversation. */
     private var outputAlert: AgentdAction.Alert? = null
@@ -254,8 +266,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         ) : Launch
     }
 
-    override fun onCreate() {
-        super.onCreate()
+    /** Takes the glasses and starts following the sessions, the alerts and the link. */
+    @MainThread
+    fun start() {
+        glasses.attach(this, noticeCallbacks)
         AgentsRuntime.alertGlasses = this
         serviceScope.launch {
             combine(
@@ -341,8 +355,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
     }
 
-    override fun onNexusOpen() {
-        surface = nexusSurfaceSession(SURFACE_ID)
+    override fun onOpen(openType: String) {
+        surface = glasses
+        onSurfaceRejected = null
         surfaceShown = true
         AgentsRuntime.hudOpen = true
         screen.surfaceOpened()
@@ -365,18 +380,19 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
     }
 
-    override fun onNexusLinkState(state: Int) {
-        glassesWorn = AlertSoundPolicy.wornAfter(glassesWorn, state)
+    override fun onStateChanged(state: SurfaceState) {
+        glassesWorn = AlertSoundPolicy.wornAfter(glassesWorn, state.linkState)
     }
 
-    override fun onNexusMessage(path: String, id: String, payload: JSONObject) {
-        if (path == BusPaths.GLASSES_DEVICE_INFO) {
-            AlertSoundPolicy.volumeFrom(payload)?.let { glassesVolume = it }
-        }
+    override fun onDeviceInfo(info: GlassesDeviceInfo) {
+        info.volume?.let { glassesVolume = it }
     }
 
-    override fun onNexusClose() {
-        tts = null
+    override fun onSurfaceRejected(code: String) {
+        onSurfaceRejected?.invoke(code)
+    }
+
+    override fun onClose() {
         ageTicker?.cancel()
         ageTicker = null
         digestFlush?.cancel()
@@ -397,9 +413,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         launchNote = null
         surface?.hide()
         surface = null
+        onSurfaceRejected = null
     }
 
-    override fun onNexusInput(event: NexusInputEvent) = screen.onInput(event)
+    override fun onInput(event: NexusInputEvent) = screen.onInput(event)
 
     /** The board, the launcher and an open conversation: no card of theirs is on screen. */
     private fun onBoardInput(event: NexusInputEvent) {
@@ -426,8 +443,16 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
     }
 
+    /** The band's callbacks, kept apart: a band tap and a surface tap are both an `onInput`. */
+    private val noticeCallbacks = object : NoticeCallbacks {
+        override fun onShown() = onNexusNoticeShown()
+        override fun onInput(event: NexusInputEvent) = onNexusNoticeInput(event)
+        override fun onAction(id: String) = onNexusNoticeAction(id)
+        override fun onClosed(reason: NexusNoticeCloseReason) = onNexusNoticeClosed(reason)
+    }
+
     /** A tap on the band means "show me": an alert's band takes it, any other band opens the board. */
-    override fun onNexusNoticeInput(event: NexusInputEvent) {
+    private fun onNexusNoticeInput(event: NexusInputEvent) {
         if (event.action != KeyEvent.ACTION_DOWN) return
         if (!GlassesKeys.isEnter(event)) return
         screen.bandTouched()
@@ -438,17 +463,17 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         if (!surfaceShown) attemptAdoption()
     }
 
-    override fun onNexusNoticeAction(id: String) {
+    private fun onNexusNoticeAction(id: String) {
         screen.bandTouched()
         if (screen.v2BandUp)AgentsRuntime.alertDirector?.onBandAction(id)
     }
 
     /** Display evidence belongs to an alert's band; a brief's band has no alert to credit. */
-    override fun onNexusNoticeShown() {
+    private fun onNexusNoticeShown() {
         if (screen.v2BandUp) AgentsRuntime.alertDirector?.onBandShown()
     }
 
-    override fun onNexusNoticeClosed(reason: NexusNoticeCloseReason) {
+    private fun onNexusNoticeClosed(reason: NexusNoticeCloseReason) {
         val director = AgentsRuntime.alertDirector
         screen.noticeClosed(
             reason,
@@ -458,20 +483,21 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         )
     }
 
-    override fun onDestroy() {
+    /** Lets the glasses go: the surface releases this app's speech, cue, band and HUD. */
+    @MainThread
+    fun close() {
         stopFollowingRemovals?.invoke()
         stopFollowingRemovals = null
         unpinKeptOwners?.invoke()
         unpinKeptOwners = null
-        tts?.close()
-        tts = null
+        glasses.detach()
         chime.close()
         if (AgentsRuntime.alertGlasses === this) AgentsRuntime.alertGlasses = null
         serviceScope.cancel()
         surfaceShown = false
         AgentsRuntime.hudOpen = false
         surface = null
-        super.onDestroy()
+        onSurfaceRejected = null
     }
 
     // ----------------------------------------------------------------- alerts
@@ -496,14 +522,9 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         }
     }
 
+    /** Each cue is its own utterance: the surface refuses a reused id. */
     private fun speak(cue: String) {
-        val session = tts ?: nexusTtsSession(
-            object : NexusTtsCallbacks {
-                override fun onTtsStarted(utteranceId: String) = Unit
-                override fun onTtsDone(utteranceId: String, reason: NexusTtsDoneReason) = Unit
-            },
-        )?.also { tts = it } ?: return
-        if (session.speak(cue) == NexusSdkResult.NOT_REGISTERED) tts = null
+        glasses.speak(cue, UUID.randomUUID().toString(), object : TtsCallbacks {})
     }
 
     override fun hideBand() = band.hide()
@@ -666,15 +687,14 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
 
     /** Opens the editable reply card for [session]: typed on the glasses, sent as `session_input`. */
     private fun beginReply(session: AgentSession) {
-        val client = nexusClient
-        if (client?.supportsEditableSurface != true) {
+        if (!glasses.state.editableSupported) {
             showBriefNotice("Can't type here", "this glasses hub is too old")
             return
         }
-        val activeSurface = surface ?: return
+        if (surface == null) return
         screen.openReply(session.key, session.id)
         val attempt = ++replyAttempt
-        activeSurface.onRejected = { code -> onReplyRejected(attempt, code) }
+        onSurfaceRejected = { code -> onReplyRejected(attempt, code) }
         render(show = false)
     }
 
@@ -695,7 +715,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         render(show = false)
     }
 
-    override fun onNexusSurfaceTextCommitted(surfaceId: String, text: String, cancelled: Boolean) {
+    override fun onTextCommitted(surfaceId: String, text: String, cancelled: Boolean) {
         val sessionKey = screen.replyTargetKey ?: return
         val sessionId = screen.replySessionId
         screen.close(ActiveCard.Kind.REPLY)
@@ -982,10 +1002,14 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         if (director != null) director.onBrief(title, body, safety) else band.briefNow(title, body)
     }
 
+    /** A show while the HUD is closed asks the hub to adopt it; an open follows if it does. */
     private fun attemptAdoption() {
-        surface = surface ?: nexusSurfaceSession(SURFACE_ID) ?: return
+        surface = glasses
         render(show = true)
     }
+
+    /** One tap-to-talk utterance for [target], on the glasses' speech. */
+    internal fun startVoice(target: VoiceTarget) = answers.startVoice(target)
 
     /**
      * [digest] marks a redraw nobody asked for (a session moved, the minute
@@ -1457,9 +1481,8 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
     }
 
     companion object {
-        const val ACTION_MONITOR_ACTIVE =
-            "com.anezium.rokidbus.plugin.agents.action.MONITOR_ACTIVE"
-        private const val SURFACE_ID = "agents"
+        /** The hub's own pick of the recognizer's language. */
+        private const val VOICE_LANGUAGE = "auto"
         private const val THINKING_TICK_MS = 2_500L
         /** How long an optimistic "thinking" cue outlives a send with no daemon word yet. */
         private const val AWAITING_REPLY_TIMEOUT_MS = 20_000L

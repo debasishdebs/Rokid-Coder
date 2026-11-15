@@ -80,7 +80,7 @@ jobs:
             :glasses-core:testDebugUnitTest \
             :glasses-hub:testDebugUnitTest \
             :glasses-app:testDebugUnitTest \
-            :mobile:agents:testDebugUnitTest \
+            :mobile:app:testDebugUnitTest \
             --continue
 
       # The hub suites now run as each upstream shell plus its core. Their union must keep every

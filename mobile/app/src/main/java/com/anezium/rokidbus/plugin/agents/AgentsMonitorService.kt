@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * "Agents monitoring" one `startForeground` stands on, with a session count,
  * Settings and Stop (see [AgentNotifications] and the Agents monitoring exception
  * in plugins/AGENTS.md §3.5). Everything the wearer needs to know reaches them on
- * the glasses, raised by [AgentsPluginService].
+ * the glasses, raised by [AgentsCore].
  */
 class AgentsMonitorService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -392,10 +392,7 @@ class AgentsMonitorService : Service() {
             stopMonitoring()
             return
         }
-        startService(
-            Intent(this, AgentsPluginService::class.java)
-                .setAction(AgentsPluginService.ACTION_MONITOR_ACTIVE),
-        )
+        startService(Intent(this, AgentsHubService::class.java))
         // Pairing data is the away-from-home path (we dial the daemon over the
         // tailnet). With none configured we simply listen: the daemon finds us.
         val wantedAgentd = config.agentd?.takeIf { config.agentdEnabled && it.configured }
@@ -495,13 +492,13 @@ class AgentsMonitorService : Service() {
     }
 
     /**
-     * The plugin service is the hub's to own while a surface is up. We only
-     * started it to keep a bus client alive for alerts, so we only take that
-     * back when the wearer is not actually looking at it.
+     * The glasses side stays while a surface is up. We started it to keep the
+     * link alive for alerts, so we only take that back when the wearer is not
+     * actually looking at it.
      */
     private fun releasePluginService() {
         if (AgentsRuntime.hudOpen) return
-        stopService(Intent(this, AgentsPluginService::class.java))
+        stopService(Intent(this, AgentsHubService::class.java))
     }
 
     companion object {
@@ -556,7 +553,7 @@ class AgentsMonitorService : Service() {
             } else {
                 context.stopService(intent)
                 if (!AgentsRuntime.hudOpen) {
-                    context.stopService(Intent(context, AgentsPluginService::class.java))
+                    context.stopService(Intent(context, AgentsHubService::class.java))
                 }
             }
         }
