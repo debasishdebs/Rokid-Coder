@@ -4,7 +4,7 @@ import { type CliInstallIo, offerCliInstall, realCliInstallIo, resolveCli } from
 import { PinStore } from "../tls";
 import { WRAPPER_NAMES, installUserWrappers, renderUserWrapper } from "../wrappers";
 import type { Answers } from "./answers";
-import { discoverLegacy, removeInstallHooks } from "./legacy";
+import { MIGRATE_HOOKS_COMMAND, discoverLegacy, migrateInstallHooks } from "./legacy";
 import {
   type BindingRecord,
   type InstallManifest,
@@ -95,6 +95,7 @@ export interface Journal {
   steps: {
     3?: { stopCurrent: boolean; retiredLegacy?: RetiredRecord };
     4?: { snapshot: string };
+    /** `settings`: only in a journal from before R217, when install itself removed the install-hooks entries; still undone. */
     5?: { wrappers: Record<string, string | null>; pathBlocks: Record<string, string | null>; settings?: { settingsPath: string; backupPath?: string } };
     7?: { env: string | null };
     8?: { plugins: Partial<Record<Tool, PluginUndo>> };
@@ -460,14 +461,6 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
       throw new SetupError(`The old agent (${legacy.autostart.label}) has to be retired first: it holds agentd's ports. Run setup again and agree to replace it.`);
     }
   }
-  let removeHooks = false;
-  if (legacy.installHooks) {
-    removeHooks =
-      ctx.answers?.legacy?.removeInstallHooks ??
-      (ctx.io.interactive &&
-        (await ask(ctx, "Remove the hooks `agentd install-hooks` added to ~/.claude/settings.json? The plugin replaces them (a backup is kept).", true)));
-  }
-
   const newManifest: InstallManifest = {
     schema: 1,
     version,
@@ -522,7 +515,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     }
     inject(ctx, 4);
 
-    // 5: wrappers, PATH block, install-hooks removal
+    // 5: wrappers, PATH block (the install-hooks entries are the user's own step, after the commit point [R217])
     const profiles = profileFiles(options.platformName, ctx.home, ctx.env.SHELL);
     journal.steps[5] = {
       wrappers: Object.fromEntries(wrapperFiles(ctx.home).map((file) => [file, readText(file)])),
@@ -531,17 +524,6 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     record();
     installUserWrappers(ctx.home, bundleDir);
     for (const file of profiles) writeBlock(file, renderBlock());
-    if (removeHooks) {
-      journal.steps[5].settings = { settingsPath: path.join(ctx.home, ".claude", "settings.json") };
-      record();
-      const removed = removeInstallHooks(ctx.home);
-      if (removed.backupPath) {
-        journal.steps[5].settings.backupPath = removed.backupPath;
-        record();
-      }
-    } else if (legacy.installHooks) {
-      warnings.push("The hooks `agentd install-hooks` added are still in ~/.claude/settings.json; next to the plugin they forward every event twice. Remove them with: ~/.rokid-coder/bin/agentd uninstall-hooks");
-    }
     inject(ctx, 5);
 
     // 6: the CLI step (a vendor install is never undone)
@@ -624,6 +606,14 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     ctx.io.write("Neither Claude Code nor Codex is installed; `rk claude` and `rk codex` offer to install them.\n");
   }
   for (const line of [...warnings, ...manual]) ctx.io.write(`${line}\n`);
+  if (legacy.installHooks) {
+    // An answers file may decline this step, never agree to it: only a person at a terminal can.
+    try {
+      await migrateInstallHooks(ctx.home, ctx.io, { decline: ctx.answers?.legacy?.removeInstallHooks === false });
+    } catch (error) {
+      ctx.io.write(`The install-hooks entries were left as they are (${error instanceof Error ? error.message : String(error)}). Run later: ${MIGRATE_HOOKS_COMMAND}\n`);
+    }
+  }
 
   // 11: pairing, after the commit point
   if (ctx.answers?.pairing === "skip" || !ctx.io.interactive) {

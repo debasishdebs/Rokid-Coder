@@ -84,11 +84,9 @@ test("upgrade_from_0_8_0_keeps_pairings_and_retires_old_agent", async (t) => {
   assert.ok(fs.existsSync(path.join(manifest.previous.snapshot, "inventory.json")));
   assert.equal(world.journal().open, false);
 
-  const now = fs.readFileSync(path.join(world.home, ".claude", "settings.json"), "utf8");
-  assert.ok(!now.includes("hook-forward.js"), "the install-hooks entries are gone");
-  assert.ok(now.includes("my-own-guard"), "the user's own hook stays");
-  const backups = fs.readdirSync(path.join(world.home, ".claude")).filter((n) => n.startsWith("settings.json.agentd-backup-"));
-  assert.equal(fs.readFileSync(path.join(world.home, ".claude", backups[0]), "utf8"), settings);
+  // Not a terminal: the install-hooks entries stay, and the step to remove them is printed [R217].
+  assert.equal(fs.readFileSync(path.join(world.home, ".claude", "settings.json"), "utf8"), settings);
+  assert.match(run.stdout, /To remove them later, run: ~\/\.rokid-coder\/bin\/rokid-setup migrate-hooks\n/);
   assert.match(fs.readFileSync(path.join(world.home, ".zprofile"), "utf8"), /# >>> rokid-coder >>>\nexport PATH="\$HOME\/\.rokid-coder\/bin:\$PATH"\n# <<< rokid-coder <<</);
   assert.deepEqual(wrappers(world).sort(), ["agentd", "rk", "rokid-node", "rokid-setup"]);
 });
@@ -479,13 +477,11 @@ test("setup_never_edits_cli_config_files_directly", async (t) => {
   assert.equal(world.run(["uninstall"]).status, 0);
   await new Promise((resolve) => setTimeout(resolve, 500));
 
-  for (const name of events) {
-    assert.match(name, /^\.claude\/settings\.json/, `only uninstallHooks writes there: ${name}`);
-  }
+  // Only the migrate-hooks step, which a person runs in a terminal, ever writes there [R217].
+  assert.deepEqual(events, []);
   const [claudeAfter, codexAfter] = watched.map((d) => treeBytes(d));
   assert.deepEqual(codexAfter, before[1], "~/.codex is untouched");
-  const changed = Object.keys({ ...before[0], ...claudeAfter }).filter((rel) => before[0][rel] !== claudeAfter[rel]);
-  assert.equal(changed.filter((rel) => rel !== "settings.json" && !rel.startsWith("settings.json.agentd-backup-")).length, 0, changed.join(", "));
+  assert.deepEqual(claudeAfter, before[0], "~/.claude is untouched");
 });
 
 test("cli_installed_syncs_that_tool_and_refreshes_daemon_env", async (t) => {

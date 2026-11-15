@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 /**
  * A non-interactive run's answers. `pairing` takes only "skip": no key can
  * confirm a pairing, because the phone's confirm is the security step and a
- * file must never stand in for the person comparing codes (6a).
+ * file must never stand in for the person comparing codes (6a). Likewise
+ * `legacy.removeInstallHooks` can only decline the settings.json migration
+ * (false); agreeing to it takes a person at a terminal [R217].
  */
 export interface Answers {
   cli?: { claude?: "install" | "skip"; codex?: "install" | "skip" };

@@ -7,6 +7,7 @@ import path from "node:path";
 import { clearAdvertise, readAdvertise, writeAdvertise } from "../advertise";
 import { LineReader } from "../launcher/pair-prompt";
 import { type Answers, readAnswers } from "./answers";
+import { migrateInstallHooks } from "./legacy";
 import { type BindingRecord, type InstallManifest, type PathPair, TOOLS, type Tool, programDir, readManifest, writeManifest } from "./manifest";
 import { type Health, type SetupContext, type SetupIo, SetupError, install, rollback } from "./orchestrator";
 import { runAgentdPair } from "./pair-step";
@@ -24,10 +25,11 @@ const USAGE = `Usage: rokid-setup <command>
   plugins status --json
   cli-installed --tool claude|codex --json
   rollback
+  migrate-hooks
   uninstall [--purge] [--yes]
   advertise set --hosts <ipv4,...> --port <port> | advertise show | advertise clear`;
 
-const COMMANDS = ["install", "plugins", "cli-installed", "rollback", "uninstall", "advertise"];
+const COMMANDS = ["install", "plugins", "cli-installed", "rollback", "migrate-hooks", "uninstall", "advertise"];
 
 /** WSL's NAT mode: the endpoint every pairing client advertises [6b-R3]; user-setup.ps1 and start-agentd.ps1 write it. */
 function advertiseCommand(args: string[], home: string, env: NodeJS.ProcessEnv): number {
@@ -206,6 +208,12 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
   const json = args.includes("--json");
   const io = makeIo(home, { log: command !== "uninstall", toStderr: json });
   try {
+    if (command === "migrate-hooks") {
+      if ((await migrateInstallHooks(home, io)) === "none") {
+        io.write("~/.claude/settings.json has no hooks from `agentd install-hooks`.\n");
+      }
+      return 0;
+    }
     let answers: Answers | undefined;
     const answersFile = option(args, "--answers");
     if (answersFile) answers = readAnswers(answersFile);
