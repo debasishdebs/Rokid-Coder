@@ -1270,5 +1270,12 @@ class NexusPluginClient internal constructor(
             callbacks = callbacks,
             transport = AndroidNexusPluginTransport(context, pluginId, hubTarget),
         )
+
+        /** A client over a caller-supplied transport, for a hub that hosts its app in-process. */
+        fun createWithTransport(
+            pluginId: String,
+            callbacks: NexusPluginCallbacks,
+            transport: NexusPluginTransport,
+        ): NexusPluginClient = NexusPluginClient(pluginId = pluginId, callbacks = callbacks, transport = transport)
     }
 }
