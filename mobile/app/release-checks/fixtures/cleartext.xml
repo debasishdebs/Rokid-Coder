@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Every link is pinned TLS; cleartext would let a ws:// or http:// dial through. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.debasishdebs.rokidcoder">
+    <application android:usesCleartextTraffic="true" />
+</manifest>

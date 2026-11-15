@@ -1,0 +1,3 @@
+# Each component here must be refused by checkReleaseDependencies [6a-R7].
+project :kadb-compat
+com.flyfishxu:kadb:1.1.0

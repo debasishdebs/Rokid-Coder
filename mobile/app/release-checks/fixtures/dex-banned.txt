@@ -1,0 +1,20 @@
+# Each class here must be refused by checkReleaseDex.
+com.anezium.rokidbus.phone.StoreActivity
+com.anezium.rokidbus.phone.StoreCatalog$Entry
+com.anezium.rokidbus.phone.RegistryClient
+com.anezium.rokidbus.phone.NexusSelfUpdater
+com.anezium.rokidbus.phone.NexusUpdateChecker
+com.anezium.rokidbus.phone.PluginUpdateChecker
+com.anezium.rokidbus.phone.PatcherHandoff
+app.morphe.patcher.Patcher
+com.anezium.rokidbus.phone.ExternalPluginController
+com.anezium.rokidbus.phone.AndroidExternalPluginRuntime$Binding
+com.anezium.rokidbus.phone.PhonePluginDiscovery
+com.anezium.rokidbus.phone.PhonePluginRegistry
+com.anezium.rokidbus.phone.speech.CloudSttSessionFactory
+com.anezium.rokidbus.phone.speech.CloudSpeechReadiness
+com.anezium.rokidbus.phone.speech.RealtimeSpeechToText
+com.anezium.rokidbus.phone.speech.CompletedAudioSpeechToText
+com.anezium.rokidbus.phone.speech.HubSecretStore
+com.anezium.rokidbus.phone.speech.SpeechCredits
+com.flyfishxu.kadb.Kadb

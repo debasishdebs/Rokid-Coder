@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The glasses app goes over CXR; the phone app installs nothing on the phone. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.debasishdebs.rokidcoder">
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <application />
+</manifest>

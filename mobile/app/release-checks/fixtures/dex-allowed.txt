@@ -1,0 +1,12 @@
+# Each class here must pass checkReleaseDex: our own stores, the core's value types and speech seam.
+com.anezium.rokidbus.plugin.agents.AgentsCore
+com.anezium.rokidbus.plugin.agents.AgentSessionStore
+com.anezium.rokidbus.plugin.agents.AgentsConfigStore$Companion
+com.anezium.rokidbus.phone.PhoneTtsSettingsStore
+com.anezium.rokidbus.phone.PluginPrincipalKt
+com.anezium.rokidbus.phone.GlassesAppInstaller
+com.anezium.rokidbus.phone.speech.SpeechSttSessionFactory
+com.anezium.rokidbus.phone.speech.SpeechEngineRegistry
+com.anezium.rokidbus.shared.PatcherContract
+androidx.lifecycle.ViewModelStore
+kotlinx.coroutines.flow.StateFlowImpl

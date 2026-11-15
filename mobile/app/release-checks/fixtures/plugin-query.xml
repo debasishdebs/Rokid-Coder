@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Asking to see Nexus plugins is the plugin runtime's discovery, which this app has none of. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.debasishdebs.rokidcoder">
+    <queries>
+        <intent>
+            <action android:name="com.anezium.rokidbus.action.PLUGIN" />
+        </intent>
+    </queries>
+    <application />
+</manifest>
