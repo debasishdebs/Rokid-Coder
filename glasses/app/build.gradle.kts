@@ -55,6 +55,19 @@ android {
     }
 }
 
+// The phone app bundles this app (rokid.glasses-asset): each build type's APK directory goes out on
+// one consumable configuration, told apart by the build type, so the phone resolves the one it needs.
+val glassesBuildType = Attribute.of("rokid.glassesBuildType", String::class.java)
+val glassesApk = configurations.consumable("glassesApk")
+androidComponents {
+    onVariants { variant ->
+        glassesApk.get().outgoing.variants.create(variant.name) {
+            attributes.attribute(glassesBuildType, variant.buildType ?: variant.name)
+            artifact(variant.artifacts.get(com.android.build.api.artifact.SingleArtifact.APK)) { type = "directory" }
+        }
+    }
+}
+
 dependencies {
     implementation(project(":glasses-core"))
     testImplementation("junit:junit:4.13.2")
