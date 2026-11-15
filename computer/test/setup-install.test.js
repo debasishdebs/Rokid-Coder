@@ -337,6 +337,62 @@ test("fresh_install_cli_installed_outside_path_reaches_daemon_env", async (t) =>
   assert.equal(world.manifest().plugins.claude.status, "ok");
 });
 
+test("failed_recovery_stays_open_and_setup_stops_until_restore_succeeds", async (t) => {
+  const world = makeWorld(t);
+  world.cli("claude");
+  const b1 = world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1" });
+  assert.equal(world.install(b1).status, 0);
+  const b2 = world.bundle("1.0.0-test.2", { pluginVersion: "1.0.2" });
+  // The previous bundle's plugins are gone, so the claude registration cannot be put back.
+  fs.rmSync(path.join(b1, "plugins"), { recursive: true });
+
+  const failed = world.install(b2, {}, { extraEnv: { ROKID_SETUP_FAIL_AT: "9" } });
+  assert.equal(failed.status, 1, failed.output);
+  assert.match(failed.stdout, /restoring the claude plugin: /);
+  assert.doesNotMatch(failed.stdout, /Rolled back to/);
+  assert.equal(world.journal().open, true, "the undo can be retried");
+
+  world.clearCalls();
+  const blocked = world.install(b2);
+  assert.equal(blocked.status, 1, blocked.output);
+  assert.match(blocked.stdout, /An earlier setup did not finish\. Undoing it first\.\n[\s\S]*restoring the claude plugin: /);
+  assert.match(blocked.stderr, /The earlier setup could not be undone, so this one did not start/);
+  assert.ok(!world.calls().some((c) => c.op === "installAutostart" && c.version === "1.0.0-test.2"), "nothing of this run started");
+  assert.equal(world.journal().open, true);
+  assert.equal(world.manifest().version, "1.0.0-test.1");
+
+  world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1" });
+  const retried = world.install(b2);
+  assert.equal(retried.status, 0, retried.output);
+  assert.match(retried.stdout, /Rolled back to 1\.0\.0-test\.1\n[\s\S]*Rokid Coder 1\.0\.0-test\.2 is installed\./);
+  assert.equal(world.journal().open, false);
+  assert.equal(world.manifest().version, "1.0.0-test.2");
+});
+
+test("failed_rollback_keeps_the_current_manifest_for_a_retry", async (t) => {
+  const world = makeWorld(t);
+  world.cli("claude");
+  const b1 = world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1" });
+  assert.equal(world.install(b1).status, 0);
+  const b2 = world.bundle("1.0.0-test.2", { pluginVersion: "1.0.2" });
+  assert.equal(world.install(b2).status, 0);
+  fs.rmSync(path.join(b1, "plugins"), { recursive: true });
+
+  const failed = world.run(["rollback"]);
+  assert.equal(failed.status, 1, failed.output);
+  assert.match(failed.stdout, /restoring the claude plugin: /);
+  assert.match(failed.stdout, /The rollback to 1\.0\.0-test\.1 did not finish/);
+  assert.equal(world.manifest().version, "1.0.0-test.2", "the manifest is not replaced after a failed restore");
+  assert.equal(world.manifest().previous.version, "1.0.0-test.1");
+
+  world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1" });
+  const retried = world.run(["rollback"]);
+  assert.equal(retried.status, 0, retried.output);
+  assert.match(retried.stdout, /Rolled back to 1\.0\.0-test\.1\n/);
+  assert.equal(world.manifest().version, "1.0.0-test.1");
+  assert.equal(world.cliState("claude").plugins["rokid@rokid-coder"].version, "1.0.1");
+});
+
 test("npm_cli_plugin_commands_run_with_its_resolved_node_including_recovery", async (t) => {
   // An npm claude (a `#!/usr/bin/env node` script) whose node only the login shell finds: setup's own PATH has none.
   const nodeDir = path.dirname(NODE);

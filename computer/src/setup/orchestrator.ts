@@ -345,14 +345,22 @@ function restorePlanFromJournal(journal: Journal): RestorePlan {
   return plan;
 }
 
-/** Undoes exactly what an open journal shows ran, then closes it. */
+/**
+ * Undoes exactly what an open journal shows ran, and closes it only when
+ * every restore succeeded. Otherwise the journal stays open, so the next
+ * setup run undoes it again before it changes anything.
+ */
 export async function recover(ctx: SetupContext, journal: Journal): Promise<boolean> {
   const plan = restorePlanFromJournal(journal);
   const problems = await runRestore(ctx, plan);
-  writeJournal(ctx.home, { ...journal, open: false });
   for (const problem of problems) ctx.io.write(`  ${problem}\n`);
-  ctx.io.write(problems.length === 0 ? `Rolled back to ${plan.label}\n` : `Rolled back to ${plan.label}, with the problems above\n`);
-  return problems.length === 0;
+  if (problems.length > 0) {
+    ctx.io.write(`The rollback to ${plan.label} did not finish. Fix the problems above, then run setup again to finish it.\n`);
+    return false;
+  }
+  writeJournal(ctx.home, { ...journal, open: false });
+  ctx.io.write(`Rolled back to ${plan.label}\n`);
+  return true;
 }
 
 // ---- install ----
@@ -422,7 +430,9 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
   const open = readJournal(ctx.home);
   if (open?.open) {
     ctx.io.write("An earlier setup did not finish. Undoing it first.\n");
-    await recover(ctx, open);
+    if (!(await recover(ctx, open))) {
+      throw new SetupError("The earlier setup could not be undone, so this one did not start");
+    }
   }
   const bundleDir = path.resolve(options.bundleDir);
   const version = bundleVersion(bundleDir);
@@ -678,12 +688,17 @@ export async function rollback(ctx: SetupContext): Promise<number> {
     if (cli && prior) plan.plugins[tool] = { cliPath: cli.path, prior, path: pluginPath };
   }
   const problems = await runRestore(ctx, plan);
+  for (const problem of problems) ctx.io.write(`  ${problem}\n`);
+  if (problems.length > 0) {
+    // The manifest still names this install and its previous, so running rollback again retries every restore.
+    ctx.io.write(`The rollback to ${plan.label} did not finish. Fix the problems above, then run rokid-setup rollback again.\n`);
+    return 1;
+  }
   if (previous.manifest) {
     writeManifest(ctx.home, previous.manifest);
   } else {
     rmSync(manifestPath(ctx.home), { force: true });
   }
-  for (const problem of problems) ctx.io.write(`  ${problem}\n`);
-  ctx.io.write(problems.length === 0 ? `Rolled back to ${plan.label}\n` : `Rolled back to ${plan.label}, with the problems above\n`);
-  return problems.length === 0 ? 0 : 1;
+  ctx.io.write(`Rolled back to ${plan.label}\n`);
+  return 0;
 }
