@@ -23,6 +23,7 @@ import {
   rotateSteerSecret,
 } from "./tls";
 import { installHooks, uninstallHooks } from "./settings";
+import { versionInfo, versionText } from "./version";
 
 interface Health {
   ok: boolean;
@@ -105,6 +106,14 @@ async function main(): Promise<void> {
   const command = process.argv[2] || "run";
   const agentRoot = path.resolve(__dirname, "..");
   switch (command) {
+    // Before any state access: these create no files and work with a corrupt config.
+    case "--version":
+    case "-v":
+    case "version": {
+      const info = versionInfo();
+      process.stdout.write(process.argv.slice(3).includes("--json") ? `${JSON.stringify(info)}\n` : versionText(info));
+      break;
+    }
     case "run":
       await run();
       break;
@@ -267,7 +276,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        `Unknown command '${command}'. Use run, install-hooks, uninstall-hooks, pair (opens a 2-minute window for one new phone and shows its code to confirm), phones, link-phone, unlink-phone, or status.`,
+        `Unknown command '${command}'. Use run, install-hooks, uninstall-hooks, pair (opens a 2-minute window for one new phone and shows its code to confirm), phones, link-phone, unlink-phone, status, selfcheck, or --version.`,
       );
   }
 }

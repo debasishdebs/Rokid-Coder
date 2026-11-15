@@ -67,6 +67,9 @@ test("loopback HTTP server reports health and returns the completed hook decisio
       ok: true,
       sessions: 3,
       uptimeMs: JSON.parse(health.body).uptimeMs,
+      agentdVersion: require("../package.json").version,
+      execPath: require("node:fs").realpathSync(process.execPath),
+      bundleRoot: null,
       codex: { enabled: true, available: false, reason: "codex not installed" },
     });
 

@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { HookResponse } from "./approval-manager";
 import type { HookPayload, Logger } from "./types";
+import { healthIdentity } from "./version";
 
 export interface HookHttpServerOptions {
   port: number;
@@ -22,6 +23,8 @@ export class HookHttpServer {
   private server?: Server;
   private ready = false;
   private readonly startedAt = Date.now();
+  /** Loopback-only and secret-free: which program is answering [6b-R4]. */
+  private readonly identity = healthIdentity();
 
   constructor(private readonly options: HookHttpServerOptions) {}
 
@@ -51,6 +54,7 @@ export class HookHttpServer {
           ok: true,
           sessions: this.options.sessionCount(),
           uptimeMs: Date.now() - this.startedAt,
+          ...this.identity,
           ...this.options.extraHealth?.(),
         });
         response.writeHead(200, {
