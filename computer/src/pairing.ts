@@ -1,4 +1,5 @@
 import os from "node:os";
+import { advertisedEndpoint, refreshAdvertiseSync } from "./advertise";
 import type { AgentConfig } from "./types";
 
 function familyIsV4(family: string | number): boolean {
@@ -28,11 +29,13 @@ export function bestHostGuess(interfaces = os.networkInterfaces()): string {
  * afterwards, in `pair_credentials` on the same confirmed TLS session.
  */
 export function pairingPayload(config: AgentConfig, fp: string): string {
+  refreshAdvertiseSync(config);
+  const endpoint = advertisedEndpoint(config);
   return JSON.stringify({
     v: 2,
     kind: "rokid-coder",
-    host: bestHostGuess(),
-    port: config.wsPort,
+    host: endpoint.hosts[0],
+    port: endpoint.port,
     fp,
   });
 }

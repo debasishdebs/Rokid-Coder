@@ -92,3 +92,34 @@ test("tailscale resolution falls back once, caches the binary, and logs only pee
     1,
   );
 });
+
+test("tailnet_discovery_uses_tailscale_exe_via_interop", async () => {
+  const { tailscaleExecutableCandidates } = require("../dist/tailnet-discovery.js");
+  const { isWsl } = require("../dist/advertise.js");
+  // Inside WSL the Windows client is the one that knows the tailnet: interop first.
+  assert.deepEqual(tailscaleExecutableCandidates("linux", true), [
+    "tailscale.exe",
+    "/mnt/c/Program Files/Tailscale/tailscale.exe",
+    "tailscale",
+    "/usr/bin/tailscale",
+  ]);
+  assert.deepEqual(tailscaleExecutableCandidates("linux", false), ["tailscale", "/usr/bin/tailscale"]);
+  assert.deepEqual(tailscaleExecutableCandidates("darwin", false), ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]);
+  assert.equal(isWsl({ WSL_DISTRO_NAME: "Ubuntu" }, () => false), true);
+  assert.equal(isWsl({}, (file) => file === "/proc/sys/fs/binfmt_misc/WSLInterop"), true);
+  assert.equal(isWsl({}, () => false), false);
+
+  const { raw } = await fixture();
+  const calls = [];
+  const discovery = new TailscalePeerDiscovery(
+    loggerHarness().logger,
+    async (binary) => {
+      calls.push(binary);
+      return binary === "/mnt/c/Program Files/Tailscale/tailscale.exe" ? { missing: false, stdout: raw } : { missing: true };
+    },
+    "linux",
+    true,
+  );
+  assert.equal((await discovery.discover()).length, 8);
+  assert.deepEqual(calls, ["tailscale.exe", "/mnt/c/Program Files/Tailscale/tailscale.exe"]);
+});

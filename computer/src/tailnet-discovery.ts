@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { isWsl } from "./advertise";
 import { DEFAULT_PHONE_LINK_PORT } from "./config";
 import type { Logger } from "./types";
 
@@ -61,7 +62,13 @@ export function selectTailnetPeers(status: unknown): TailnetPeerSelection {
   };
 }
 
-export function tailscaleExecutableCandidates(platform = process.platform): string[] {
+/** Inside WSL the Windows client knows the tailnet: `tailscale.exe` through interop comes first. */
+const WSL_CANDIDATES = ["tailscale.exe", "/mnt/c/Program Files/Tailscale/tailscale.exe"];
+
+export function tailscaleExecutableCandidates(platform = process.platform, wsl = platform === "linux" && isWsl()): string[] {
+  if (wsl) {
+    return [...WSL_CANDIDATES, "tailscale", "/usr/bin/tailscale"];
+  }
   const fallback =
     platform === "win32"
       ? "C:\\Program Files\\Tailscale\\tailscale.exe"
@@ -103,6 +110,7 @@ export class TailscalePeerDiscovery {
     private readonly logger: Logger,
     private readonly runner: TailscaleCommandRunner = runTailscaleStatus,
     private readonly platform = process.platform,
+    private readonly wsl = platform === "linux" && isWsl(),
   ) {}
 
   async discover(): Promise<string[]> {
@@ -144,7 +152,7 @@ export class TailscalePeerDiscovery {
       this.resolvedBinary = undefined;
     }
 
-    for (const candidate of tailscaleExecutableCandidates(this.platform)) {
+    for (const candidate of tailscaleExecutableCandidates(this.platform, this.wsl)) {
       const result = await this.run(candidate);
       if (result.missing) {
         continue;

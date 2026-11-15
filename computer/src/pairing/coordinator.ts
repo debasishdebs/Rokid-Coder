@@ -1,3 +1,4 @@
+import { advertisedEndpoint, startAdvertiseRefresh } from "../advertise";
 import { ALLOW_NEXT_WINDOW_MS, PROVISIONAL_PIN_MS, PinStore, normalizeFingerprint, shortFingerprint } from "../tls";
 import type { AgentConfig, Logger } from "../types";
 import { SasAttempt, type AbortReason, type AttemptState } from "./attempt";
@@ -60,9 +61,12 @@ export class PairingCoordinator {
   private readonly watchers = new Set<(status: PairStatus) => void>();
   private attemptTimer?: NodeJS.Timeout;
   private readonly now: () => number;
+  private readonly stopAdvertiseRefresh: () => void;
 
   constructor(private readonly options: CoordinatorOptions) {
     this.now = options.now ?? Date.now;
+    // The daemon's refresh of the NAT-mode endpoint [6b-R3]; a no-op anywhere else.
+    this.stopAdvertiseRefresh = startAdvertiseRefresh(options.config);
   }
 
   // ---------------------------------------------------------------- the window
@@ -95,12 +99,13 @@ export class PairingCoordinator {
     if (!attempt) {
       return undefined;
     }
+    const endpoint = advertisedEndpoint(this.options.config, this.options.wsHost);
     return {
       nexus: "agentd-pair-ready",
       v: 1,
       machineName: this.options.config.machineName,
-      host: this.options.wsHost(),
-      wsPort: this.options.config.wsPort,
+      host: endpoint.hosts[0],
+      wsPort: endpoint.port,
       attempt,
     };
   }
@@ -309,6 +314,7 @@ export class PairingCoordinator {
   }
 
   dispose(): void {
+    this.stopAdvertiseRefresh();
     this.clearTimer();
     if (this.current?.active) {
       this.current.abort("disconnect", { tell: false });
@@ -333,6 +339,7 @@ export class PairingCoordinator {
       throw new Error("no steering secret");
     }
     this.options.pins.addProvisional(attempt.phoneFp, attempt.attempt, this.now(), PROVISIONAL_PIN_MS);
+    const endpoint = advertisedEndpoint(this.options.config, this.options.wsHost);
     this.options.logger.info("pairing_pinned_provisional", { attempt: attempt.attempt, fingerprint: shortFingerprint(attempt.phoneFp) });
     return {
       type: "pair_credentials",
@@ -342,8 +349,8 @@ export class PairingCoordinator {
       steer,
       machineId: this.options.config.machineId,
       machineName: this.options.config.machineName,
-      wsHost: this.options.wsHost(),
-      wsPort: this.options.config.wsPort,
+      wsHost: endpoint.hosts[0],
+      wsPort: endpoint.port,
     };
   }
 

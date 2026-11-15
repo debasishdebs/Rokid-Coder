@@ -6,6 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { offerCliInstall, realCliInstallIo, resolveCli, type CliTool } from "./launcher/cli-install";
+import { applyWindowsGate } from "./launcher/windows-gate";
 import { claudeSessionsDir, findOwnedClaudeSession } from "./launcher/claude-sessions";
 import { LauncherClient } from "./launcher/launcher-client";
 import { offerPairing } from "./launcher/pair-prompt";
@@ -249,6 +250,7 @@ async function runClaude(args: string[]): Promise<void> {
     process.stderr.write(`rk: could not start claude: ${bin}: command not found\n`);
     process.exit(127);
   }
+  applyWindowsGate("claude");
   const socketPath = launcherSocketPath();
 
   // Everything is said before the TUI starts, so nothing lands in the middle of it.
@@ -611,6 +613,7 @@ async function runCodex(args: string[]): Promise<void> {
     process.stderr.write(`rk: could not start codex: ${bin}: command not found\n`);
     process.exit(127);
   }
+  applyWindowsGate("codex");
   const saved = saveTerminal();
   // Until Codex runs, a kill or an error of rk's own ends rk here. The hint
   // holds the terminal raw, and only SIGTERM's default would give it back.

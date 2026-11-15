@@ -4,6 +4,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { clearAdvertise, readAdvertise, writeAdvertise } from "../advertise";
 import { LineReader } from "../launcher/pair-prompt";
 import { type Answers, readAnswers } from "./answers";
 import { type BindingRecord, type InstallManifest, type PathPair, TOOLS, type Tool, programDir, readManifest, writeManifest } from "./manifest";
@@ -23,9 +24,31 @@ const USAGE = `Usage: rokid-setup <command>
   plugins status --json
   cli-installed --tool claude|codex --json
   rollback
-  uninstall [--purge] [--yes]`;
+  uninstall [--purge] [--yes]
+  advertise set --hosts <ipv4,...> --port <port> | advertise show | advertise clear`;
 
-const COMMANDS = ["install", "plugins", "cli-installed", "rollback", "uninstall"];
+const COMMANDS = ["install", "plugins", "cli-installed", "rollback", "uninstall", "advertise"];
+
+/** WSL's NAT mode: the endpoint every pairing client advertises [6b-R3]; user-setup.ps1 and start-agentd.ps1 write it. */
+function advertiseCommand(args: string[], home: string, env: NodeJS.ProcessEnv): number {
+  const stateDir = stateLocations(home, env).stateDir;
+  switch (args[0]) {
+    case "set": {
+      const hosts = (option(args, "--hosts") ?? "").split(",").filter(Boolean);
+      const port = Number(option(args, "--port"));
+      writeAdvertise(stateDir, hosts, port);
+      return 0;
+    }
+    case "show":
+      process.stdout.write(`${JSON.stringify(readAdvertise(stateDir) ?? { mode: "default" })}\n`);
+      return 0;
+    case "clear":
+      clearAdvertise(stateDir);
+      return 0;
+    default:
+      throw new SetupError(USAGE);
+  }
+}
 
 function option(args: string[], name: string): string | undefined {
   const at = args.indexOf(name);
@@ -171,6 +194,14 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     return 1;
   }
   const home = env.HOME || os.homedir();
+  if (command === "advertise") {
+    try {
+      return advertiseCommand(args, home, env);
+    } catch (error) {
+      process.stderr.write(`rokid-setup: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 1;
+    }
+  }
   const json = args.includes("--json");
   const io = makeIo(home, { log: command !== "uninstall", toStderr: json });
   try {
