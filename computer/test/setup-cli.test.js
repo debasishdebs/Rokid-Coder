@@ -82,6 +82,40 @@ test("uninstall_keeps_state_unless_purge", async (t) => {
   assert.ok(!fs.existsSync(path.join(rc, "backups")));
 });
 
+test("uninstall_stops_and_stays_retryable_when_plugin_removal_fails", async (t) => {
+  const world = makeWorld(t);
+  await world.seed08();
+  const cli = world.cli("claude");
+  const bundle = world.bundle("1.0.0-test.1");
+  assert.equal(world.install(bundle).status, 0);
+  const working = fs.readFileSync(cli, "utf8");
+  // The CLI answers its help and list, but refuses to remove anything.
+  fs.writeFileSync(
+    cli,
+    working.replace(/^exec /m, 'case " $* " in *" uninstall "*|*" remove "*) echo "permission denied" >&2; exit 1;; esac\nexec '),
+  );
+  const state = world.stateBytes();
+
+  const run = world.run(["uninstall"]);
+  assert.equal(run.status, 1, run.output);
+  assert.match(run.output, /The claude plugin could not be removed: .*permission denied/);
+  assert.match(run.output, /Nothing else was removed.*run rokid-setup uninstall again/s);
+  assert.doesNotMatch(run.output, /Rokid Coder was removed/);
+  assert.ok(world.cliState("claude").plugins["rokid@rokid-coder"], "the plugin is still registered");
+  const rc = path.join(world.home, ".rokid-coder");
+  for (const kept of ["bin", "env", "install.json"]) assert.ok(fs.existsSync(path.join(rc, kept)), `${kept} is kept`);
+  assert.ok(world.manifest(), "the manifest still names the CLIs and bundles to retry with");
+  assert.ok(fs.readFileSync(path.join(world.home, ".zprofile"), "utf8").includes("rokid-coder"), "the PATH block is kept");
+  assert.deepEqual(world.stateBytes(), state);
+
+  // Once the CLI can remove it again, the same command finishes the job.
+  fs.writeFileSync(cli, working);
+  const retry = world.run(["uninstall"]);
+  assert.equal(retry.status, 0, retry.output);
+  assert.deepEqual(world.cliState("claude"), { marketplaces: {}, plugins: {} });
+  for (const gone of ["bin", "env", "install.json"]) assert.ok(!fs.existsSync(path.join(rc, gone)), gone);
+});
+
 test("uninstall_purge_requires_confirmation", async (t) => {
   const world = makeWorld(t);
   await world.seed08();

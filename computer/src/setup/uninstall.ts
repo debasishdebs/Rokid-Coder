@@ -45,14 +45,24 @@ export async function uninstall(ctx: SetupContext, options: { purge: boolean; ye
     .filter((dir): dir is string => Boolean(dir))
     .flatMap((dir) => [dir, path.dirname(dir)]);
   const pluginEnv = cliRunEnv(ctx.env, manifest?.clis ?? {});
+  let pluginFailed = false;
   for (const tool of TOOLS) {
     const cli = manifest?.clis[tool];
     if (!cli) continue;
     try {
       await removePlugin(createDriver(tool, cli.path, { home: ctx.home, env: pluginEnv }), roots);
     } catch (error) {
+      pluginFailed = true;
       ctx.io.write(`The ${tool} plugin could not be removed: ${error instanceof Error ? error.message : String(error)}\n`);
     }
+  }
+  // The manifest is what names the CLIs and bundles a retry needs, so nothing
+  // past this point may go while a registration still points into a bundle.
+  if (pluginFailed) {
+    ctx.io.write(
+      "Nothing else was removed, so the plugins can still be found and taken out: fix the problem above, then run rokid-setup uninstall again.\n",
+    );
+    return 1;
   }
   // 3
   const bin = path.join(programDir(ctx.home), "bin");
