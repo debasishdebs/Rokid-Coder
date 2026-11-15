@@ -2,7 +2,7 @@
 
 - **Status:** Proposed. Plan 6a T2, Step 1. Nothing else in T2 starts until the Codex review of
   this ADR says READY.
-- **Base:** `release/1.0.0` at `548576f4`. Every `file:line` below is at that commit. Paths
+- **Base:** `release/1.0.0` at `67dcfd48`. Every `file:line` below is at that commit. Paths
   without a module prefix are relative to `vendor/nexus/`.
 - **Requirements:** Plan 6a T2 `[FR 4, FR 5, FR 6]`, `[6a-R6]`, `[6a-R7]`, `[6a-R8]`, R12′.
 
@@ -1125,7 +1125,7 @@ file is still ≥ 50 % similar. So:
   `com.anezium.rokidbus.phone.BusHubService` in a new file `BusHubShellService.kt`. The old
   file's rename target is `phone-core/…/HubCore.kt`, which keeps most of its lines in their
   original order (the core members of §2 are cut out of the file, not rewritten). The
-  implementer checks `git diff -M --stat 548576f4 -- vendor/nexus` shows
+  implementer checks `git diff -M --stat 67dcfd48 -- vendor/nexus` shows
   `BusHubService.kt => HubCore.kt`; if it doesn't, the split is redone with fewer rewrites.
 - The glasses manifest moves; the shell's is new at a new path (§4).
 
@@ -1228,7 +1228,7 @@ T2 changes both workflows (controller ruling on Finding 5):
   (`build/test-results/testDebugUnitTest/*.xml`), maps it to `group|class#method|outcome` with
   `group` = `phone` for phone-hub ∪ phone-core and `glasses` for glasses-hub ∪ glasses-core, and
   compares it with `.github/suite-baselines/hubs.txt`, recorded from the pre-split run at
-  `548576f4`. It fails if a baseline identity is missing or changed outcome, or if a new
+  `67dcfd48`. It fails if a baseline identity is missing or changed outcome, or if a new
   identity does not pass. Only the 2 recorded `GlassesFileStoreTest` failures may differ, by
   name.
 - **SPP files unchanged**, a step in both workflows: `git hash-object` of

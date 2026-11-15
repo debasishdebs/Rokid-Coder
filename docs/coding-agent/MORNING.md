@@ -5,14 +5,14 @@ Everything here was deliberately NOT done overnight. Ruling R25 says outward act
 The full trace lives in the SDD ledgers under `.superpowers/sdd/*/progress.md` (git-ignored). Every decision is a `Ruling Rnn:` line there, with why and the cost if wrong. Every plan has its own branch (R26), so each one can be reverted on its own.
 
 ## Status at a glance
-- **Plan 1 (laptop, agentd + plugins):** DONE on branch `rokid-coder/plan-1`, head `98e50c91`. agentd tests pass 375/375.
+- **Plan 1 (laptop, agentd + plugins):** DONE on branch `rokid-coder/plan-1`, head `cd8b3298`. agentd tests pass 375/375.
   - Every task was reviewed, followed by a final whole-branch review and a Codex sol diff review.
   - A live smoke test ran on Haiku and luna: `docs/coding-agent/claude/plan/2026-11-14-plan-1-smoke.md`.
-- **Plan 2 (phone + glasses):** DONE (device-free) on branch `rokid-coder/plan-2`, head `6e7e0395`. Task 13 (phone-hub) is DEFERRED because `../CxrGlobal` is missing.
+- **Plan 2 (phone + glasses):** DONE (device-free) on branch `rokid-coder/plan-2`, head `152c6d1f`. Task 13 (phone-hub) is DEFERRED because `../CxrGlobal` is missing.
   - Tests: Agents plugin 345/345, agentd 441/441, shared 460, bus-client 151. glasses-hub is 974/976; the 2 failures are pre-existing `GlassesFileStoreTest` ones, not ours.
   - Every task was reviewed, with fix rounds where needed. Then a final whole-branch review, a Codex sol diff review, one fix wave and a re-review.
   - **Nothing has run on a device yet.** Work through `docs/coding-agent/claude/plan/2026-11-14-plan-2-device-checklist.md` (50 items).
-- **Plan 3 (`rk` launchers): DONE** on branch `rokid-coder/plan-3`, head `3cea4e47`, with 650/650 agentd tests passing.
+- **Plan 3 (`rk` launchers): DONE** on branch `rokid-coder/plan-3`, head `11dabc74`, with 650/650 agentd tests passing.
   - What it adds:
     - `rk claude`: a pty launcher with an exact session binding, safe typing, a pairing prompt and next-step hints
     - `rk codex`: plain codex plus a hint block
@@ -20,7 +20,7 @@ The full trace lives in the SDD ledgers under `.superpowers/sdd/*/progress.md` (
   - How it was checked: every task was reviewed, then a final opus review, a Codex sol diff review, one fix wave, a re-review, and the residual R165.
   - The live smoke on Haiku (never `/model`) is in `docs/coding-agent/claude/plan/2026-11-14-plan-3-smoke.md`.
 
-- **Plan 4 (morning feedback): DONE (device-free)** on branch `rokid-coder/plan-4`, head `8974d605` plus this docs commit.
+- **Plan 4 (morning feedback): DONE (device-free)** on branch `rokid-coder/plan-4`, head `52709882` plus this docs commit.
   - Tests the controller ran itself: agentd 672/672; Agents plugin 490 tests with 0 failures. Codex final check: all findings addressed.
   - Details, the open questions and the device checks are in the "Plan 4" section at the end.
 
@@ -108,7 +108,7 @@ They are recorded in every ledger and in `.superpowers/sdd/MASTER-HANDOFF.md`.
 - The Plan 3 spike left 2 empty Codex threads in daemon memory. They clear on the next daemon restart.
 - Pairing a new phone from inside a session opens a 2-minute window on the same Wi-Fi or Tailscale (R154). Verify it on the device.
 
-## Plan 4 (morning feedback), branch `rokid-coder/plan-4`, based on the plan-3 head `3a623c2c`
+## Plan 4 (morning feedback), branch `rokid-coder/plan-4`, based on the plan-3 head `2345187e`
 Plan: `docs/coding-agent/claude/plan/2026-11-14-plan-4-feedback.md`. It went through 4 Codex sol plan reviews until READY. Every review in Plan 4 was done by Codex (U14). Ledger and rulings R168–R200: `.superpowers/sdd/2026-11-14-plan-4-feedback/progress.md`.
 
 **What it adds:**

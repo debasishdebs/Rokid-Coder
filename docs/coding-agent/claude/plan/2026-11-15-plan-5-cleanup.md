@@ -1,7 +1,7 @@
 # Rokid-Coder Plan 5: Cleanup, per-kind sounds, OpenClaw
 
 **Goal:** Clear the logged minors from Plans 3–4, make the sound for each alert kind a phone setting (U19), and remove OpenClaw if that breaks nothing (U18).
-**Branch:** `rokid-coder/plan-5`, off the `rokid-coder/plan-4` head `36725512`. Tasks run in parallel worktrees (U15), followed by ONE Codex sol review and one fix wave.
+**Branch:** `rokid-coder/plan-5`, off the `rokid-coder/plan-4` head `ca0cfa9c`. Tasks run in parallel worktrees (U15), followed by ONE Codex sol review and one fix wave.
 **Spec:** the design doc plus the USER DECISIONS U1–U21 in `.superpowers/sdd/MASTER-HANDOFF.md`. Global constraints are the same as Plan 4 (`2026-11-14-plan-4-feedback.md`, "Global Constraints"):
 - local commits only
 - no Co-Authored-By
