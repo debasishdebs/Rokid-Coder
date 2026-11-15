@@ -108,7 +108,7 @@ jobs:
 
       # Includes the release gate, publish, version, upstream-sync and workflow checks.
       - name: Run the script tests
-        run: node --test "scripts/test/*.test.mjs"
+        run: node --test "scripts/test/*.test.mjs" "scripts/test/*.test.js"
 
       - name: Check the docs for secrets and full fingerprints
         run: node scripts/check-docs-secrets.mjs
