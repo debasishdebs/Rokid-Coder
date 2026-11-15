@@ -419,10 +419,136 @@ function Test-PlanItemPresent {
   }
 }
 
+function Get-ParameterValue {
+  <# One cmdlet parameter from a plan (a hashtable) or a recorded object (JSON): $null when absent. #>
+  param($Parameters, [Parameter(Mandatory = $true)][string]$Name)
+  if ($Parameters -is [Collections.IDictionary]) { if ($Parameters.Contains($Name)) { return $Parameters[$Name] } return $null }
+  Get-PropertyValue $Parameters $Name
+}
+
+function ConvertTo-Hashtable {
+  <# A recorded object's parameters, back into something New-NetFirewallRule @p can splat. #>
+  param($Object)
+  if ($Object -is [Collections.IDictionary]) { return $Object }
+  $table = @{}
+  if ($null -ne $Object) { foreach ($property in $Object.PSObject.Properties) { $table[$property.Name] = $property.Value } }
+  $table
+}
+
+function ConvertTo-FilterValue {
+  <#
+    One filter as a comparable string: the sorted, lowercased set, 'any' when empty.
+    -Address puts each IPv4 in its network/length form, whether Windows shows it as
+    a mask (100.64.0.0/255.192.0.0), a length or a bare host; keywords stay as words.
+  #>
+  param($Values, [switch]$Address, [switch]$Flags)
+  $list = @(foreach ($value in @($Values)) {
+      foreach ($part in $(if ($Flags) { "$value" -split '\s*,\s*' } else { @("$value") })) {
+        $text = $part.Trim()
+        if ($text -eq '') { continue }
+        if ($Address -and $text -match '^(\d{1,3}(?:\.\d{1,3}){3})(?:/(\d{1,3}(?:\.\d{1,3}){3}|\d{1,2}))?$') {
+          $length = 32
+          if ($Matches[2] -and $Matches[2].Contains('.')) {
+            $length = 0
+            foreach ($byte in ([Net.IPAddress]::Parse($Matches[2])).GetAddressBytes()) { $length += ([Convert]::ToString($byte, 2) -replace '0', '').Length }
+          } elseif ($Matches[2]) { $length = [int]$Matches[2] }
+          ConvertTo-NetworkPrefix -Address $Matches[1] -PrefixLength $length
+        } else { $text.ToLowerInvariant() }
+      }
+    })
+  if ($list.Count -eq 0) { return 'any' }
+  (@($list | Sort-Object -Unique) -join ',')
+}
+
+function ConvertTo-ProtocolValue {
+  param($Value)
+  switch ("$Value".Trim().ToLowerInvariant()) { '6' { 'tcp' } '17' { 'udp' } '' { 'any' } default { $_ } }
+}
+
+function Get-FirewallRuleFilter {
+  <# A host rule's port and address filters, as Windows enforces them. #>
+  param([Parameter(Mandatory = $true)]$Rule)
+  [pscustomobject]@{ Port = ($Rule | Get-NetFirewallPortFilter); Address = ($Rule | Get-NetFirewallAddressFilter) }
+}
+
+function Get-ExpectedRuleFilter {
+  <# What a plan rule must look like once Windows enforces it, in Get-EffectiveRuleFilter's terms. #>
+  param([Parameter(Mandatory = $true)]$Item)
+  $p = $Item.Parameters
+  $filter = [ordered]@{
+    Enabled   = 'true'
+    Direction = ConvertTo-FilterValue (Get-ParameterValue $p 'Direction')
+    Action    = ConvertTo-FilterValue (Get-ParameterValue $p 'Action')
+    Protocol  = ConvertTo-ProtocolValue (Get-ParameterValue $p 'Protocol')
+  }
+  if ($Item.Kind -eq 'hyperv') {
+    $filter.LocalPorts = ConvertTo-FilterValue (Get-ParameterValue $p 'LocalPorts')
+    $filter.RemotePorts = ConvertTo-FilterValue (Get-ParameterValue $p 'RemotePorts')
+    $filter.RemoteAddresses = ConvertTo-FilterValue (Get-ParameterValue $p 'RemoteAddresses') -Address
+    $filter.VMCreatorId = ConvertTo-FilterValue (Get-ParameterValue $p 'VMCreatorId')
+  } else {
+    $filter.LocalPorts = ConvertTo-FilterValue (Get-ParameterValue $p 'LocalPort')
+    $filter.RemotePorts = ConvertTo-FilterValue (Get-ParameterValue $p 'RemotePort')
+    $filter.RemoteAddresses = ConvertTo-FilterValue (Get-ParameterValue $p 'RemoteAddress') -Address
+    $filter.Profile = ConvertTo-FilterValue (Get-ParameterValue $p 'Profile') -Flags
+  }
+  $filter
+}
+
+function Get-EffectiveRuleFilter {
+  <# The rule of the plan item's name as Windows enforces it (enabled, direction, protocol, ports, scope); $null when there is none. #>
+  param([Parameter(Mandatory = $true)]$Item)
+  if ($Item.Kind -eq 'hyperv') {
+    $rule = Get-NetFirewallHyperVRule -Name $Item.Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $rule) { return $null }
+    return [ordered]@{
+      Enabled         = ConvertTo-FilterValue (Get-PropertyValue $rule 'Enabled')
+      Direction       = ConvertTo-FilterValue (Get-PropertyValue $rule 'Direction')
+      Action          = ConvertTo-FilterValue (Get-PropertyValue $rule 'Action')
+      Protocol        = ConvertTo-ProtocolValue (Get-PropertyValue $rule 'Protocol')
+      LocalPorts      = ConvertTo-FilterValue (Get-PropertyValue $rule 'LocalPorts')
+      RemotePorts     = ConvertTo-FilterValue (Get-PropertyValue $rule 'RemotePorts')
+      RemoteAddresses = ConvertTo-FilterValue (Get-PropertyValue $rule 'RemoteAddresses') -Address
+      VMCreatorId     = ConvertTo-FilterValue (Get-PropertyValue $rule 'VMCreatorId')
+    }
+  }
+  $rule = Get-NetFirewallRule -Name $Item.Name -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $rule) { return $null }
+  $filters = Get-FirewallRuleFilter -Rule $rule
+  [ordered]@{
+    Enabled         = ConvertTo-FilterValue (Get-PropertyValue $rule 'Enabled')
+    Direction       = ConvertTo-FilterValue (Get-PropertyValue $rule 'Direction')
+    Action          = ConvertTo-FilterValue (Get-PropertyValue $rule 'Action')
+    Protocol        = ConvertTo-ProtocolValue (Get-PropertyValue $filters.Port 'Protocol')
+    LocalPorts      = ConvertTo-FilterValue (Get-PropertyValue $filters.Port 'LocalPort')
+    RemotePorts     = ConvertTo-FilterValue (Get-PropertyValue $filters.Port 'RemotePort')
+    RemoteAddresses = ConvertTo-FilterValue (Get-PropertyValue $filters.Address 'RemoteAddress') -Address
+    Profile         = ConvertTo-FilterValue (Get-PropertyValue $rule 'Profile') -Flags
+  }
+}
+
+function Get-PlanItemDrift {
+  <#
+    How the machine differs from one plan item: @('absent'), the names of the filters
+    that differ (a rule disabled, of the wrong direction, protocol, port or scope, or
+    a Hyper-V scope from before the host's networks changed), or nothing when it matches.
+  #>
+  param([Parameter(Mandatory = $true)]$Item)
+  if ($Item.Kind -eq 'portproxy') { if (Test-PlanItemPresent -Item $Item) { return } return 'absent' }
+  $actual = Get-EffectiveRuleFilter -Item $Item
+  if (-not $actual) { return 'absent' }
+  $expected = Get-ExpectedRuleFilter -Item $Item
+  foreach ($key in $expected.Keys) { if ($expected[$key] -ne $actual[$key]) { $key } }
+}
+
 function Test-MachineRuleSet {
-  <# Preflight's firewall_rules: is the mode's whole set present? Returns the missing names. #>
+  <# Preflight's firewall_rules: does the machine enforce the mode's whole set? Returns each missing or changed one. #>
   param([Parameter(Mandatory = $true)][ValidateSet('mirrored', 'nat')][string]$Mode)
-  @(Get-MachinePlan -Mode $Mode | Where-Object { -not (Test-PlanItemPresent -Item $_) } | ForEach-Object { $_.Name })
+  @(foreach ($item in Get-MachinePlan -Mode $Mode) {
+      $drift = @(Get-PlanItemDrift -Item $item)
+      if ($drift.Count -eq 0) { continue }
+      if ($drift -contains 'absent') { $item.Name } else { "$($item.Name) ($($drift -join ', ') changed)" }
+    })
 }
 
 function Read-MachineState {
@@ -435,7 +561,54 @@ function Read-MachineState {
 function Write-MachineState {
   param([Parameter(Mandatory = $true)][string]$StatePath, [Parameter(Mandatory = $true)]$State)
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $StatePath) | Out-Null
-  Write-Utf8File -Path $StatePath -Content (ConvertTo-Json -InputObject $State -Depth 6)
+  Write-Utf8File -Path $StatePath -Content (ConvertTo-Json -InputObject $State -Depth 8)
+}
+
+function New-PlanObject {
+  <# Creates one firewall rule, Hyper-V rule or port proxy from its parameters; returns its ids. #>
+  param([Parameter(Mandatory = $true)][string]$Kind, [Parameter(Mandatory = $true)]$Parameters)
+  $p = ConvertTo-Hashtable $Parameters
+  switch ($Kind) {
+    'firewall' { $created = New-NetFirewallRule @p; @([string]$created.Name) }
+    'hyperv' { $created = New-NetFirewallHyperVRule @p; @([string]$created.Name) }
+    'portproxy' {
+      $run = Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'add', 'v4tov4', "listenaddress=$($p.ListenAddress)", "listenport=$($p.ListenPort)", "connectaddress=$($p.ConnectAddress)", "connectport=$($p.ConnectPort)")
+      if ($run.ExitCode -ne 0) { throw "netsh portproxy add failed ($($run.ExitCode))" }
+      @("$($p.ListenAddress):$($p.ListenPort)->$($p.ConnectAddress):$($p.ConnectPort)")
+    }
+  }
+}
+
+function Remove-PlanObject {
+  <# Removes one recorded object by its name (a port proxy by its exact entry), and nothing else. #>
+  param([Parameter(Mandatory = $true)]$Object)
+  switch ($Object.kind) {
+    'firewall' { Remove-NetFirewallRule -Name $Object.name -ErrorAction SilentlyContinue }
+    'hyperv' { Remove-NetFirewallHyperVRule -Name $Object.name -ErrorAction SilentlyContinue }
+    'portproxy' {
+      $p = $Object.parameters
+      $present = Get-PortProxyEntries | Where-Object { $_.ListenAddress -eq $p.ListenAddress -and $_.ListenPort -eq [int]$p.ListenPort -and $_.ConnectAddress -eq $p.ConnectAddress -and $_.ConnectPort -eq [int]$p.ConnectPort }
+      if ($present) { Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'delete', 'v4tov4', "listenaddress=$($p.ListenAddress)", "listenport=$($p.ListenPort)") | Out-Null }
+    }
+  }
+}
+
+function Undo-MachineObject {
+  <#
+    Takes one recorded object back out: removes it and, when it replaced an earlier
+    run's rule, re-creates that rule from its recorded parameters and records it
+    again. Returns the state without (or with the restored) entry.
+  #>
+  param([Parameter(Mandatory = $true)]$State, [Parameter(Mandatory = $true)]$Object)
+  Remove-PlanObject -Object $Object
+  $others = @(@($State.objects) | Where-Object { -not ($_.kind -eq $Object.kind -and $_.name -eq $Object.name) })
+  $previous = Get-PropertyValue $Object 'previous'
+  if ($previous) {
+    $previous.ids = @(New-PlanObject -Kind $previous.kind -Parameters $previous.parameters)
+    $others += $previous
+  }
+  $State.objects = $others
+  $State
 }
 
 function Assert-MachineStatePath {
@@ -448,8 +621,14 @@ function Assert-MachineStatePath {
 
 function Invoke-MachineApply {
   <#
-    Creates each missing object of the mode's plan and records it in machine-state.json
-    with this run's id, so a failed install reverts exactly what this run created.
+    Reconciles the machine with the mode's plan, recording each change in
+    machine-state.json with this run's id before making it:
+    - a missing object is created;
+    - a product-owned rule (one machine-state.json records) that Windows enforces
+      differently (disabled, another direction, protocol, port or scope, or the
+      Hyper-V scope of networks the host has left) is replaced, its earlier record
+      kept as `previous`, so reverting this run re-creates it exactly;
+    - a same-named rule nobody recorded that differs is never touched: Apply stops.
   #>
   param(
     [Parameter(Mandatory = $true)][ValidateSet('mirrored', 'nat')][string]$Mode,
@@ -458,25 +637,38 @@ function Invoke-MachineApply {
   )
   Assert-MachineStatePath -StatePath $StatePath
   $state = Read-MachineState -StatePath $StatePath
-  foreach ($item in Get-MachinePlan -Mode $Mode) {
-    if (Test-PlanItemPresent -Item $item) { continue }
-    $p = $item.Parameters
-    switch ($item.Kind) {
-      'firewall' { $created = New-NetFirewallRule @p; $ids = @([string]$created.Name) }
-      'hyperv' { $created = New-NetFirewallHyperVRule @p; $ids = @([string]$created.Name) }
-      'portproxy' {
-        $run = Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'add', 'v4tov4', "listenaddress=$($p.ListenAddress)", "listenport=$($p.ListenPort)", "connectaddress=$($p.ConnectAddress)", "connectport=$($p.ConnectPort)")
-        if ($run.ExitCode -ne 0) { throw "netsh portproxy add failed ($($run.ExitCode))" }
-        $ids = @("$($p.ListenAddress):$($p.ListenPort)->$($p.ConnectAddress):$($p.ConnectPort)")
+  # Every item is checked before anything changes.
+  $work = @(foreach ($item in Get-MachinePlan -Mode $Mode) {
+      $drift = @(Get-PlanItemDrift -Item $item)
+      if ($drift.Count -eq 0) { continue }
+      $owned = @($state.objects) | Where-Object { $_.kind -eq $item.Kind -and $_.name -eq $item.Name } | Select-Object -First 1
+      $replace = $drift -notcontains 'absent'
+      if ($replace -and -not $owned) {
+        throw "A firewall rule named $($item.Name) exists that Rokid Coder did not create, and it differs from what Rokid Coder needs ($($drift -join ', ')). Remove it, then apply again."
       }
+      [pscustomobject]@{ Item = $item; Owned = $owned; Replace = $replace }
+    })
+  foreach ($step in $work) {
+    $item = $step.Item
+    $previous = $null
+    if ($step.Replace) {
+      $previous = [pscustomobject]@{ kind = $step.Owned.kind; name = $step.Owned.name; ids = @($step.Owned.ids); runId = $step.Owned.runId; mode = $step.Owned.mode; parameters = $step.Owned.parameters }
     }
-    $state.objects = @($state.objects) + [pscustomobject]@{ kind = $item.Kind; name = $item.Name; ids = $ids; runId = $RunId; mode = $Mode; parameters = $p }
+    $entry = [pscustomobject]@{ kind = $item.Kind; name = $item.Name; ids = @(); runId = $RunId; mode = $Mode; parameters = $item.Parameters; previous = $previous }
+    $state.objects = @(@($state.objects) | Where-Object { -not ($_.kind -eq $item.Kind -and $_.name -eq $item.Name) }) + $entry
+    Write-MachineState -StatePath $StatePath -State $state
+    if ($step.Replace) { Remove-PlanObject -Object $step.Owned }
+    $entry.ids = @(New-PlanObject -Kind $item.Kind -Parameters $item.Parameters)
     Write-MachineState -StatePath $StatePath -State $state
   }
 }
 
 function Invoke-MachineRevert {
-  <# Removes what machine-state.json records (one run's, or -All), and nothing it does not. #>
+  <#
+    Removes what machine-state.json records, and nothing it does not: one run's
+    objects, each replaced rule re-created as the earlier run recorded it; or -All,
+    every recorded object.
+  #>
   param(
     [Parameter(Mandatory = $true)][string]$StatePath,
     [string]$RunId,
@@ -485,20 +677,15 @@ function Invoke-MachineRevert {
   Assert-MachineStatePath -StatePath $StatePath
   if (-not $All -and -not $RunId) { throw 'Revert needs -RunId or -All' }
   $state = Read-MachineState -StatePath $StatePath
-  $kept = @()
-  foreach ($object in @($state.objects)) {
-    if (-not $All -and $object.runId -ne $RunId) { $kept += $object; continue }
-    switch ($object.kind) {
-      'firewall' { Remove-NetFirewallRule -Name $object.name -ErrorAction SilentlyContinue }
-      'hyperv' { Remove-NetFirewallHyperVRule -Name $object.name -ErrorAction SilentlyContinue }
-      'portproxy' {
-        $p = $object.parameters
-        $present = Get-PortProxyEntries | Where-Object { $_.ListenAddress -eq $p.ListenAddress -and $_.ListenPort -eq [int]$p.ListenPort -and $_.ConnectAddress -eq $p.ConnectAddress -and $_.ConnectPort -eq [int]$p.ConnectPort }
-        if ($present) { Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'delete', 'v4tov4', "listenaddress=$($p.ListenAddress)", "listenport=$($p.ListenPort)") | Out-Null }
-      }
+  if ($All) {
+    foreach ($object in @($state.objects)) { Remove-PlanObject -Object $object }
+    $state.objects = @()
+  } else {
+    foreach ($object in @(@($state.objects) | Where-Object { $_.runId -eq $RunId })) {
+      $state = Undo-MachineObject -State $state -Object $object
+      Write-MachineState -StatePath $StatePath -State $state
     }
   }
-  $state.objects = $kept
   Write-MachineState -StatePath $StatePath -State $state
 }
 
@@ -647,7 +834,7 @@ function Invoke-Preflight {
     $items.Add((New-PreflightItem 'wsl_localhost_forwarding' ("$forwarding" -ine 'false') "localhostForwarding=$(if ($null -eq $forwarding) { '(default true)' } else { $forwarding })" 'Let the installer set localhostForwarding=true in .wslconfig (WSL restarts)' -Action 'wslconfig'))
   }
   $missing = @(Test-MachineRuleSet -Mode $Mode)
-  $items.Add((New-PreflightItem 'firewall_rules' ($missing.Count -eq 0) $(if ($missing.Count) { "missing: $($missing -join ', ')" } else { 'present' }) 'Apply them (administrator)' -Action 'machine'))
+  $items.Add((New-PreflightItem 'firewall_rules' ($missing.Count -eq 0) $(if ($missing.Count) { "missing or changed: $($missing -join ', ')" } else { 'present' }) 'Apply them (administrator)' -Action 'machine'))
   $ports = @($script:HttpPort, $script:WssPort) + $(if ($Mode -eq 'nat') { @($script:NatPort) } else { @() })
   $bundleRoot = "$($facts.Home)/.local/share/rokid-coder/"
   $proxyRecorded = [bool](@((Read-MachineState -StatePath (Get-RokidPaths).MachineState).objects) | Where-Object { $_.kind -eq 'portproxy' })

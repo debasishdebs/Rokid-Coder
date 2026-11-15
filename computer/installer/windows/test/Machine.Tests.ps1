@@ -125,11 +125,85 @@ Describe 'the machine plan' {
     { Invoke-MachineApply -Mode nat -StatePath (Join-Path $env:USERPROFILE 'state.json') -RunId 'x' } | Should -Throw '*ProgramData*'
   }
 
+  It 'firewall_check_compares_effective_filters_not_names' {
+    # How Windows hands a matching host rule back: enum text, the tailnet as a mask.
+    $script:hostRule = @{ Enabled = 'True'; Direction = 'Inbound'; Action = 'Allow'; Profile = 'Domain, Private' }
+    $script:portFilter = @{ Protocol = 'TCP'; LocalPort = @('8794'); RemotePort = @('Any') }
+    $script:addressFilter = @{ RemoteAddress = @('LocalSubnet', '100.64.0.0/255.192.0.0') }
+    Mock -ModuleName RokidCoder Get-NetFirewallRule { [pscustomobject](@{ Name = $Name } + $script:hostRule) }
+    Mock -ModuleName RokidCoder Get-FirewallRuleFilter { [pscustomobject]@{ Port = [pscustomobject]$script:portFilter; Address = [pscustomobject]$script:addressFilter } }
+    Mock -ModuleName RokidCoder Invoke-Native { [pscustomobject]@{ ExitCode = 0; Output = @('0.0.0.0        8794        127.0.0.1       8792') } }
+    $proxy = Get-MachinePlan -Mode nat | Where-Object Name -eq 'RokidCoder-proxy'
+    @(Get-PlanItemDrift -Item $proxy) | Should -BeNullOrEmpty
+    Test-MachineRuleSet -Mode nat | Should -BeNullOrEmpty
+    # Each enforced filter that differs fails the check, by name; a present name alone never passes it.
+    $cases = @(
+      @{ Field = 'Enabled'; Change = { $script:hostRule.Enabled = 'False' } }
+      @{ Field = 'Direction'; Change = { $script:hostRule.Direction = 'Outbound' } }
+      @{ Field = 'Action'; Change = { $script:hostRule.Action = 'Block' } }
+      @{ Field = 'Protocol'; Change = { $script:portFilter.Protocol = 'UDP' } }
+      @{ Field = 'LocalPorts'; Change = { $script:portFilter.LocalPort = @('8795') } }
+      @{ Field = 'RemoteAddresses'; Change = { $script:addressFilter.RemoteAddress = @('Any') } }
+      @{ Field = 'Profile'; Change = { $script:hostRule.Profile = 'Any' } }
+    )
+    foreach ($case in $cases) {
+      $saved = @{ rule = $script:hostRule.Clone(); port = $script:portFilter.Clone(); address = $script:addressFilter.Clone() }
+      & $case.Change
+      @(Get-PlanItemDrift -Item $proxy) | Should -Be @($case.Field) -Because $case.Field
+      Test-MachineRuleSet -Mode nat | Should -Be @("RokidCoder-proxy ($($case.Field) changed)")
+      $script:hostRule = $saved.rule; $script:portFilter = $saved.port; $script:addressFilter = $saved.address
+    }
+    # A Hyper-V rule still scoped to a network the host has left: its scope is stale.
+    Mock -ModuleName RokidCoder Get-NetFirewallHyperVRule {
+      [pscustomobject]@{ Name = $Name; Enabled = 'True'; Direction = 'Inbound'; Action = 'Allow'; Protocol = 'TCP'; LocalPorts = @('8792'); RemotePorts = @('Any'); RemoteAddresses = @('192.168.1.0/255.255.255.0', '100.64.0.0/255.192.0.0'); VMCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' }
+    }
+    $wss = { param($scope) Get-MachinePlan -Mode mirrored -HyperVScope $scope | Where-Object Name -eq 'RokidCoder-wss' }
+    @(Get-PlanItemDrift -Item (& $wss @('192.168.1.0/24', '100.64.0.0/10'))) | Should -BeNullOrEmpty
+    @(Get-PlanItemDrift -Item (& $wss @('10.20.0.0/16', '100.64.0.0/10'))) | Should -Be @('RemoteAddresses')
+    # Absent stays absent.
+    Mock -ModuleName RokidCoder Get-NetFirewallRule { $null }
+    @(Get-PlanItemDrift -Item $proxy) | Should -Be @('absent')
+    ConvertTo-FilterValue @('100.64.0.0/10', 'LocalSubnet', '192.168.1.40') -Address | Should -Be '100.64.0.0/10,192.168.1.40/32,localsubnet'
+  }
+
+  It 'repair_reconciles_owned_rules_and_revert_restores_them_exactly' {
+    $state = (Get-RokidPaths).MachineState
+    $old = @('192.168.1.0/24', '100.64.0.0/10')
+    $new = @('10.20.0.0/16', '100.64.0.0/10')
+    $earlier = @(Get-MachinePlan -Mode mirrored -HyperVScope $old | Where-Object Kind -eq 'hyperv' | ForEach-Object {
+        [pscustomobject]@{ kind = 'hyperv'; name = $_.Name; ids = @($_.Name); runId = 'install'; mode = 'mirrored'; parameters = $_.Parameters }
+      })
+    Write-MachineState -StatePath $state -State ([pscustomobject]@{ schema = 1; objects = $earlier })
+    # The host moved to 10.20.0.0/16; its host rules still match, the Hyper-V ones carry the old scope.
+    Mock -ModuleName RokidCoder Get-HyperVScope { $new }
+    Mock -ModuleName RokidCoder Get-PlanItemDrift { if ($Item.Kind -eq 'hyperv') { 'RemoteAddresses' } }
+    $script:created = New-Object System.Collections.Generic.List[object]
+    Mock -ModuleName RokidCoder New-NetFirewallHyperVRule { $script:created.Add(@{ Name = $Name; RemoteAddresses = @($RemoteAddresses) }); [pscustomobject]@{ Name = $Name } }
+    Mock -ModuleName RokidCoder Remove-NetFirewallHyperVRule { }
+    Mock -ModuleName RokidCoder New-NetFirewallRule { throw 'the matching host rules are left alone' }
+    Invoke-MachineApply -Mode mirrored -StatePath $state -RunId 'repair'
+    Should -Invoke -ModuleName RokidCoder Remove-NetFirewallHyperVRule -Times 2 -Exactly
+    @($script:created | ForEach-Object { "$($_.Name)=$($_.RemoteAddresses -join ',')" }) | Should -Be @('RokidCoder-wss=10.20.0.0/16,100.64.0.0/10', 'RokidCoder-discovery=10.20.0.0/16,100.64.0.0/10')
+    $recorded = @((Read-MachineState -StatePath $state).objects)
+    @($recorded | ForEach-Object { "$($_.name):$($_.runId)<-$($_.previous.runId)" }) | Should -Be @('RokidCoder-wss:repair<-install', 'RokidCoder-discovery:repair<-install')
+    # A failed Repair reverts its run: the earlier rules come back as recorded, scope and all.
+    $script:created.Clear()
+    Invoke-MachineRevert -StatePath $state -RunId 'repair'
+    @($script:created | ForEach-Object { "$($_.Name)=$($_.RemoteAddresses -join ',')" }) | Should -Be @('RokidCoder-wss=192.168.1.0/24,100.64.0.0/10', 'RokidCoder-discovery=192.168.1.0/24,100.64.0.0/10')
+    @((Read-MachineState -StatePath $state).objects | ForEach-Object { "$($_.name):$($_.runId)" }) | Should -Be @('RokidCoder-wss:install', 'RokidCoder-discovery:install')
+    # A changed rule nobody recorded is never replaced: Apply stops before touching anything.
+    Write-MachineState -StatePath $state -State ([pscustomobject]@{ schema = 1; objects = @() })
+    $script:created.Clear()
+    { Invoke-MachineApply -Mode mirrored -StatePath $state -RunId 'other' } | Should -Throw '*did not create*'
+    $script:created | Should -BeNullOrEmpty
+    @((Read-MachineState -StatePath $state).objects) | Should -BeNullOrEmpty
+  }
+
   It 'failed_install_reverts_only_this_runs_machine_changes' {
     $state = (Get-RokidPaths).MachineState
     # An earlier install created the mirrored rules; this run adds NAT's.
     Write-MachineState -StatePath $state -State ([pscustomobject]@{ schema = 1; objects = @([pscustomobject]@{ kind = 'hyperv'; name = 'RokidCoder-wss'; ids = @('RokidCoder-wss'); runId = 'earlier'; mode = 'mirrored'; parameters = @{} }) })
-    Mock -ModuleName RokidCoder Test-PlanItemPresent { $false }
+    Mock -ModuleName RokidCoder Get-PlanItemDrift { 'absent' }
     Mock -ModuleName RokidCoder New-NetFirewallRule { [pscustomobject]@{ Name = $Name } }
     Mock -ModuleName RokidCoder Invoke-Native {
       if ($ArgumentList -contains 'show') { return [pscustomobject]@{ ExitCode = 0; Output = @('', '0.0.0.0        8794        127.0.0.1       8792') } }
@@ -165,5 +239,27 @@ Describe 'the machine plan' {
     Should -Invoke -ModuleName RokidCoder Invoke-Native -Times 1 -Exactly -ParameterFilter { $ArgumentList -contains 'delete' }
     Should -Invoke -ModuleName RokidCoder Invoke-Native -Times 0 -Exactly -ParameterFilter { $ArgumentList -contains 'listenport=9000' }
     @((Read-MachineState -StatePath $state).objects) | Should -BeNullOrEmpty
+  }
+}
+
+Describe 'firewall filters on the hosted runner, for real' {
+  It 'effective_filters_read_back_from_a_real_host_rule' {
+    # The property names and the address form Get-EffectiveRuleFilter reads, from a rule Windows really holds.
+    $p = (Get-MachinePlan -Mode nat | Where-Object Name -eq 'RokidCoder-proxy').Parameters.Clone()
+    $p.Name = "RokidCoder-ci-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $p.DisplayName = 'Rokid Coder CI filter check'
+    $p.Group = 'Rokid Coder CI'
+    $item = [pscustomobject]@{ Kind = 'firewall'; Name = $p.Name; Cmdlet = 'New-NetFirewallRule'; Parameters = $p }
+    try {
+      New-NetFirewallRule @p | Out-Null
+      @(Get-PlanItemDrift -Item $item) | Should -BeNullOrEmpty -Because "Windows hands back: $((Get-EffectiveRuleFilter -Item $item | ConvertTo-Json -Compress))"
+      Disable-NetFirewallRule -Name $p.Name
+      @(Get-PlanItemDrift -Item $item) | Should -Be @('Enabled')
+      Enable-NetFirewallRule -Name $p.Name
+      Set-NetFirewallRule -Name $p.Name -RemoteAddress 'Any'
+      @(Get-PlanItemDrift -Item $item) | Should -Be @('RemoteAddresses')
+    } finally {
+      Remove-NetFirewallRule -Name $p.Name -ErrorAction SilentlyContinue
+    }
   }
 }
