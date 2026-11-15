@@ -109,7 +109,7 @@ jobs:
       - name: Run the node tests of the Windows installer
         shell: bash
         working-directory: computer
-        run: node --test installer/windows/test/netprobe.test.js
+        run: node --test installer/windows/test/netprobe.test.js installer/windows/test/glibc.test.js
 
       - name: Install the pinned NSIS
         run: |

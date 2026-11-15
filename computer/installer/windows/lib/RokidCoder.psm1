@@ -26,6 +26,8 @@ $script:Tailnet = '100.64.0.0/10'
 # metadata test and gate W3 show it does, the Hyper-V rules carry the concrete Private/Domain prefixes.
 $script:HyperVTakesLocalSubnet = $false
 $script:RelayImages = @('wslrelay.exe', 'wslhost.exe', 'vmmem', 'vmmemwsl', 'vmwp.exe')
+# `getconf GNU_LIBC_VERSION` prints "glibc 2.35": two components, rarely three. wsl-requirements.json's floor is the bare "2.35".
+$script:GlibcPattern = '^\s*(?:glibc\s+)?(\d+)\.(\d+)(?:\.(\d+))?\s*$'
 $script:Root = Split-Path -Parent $PSScriptRoot
 
 # ---------------------------------------------------------------- the native boundary
@@ -123,6 +125,15 @@ function ConvertTo-WslVersion {
   $null
 }
 
+function ConvertTo-GlibcVersion {
+  <# "glibc 2.39" (getconf's own output) or "2.35" as major.minor.patch, the patch 0 when absent; $null for anything else. #>
+  param([string]$Text)
+  if ("$Text" -match $script:GlibcPattern) {
+    return [version]('{0}.{1}.{2}' -f $Matches[1], $Matches[2], $(if ($Matches[3]) { $Matches[3] } else { 0 }))
+  }
+  $null
+}
+
 function Get-FileProductVersion {
   param([Parameter(Mandatory = $true)][string]$Path)
   (Get-Item -LiteralPath $Path).VersionInfo.ProductVersion
@@ -206,7 +217,7 @@ function Get-DistroFacts {
     }
   }
   [pscustomobject]@{
-    Glibc  = $(if ($glibc.ExitCode -eq 0) { ConvertTo-WslVersion ("$($glibc.Output[0])" -replace '^glibc\s+', '') } else { $null })
+    Glibc  = $(if ($glibc.ExitCode -eq 0 -and $glibc.Output.Count -gt 0) { ConvertTo-GlibcVersion "$($glibc.Output[0])" } else { $null })
     User   = $name
     Uid    = $(if ($uid.ExitCode -eq 0) { [int]"$($uid.Output[0])".Trim() } else { $null })
     Home   = $linuxHome
@@ -622,7 +633,9 @@ function Invoke-Preflight {
   }
   $items.Add((New-PreflightItem 'wsl_distro' ($distro.Version -eq 2) "$($distro.Name) (WSL $($distro.Version))" "Convert it: wsl --set-version $($distro.Name) 2"))
   $facts = Get-DistroFacts -Distro $distro.Name
-  $items.Add((New-PreflightItem 'distro_glibc' ([bool]($facts.Glibc -and $facts.Glibc -ge (ConvertTo-WslVersion $Requirements.glibcMin))) "glibc $($facts.Glibc)" 'Use Ubuntu 22.04 or later'))
+  $glibcMin = ConvertTo-GlibcVersion $Requirements.glibcMin
+  if (-not $glibcMin) { throw "wsl-requirements.json: glibcMin '$($Requirements.glibcMin)' is not a version" }
+  $items.Add((New-PreflightItem 'distro_glibc' ([bool]($facts.Glibc -and $facts.Glibc -ge $glibcMin)) $(if ($facts.Glibc) { "glibc $($facts.Glibc.Major).$($facts.Glibc.Minor)" } else { 'glibc not found' }) "Use Ubuntu 22.04 or later (glibc $($Requirements.glibcMin))"))
   $items.Add((New-PreflightItem 'distro_user' ([bool]($facts.User -and $facts.Uid -ne 0)) "default user $($facts.User) (uid $($facts.Uid))" "In the distro: sudo adduser <name>; sudo usermod -aG sudo <name>; then in Windows: $($distro.Name) config --default-user <name>"))
   $public = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object { $_.NetworkCategory -eq 'Public' })
   $items.Add((New-PreflightItem 'network_profile' ($public.Count -eq 0) $(if ($public.Count) { "Public: $(($public | ForEach-Object { $_.Name }) -join ', ')" } else { 'Private or Domain' }) 'Settings > Network & internet > (your network) > Private network'))

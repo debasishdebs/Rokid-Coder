@@ -86,7 +86,7 @@ Describe 'networking' {
     Write-Utf8File -Path $config -Content "[wsl2]`r`nlocalhostForwarding=false`r`nprocessors=4`r`n"
     Mock -ModuleName RokidCoder Get-WindowsBuild { 22631 }
     Mock -ModuleName RokidCoder Get-LxssDistros { @([pscustomobject]@{ Guid = '{g}'; Name = 'Ubuntu'; Version = 2; Default = $true }) }
-    Mock -ModuleName RokidCoder Get-DistroFacts { [pscustomobject]@{ Glibc = [version]'2.39.0.0'; User = 'zoe'; Uid = 1000; Home = '/home/zoe'; FreeMB = 50000 } }
+    Mock -ModuleName RokidCoder Get-DistroFacts { [pscustomobject]@{ Glibc = (ConvertTo-GlibcVersion 'glibc 2.39'); User = 'zoe'; Uid = 1000; Home = '/home/zoe'; FreeMB = 50000 } }
     Mock -ModuleName RokidCoder Test-MachineRuleSet { @() }
     Mock -ModuleName RokidCoder Get-HostListeners { @() }
     Mock -ModuleName RokidCoder Get-DistroListeners { @() }

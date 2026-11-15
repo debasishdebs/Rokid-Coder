@@ -2,11 +2,12 @@ BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 
   function Set-HealthyMachine {
+    param([switch]$RealDistroFacts)
     Mock -ModuleName RokidCoder Get-WindowsBuild { 22631 }
     Mock -ModuleName RokidCoder Get-WslExePaths { [pscustomobject]@{ Store = 'C:\Program Files\WSL\wsl.exe'; Inbox = 'C:\Windows\System32\wsl.exe' } }
     Mock -ModuleName RokidCoder Get-WslVersionInfo { [pscustomobject]@{ Version = [version]'2.3.26.0'; Source = 'file' } }
     Mock -ModuleName RokidCoder Get-LxssDistros { @([pscustomobject]@{ Guid = '{g}'; Name = 'Ubuntu'; Version = 2; Default = $true }) }
-    Mock -ModuleName RokidCoder Get-DistroFacts { [pscustomobject]@{ Glibc = [version]'2.39.0.0'; User = 'zoe'; Uid = 1000; Home = '/home/zoe'; FreeMB = 50000 } }
+    if (-not $RealDistroFacts) { Mock -ModuleName RokidCoder Get-DistroFacts { [pscustomobject]@{ Glibc = (ConvertTo-GlibcVersion 'glibc 2.39'); User = 'zoe'; Uid = 1000; Home = '/home/zoe'; FreeMB = 50000 } } }
     Mock -ModuleName RokidCoder Get-NetConnectionProfile { [pscustomobject]@{ Name = 'Home'; NetworkCategory = 'Private'; InterfaceIndex = 5 } }
     Mock -ModuleName RokidCoder Get-EffectiveNetworkingMode { 'mirrored' }
     Mock -ModuleName RokidCoder Get-WslConfigValue { $null }
@@ -37,7 +38,7 @@ Describe 'preflight' {
     Test-PreflightPassed -Result $mirrored | Should -BeTrue
     # And each one fails, with its fix shown, when its requirement is not met.
     Mock -ModuleName RokidCoder Get-WindowsBuild { 19045 }
-    Mock -ModuleName RokidCoder Get-DistroFacts { [pscustomobject]@{ Glibc = [version]'2.31.0.0'; User = 'root'; Uid = 0; Home = '/root'; FreeMB = 10 } }
+    Mock -ModuleName RokidCoder Get-DistroFacts { [pscustomobject]@{ Glibc = (ConvertTo-GlibcVersion 'glibc 2.31'); User = 'root'; Uid = 0; Home = '/root'; FreeMB = 10 } }
     Mock -ModuleName RokidCoder Test-MachineRuleSet { @('RokidCoder-proxy') }
     Mock -ModuleName RokidCoder Get-FreeSpaceMB { 100 }
     $bad = Invoke-Preflight -Mode nat
@@ -132,6 +133,35 @@ Describe 'preflight' {
     Mock -ModuleName RokidCoder Get-DistroListeners { @(8791, 8792 | ForEach-Object { [pscustomobject]@{ Side = 'wsl'; Port = $_; Pid = 321; Name = ''; Path = '/home/zoe/.local/share/rokid-coder/1.0.0/node/bin/node'; CommandLine = '' } }) }
     Mock -ModuleName RokidCoder Get-HostListeners { @([pscustomobject]@{ Side = 'host'; Port = 8792; Pid = 50; Name = 'wslrelay.exe'; Path = ''; CommandLine = '' }) }
     (Get-Item-Of (Invoke-Preflight -Mode nat) 'ports').ok | Should -BeTrue
+  }
+}
+
+Describe 'the distro glibc' {
+  BeforeEach { Set-HealthyMachine -RealDistroFacts }
+
+  It 'distro_glibc_reads_two_component_getconf_output' {
+    # What getconf GNU_LIBC_VERSION really prints (fake-interop/recorded/getconf-gnu-libc-version.json), through Get-DistroFacts.
+    $script:getconf = 'glibc 2.35'
+    Mock -ModuleName RokidCoder Invoke-WslExec {
+      switch ($Path) {
+        '/usr/bin/getconf' { [pscustomobject]@{ ExitCode = 0; Output = @($script:getconf) } }
+        '/usr/bin/id' { [pscustomobject]@{ ExitCode = 0; Output = @($(if ($Arguments -contains '-un') { 'zoe' } else { '1000' })) } }
+        '/usr/bin/getent' { [pscustomobject]@{ ExitCode = 0; Output = @('zoe:x:1000:1000::/home/zoe:/bin/bash') } }
+        '/usr/bin/df' { [pscustomobject]@{ ExitCode = 0; Output = @('Filesystem 1024-blocks Used Available Capacity Mounted on', '/dev/sdc 1000000000 1 51200000 1% /') } }
+        default { [pscustomobject]@{ ExitCode = 1; Output = @() } }
+      }
+    }
+    (Get-DistroFacts -Distro 'Ubuntu').Glibc | Should -Be ([version]'2.35.0')
+    ConvertTo-GlibcVersion (Get-WslRequirements).glibcMin | Should -Be ([version]'2.35.0') -Because 'the floor is two components too'
+    $verdicts = foreach ($raw in 'glibc 2.31', 'glibc 2.35', 'glibc 2.36', 'glibc 2.39', 'glibc 2.35.1') {
+      $script:getconf = $raw
+      $item = Get-Item-Of (Invoke-Preflight -Mode nat) 'distro_glibc'
+      "${raw}=$($item.ok)"
+    }
+    $verdicts | Should -Be @('glibc 2.31=False', 'glibc 2.35=True', 'glibc 2.36=True', 'glibc 2.39=True', 'glibc 2.35.1=True')
+    $script:getconf = 'glibc 2.39'
+    (Get-Item-Of (Invoke-Preflight -Mode nat) 'distro_glibc').detail | Should -Be 'glibc 2.39'
+    foreach ($junk in '', 'glibc', 'musl libc 1.2.4') { ConvertTo-GlibcVersion $junk | Should -BeNullOrEmpty -Because "'$junk'" }
   }
 }
 
