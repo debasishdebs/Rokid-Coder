@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The About screen. The about_privacy_* sentences are the same words as PRIVACY.md at the
+    repository root; PrivacyTextTest fails when either side drifts.
+-->
+<resources>
+    <string name="about_title">About Rokid Coder</string>
+    <string name="about_intro">Your Claude Code and Codex sessions on your Rokid glasses.</string>
+    <string name="about_privacy_heading">Privacy</string>
+    <string name="about_privacy_summary">Rokid Coder runs no servers and collects nothing.</string>
+    <string name="about_privacy_paths_intro">Data leaves your devices only through services you already use:</string>
+    <string name="about_privacy_path_cli">The Claude/Anthropic and Codex/OpenAI command-line tools you run on your computer.</string>
+    <string name="about_privacy_path_speech">Your Android speech engine, which may be online.</string>
+    <string name="about_privacy_path_tailscale">Tailscale, if you choose it.</string>
+    <string name="about_privacy_no_extras">The 1.0 app has no cloud speech engines and no analytics.</string>
+    <string name="about_privacy_link">Read the full privacy note</string>
+</resources>

@@ -1,4 +1,68 @@
-# nexus-agentd
+# Rokid Coder on your computer
+
+The helper that follows your Claude Code and Codex sessions and talks to your phone over pinned TLS. Install it from the installer; the phone app guides you through the same steps.
+
+Download the installer from <https://github.com/debasishdebs/Rokid-Coder/releases/latest>.
+
+## Requirements
+
+- **macOS 13 or later**, Apple silicon or Intel. Pick the `arm64` or `x64` file to match your Mac.
+- **Windows 11 22H2 or later with WSL 2** and an Ubuntu distro (22.04 or 24.04). The installer checks WSL for you and says how to fix what is missing.
+- Your phone and computer on the same Wi-Fi, or both on Tailscale.
+- Claude Code or Codex. You do not need them first: setup offers to install a missing one, and you can skip that step.
+
+Nothing else is needed. The installer carries its own Node runtime, so it does not touch yours.
+
+## Install on macOS
+
+1. Download `rokid-coder-1.0.0-macos-arm64.dmg` (Apple silicon) or `rokid-coder-1.0.0-macos-x64.dmg` (Intel) and open it. The `.pkg` inside is the same installer.
+2. The installer is not signed by Apple yet, so macOS stops the first launch. **Right-click the `.pkg` and choose Open, then Open again.** You only do this once.
+3. Follow the installer. It checks your macOS version and architecture first and tells you what to fix.
+4. When it finishes, a Terminal window opens and runs Rokid Coder setup as you. If it did not open (for example after `sudo installer`), open **Rokid Coder Setup** from the disk image, or run the `rokid-setup` command the installer printed.
+5. Setup walks through the CLI step and pairing, below.
+
+Upgrading from 0.8.0 is the same install. Setup keeps your pairing and retires the old background job.
+
+## Install on Windows
+
+1. Download `rokid-coder-1.0.0-windows-x64.exe` and run it as yourself, not as another account.
+2. The installer is not signed yet, so Windows SmartScreen warns. **Click More info, then Run anyway.**
+3. The installer checks Windows, WSL 2, your distro, the network profile and the firewall, shows each result with its fix, and continues when everything it needs passes. It may ask to switch WSL to mirrored networking; if you decline, it uses a port proxy instead and tells you automatic discovery is not available, so you pair with the QR code or Tailscale.
+4. A console window then runs Rokid Coder setup inside your WSL distro: the CLI step and pairing, below.
+
+On Windows the launcher commands `rk claude` and `rk codex` print a hint to use plugin mode (`/rokid:on`) until the launcher is verified on Windows.
+
+## The CLI step (you can skip it)
+
+If Claude Code or Codex is missing, setup offers to install it with that tool's own installer. Say no to skip: setup finishes either way, and `rk claude` or `rk codex` offers the install again later. When a CLI is present, setup also installs the Rokid Coder plugin into it (see [`../plugin/README.md`](../plugin/README.md)).
+
+## Pairing
+
+Pairing is the last step of setup, and it is confirmed on the phone.
+
+1. On the phone, open Rokid Coder and follow the setup until it waits for your computer.
+2. In setup, the computer shows a short code. Check that the phone shows the same code, then confirm on the phone.
+3. If the phone cannot find the computer on its own, setup offers the QR code or a pairing line to scan or paste, and Tailscale.
+
+Pair later with `agentd pair` in a terminal, or `/rokid:pair` inside Claude Code. Every new pairing needs the same code check on the phone.
+
+## Tailscale (optional)
+
+Tailscale lets your phone reach the computer away from home. Install it on both, sign in with the same account, and no re-pairing is needed. The phone app shows the Tailscale steps under Settings, Connectors.
+
+## Uninstall
+
+- **macOS:** run `rokid-setup uninstall` as yourself, then `uninstall.sh --system` from the disk image to remove the program files.
+- **Windows:** uninstall Rokid Coder from Apps, Installed apps.
+
+Your pairing state is kept unless you purge it (`rokid-setup uninstall --purge`).
+
+<!-- RECHECK-6B: the install and uninstall steps above follow the 6b plan text. Re-check the file names, prompts, setup hand-off and uninstall commands against the merged macOS (T7b) and Windows (T8) installers. -->
+
+
+# Reference: running from source
+
+The installer does the setup below for you. These are the manual steps and the daemon's behavior, for running from a source checkout.
 
 `nexus-agentd` is the Windows PC-side monitor for Nexus Agents mission control. It receives
 Claude Code lifecycle hooks on loopback, tails active Claude transcript JSONL files, and

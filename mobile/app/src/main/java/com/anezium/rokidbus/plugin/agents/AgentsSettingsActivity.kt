@@ -34,6 +34,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
+import com.anezium.rokidbus.plugin.agents.about.AboutActivity
 import com.anezium.rokidbus.plugin.agents.connectors.ConnectorsActivity
 import com.anezium.rokidbus.plugin.agents.onboarding.OnboardingActivity
 
@@ -164,6 +165,7 @@ class AgentsSettingsActivity : ComponentActivity() {
         onUninstall = { startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName"))) },
         onConnectors = { startActivity(Intent(this, ConnectorsActivity::class.java)) },
         onGlassesApp = { startActivity(OnboardingActivity.glassesApp(this)) },
+        onAbout = { startActivity(Intent(this, AboutActivity::class.java)) },
     )
 
     /** Saves the change on top of what is stored now (Quiet may have moved on the glasses) and tells agentd. */

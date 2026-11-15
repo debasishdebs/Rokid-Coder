@@ -170,6 +170,8 @@ internal class SettingsActions(
     val onConnectors: () -> Unit = {},
     /** The bundled glasses app: install or update it on the glasses. */
     val onGlassesApp: () -> Unit = {},
+    /** Settings → About: the version and the privacy note. */
+    val onAbout: () -> Unit = {},
 )
 
 @Composable
@@ -246,6 +248,14 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
 
         item { SectionLabel("Background") }
         item { BackgroundCard(state, actions) }
+
+        item { SectionLabel("About") }
+        item {
+            SettingsCard {
+                NoticeText("The version, and what Rokid Coder does with your data.", tag = "about_hint")
+                SecondaryAction("About and privacy", actions.onAbout, tag = "about")
+            }
+        }
 
         item { SectionLabel("Plugin") }
         item {

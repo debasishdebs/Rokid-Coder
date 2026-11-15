@@ -1,22 +1,24 @@
 # Rokid-Coder
 
-Rokid-Coder puts your Claude Code and Codex sessions on Rokid glasses: permission
-prompts, questions and progress on the HUD, answered from the glasses. It is built
-on [Rokid Nexus](https://github.com/Anezium/Rokid-Nexus), which is vendored here.
+Rokid-Coder puts your Claude Code and Codex sessions on Rokid glasses: permission prompts, questions and progress on the HUD, answered from the glasses.
+It is built on [Rokid Nexus](https://github.com/Anezium/Rokid-Nexus), which is vendored here.
 
-## Layout
+## Download
 
-| Path | What it is |
+Get the latest release: <https://github.com/debasishdebs/Rokid-Coder/releases/latest>
+
+You install two things: the phone app (which brings the glasses app with it), and the helper on your computer. Start on the phone: the app walks you through the rest.
+
+| Install | Guide |
 |---|---|
-| `computer/` | The daemon on your computer (Node, TypeScript). It follows the sessions and talks to the phone over pinned TLS. |
-| `plugin/claude-code`, `plugin/codex` | The Claude Code and Codex plugins that opt a session in (`/rokid:on`). Listed by `.claude-plugin/marketplace.json` and `.agents/plugins/marketplace.json`. |
-| `mobile/` | The phone side. `mobile/agents` is the Agents app, Gradle module `:mobile:agents`. |
-| `glasses/` | The glasses side (the glasses app arrives in Plan 6a). |
-| `contracts/` | Wire fixtures shared by the computer and phone tests. |
-| `vendor/nexus/` | Upstream Rokid-Nexus as a git subtree, with our patches listed in `vendor/nexus/PATCHES.md`. |
-| `docs/coding-agent/` | Designs, plans, reviews and the handoff. |
+| The computer (macOS, or Windows 11 with WSL 2) | [`computer/README.md`](computer/README.md) |
+| The Claude Code and Codex plugins | [`plugin/README.md`](plugin/README.md) |
+| The phone app | [`mobile/README.md`](mobile/README.md) |
+| The glasses app | [`glasses/README.md`](glasses/README.md) |
 
-## Build and test
+What Rokid-Coder does with your data: [`PRIVACY.md`](PRIVACY.md).
+
+## Building from source
 
 You need Node 22, JDK 17, the Android SDK, and the CXR library checked out next to this
 repository at `../CxrGlobal` (Anezium/CxrGlobal v0.3.0). `vendor/CxrGlobal` links to it,
@@ -27,14 +29,13 @@ npm ci                             # the computer and plugin workspaces
 (cd computer && npm test)
 ./gradlew :shared:test :bus-client:testDebugUnitTest :ink-engine:test \
   :phone-hub:testDebugUnitTest :glasses-hub:testDebugUnitTest \
-  :mobile:agents:testDebugUnitTest --continue
+  :mobile:app:testDebugUnitTest --continue
 ```
 
 The upstream modules keep their upstream Gradle names (`:shared`, `:phone-hub`, …) and
 live under `vendor/nexus`. `.github/workflows/tests.yml` runs the product suites;
 `upstream-validation.yml` builds `vendor/nexus` on its own and runs upstream's full list.
-
-## Upstream updates
+`docs/coding-agent/` holds the designs, plans, reviews and the handoff.
 
 `scripts/upstream-sync.sh` merges upstream `main` into `vendor/nexus` with
 `git subtree pull --squash`. A clean merge exits 0, and every suite must then pass. A
