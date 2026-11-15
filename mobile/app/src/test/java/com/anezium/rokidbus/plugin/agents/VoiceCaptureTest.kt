@@ -1,8 +1,11 @@
 package com.anezium.rokidbus.plugin.agents
 
 import com.anezium.rokidbus.client.plugin.NexusSdkResult
+import com.anezium.rokidbus.client.plugin.NexusSpeechError
 import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
 import com.anezium.rokidbus.plugin.agents.VoiceCapture.State
+import com.anezium.rokidbus.plugin.agents.service.VoiceAvailability
+import com.anezium.rokidbus.plugin.agents.service.VoiceUnavailableException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -76,6 +79,33 @@ class VoiceCaptureTest {
         val quiet = listening()
         quiet.onStopped(NexusSpeechStopReason.NO_SPEECH)
         assertEquals(State.Failed("Didn't catch that"), quiet.state)
+    }
+
+    @Test
+    fun a_microphone_refused_for_voice_off_shows_its_pointer_not_link_lost() {
+        for (availability in listOf(VoiceAvailability.NEEDS_APP_OPEN, VoiceAvailability.PERMISSION_DENIED)) {
+            // What CoderService.promote returns, as HubCore words it into the recognizer's
+            // SOURCE_UNAVAILABLE error, which the session manager ends as LINK_LOST.
+            val refusal = VoiceUnavailableException(availability)
+            val error = NexusSpeechError(
+                kind = "SOURCE_UNAVAILABLE",
+                provider = "Android",
+                detail = "Microphone foreground service is unavailable (${refusal.javaClass.simpleName}: ${refusal.message})",
+            )
+            for (capture in listOf(VoiceCapture(), listening())) {
+                capture.onStopped(NexusSpeechStopReason.LINK_LOST, error)
+                assertEquals(availability.name, State.Failed(availability.glassesLine!!), capture.state)
+            }
+        }
+        assertEquals(VoiceAvailability.OPEN_APP, VoiceAvailability.NEEDS_APP_OPEN.glassesLine)
+
+        // A real link loss still says so.
+        val lost = listening()
+        lost.onStopped(
+            NexusSpeechStopReason.LINK_LOST,
+            NexusSpeechError("SOURCE_UNAVAILABLE", null, "Glasses audio link was lost"),
+        )
+        assertEquals(State.Failed(VoiceCapture.LINK_LOST), lost.state)
     }
 
     @Test

@@ -1,7 +1,9 @@
 package com.anezium.rokidbus.plugin.agents
 
 import com.anezium.rokidbus.client.plugin.NexusSdkResult
+import com.anezium.rokidbus.client.plugin.NexusSpeechError
 import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
+import com.anezium.rokidbus.plugin.agents.service.VoiceAvailability
 import java.util.Locale
 
 /** The one thing the capture needs from a speech session. The SDK's `stop()` only acts once the hub has accepted the start. */
@@ -86,10 +88,19 @@ class VoiceCapture {
      */
     private fun heardOf(text: String): State = State.Heard(text.singleLine(Int.MAX_VALUE))
 
-    fun onStopped(reason: NexusSpeechStopReason) {
+    /**
+     * [error] is the hub's, when it gave one: a microphone refused because voice is off ends the
+     * session as a link loss, and its detail says why, so the card points at the fix instead.
+     */
+    fun onStopped(reason: NexusSpeechStopReason, error: NexusSpeechError? = null) {
         if (invalidated) return
         // A heard or failed utterance keeps its card, whatever ended the session after it.
         if (state is State.Heard || state is State.Failed) return
+        val voiceOff = VoiceAvailability.of(error)?.glassesLine?.takeIf { reason != NexusSpeechStopReason.CANCELLED }
+        if (voiceOff != null) {
+            state = State.Failed(voiceOff)
+            return
+        }
         state = when (reason) {
             // This side cancelled: no card of voice is left to show.
             NexusSpeechStopReason.CANCELLED -> State.Idle

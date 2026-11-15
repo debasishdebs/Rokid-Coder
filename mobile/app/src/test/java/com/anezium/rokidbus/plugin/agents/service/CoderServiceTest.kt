@@ -285,7 +285,9 @@ class CoderServiceTest {
         val failure = service.promote(microphone = true)
         idle()
 
-        assertTrue(failure is ForegroundServiceStartNotAllowedException)
+        // The reason travels with the refusal, so the speech result says it too.
+        assertEquals(VoiceAvailability.NEEDS_APP_OPEN, (failure as VoiceUnavailableException).availability)
+        assertTrue(failure.cause is ForegroundServiceStartNotAllowedException)
         assertEquals(VoiceAvailability.NEEDS_APP_OPEN, CoderService.voice.value)
         val notice = glassesNotices().single()
         assertEquals(VoiceAvailability.GLASSES_TITLE, notice.title)
@@ -304,7 +306,7 @@ class CoderServiceTest {
         val failure = service.promote(microphone = true)
         idle()
 
-        assertNotNull(failure)
+        assertEquals(VoiceAvailability.NEEDS_APP_OPEN, (failure as VoiceUnavailableException).availability)
         assertEquals("no microphone start from the background", listOf(false), starts.map { it.microphone })
         assertEquals(VoiceAvailability.NEEDS_APP_OPEN, CoderService.voice.value)
         assertEquals(VoiceAvailability.OPEN_APP, glassesNotices().single().body)
@@ -356,7 +358,7 @@ class CoderServiceTest {
         val failure = service.promote(microphone = true)
         idle()
 
-        assertNotNull(failure)
+        assertEquals(VoiceAvailability.PERMISSION_DENIED, (failure as VoiceUnavailableException).availability)
         assertEquals(1, starts.size)
         assertTrue(glassesNotices().single().body!!.startsWith("Microphone is off"))
 

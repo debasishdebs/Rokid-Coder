@@ -99,19 +99,21 @@ class CoderService : Service(), HubForegroundHost {
     override fun promote(microphone: Boolean): Throwable? {
         if (microphone && !promotion.microphoneHeld) {
             val refusal = when {
-                !microphoneGranted() -> SecurityException("RECORD_AUDIO is not granted")
-                !processStarted() -> SecurityException("the app is not open")
+                !microphoneGranted() -> VoiceAvailability.PERMISSION_DENIED
+                !processStarted() -> VoiceAvailability.NEEDS_APP_OPEN
                 else -> null
             }
             if (refusal != null) {
                 refreshVoice()
                 pointVoiceOnGlasses()
-                return refusal
+                return VoiceUnavailableException(refusal)
             }
         }
-        val failure = promoteService(microphone)
-        if (microphone && failure != null) pointVoiceOnGlasses()
-        return failure
+        val failure = promoteService(microphone) ?: return null
+        if (!microphone) return failure
+        pointVoiceOnGlasses()
+        val reason = _voice.value.takeIf { it != VoiceAvailability.AVAILABLE } ?: VoiceAvailability.NEEDS_APP_OPEN
+        return VoiceUnavailableException(reason, failure)
     }
 
     override fun onLinkStateChanged(linkState: Int) {

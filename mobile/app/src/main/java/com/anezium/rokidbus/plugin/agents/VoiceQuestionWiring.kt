@@ -80,7 +80,7 @@ internal class VoiceQuestionWiring(
             }
             override fun onFinal(text: String) = onVoiceEvent(run) { it.onFinal(text) }
             override fun onStopped(reason: NexusSpeechStopReason, error: NexusSpeechError?) {
-                onVoiceEvent(run) { it.onStopped(reason) }
+                onVoiceEvent(run) { it.onStopped(reason, error) }
             }
         })
         if (session == null) {
