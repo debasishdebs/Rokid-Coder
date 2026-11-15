@@ -1,0 +1,620 @@
+name: macOS installer
+
+# Builds rokid-coder-<v>-macos-<arch>.pkg and .dmg from the validated
+# bundle-darwin-<arch> archive (T7a's archive contract: digest, validated.json,
+# verify-bundle --static and selfcheck before pkgbuild), then installs it for
+# real, each scenario on its own fresh runner [6b-R14]:
+#   clean-runtime         install_with_toolchains_removed, setup_as_special_char_user_runs_under_that_uid,
+#                         hooks_daemon_and_pty_after_install
+#   gui-session           gui_session_setup_reaches_first_prompt_as_console_user
+#   legacy-upgrade        real_0_8_0_upgrade_on_runner
+#   legacy-upgrade-fails  failed_0_8_0_upgrade_restores_legacy_on_runner
+#   release-upgrade       upgrade_between_installer_releases_on_runner, uninstall_keeps_state_then_purge
+# Hosted macOS runners log the runner user in, so a GUI session (a console
+# user and a gui/<uid> domain) exists. Setup only ever meets the recorded fake
+# claude and codex. The artifact macos-pkg-<arch> holds the pkg and the dmg.
+
+on:
+  push:
+    paths:
+      - "computer/installer/macos/**"
+      - "computer/src/setup/**"
+      - ".github/workflows/macos-installer.yml"
+  pull_request:
+    paths:
+      - "computer/installer/macos/**"
+      - "computer/src/setup/**"
+      - ".github/workflows/macos-installer.yml"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  PACKAGE_ID: io.github.debasishdebs.rokidcoder.computer
+  LABEL: io.github.debasishdebs.rokidcoder.agentd
+  LEGACY_LABEL: com.anezium.nexus-agentd
+  INSTALL_ROOT: /Library/Application Support/RokidCoder
+  CI_DIR: /Users/Shared/rokid-ci
+  ANSWERS: /Users/Shared/rokid-ci/ci-answers.json
+
+jobs:
+  bundles:
+    name: Bundles
+    uses: ./.github/workflows/bundles.yml
+
+  package:
+    name: Package ${{ matrix.arch }}
+    needs: bundles
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
+      TARGET: darwin-${{ matrix.arch }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: computer
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      - name: Set up the pinned Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: computer/runtime/node-version.txt
+
+      - name: Fetch the validated bundle archive
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-darwin-${{ matrix.arch }}
+          path: ${{ runner.temp }}/bundle-archive
+
+      - name: Check the archive against its digest and validation, and extract it
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/bundle-archive"
+          name=$(ls rokid-coder-bundle-*-"$TARGET".tar.gz)
+          shasum -a 256 -c "$name.sha256"
+          digest=$(cut -d ' ' -f 1 "$name.sha256")
+          validated=$(plutil -extract sha256 raw -o - "$name.validated.json")
+          [ "$digest" = "$validated" ] || { echo "$name is not the archive bundles.yml validated"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/bundle"
+          tar -xzf "$name" -C "$RUNNER_TEMP/bundle"
+          echo "BUNDLE=$(cd "$RUNNER_TEMP/bundle" && pwd -P)" >> "$GITHUB_ENV"
+
+      - name: Verify the extracted bundle and run selfcheck
+        run: |
+          set -euo pipefail
+          node installer/bundle/verify-bundle.mjs "$BUNDLE" --static
+          "$BUNDLE/bin/agentd" selfcheck --require-bundle
+
+      - name: Build the release package and the two upgrade-test builds
+        run: |
+          set -euo pipefail
+          sh installer/macos/build-pkg.sh --bundle "$BUNDLE" --arch "$ARCH" --out dist-pkg
+          sh installer/macos/build-pkg.sh --bundle "$BUNDLE" --arch "$ARCH" --out dist-pkg-test --version-suffix test.1
+          sh installer/macos/build-pkg.sh --bundle "$BUNDLE" --arch "$ARCH" --out dist-pkg-test --version-suffix test.2
+
+      - name: Upload the package and disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-pkg-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            computer/dist-pkg/*.pkg
+            computer/dist-pkg/*.dmg
+
+      - name: Upload the upgrade-test builds
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-test-pkg-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 3
+          path: computer/dist-pkg-test/*.pkg
+
+  clean-runtime:
+    name: clean-runtime (${{ matrix.arch }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
+      TEST_USER: rokidtest
+      TEST_HOME: /Users/Rokid Tëst
+    defaults:
+      run:
+        shell: bash
+        working-directory: computer
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      - name: Fetch the package
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-pkg-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pkg
+
+      - name: Locate the package
+        run: |
+          set -euo pipefail
+          pkg=$(ls "$RUNNER_TEMP"/pkg/rokid-coder-*-macos-"$ARCH".pkg)
+          version=${pkg##*/rokid-coder-}
+          version=${version%-macos-$ARCH.pkg}
+          { echo "PKG=$pkg"; echo "VERSION=$version"; echo "BUNDLE_DIR=$INSTALL_ROOT/$version"; } >> "$GITHUB_ENV"
+
+      - name: Stage the CI helpers and the fake CLIs where every user can read them
+        run: |
+          set -euo pipefail
+          sudo rm -rf "$CI_DIR"
+          mkdir -p "$CI_DIR"
+          cp -R installer/macos/test/ci/. "$CI_DIR/"
+          cp -R test/fixtures/plugin-cli "$CI_DIR/plugin-cli"
+          chmod -R a+rX "$CI_DIR"
+          bash "$CI_DIR/move-real-clis-aside.sh"
+
+      - name: Move every Node and the Xcode toolchains aside
+        run: bash "$CI_DIR/remove-toolchains.sh"
+
+      - name: install_with_toolchains_removed
+        run: |
+          set -euo pipefail
+          # `sudo installer` is a command-line install: the payload goes in, setup is deferred.
+          sudo installer -pkg "$PKG" -target /
+          pkgutil --pkg-info "$PACKAGE_ID"
+          test -x "$BUNDLE_DIR/bin/rokid-setup"
+          test -x "$BUNDLE_DIR/Rokid Coder Setup.command"
+          test -x "$BUNDLE_DIR/uninstall.sh"
+          [ "$(stat -f %Su "$BUNDLE_DIR")" = root ]
+          writable=$(find "$INSTALL_ROOT" ! -type l \( -perm -0002 -o -perm -0020 \) -print)
+          [ -z "$writable" ] || { echo "writable by others:"; echo "$writable"; exit 1; }
+          [ ! -e "$INSTALL_ROOT/handoff" ] || { echo "a command-line install handed setup to someone"; exit 1; }
+          grep -qx "reason deferred_cli_install" "$INSTALL_ROOT/pending-setup"
+          grep -F "Rokid Coder is installed. To finish, open \"Rokid Coder Setup\" from the disk image, or run: \"$BUNDLE_DIR/bin/rokid-setup\" install --platform darwin --bundle \"$BUNDLE_DIR\"" /var/log/install.log
+          "$BUNDLE_DIR/bin/agentd" --version
+
+      - name: setup_as_special_char_user_runs_under_that_uid
+        # From /, so nothing the test user runs starts in the runner's own (unreadable) workspace.
+        working-directory: /
+        run: |
+          set -euo pipefail
+          sudo sysadminctl -addUser "$TEST_USER" -fullName "Rokid Tëst" -home "$TEST_HOME" -password "$(openssl rand -hex 16)"
+          sudo createhomedir -c -u "$TEST_USER"
+          uid=$(dscl . -read "/Users/$TEST_USER" UniqueID | awk '{ print $2 }')
+          sudo -u "$TEST_USER" -H /bin/sh "$CI_DIR/fake-clis.sh" "$TEST_HOME/.local/bin" "$BUNDLE_DIR/bin/rokid-node"
+          touch "$RUNNER_TEMP/before-setup"
+          sleep 1
+          # launch-setup.sh's own environment construction, running setup in place of Terminal.
+          sudo env ROKID_VERSION="$VERSION" ROKID_BUNDLE_DIR="$BUNDLE_DIR" /bin/sh "$GITHUB_WORKSPACE/computer/installer/macos/lib/launch-setup.sh" \
+            "$uid" "$TEST_USER" "$TEST_HOME" /bin/zsh -- \
+            "$BUNDLE_DIR/bin/rokid-setup" install --platform darwin --bundle "$BUNDLE_DIR" --answers "$ANSWERS" 2>&1 | tee "$RUNNER_TEMP/setup.out"
+
+          stray=$(sudo find "$TEST_HOME" ! -user "$TEST_USER" -print)
+          [ -z "$stray" ] || { echo "not owned by $TEST_USER:"; echo "$stray"; exit 1; }
+          outside=$(sudo find /Library /Users /private/tmp /private/var/tmp \( -path "$TEST_HOME" -o -path /Users/runner \) -prune \
+            -o -user "$TEST_USER" -newer "$RUNNER_TEMP/before-setup" -print 2> /dev/null || true)
+          [ -z "$outside" ] || { echo "created outside $TEST_HOME:"; echo "$outside"; exit 1; }
+
+          as_user() { sudo -u "$TEST_USER" -H /usr/bin/env -i HOME="$TEST_HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin "$@"; }
+          as_user "$TEST_HOME/.rokid-coder/bin/agentd" --version --json > "$RUNNER_TEMP/version.json"
+          [ "$(plutil -extract execPath raw -o - "$RUNNER_TEMP/version.json")" = "$BUNDLE_DIR/node/bin/node" ]
+          as_user "$TEST_HOME/.rokid-coder/bin/rokid-node" -e 'process.exit(process.execPath === process.argv[1] ? 0 : 1)' "$BUNDLE_DIR/node/bin/node"
+          for tool in claude codex; do
+            sudo cp "$TEST_HOME/.fake-plugin-cli/$tool/state.json" "$RUNNER_TEMP/$tool-state.json"
+            sudo chmod a+r "$RUNNER_TEMP/$tool-state.json"
+            [ "$(plutil -extract marketplaces.rokid-coder.path raw -o - "$RUNNER_TEMP/$tool-state.json")" = "$BUNDLE_DIR/plugins" ]
+            [ "$(plutil -extract plugins.rokid@rokid-coder.version raw -o - "$RUNNER_TEMP/$tool-state.json")" != "" ]
+          done
+          grep -q "agentd starts at your next login." "$RUNNER_TEMP/setup.out"
+          sudo test -f "$TEST_HOME/Library/LaunchAgents/$LABEL.plist"
+          if launchctl print "gui/$uid" > /dev/null 2>&1; then echo "$TEST_USER unexpectedly has a GUI session"; exit 1; fi
+          as_user "$TEST_HOME/.rokid-coder/bin/agentd" selfcheck --require-bundle
+
+      - name: hooks_daemon_and_pty_after_install
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/controlled-home"
+          home="$(cd "$RUNNER_TEMP/controlled-home" && pwd -P)"
+          allow=(sandbox-exec -f installer/bundle/exec-allowlist.sb -D "BUNDLE=$BUNDLE_DIR" -D "WRAPPERS=$home/.rokid-coder/bin")
+          "${allow[@]}" "$BUNDLE_DIR/bin/rokid-node" installer/bundle/controlled-run.mjs "$BUNDLE_DIR" --home "$home" | tee "$RUNNER_TEMP/controlled-run.json"
+          [ "$(plutil -extract ok raw -o - "$RUNNER_TEMP/controlled-run.json")" = true ]
+          # The profile bites: the compiler shim is refused.
+          if "${allow[@]}" /bin/sh -c '/usr/bin/cc --version' > "$RUNNER_TEMP/probe.log" 2>&1; then
+            echo "/usr/bin/cc ran under the exec allowlist"; cat "$RUNNER_TEMP/probe.log"; exit 1
+          fi
+          grep -q "Operation not permitted" "$RUNNER_TEMP/probe.log"
+
+  gui-session:
+    name: gui-session (${{ matrix.arch }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: computer
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      - name: Fetch the package
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-pkg-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pkg
+
+      - name: Locate the package
+        run: |
+          set -euo pipefail
+          pkg=$(ls "$RUNNER_TEMP"/pkg/rokid-coder-*-macos-"$ARCH".pkg)
+          version=${pkg##*/rokid-coder-}
+          version=${version%-macos-$ARCH.pkg}
+          { echo "PKG=$pkg"; echo "VERSION=$version"; echo "BUNDLE_DIR=$INSTALL_ROOT/$version"; } >> "$GITHUB_ENV"
+
+      - name: Stage the CI helpers where every user can read them
+        run: |
+          set -euo pipefail
+          sudo rm -rf "$CI_DIR"
+          mkdir -p "$CI_DIR"
+          cp -R installer/macos/test/ci/. "$CI_DIR/"
+          chmod -R a+rX "$CI_DIR"
+          bash "$CI_DIR/move-real-clis-aside.sh"
+
+      - name: gui_session_setup_reaches_first_prompt_as_console_user
+        run: |
+          set -euo pipefail
+          uid=$(id -u)
+          sudo installer -pkg "$PKG" -target /
+          # The real postinstall handoff, as Installer runs it after a GUI install: as root, with
+          # COMMAND_LINE_INSTALL unset (sudo resets the environment), and the real scutil.
+          pkgutil --expand-full "$PKG" "$RUNNER_TEMP/expanded"
+          sudo /bin/sh "$RUNNER_TEMP/expanded/rokid-coder-component.pkg/Scripts/postinstall" "$PKG" "$INSTALL_ROOT" / / | tee "$RUNNER_TEMP/postinstall.out"
+          grep -q "setup opened in Terminal for runner" "$RUNNER_TEMP/postinstall.out"
+          [ "$(plutil -extract uid raw -o - "$INSTALL_ROOT/handoff/$uid.json")" = "$uid" ]
+
+          log="$HOME/.rokid-coder/logs/setup.log"
+          for _ in $(seq 1 90); do
+            if pgrep -u "$uid" -x Terminal > /dev/null && pgrep -u "$uid" -f "app/dist/setup/main.js install" > /dev/null &&
+              grep -q "awaiting: cli_step" "$log" 2> /dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          pgrep -u "$uid" -x Terminal
+          pgrep -u "$uid" -f "app/dist/setup/main.js install"
+          grep -q "awaiting: cli_step" "$log"
+          pkill -u "$uid" -f "app/dist/setup/main.js install"
+
+          # Then setup as runner, non-interactively; it first undoes the run that was stopped.
+          "$BUNDLE_DIR/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null | tee "$RUNNER_TEMP/setup.out"
+          launchctl print "gui/$uid/$LABEL" > /dev/null
+          "$HOME/.rokid-coder/bin/agentd" status | tee "$RUNNER_TEMP/status.out"
+          grep -q "running: yes" "$RUNNER_TEMP/status.out"
+
+  legacy-upgrade:
+    name: legacy-upgrade (${{ matrix.arch }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: computer
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      - name: Check out 0.8.0
+        uses: actions/checkout@v6
+        with:
+          ref: rokid-coder-v0.8.0
+          path: legacy-0.8.0
+
+      # 0.8.0 runs on the system node (install-launchagent.sh:23-25); clean-runtime proves the bundle needs none.
+      - name: Set up Node 22 for 0.8.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Fetch the package
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-pkg-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pkg
+
+      - name: Locate the package
+        run: |
+          set -euo pipefail
+          pkg=$(ls "$RUNNER_TEMP"/pkg/rokid-coder-*-macos-"$ARCH".pkg)
+          version=${pkg##*/rokid-coder-}
+          version=${version%-macos-$ARCH.pkg}
+          { echo "PKG=$pkg"; echo "VERSION=$version"; echo "BUNDLE_DIR=$INSTALL_ROOT/$version"; } >> "$GITHUB_ENV"
+
+      - name: Stage the CI helpers and the fake CLIs
+        run: |
+          set -euo pipefail
+          sudo rm -rf "$CI_DIR"
+          mkdir -p "$CI_DIR"
+          cp -R installer/macos/test/ci/. "$CI_DIR/"
+          cp -R test/fixtures/plugin-cli "$CI_DIR/plugin-cli"
+          chmod -R a+rX "$CI_DIR"
+          bash "$CI_DIR/move-real-clis-aside.sh"
+          sh "$CI_DIR/fake-clis.sh" "$HOME/.local/bin" "$(command -v node)"
+
+      - name: Run 0.8.0 as runner, with the 0.8.0 state and its repo marketplace
+        run: |
+          set -euo pipefail
+          legacy=$(cd ../legacy-0.8.0 && pwd -P)
+          (cd "$legacy/agentd" && npm ci && npm run build)
+          cp -R test/fixtures/state-0.8.0/home/. "$HOME/"
+          "$HOME/.local/bin/claude" plugin marketplace add "$legacy"
+          "$HOME/.local/bin/claude" plugin install rokid@rokid-coder
+          "$legacy/agentd/scripts/install-launchagent.sh"
+          for _ in $(seq 1 60); do
+            if lsof -nP -iTCP:8791 -sTCP:LISTEN > /dev/null && lsof -nP -iTCP:8792 -sTCP:LISTEN > /dev/null; then break; fi
+            sleep 1
+          done
+          lsof -nP -iTCP:8791,8792 -sTCP:LISTEN
+          node "$CI_DIR/state-check.js" secrets "$HOME" "$RUNNER_TEMP/secrets.before"
+          echo "LEGACY=$legacy" >> "$GITHUB_ENV"
+
+      - name: Install the package and run setup as runner
+        run: |
+          set -euo pipefail
+          sudo installer -pkg "$PKG" -target /
+          "$BUNDLE_DIR/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null | tee "$RUNNER_TEMP/setup.out"
+
+      - name: real_0_8_0_upgrade_on_runner
+        run: |
+          set -euo pipefail
+          uid=$(id -u)
+          if launchctl print "gui/$uid/$LEGACY_LABEL" > /dev/null 2>&1; then echo "$LEGACY_LABEL is still loaded"; exit 1; fi
+          [ ! -e "$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist" ]
+          for port in 8791 8792; do
+            pid=$(lsof -nP -iTCP:$port -sTCP:LISTEN -Fp | sed -n 's/^p//p' | head -n 1)
+            exe=$(lsof -a -p "$pid" -d txt -Fn | sed -n 's/^n//p' | head -n 1)
+            [ "$exe" = "$BUNDLE_DIR/node/bin/node" ] || { echo "port $port is held by $exe"; exit 1; }
+          done
+          "$BUNDLE_DIR/bin/rokid-node" "$CI_DIR/state-check.js" secrets "$HOME" "$RUNNER_TEMP/secrets.after" "$BUNDLE_DIR"
+          cmp -s "$RUNNER_TEMP/secrets.before" "$RUNNER_TEMP/secrets.after" || { echo "the token, machineId or pinned phone changed"; exit 1; }
+          echo "token, machineId and pin unchanged"
+
+  legacy-upgrade-fails:
+    name: legacy-upgrade-fails (${{ matrix.arch }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: computer
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      - name: Check out 0.8.0
+        uses: actions/checkout@v6
+        with:
+          ref: rokid-coder-v0.8.0
+          path: legacy-0.8.0
+
+      - name: Set up Node 22 for 0.8.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Fetch the package
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-pkg-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pkg
+
+      - name: Locate the package
+        run: |
+          set -euo pipefail
+          pkg=$(ls "$RUNNER_TEMP"/pkg/rokid-coder-*-macos-"$ARCH".pkg)
+          version=${pkg##*/rokid-coder-}
+          version=${version%-macos-$ARCH.pkg}
+          { echo "PKG=$pkg"; echo "VERSION=$version"; echo "BUNDLE_DIR=$INSTALL_ROOT/$version"; } >> "$GITHUB_ENV"
+
+      - name: Stage the CI helpers and the fake CLIs
+        run: |
+          set -euo pipefail
+          sudo rm -rf "$CI_DIR"
+          mkdir -p "$CI_DIR"
+          cp -R installer/macos/test/ci/. "$CI_DIR/"
+          cp -R test/fixtures/plugin-cli "$CI_DIR/plugin-cli"
+          chmod -R a+rX "$CI_DIR"
+          bash "$CI_DIR/move-real-clis-aside.sh"
+          sh "$CI_DIR/fake-clis.sh" "$HOME/.local/bin" "$(command -v node)"
+
+      - name: Run 0.8.0 as runner, with the 0.8.0 state and its repo marketplace
+        run: |
+          set -euo pipefail
+          legacy=$(cd ../legacy-0.8.0 && pwd -P)
+          (cd "$legacy/agentd" && npm ci && npm run build)
+          cp -R test/fixtures/state-0.8.0/home/. "$HOME/"
+          "$HOME/.local/bin/claude" plugin marketplace add "$legacy"
+          "$HOME/.local/bin/claude" plugin install rokid@rokid-coder
+          "$legacy/agentd/scripts/install-launchagent.sh"
+          for _ in $(seq 1 60); do
+            if lsof -nP -iTCP:8791 -sTCP:LISTEN > /dev/null && lsof -nP -iTCP:8792 -sTCP:LISTEN > /dev/null; then break; fi
+            sleep 1
+          done
+          lsof -nP -iTCP:8791,8792 -sTCP:LISTEN
+          node "$CI_DIR/state-check.js" state "$HOME" "$RUNNER_TEMP/state.before"
+          { echo "LEGACY=$legacy"; echo "LEGACY_NODE=$(realpath "$(command -v node)")"; } >> "$GITHUB_ENV"
+
+      - name: Install the package and run setup, failing after the new agent starts
+        run: |
+          set -uo pipefail
+          sudo installer -pkg "$PKG" -target / || exit 1
+          ROKID_SETUP_TEST=1 ROKID_SETUP_FAIL_AT=9 "$BUNDLE_DIR/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null | tee "$RUNNER_TEMP/setup.out"
+          status=${PIPESTATUS[0]}
+          [ "$status" -ne 0 ] || { echo "setup should have failed at step 9"; exit 1; }
+          grep -q "Rolled back to your 0.8.0 setup" "$RUNNER_TEMP/setup.out"
+
+      - name: failed_0_8_0_upgrade_restores_legacy_on_runner
+        run: |
+          set -euo pipefail
+          uid=$(id -u)
+          launchctl print "gui/$uid/$LEGACY_LABEL" > /dev/null
+          for port in 8791 8792; do
+            pid=$(lsof -nP -iTCP:$port -sTCP:LISTEN -Fp | sed -n 's/^p//p' | head -n 1)
+            exe=$(lsof -a -p "$pid" -d txt -Fn | sed -n 's/^n//p' | head -n 1)
+            [ "$(realpath "$exe")" = "$LEGACY_NODE" ] || { echo "port $port is held by $exe"; exit 1; }
+          done
+          node "$CI_DIR/state-check.js" state "$HOME" "$RUNNER_TEMP/state.after"
+          node "$CI_DIR/state-check.js" compare "$RUNNER_TEMP/state.before" "$RUNNER_TEMP/state.after"
+          [ "$(plutil -extract marketplaces.rokid-coder.path raw -o - "$HOME/.fake-plugin-cli/claude/state.json")" = "$LEGACY" ]
+          if launchctl print "gui/$uid/$LABEL" > /dev/null 2>&1; then echo "$LABEL was left behind"; exit 1; fi
+          [ ! -e "$HOME/Library/LaunchAgents/$LABEL.plist" ] || { echo "$LABEL's plist was left behind"; exit 1; }
+
+  release-upgrade:
+    name: release-upgrade (${{ matrix.arch }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: computer
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+
+      # Only for the fake CLIs; the product runs on its bundled node.
+      - name: Set up Node 22 for the fake CLIs
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Fetch the upgrade-test builds
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-test-pkg-${{ matrix.arch }}
+          path: ${{ runner.temp }}/test-pkg
+
+      - name: Locate the test builds
+        run: |
+          set -euo pipefail
+          for n in 1 2; do
+            pkg=$(ls "$RUNNER_TEMP"/test-pkg/rokid-coder-*-test.$n-macos-"$ARCH".pkg)
+            version=${pkg##*/rokid-coder-}
+            version=${version%-macos-$ARCH.pkg}
+            { echo "PKG$n=$pkg"; echo "V$n=$version"; echo "DIR$n=$INSTALL_ROOT/$version"; } >> "$GITHUB_ENV"
+          done
+
+      - name: Stage the CI helpers and the fake CLIs
+        run: |
+          set -euo pipefail
+          sudo rm -rf "$CI_DIR"
+          mkdir -p "$CI_DIR"
+          cp -R installer/macos/test/ci/. "$CI_DIR/"
+          cp -R test/fixtures/plugin-cli "$CI_DIR/plugin-cli"
+          chmod -R a+rX "$CI_DIR"
+          bash "$CI_DIR/move-real-clis-aside.sh"
+          sh "$CI_DIR/fake-clis.sh" "$HOME/.local/bin" "$(command -v node)"
+
+      - name: upgrade_between_installer_releases_on_runner
+        run: |
+          set -euo pipefail
+          uid=$(id -u)
+          health() {
+            curl -fsS http://127.0.0.1:8791/health -o "$RUNNER_TEMP/health.json"
+            [ "$(plutil -extract agentdVersion raw -o - "$RUNNER_TEMP/health.json")" = "$1" ] || { echo "/health is not $1"; cat "$RUNNER_TEMP/health.json"; exit 1; }
+            [ "$(plutil -extract execPath raw -o - "$RUNNER_TEMP/health.json")" = "$2/node/bin/node" ]
+          }
+          sudo installer -pkg "$PKG1" -target /
+          "$DIR1/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null
+          health "$V1" "$DIR1"
+          sudo installer -pkg "$PKG2" -target /
+          "$DIR2/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null
+          health "$V2" "$DIR2"
+          if pgrep -f "RokidCoder/$V1/"; then echo "a $V1 process is still running"; exit 1; fi
+          [ "$(launchctl list | awk -v label="$LABEL" '$3 == label' | wc -l | tr -d ' ')" = 1 ]
+          test -d "$DIR1"
+          [ "$(plutil -extract previous.bundleDir raw -o - "$HOME/.rokid-coder/install.json")" = "$DIR1" ]
+          [ "$(plutil -extract plugins.rokid@rokid-coder.version raw -o - "$HOME/.fake-plugin-cli/claude/state.json")" = "$V2" ]
+
+          # rollback: test.1 runs again, with its own plugin content [6b-R11].
+          "$HOME/.rokid-coder/bin/rokid-setup" rollback
+          health "$V1" "$DIR1"
+          [ "$(plutil -extract plugins.rokid@rokid-coder.version raw -o - "$HOME/.fake-plugin-cli/claude/state.json")" = "$V1" ]
+          [ "$(plutil -extract marketplaces.rokid-coder.path raw -o - "$HOME/.fake-plugin-cli/claude/state.json")" = "$DIR1/plugins" ]
+
+          # A failed upgrade to test.2 leaves test.1 running, with its plugin restored.
+          set +e
+          ROKID_SETUP_TEST=1 ROKID_SETUP_FAIL_AT=9 "$DIR2/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null
+          status=$?
+          set -e
+          [ "$status" -ne 0 ] || { echo "setup should have failed at step 9"; exit 1; }
+          health "$V1" "$DIR1"
+          [ "$(plutil -extract plugins.rokid@rokid-coder.version raw -o - "$HOME/.fake-plugin-cli/claude/state.json")" = "$V1" ]
+
+      - name: uninstall_keeps_state_then_purge
+        run: |
+          set -euo pipefail
+          uid=$(id -u)
+          "$DIR1/uninstall.sh"
+          test -f "$HOME/.nexus-agentd/config.json"
+          [ ! -e "$HOME/.rokid-coder/install.json" ]
+          [ ! -e "$HOME/Library/LaunchAgents/$LABEL.plist" ]
+          if launchctl print "gui/$uid/$LABEL" > /dev/null 2>&1; then echo "$LABEL is still loaded"; exit 1; fi
+          "$DIR1/uninstall.sh" --purge --yes
+          [ ! -e "$HOME/.nexus-agentd" ]
+          "$DIR1/uninstall.sh" --system
+          [ ! -e "$INSTALL_ROOT" ]
+          if pkgutil --pkg-info "$PACKAGE_ID" > /dev/null 2>&1; then echo "the receipt is still there"; exit 1; fi

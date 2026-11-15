@@ -1,0 +1,5 @@
+{
+  "cli": { "claude": "skip", "codex": "skip" },
+  "legacy": { "retireAutostart": true, "removeInstallHooks": true },
+  "pairing": "skip"
+}
