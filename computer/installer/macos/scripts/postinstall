@@ -1,0 +1,60 @@
+#!/bin/sh
+# The package's postinstall, as root, once the payload is in place:
+#   1. record installed-version (Distribution.xml's downgrade check reads it)
+#   2. prune the version dirs no user references any more [6b-R6]
+#   3. hand setup to the console user, or leave a pending marker and say how to finish
+# Setup is the user's step, not the package's: once the payload is in place
+# this always exits 0, whatever happens to the handoff.
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+if [ "${ROKID_INSTALLER_TEST:-}" != 1 ]; then unset ROKID_INSTALL_ROOT ROKID_INSTALL_LOG DSCL PLUTIL; fi
+ROOT=${ROKID_INSTALL_ROOT:-/Library/Application Support/RokidCoder}
+INSTALL_LOG=${ROKID_INSTALL_LOG:-/var/log/install.log}
+DSCL=${DSCL:-/usr/bin/dscl}
+PLUTIL=${PLUTIL:-/usr/bin/plutil}
+VERSION=$(cat "$here/version")
+BUNDLE="$ROOT/$VERSION"
+. "$here/lib/references.sh"
+
+say() {
+  printf 'Rokid Coder: %s\n' "$1"
+  printf '%s Rokid Coder: %s\n' "$(date '+%Y-%m-%d %H:%M:%S%z')" "$1" >> "$INSTALL_LOG" 2>/dev/null
+}
+
+if [ -z "$VERSION" ] || [ ! -x "$BUNDLE/bin/rokid-setup" ]; then
+  say "the payload is missing from $BUNDLE"
+  exit 1
+fi
+
+write_installed_version() {
+  tmp="$ROOT/.installed-version.$$"
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>version</key>\n\t<string>%s</string>\n</dict>\n</plist>\n' "$VERSION" > "$tmp" &&
+    chmod 0644 "$tmp" && mv -f "$tmp" "$ROOT/installed-version" || { rm -f "$tmp"; say "could not record installed-version"; }
+}
+
+defer() {
+  command="\"$BUNDLE/bin/rokid-setup\" install --platform darwin --bundle \"$BUNDLE\""
+  tmp="$ROOT/.pending-setup.$$"
+  printf 'version %s\nreason %s\ncommand %s\n' "$VERSION" "$1" "$command" > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$ROOT/pending-setup" || rm -f "$tmp"
+  say "setup was not started ($1)."
+  say "Rokid Coder is installed. To finish, open \"Rokid Coder Setup\" from the disk image, or run: $command"
+}
+
+write_installed_version
+rokid_prune "$ROOT" "$VERSION" | while read -r line; do say "$line"; done
+
+resolved=$(/bin/sh "$here/lib/resolve-user.sh")
+if [ $? -ne 0 ]; then
+  defer "${resolved:-no_eligible_user}"
+  exit 0
+fi
+tab=$(printf '\t')
+IFS=$tab read -r user uid home shell <<EOF
+$resolved
+EOF
+if ROKID_VERSION=$VERSION ROKID_BUNDLE_DIR=$BUNDLE /bin/sh "$here/lib/launch-setup.sh" "$uid" "$user" "$home" "$shell"; then
+  say "setup opened in Terminal for $user."
+else
+  defer launch_failed
+fi
+exit 0
