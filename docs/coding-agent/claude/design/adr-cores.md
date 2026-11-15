@@ -882,30 +882,57 @@ internal class GlassesAppSlot(private val cxr: () -> CxrTransport?) {
 
     inner class Op {
         val id: Long
-        /** Pre-dispatch only: give the slot back. A no-op once dispatched or done. */
-        fun release()
-        /** Runs at completion, on whichever thread completes the op. */
+        /** Registers cleanup (delete the APK copy). Runs once, at operation completion. */
         fun onComplete(action: () -> Unit)
+        /**
+         * Operation completion: free the slot and run the onComplete actions, once. From
+         * ACQUIRED it happens now; from DISPATCHED it is deferred to that dispatch's completion.
+         * Idempotent. The owner calls it in `finally`.
+         */
+        fun finish()
     }
 
     /**
-     * Marks [op] DISPATCHED under the slot lock, then makes one CXR app call with a fresh
-     * IGlassAppCbk bound to (op.id, dispatch number). Returns the answer, or LINK_LOST.
-     * Cancelling the awaiting coroutine detaches the waiter only; the dispatch stays owned
-     * by the slot until it completes.
+     * One CXR app call on [op]: ACQUIRED -> DISPATCHED under the slot lock, then the call with a
+     * fresh IGlassAppCbk bound to (op.id, dispatch number). Returns at dispatch completion with
+     * the answer or LINK_LOST; the op is ACQUIRED again and still holds the slot.
      */
     suspend fun <T> dispatch(op: Op, call: (IGlassAppCbk) -> Unit, answer: (AppAnswer) -> T): DispatchResult<T>
+
+    /** The same, for a non-suspending caller: [done] runs at dispatch completion, on the CXR thread. */
+    fun dispatchAsync(op: Op, call: (IGlassAppCbk) -> Unit, done: (DispatchResult<AppAnswer>) -> Unit)
 }
 ```
 
+Two completions are distinct:
+
+- **Dispatch completion** ends one CXR call. The op returns to `ACQUIRED` and **keeps the
+  slot**; nothing is cleaned up. It happens on the first answer on that dispatch's callback; on
+  link loss (`onCXRLConnected(false)` / `onGlassBtConnected(false)` call `slot.failDispatched()`
+  where `failActiveGlassesAppOperation` ran, `606`, `632`), as `LINK_LOST`; on `HubCore.stop()`/
+  `close()`, as `LINK_LOST`; or at once if the CXR call throws synchronously (today's
+  `runCatching` paths).
+- **Operation completion** ends the whole op (for an install: query, then upload, then the
+  result). It is the **only** point where the slot is freed and the `onComplete` actions run,
+  exactly once, and it happens only through `finish()`.
+
+| From | Event | To | Slot / cleanup |
+|---|---|---|---|
+| — | `acquire` / `tryAcquire` succeeds | `ACQUIRED` | held |
+| `ACQUIRED` | `dispatch` / `dispatchAsync` | `DISPATCHED` | held |
+| `DISPATCHED` | dispatch completion | `ACQUIRED` | held; the owner decides the next step |
+| `DISPATCHED` | `finish()` (the owner's `finally` after its coroutine was cancelled, or any owner exit) | `DISPATCHED` + finish pending | held: **ownership after a dispatch is non-cancellable** |
+| `DISPATCHED` + finish pending | dispatch completion | `DONE` | **freed; cleanup runs** |
+| `ACQUIRED` | `finish()` | `DONE` | **freed; cleanup runs** |
+| `DONE` | `finish()` | `DONE` | no-op |
+
 | Rule | Contract |
 |---|---|
-| States | An op is `ACQUIRED` → (`DISPATCHED` → `ACQUIRED`)* → `DONE`. It may make several CXR calls in sequence (install queries, then uploads); each has its own callback object and dispatch number. |
-| Before a dispatch | The owner may abort (cancellation, `cancel()`, an exception, a failed precondition): `release()` in `finally` is correct here, and the slot is free at once. |
-| After a dispatch | **Ownership is non-cancellable.** The slot is released, and the op's `onComplete` actions (delete the APK copy) run, only on: (a) the first answer on this dispatch's callback; (b) link loss — `onCXRLConnected(false)` and `onGlassBtConnected(false)` call `slot.failDispatched()` where `failActiveGlassesAppOperation` ran (`606`, `632`); (c) `HubCore.stop()`/`close()`. A CXR call that throws synchronously completes the dispatch as failed at once (today's `runCatching` paths). |
-| Stale callbacks | A callback whose `(op.id, dispatch number)` is not the current dispatch is dropped. A callback after (b) or (c) is dropped. |
-| Waiter cancellation | `suspendCancellableCoroutine`; `invokeOnCancellation` does nothing to the op. After a dispatch completes, the op checks the waiter and `cancel()` before its next step, and aborts there (release + cleanup). |
-| Third-party upload | `uploadThirdPartyApk`: `tryAcquire`, one dispatch, `callback(success)` exactly once from the CXR thread on an answer; on link loss the slot is freed without a callback, as `5102` does today. |
+| Release points | Exactly two: `finish()` from `ACQUIRED`, and the dispatch completion of a `DISPATCHED` op whose finish is pending. Nothing else frees the slot or deletes the copy. |
+| Owner code | `op = acquire(…)`, register cleanup, then `try { …dispatches… } finally { op.finish() }`. `finally` is always correct: while a dispatch is in flight it only marks the finish pending. |
+| Waiter cancellation | `dispatch` uses `suspendCancellableCoroutine`; `invokeOnCancellation` does nothing to the dispatch. The cancellation unwinds into the owner's `finally`, whose `finish()` is deferred as above. |
+| Stale callbacks | A callback whose `(op.id, dispatch number)` is not the in-flight dispatch is dropped, including any callback after that dispatch completed by link loss or stop. |
+| Third-party upload | `uploadThirdPartyApk`: `tryAcquire` (busy → `false`), one `dispatchAsync`; at dispatch completion `callback(success)` runs exactly once for an answer, no callback for `LINK_LOST` (as `5102` today), then `finish()`. |
 | Locks | The slot lock is never held while calling CXR, a callback, `onProgress` or a hook. |
 
 #### 3.6.2 `install`
@@ -918,29 +945,32 @@ upload dispatch, 100 just before returning `Installed`, and nothing on any other
 
 1. `onProgress(0)`. `expected.packageName` must equal the CXR session's package, else
    `Failed("Glasses APK package does not match this hub.")`.
-2. `op = slot.acquire(INSTALL)` (waits FIFO). From here every exit before the upload dispatch
-   runs `finally { copy?.delete(); op.release() }`.
+2. `op = slot.acquire(INSTALL)` (waits FIFO). Everything below runs inside
+   `try { … } finally { op.finish() }` (§3.6.1).
 3. Copy `apk` into a core-private file (`noBackupFilesDir/glasses-install/<uuid>.apk`). Every
    later step reads only the copy, so the file cannot change between verifying and pushing. An
-   I/O failure is `Failed("Could not read the glasses APK.")`.
+   I/O failure is `Failed("Could not read the glasses APK.")`. `op.onComplete { copy.delete() }`
+   is registered as soon as the copy exists, so the copy goes exactly when the op completes.
 4. **Verify the copy, on every call:** `GlassesApkVerificationPolicy.verify(copy, expected,
    ApksigGlassesApkInspector())` — SHA-256 equals `expected.sha256`; apksig verifies; package
    equals `expected.packageName`; exactly one signer, and its digest is in
    `expected.signerSha256`; `versionCode == expected.versionCode`. A rejection is
    `Failed(<the policy's fixed reason>)`; an inspector exception is the policy's "could not be
    verified" reason. `onProgress(25)`.
-5. The installed version, through a QUERY dispatch on this same op (as `installedVersion()`
-   below): equal → `AlreadyCurrent`; greater → `NewerOnGlasses`.
+5. The installed version, through an `appIsInstalled` dispatch on this same op (as
+   `installedVersion()` below). Its dispatch completion leaves the op `ACQUIRED` with the slot
+   still held: equal → `AlreadyCurrent`; greater → `NewerOnGlasses`; otherwise go on.
 6. Wi-Fi on (`isPhoneWifiEnabled`) and CXR up, else the two fixed messages of
    `BusHubService.kt:4101-4117`.
 7. If `cancel()` was called or the waiter is cancelled: `Cancelled` (for `cancel()`) or
    `CancellationException` (for coroutine cancellation). **No upload is dispatched.**
-8. `onProgress(50)`; `op.onComplete { copy.delete() }`; dispatch `appUploadAndInstall(copy)`.
-   From here `cancel()` is ignored, coroutine cancellation detaches only the waiter, and the
-   copy and the slot belong to the slot (§3.6.1).
-9. The answer: success → `onProgress(100)`, `Installed`. Refused → `Failed("The glasses did
-   not install the app.")`. Link lost → `Failed("Connection to the glasses was lost.")`. The
-   op is then `DONE`.
+8. `onProgress(50)`; dispatch `appUploadAndInstall(copy)` on the same op. From here `cancel()`
+   is ignored; a coroutine cancellation unwinds to `finally`, whose `finish()` stays pending
+   until this dispatch completes, so the slot and the copy outlive the waiter (§3.6.1).
+9. At dispatch completion: success → `onProgress(100)`, `Installed`. Refused →
+   `Failed("The glasses did not install the app.")`. `LINK_LOST` → `Failed("Connection to the
+   glasses was lost.")`. Then the `finally`: operation completion, the slot is freed and the
+   copy deleted.
 
 `cancel()` (any thread) flags the current INSTALL op; it is a no-op without one, and after
 step 8.
@@ -1183,7 +1213,7 @@ where the subject's shape changed:
 | Surface threading (§1) | `confined_call_off_main_throws`; `callbacks_are_posted_never_reentrant`; `cancellation_calls_from_a_background_thread_run_on_main_in_order` |
 | Speech runs (§3.2.2) | `stop_before_acceptance_latches_and_stops_on_accept` (one `onStopped(CANCELLED)`, no `onStarted`, a stop frame right after the accept); `stop_before_acceptance_then_denial_is_swallowed`; `stop_from_background_thread_is_serialized_on_main`; `stop_after_end_is_a_noop`; `second_start_while_latched_is_not_available`; `late_callback_of_an_old_run_never_reaches_a_new_run` |
 | Attach, detach, restart (§3.2.1) | `attach_posts_initial_state_and_device_info`; `detach_drops_already_queued_callbacks`; `detach_ends_speech_tts_notice_and_surface`; `open_while_detached_is_hidden_at_once`; `stop_reports_cancelled_and_stopped_never_error`; `restart_recreates_the_client_and_keeps_the_listener`; `old_epoch_callbacks_are_dropped_after_restart` |
-| CXR app slot (§3.6.1) | `coroutine_cancel_after_dispatch_keeps_slot_and_copy_until_answer`; `link_loss_after_dispatch_releases_slot_and_deletes_copy`; `stale_callback_of_a_released_dispatch_is_dropped`; `query_launch_and_third_party_upload_share_the_slot_fifo`; `third_party_upload_busy_returns_false`; `exception_before_dispatch_releases_slot_and_deletes_copy`; `progress_is_inline_monotonic_and_never_after_return` |
+| CXR app slot (§3.6.1) | `dispatch_completion_keeps_the_slot_for_the_next_dispatch` (after the install's query answers, a waiting `installedVersion()` is still waiting, the copy exists, and the upload goes out on the same op); `finish_during_dispatch_is_deferred_until_the_answer` (coroutine cancel after the upload dispatch: slot held and copy present until CXR answers, then both released); `link_loss_completes_the_dispatch_and_the_owner_finishes_with_failed` (slot freed and copy deleted only at that `finish`); `finish_is_idempotent_and_cleanup_runs_once`; `stale_callback_of_a_completed_dispatch_is_dropped`; `query_launch_and_third_party_upload_share_the_slot_fifo`; `third_party_upload_busy_returns_false`; `exception_while_acquired_finishes_the_operation_and_deletes_copy`; `progress_is_inline_monotonic_and_never_after_return` |
 
 ### 6.1 CI
 
