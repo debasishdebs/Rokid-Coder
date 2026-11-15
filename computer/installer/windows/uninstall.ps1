@@ -1,8 +1,9 @@
 <#
   uninstall.ps1 [-Purge] [-KeepMirrored yes|no]   (Apps & Features runs it through the NSIS uninstaller)
 
-  1. rokid-setup uninstall [--purge --yes] in the bound distro: stops agentd and
-     removes the plugins, wrappers, PATH block and bundles; state stays unless purged.
+  1. rokid-setup uninstall [--purge --yes] in the committed binding's distro (the
+     registered task's binding, confirmed by that distro's install.json): stops agentd
+     and removes the plugins, wrappers, PATH block and bundles; state stays unless purged.
   2. Unregister-ScheduledTask \RokidCoder\agentd.
   3. The elevated machine.ps1 -Revert -All: every rule and proxy entry recorded
      in machine-state.json, and nothing it did not create.
@@ -20,10 +21,10 @@ if (-not (Get-Module RokidCoder)) { Import-Module (Join-Path $PSScriptRoot 'lib\
 $paths = Get-RokidPaths
 $problems = New-Object System.Collections.Generic.List[string]
 
-# 1
-$bindingFile = Get-ChildItem -LiteralPath $paths.DataRoot -Filter 'binding-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc | Select-Object -Last 1
-if ($bindingFile) {
-  $binding = Get-Content -LiteralPath $bindingFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+# 1: in the distro of the COMMITTED binding (the one install.json names), never a failed Repair's newer one
+$committed = Resolve-CommittedBinding -Paths $paths
+if ($committed) {
+  $binding = $committed.Binding
   $argv = @('uninstall') + $(if ($Purge) { @('--purge', '--yes') } else { @() })
   $run = Invoke-WslExec -Distro $binding.distroName -User $binding.linuxUser -Path "$($binding.linuxHome)/.rokid-coder/bin/rokid-setup" -Arguments $argv
   $run.Output | ForEach-Object { Write-Output $_ }

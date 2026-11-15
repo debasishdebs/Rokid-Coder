@@ -870,12 +870,54 @@ function Start-SetupWindow {
   (Start-Process -FilePath $Binding.wslExe -ArgumentList (ConvertTo-CommandLine $argv) -Wait -PassThru).ExitCode
 }
 
+function Read-InstallManifest {
+  <# install.json inside the binding's distro: the commit point of rokid-setup install. $null when absent or unreadable. #>
+  param([Parameter(Mandatory = $true)]$Binding)
+  $run = Invoke-WslExec -Distro $Binding.distroName -User $Binding.linuxUser -Path '/usr/bin/cat' -Arguments @("$($Binding.linuxHome)/.rokid-coder/install.json")
+  if ($run.ExitCode -ne 0) { return $null }
+  try { ($run.Output -join "`n") | ConvertFrom-Json } catch { $null }
+}
+
+function Get-RegisteredBindingPath {
+  <# The binding the registered \RokidCoder\agentd task's action names; $null without the task. #>
+  $task = Get-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskName -ErrorAction SilentlyContinue
+  foreach ($action in @($(if ($task) { $task.Actions }))) {
+    if ("$(Get-PropertyValue $action 'Arguments')" -match '-Binding "([^"]+)"') { return $Matches[1] }
+  }
+  $null
+}
+
+function Resolve-CommittedBinding {
+  <#
+    The binding the committed install was made with: the one its install.json names.
+    The registered task's binding is asked first, then each staged one, newest first,
+    so a failed Repair's newer binding (perhaps for another distro) is never taken
+    for the install. $null when no distro holds a committed install.
+  #>
+  param($Paths = (Get-RokidPaths))
+  $candidates = New-Object System.Collections.Generic.List[string]
+  $registered = Get-RegisteredBindingPath
+  if ($registered) { $candidates.Add($registered) }
+  foreach ($file in @(Get-ChildItem -LiteralPath $Paths.DataRoot -Filter 'binding-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)) {
+    if (-not ($candidates | Where-Object { $_ -ieq $file.FullName })) { $candidates.Add($file.FullName) }
+  }
+  $manifests = @{}
+  foreach ($path in $candidates) {
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    $binding = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    $where = "$($binding.distroName)|$($binding.linuxUser)|$($binding.linuxHome)"
+    if (-not $manifests.ContainsKey($where)) { $manifests[$where] = Read-InstallManifest -Binding $binding }
+    $committed = Get-PropertyValue (Get-PropertyValue (Get-PropertyValue $manifests[$where] 'binding') 'bindingPath') 'win'
+    if ($committed -and $committed -ieq $path) { return [pscustomobject]@{ Path = $path; Binding = $binding } }
+  }
+  $null
+}
+
 function Get-CommittedGenerations {
   <# The committed generation and its previous, from install.json inside the distro. #>
   param([Parameter(Mandatory = $true)]$Binding)
-  $run = Invoke-WslExec -Distro $Binding.distroName -User $Binding.linuxUser -Path '/usr/bin/cat' -Arguments @("$($Binding.linuxHome)/.rokid-coder/install.json")
-  if ($run.ExitCode -ne 0) { return @() }
-  $manifest = ($run.Output -join "`n") | ConvertFrom-Json
+  $manifest = Read-InstallManifest -Binding $Binding
+  if (-not $manifest) { return @() }
   $previous = Get-PropertyValue (Get-PropertyValue (Get-PropertyValue $manifest 'previous') 'manifest') 'binding'
   @(
     Get-GenerationOf (Get-PropertyValue (Get-PropertyValue (Get-PropertyValue $manifest 'binding') 'bindingPath') 'win')
