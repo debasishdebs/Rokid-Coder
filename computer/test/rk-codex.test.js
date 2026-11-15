@@ -124,14 +124,13 @@ test("rk_codex_pair_prompt_opens_window_then_starts_codex", async () => {
       const run = inPty(process.execPath, [RK, "codex"], env);
       await run.until("No phone paired yet. Pair now? [Y/n]");
       run.write("y\r");
-      await run.until("Open Agents on your phone → Add a computer (2:00 left)");
+      // An agentd holds the hook port but offers no pairing socket: rk does not write the pins beside it (R208, R209).
+      await run.until("Could not open the pairing window: agentd is running or starting");
       const pins = new PinStore(path.join(configDir, "tls", "phone-pins.json"));
-      assert.equal(pins.allowNextOpen(Date.now()), true);
-      assert.equal(run.out.includes("fake-codex ready"), false, "Codex waits for the pairing");
-      pairPhone(configDir);
-      await run.until("Paired ✓", 3000);
+      assert.equal(pins.allowNextOpen(Date.now()), false, "rk wrote the pins while agentd held them");
+      // Codex still starts.
       assert.deepEqual(await run.exited, { code: 0, signal: null });
-      assert.ok(run.out.indexOf("Paired ✓") < run.out.indexOf("fake-codex ready"), run.out);
+      assert.ok(run.out.includes("fake-codex ready"), run.out);
     } finally {
       await agentd.close();
     }

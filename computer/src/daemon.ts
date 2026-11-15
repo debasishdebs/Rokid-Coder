@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -30,7 +31,7 @@ import { QuestionRelay } from "./question-relay";
 import { TranscriptTailManager, readTranscriptHeading } from "./transcript";
 import { DETAIL_MESSAGE_LIMIT, readRecentMessages } from "./transcript-messages";
 import { sessionKeyOf } from "./protocol-v2";
-import { DAY_MS, ensureAgentCert, ensureSteerSecret, holdPinsLock, PinStore, readSteerSecret, steerSecretFile } from "./tls";
+import { DAY_MS, ensureAgentCert, ensureSteerSecret, PinStore, readSteerSecret, steerSecretFile } from "./tls";
 import type { AgentProvider, HookPayload } from "./types";
 import { WsHub } from "./ws-server";
 
@@ -89,6 +90,33 @@ const REBIND_REPLY_WAIT_MS = 1000;
 function envMs(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
   return process.env[name] !== undefined && Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** How long agentd waits for its hook port, which a CLI writing the pins (or another agentd) may hold. */
+const HOOK_PORT_WAIT_MS = 5_000;
+
+async function bindHookPort(server: HookHttpServer, port: number): Promise<void> {
+  const deadline = Date.now() + HOOK_PORT_WAIT_MS;
+  for (;;) {
+    try {
+      await server.bind();
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") {
+        throw error;
+      }
+      if (Date.now() >= deadline) {
+        throw Object.assign(
+          new Error(
+            `127.0.0.1:${port} is still taken after ${HOOK_PORT_WAIT_MS / 1000} s: another agentd is running, or a CLI is ` +
+              "changing the phone pins. Stop the other agentd, or try again in a moment.",
+          ),
+          { code: "EADDRINUSE" },
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
 }
 
 export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<RunningDaemon> {
@@ -485,9 +513,19 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
   const agentCert = await ensureAgentCert(tlsDir);
   ensureSteerSecret(tlsDir);
-  // The only pin writer while it runs (R208): the lock is taken before the first read and held until stop,
-  // so no other process can change the pins underneath it; the CLI asks over the launcher socket instead.
-  const releasePinsLock = holdPinsLock(tlsDir);
+  // The only pin writer while it runs (R208). Its lock is the hook port (R209): bound before the first read
+  // of the pins and held until stop, answering 503 until the daemon is up. The CLI asks over the launcher
+  // socket instead, and writes directly only while it holds the port itself, so only when agentd is down.
+  const httpServer = new HookHttpServer({
+    port: config.httpPort,
+    sessionCount: () => sessions.size,
+    onHook: (payload, closed) => processHook(payload, closed),
+    logger,
+    extraHealth: () => ({ codex: codex.availability() }),
+  });
+  await bindHookPort(httpServer, config.httpPort);
+  // The file lock an earlier build used; inert now.
+  rmSync(path.join(tlsDir, "phone-pins.lock"), { recursive: true, force: true });
   const pins = new PinStore(path.join(tlsDir, "phone-pins.json"), { logger });
   // One window, one attempt, for both transports and every entry point.
   const pairing = new PairingCoordinator({
@@ -703,13 +741,6 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       subscribeCodex(entry.id);
     }
   }
-  const httpServer = new HookHttpServer({
-    port: config.httpPort,
-    sessionCount: () => sessions.size,
-    onHook: processHook,
-    logger,
-    extraHealth: () => ({ codex: codex.availability() }),
-  });
   // A Claude session killed outright (kill -9, a closed terminal) sends no
   // SessionEnd, and `claude --resume` would inherit its approve-all; once its
   // transcript or its process is gone, the mode ends as if it had.
@@ -775,7 +806,6 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     await hub.stop().catch(() => undefined);
     tailManager.stopAll();
     sessions.dispose();
-    releasePinsLock();
     throw error;
   }
 
@@ -826,7 +856,6 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       tailManager.stopAll();
       await Promise.all([httpServer.stop(), hub.stop()]);
       sessions.dispose();
-      releasePinsLock();
       logger.info("daemon_stopped");
     },
   };

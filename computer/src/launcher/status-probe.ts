@@ -47,7 +47,7 @@ export function phonePinsFile(): string {
 }
 
 /** agentd's hook port: the same override the hooks use, then its config.json, then the default. */
-function agentdHttpPort(): number {
+export function agentdHttpPort(): number {
   const fromEnv = Number(process.env.NEXUS_AGENTD_HTTP_PORT);
   if (Number.isSafeInteger(fromEnv) && fromEnv > 0 && fromEnv <= 65_535) {
     return fromEnv;

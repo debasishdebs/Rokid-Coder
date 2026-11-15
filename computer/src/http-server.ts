@@ -20,15 +20,32 @@ export interface HookHttpServerOptions {
 
 export class HookHttpServer {
   private server?: Server;
+  private ready = false;
   private readonly startedAt = Date.now();
 
   constructor(private readonly options: HookHttpServerOptions) {}
 
-  start(): Promise<void> {
+  /** Binds the port and serves: `bind`, if it has not run, then requests are answered. */
+  async start(): Promise<void> {
+    await this.bind();
+    this.ready = true;
+  }
+
+  /**
+   * Takes the port without serving yet: agentd holds it from before its first
+   * read of the phone pins, as the pin writer lock (R209). Until `start`,
+   * every request is refused with 503.
+   */
+  bind(): Promise<void> {
     if (this.server) {
       return Promise.resolve();
     }
     const server = createServer((request, response) => {
+      if (!this.ready) {
+        response.writeHead(503, { "content-type": "application/json", connection: "close" });
+        response.end('{"error":"starting"}');
+        return;
+      }
       if (request.method === "GET" && request.url === "/health") {
         const body = JSON.stringify({
           ok: true,
@@ -120,7 +137,7 @@ export class HookHttpServer {
       };
       server.once("error", onError);
       server.once("listening", onListening);
-      server.listen(this.options.port, "127.0.0.1");
+      server.listen({ port: this.options.port, host: "127.0.0.1", exclusive: true });
     });
   }
 
@@ -132,6 +149,7 @@ export class HookHttpServer {
   stop(): Promise<void> {
     const server = this.server;
     this.server = undefined;
+    this.ready = false;
     if (!server) {
       return Promise.resolve();
     }

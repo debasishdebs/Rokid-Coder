@@ -11,7 +11,7 @@ import {
 import { startDaemon } from "./daemon";
 import { LineReader } from "./launcher/pair-prompt";
 import { pairingPayload } from "./pairing";
-import { type PinsChange, type PinsChangeResult, requestPinsChange } from "./pairing/pins-client";
+import { changePins } from "./pairing/pin-writer";
 import { confirmInTerminal } from "./pairing/terminal-client";
 import { PhoneSettingsStore } from "./phone-settings";
 import {
@@ -23,30 +23,6 @@ import {
   rotateSteerSecret,
 } from "./tls";
 import { installHooks, uninstallHooks } from "./settings";
-
-/**
- * A pin change (R208): made by agentd when it is running, which is then the
- * only process that writes the pins. Only when it is not running does this
- * process write them itself, under the pins lock.
- */
-async function changePins(stateDir: string, tlsDir: string, change: PinsChange): Promise<PinsChangeResult> {
-  const viaAgentd = await requestPinsChange(stateDir, change);
-  if (viaAgentd) {
-    return viaAgentd;
-  }
-  const pins = new PinStore(path.join(tlsDir, "phone-pins.json"));
-  switch (change.op) {
-    case "forget": {
-      const removed = pins.forget(change.fp ?? "");
-      return { removed: removed.length, empty: pins.isEmpty() };
-    }
-    case "forget_all":
-      pins.forgetAll();
-      return {};
-    case "allow_next":
-      return { until: pins.armAllowNext(Date.now()) };
-  }
-}
 
 interface Health {
   ok: boolean;
@@ -153,7 +129,7 @@ async function main(): Promise<void> {
       if (process.argv.slice(3).includes("--rotate-steer")) {
         rotateSteerSecret(tlsDir);
         // PhoneLink checks the pin, not the secret: a rotation that kept the pins would revoke nothing there.
-        await changePins(config.rokidCoder.stateDir, tlsDir, { op: "forget_all" });
+        await changePins(config.rokidCoder.stateDir, tlsDir, config.httpPort, { op: "forget_all" });
         process.stderr.write(
           "Steering secret rotated and every phone forgotten. A running agentd disconnects them on both links now; each must pair again with a code.\n",
         );
@@ -237,14 +213,14 @@ async function main(): Promise<void> {
         if (which === "--all") {
           // Forgetting everything revokes both transports: a phone that dials in
           // over wss is trusted by the steering secret, not by a pin.
-          await changePins(config.rokidCoder.stateDir, tlsDir, { op: "forget_all" });
+          await changePins(config.rokidCoder.stateDir, tlsDir, config.httpPort, { op: "forget_all" });
           rotateSteerSecret(tlsDir);
           process.stdout.write(
             `Forgot all phones. A running agentd drops its dialled link.\nThe steering secret was rotated too, so a running agentd also cuts off every phone steering over the paired WebSocket link; to steer again, a phone must pair again with "pair".\n${none}`,
           );
         } else if (which) {
           // One phone is one pairing: a half-finished one (provisional) goes with it.
-          const result = await changePins(config.rokidCoder.stateDir, tlsDir, { op: "forget", fp: which });
+          const result = await changePins(config.rokidCoder.stateDir, tlsDir, config.httpPort, { op: "forget", fp: which });
           process.stdout.write(
             (result.removed ?? 0) > 0
               ? `Forgotten. That phone's links close now; it must pair again to reconnect.\n${result.empty ? none : ""}`
@@ -254,7 +230,7 @@ async function main(): Promise<void> {
           throw new Error("Usage: agentd phones forget <fingerprint|--all>");
         }
       } else if (action === "allow-next") {
-        await changePins(config.rokidCoder.stateDir, tlsDir, { op: "allow_next" });
+        await changePins(config.rokidCoder.stateDir, tlsDir, config.httpPort, { op: "allow_next" });
         process.stdout.write(
           `Open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes, for one phone. It pairs only once you compare its 6-digit code: run "agentd pair" to see it, and confirm on the phone.\n`,
         );

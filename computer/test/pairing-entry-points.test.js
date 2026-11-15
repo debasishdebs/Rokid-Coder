@@ -15,10 +15,12 @@ const path = require("node:path");
 const { pairingPayload } = require("../dist/pairing.js");
 const { PairingCoordinator } = require("../dist/pairing/coordinator.js");
 const { PAIR_TEXT } = require("../dist/attach-command.js");
-const { PinStore, holdPinsLock } = require("../dist/tls.js");
+const { PinStore } = require("../dist/tls.js");
+const { holdHookPort, writePinsDirectly } = require("../dist/pairing/pin-writer.js");
+const { LAUNCHER_SOCKET_NAME } = require("../dist/launcher/socket-name.js");
 const { ensureConfig, saveConfig } = require("../dist/config.js");
 const { createFakePhone } = require("./fake-phone.js");
-const { withDaemon, settle } = require("./helpers/daemon.js");
+const { withDaemon, settle, freePort } = require("./helpers/daemon.js");
 const { phoneCert } = require("./helpers/tls.js");
 const { wssSasPhone } = require("./helpers/sas-phone.js");
 
@@ -276,11 +278,9 @@ test("rotate_steer_requires_new_sas_pairing", async () => {
 // ---------------------------------------------------------------- one pin writer (R208)
 
 test("cli_forget_goes_through_running_agentd", async () => {
-  await withDaemon({ transport: "wshub" }, async ({ coderDir }) => {
-    const tlsDir = path.join(coderDir, "tls");
-    // agentd holds the pins lock for its whole run, so a direct write from the CLI could not happen.
-    const owner = await fsp.readFile(path.join(tlsDir, "phone-pins.lock", "owner"), "utf8");
-    assert.ok(owner.startsWith(`${process.pid}:`), "agentd does not hold the pins lock");
+  await withDaemon({ transport: "wshub" }, async ({ coderDir, httpPort }) => {
+    // agentd holds its hook port, the pin writer lock, for its whole run: the CLI could not write directly.
+    assert.equal(await holdHookPort(httpPort), undefined, "agentd does not hold its hook port");
     const fp = (await phoneCert("cli-forget-phone")).fingerprint256;
     pinsOf(coderDir).add(fp);
     const forget = runCli(coderDir, ["phones", "forget", fp.slice(0, 23)]);
@@ -294,32 +294,121 @@ test("cli_forget_goes_through_running_agentd", async () => {
     const bad = runCli(coderDir, ["phones", "forget", "12"]);
     assert.notEqual(await bad.exited, 0);
     assert.match(bad.out, /give at least 8 hex digits/);
-    assert.equal(await fsp.readFile(path.join(tlsDir, "phone-pins.lock", "owner"), "utf8"), owner, "the lock changed hands");
   });
 });
 
-test("cli_writes_directly_only_when_agentd_down", async () => {
+/** A config for the CLI with no agentd running, on a hook port nothing else uses. */
+async function cliWithoutAgentd() {
   const root = await fsp.mkdtemp(path.join(require("node:os").tmpdir(), "rokid-coder-cli-"));
   track(() => fsp.rm(root, { recursive: true, force: true }));
   const coderDir = path.join(root, "rokid-coder");
   const stateDir = path.join(root, "nexus-agentd");
-  saveConfig({ ...ensureConfig(stateDir), rokidCoder: { stateDir: coderDir } }, stateDir);
+  const httpPort = await freePort();
+  saveConfig({ ...ensureConfig(stateDir), httpPort, rokidCoder: { stateDir: coderDir } }, stateDir);
+  return { coderDir, httpPort };
+}
+
+test("cli_writes_directly_only_when_agentd_down", async () => {
+  const { coderDir, httpPort } = await cliWithoutAgentd();
   const [a, b] = await Promise.all(["down-a", "down-b"].map(async (name) => (await phoneCert(name)).fingerprint256));
   pinsOf(coderDir).add(a);
   pinsOf(coderDir).add(b);
-  // No agentd: the CLI writes the pins itself, under the lock.
+  // No agentd: the CLI writes the pins itself, holding the hook port.
   const direct = runCli(coderDir, ["phones", "forget", a.slice(0, 23)]);
   assert.equal(await direct.exited, 0, direct.out);
   assert.match(direct.out, /^Forgotten\./);
   assert.equal(pinsOf(coderDir).has(a), false);
-  // An agentd that holds the pins but whose socket cannot be reached: the CLI fails closed and writes nothing.
-  const release = holdPinsLock(path.join(coderDir, "tls"));
+  // The hook port is taken (an agentd starting, with no socket yet): the CLI fails closed and writes nothing.
+  const release = await holdHookPort(httpPort);
   track(release);
   const refused = runCli(coderDir, ["phones", "forget", b.slice(0, 23)]);
   assert.notEqual(await refused.exited, 0);
-  assert.match(refused.out, new RegExp(`held by another process \\(pid ${process.pid}\\)`));
-  release();
+  assert.match(refused.out, new RegExp(`agentd is running or starting \\(127\\.0\\.0\\.1:${httpPort} is taken\\)`));
+  await release();
   assert.equal(pinsOf(coderDir).has(b), true);
+});
+
+test("cli_direct_write_holds_hook_port_and_agentd_waits", async () => {
+  const httpPort = await freePort();
+  const fp = (await phoneCert("written-while-down")).fingerprint256;
+  let writer;
+  let startedAt;
+  await withDaemon(
+    {
+      transport: "wshub",
+      httpPort,
+      beforeStart: async ({ coderDir }) => {
+        const file = path.join(coderDir, "tls", "phone-pins.json");
+        const held = path.join(coderDir, "cli-held");
+        // A CLI direct write in progress as agentd starts: it holds the hook port for the whole write.
+        writer = spawn(process.execPath, ["-e", `
+          const fs = require("node:fs");
+          const { PinStore } = require(${JSON.stringify(path.join(__dirname, "..", "dist", "tls.js"))});
+          const { holdHookPort } = require(${JSON.stringify(path.join(__dirname, "..", "dist", "pairing", "pin-writer.js"))});
+          (async () => {
+            const release = await holdHookPort(${httpPort});
+            if (!release) process.exit(2);
+            new PinStore(${JSON.stringify(file)}).add(${JSON.stringify(fp)});
+            fs.writeFileSync(${JSON.stringify(held)}, "1");
+            // Still holding the port, with its event loop free to refuse what arrives.
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            await release();
+          })();
+        `], { stdio: "ignore" });
+        track(() => writer.kill("SIGKILL"));
+        await waitUntil(async () => {
+          try {
+            await fsp.stat(held);
+            return true;
+          } catch {
+            return false;
+          }
+        }, "the CLI never took the hook port");
+        // While the CLI holds it, a request to the port is refused.
+        const status = await new Promise((resolve, reject) => {
+          require("node:http").get({ host: "127.0.0.1", port: httpPort, path: "/health" }, (response) => {
+            response.resume();
+            resolve(response.statusCode);
+          }).on("error", reject);
+        });
+        assert.equal(status, 503);
+        startedAt = Date.now();
+      },
+    },
+    async ({ coderDir }) => {
+      // agentd waited for the port, so it read the pins only after the CLI's write was on disk.
+      assert.ok(Date.now() - startedAt >= 500, "agentd did not wait for the hook port");
+      assert.equal(pinsOf(coderDir).has(fp), true);
+      assert.equal(writer.exitCode, 0);
+    },
+  );
+});
+
+test("agentd_and_cli_never_write_concurrently", async () => {
+  await withDaemon({ transport: "wshub" }, async ({ coderDir, httpPort }) => {
+    const fp = (await phoneCert("never-concurrent")).fingerprint256;
+    pinsOf(coderDir).add(fp);
+    // A direct writer while agentd runs cannot get the port.
+    await assert.rejects(writePinsDirectly(httpPort, () => pinsOf(coderDir).forget(fp.slice(0, 23))), /is taken/);
+    // Nor can a CLI that cannot reach agentd's socket: it fails closed rather than write beside agentd.
+    const socket = path.join(coderDir, LAUNCHER_SOCKET_NAME);
+    const aside = `${socket}.aside`;
+    await fsp.rename(socket, aside);
+    let restored = false;
+    track(async () => {
+      if (!restored) await fsp.rename(aside, socket);
+    });
+    const refused = runCli(coderDir, ["phones", "forget", fp.slice(0, 23)]);
+    assert.notEqual(await refused.exited, 0);
+    assert.match(refused.out, /agentd is running or starting/);
+    assert.equal(pinsOf(coderDir).has(fp), true);
+    await fsp.rename(aside, socket);
+    restored = true;
+    // Through agentd, the same change is made.
+    const forget = runCli(coderDir, ["phones", "forget", fp.slice(0, 23)]);
+    assert.equal(await forget.exited, 0, forget.out);
+    assert.equal(pinsOf(coderDir).has(fp), false);
+  });
 });
 
 test("phones_forget_also_drops_a_provisional_pin", async () => {

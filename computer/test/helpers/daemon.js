@@ -73,14 +73,14 @@ function releaseEnv() {
  * Starts the daemon on fresh ports, retrying up to 5 times when a port turns
  * out to be taken after all (another process drew it between probe and bind).
  */
-async function startOnFreePorts({ base, stateDir, coderDir, claudeDir, phoneHosts }) {
+async function startOnFreePorts({ base, stateDir, coderDir, claudeDir, phoneHosts, fixedHttpPort }) {
   const previous = startTurn;
   let done;
   startTurn = new Promise((resolve) => { done = resolve; });
   await previous;
   try {
     for (let attempt = 1; ; attempt += 1) {
-      const httpPort = await freePort();
+      const httpPort = fixedHttpPort ?? await freePort();
       const wsPort = await freePort();
       const discoveryPort = await freePort();
       saveConfig({
@@ -148,7 +148,7 @@ function transcriptLine(sessionId) {
  * The daemon's agentd cert is the one shared test cert, copied into its tls dir. `coderFiles` pre-seeds files in
  * the Rokid-Coder state dir (name -> JSON value), such as settings.json.
  */
-async function withDaemon({ transport, tls = true, attached = [], discovered = [], coderFiles = {}, paired = false }, body) {
+async function withDaemon({ transport, tls = true, attached = [], discovered = [], coderFiles = {}, paired = false, httpPort: fixedHttpPort, beforeStart }, body) {
   await withTempDir(async (dir) => {
     const stateDir = path.join(dir, "nexus-agentd");
     const coderDir = path.join(dir, "rokid-coder");
@@ -189,6 +189,8 @@ async function withDaemon({ transport, tls = true, attached = [], discovered = [
       phonePort = (await phone.start({ token: base.token })).port;
     }
 
+    // What a test does just before agentd starts: hold its hook port as a CLI writing the pins would, say.
+    await beforeStart?.({ coderDir });
     holdEnv();
     let daemon;
     try {
@@ -198,6 +200,7 @@ async function withDaemon({ transport, tls = true, attached = [], discovered = [
         coderDir,
         claudeDir,
         phoneHosts: transport === "phonelink" ? [`127.0.0.1:${phonePort}`] : [],
+        fixedHttpPort,
       });
       daemon = started.daemon;
       const { httpPort, wsPort } = started;

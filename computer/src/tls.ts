@@ -13,7 +13,6 @@ import {
   statSync,
   unlinkSync,
   watch,
-  writeFileSync,
   writeSync,
 } from "node:fs";
 import path from "node:path";
@@ -36,9 +35,6 @@ const TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 /** How long `phones allow-next` leaves the door open for one more phone. */
 export const ALLOW_NEXT_WINDOW_MS = 2 * 60 * 1000;
 const CERT_LOCK_STALE_MS = 30_000;
-/** How long a pin change waits for another process's before it fails closed. */
-const PINS_LOCK_WAIT_MS = 3_000;
-const PINS_LOCK_NAME = "phone-pins.lock";
 const CERT_LOCK_WAIT_MS = 10_000;
 
 export interface AgentCert {
@@ -281,156 +277,6 @@ export function watchFiles(files: string[], intervalMs: number, onChange: () => 
   };
 }
 
-// ---- the pins lock ----
-
-/**
- * The pins locks this process holds: how many holds are open, and the token it
- * wrote into the lock's owner file. A pin change made inside another, or while
- * agentd holds the lock for its whole run, is not a second acquire.
- */
-const heldPinsLocks = new Map<string, { depth: number; token: string }>();
-const lockSleeper = new Int32Array(new SharedArrayBuffer(4));
-
-function pinsLockPath(dir: string): string {
-  return path.join(dir, PINS_LOCK_NAME);
-}
-
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-function lockOwner(lock: string): string | undefined {
-  try {
-    return readFileSync(path.join(lock, "owner"), "utf8");
-  } catch {
-    return undefined;
-  }
-}
-
-function ownerPid(owner: string | undefined): number | undefined {
-  const pid = owner === undefined ? NaN : Number(owner.split(":")[0]);
-  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
-}
-
-/**
- * Takes over a lock only when its holder's process is dead: a live holder's
- * lock is never taken, however long it has been held. The lock is renamed
- * aside, and only if its owner is still the dead one, before it is removed.
- */
-function breakDeadLock(lock: string): void {
-  const owner = lockOwner(lock);
-  const pid = ownerPid(owner);
-  if (pid === undefined || pidAlive(pid)) {
-    return;
-  }
-  if (lockOwner(lock) !== owner) {
-    return;
-  }
-  const aside = `${lock}.dead-${process.pid}-${randomBytes(4).toString("hex")}`;
-  try {
-    renameSync(lock, aside);
-  } catch {
-    return;
-  }
-  rmSync(aside, { recursive: true, force: true });
-}
-
-/**
- * Takes the phone-pins lock in `dir` and returns its release. The lock is a
- * directory that appears in one rename with its owner file (pid and a random
- * token) already inside, so it is never seen without an owner. A lock held by
- * a live process makes this wait at most `waitMs` and then throw: a pin change
- * that cannot be made safely is not made. Reentrant within this process.
- * agentd holds it from before its first read of the pins until it stops
- * (R208), so while it runs no other process can write them.
- */
-export function holdPinsLock(dir: string, { waitMs = PINS_LOCK_WAIT_MS }: { waitMs?: number } = {}): () => void {
-  const lock = pinsLockPath(dir);
-  const held = heldPinsLocks.get(lock);
-  if (held) {
-    held.depth += 1;
-  } else {
-    privateDir(dir);
-    const token = `${process.pid}:${randomBytes(16).toString("hex")}`;
-    const deadline = Date.now() + waitMs;
-    for (;;) {
-      const staging = `${lock}.new-${randomBytes(4).toString("hex")}`;
-      mkdirSync(staging, { mode: 0o700 });
-      try {
-        writeFileSync(path.join(staging, "owner"), token, { mode: 0o600 });
-        renameSync(staging, lock);
-        break;
-      } catch (error) {
-        rmSync(staging, { recursive: true, force: true });
-        if (!["EEXIST", "ENOTEMPTY", "EISDIR", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
-          throw error;
-        }
-      }
-      breakDeadLock(lock);
-      if (Date.now() >= deadline) {
-        const pid = ownerPid(lockOwner(lock));
-        throw new Error(
-          `The phone pins at ${dir} are held by another process${pid ? ` (pid ${pid})` : ""}. ` +
-            "While agentd runs it is the only one that changes them; if it is not running, try again.",
-        );
-      }
-      Atomics.wait(lockSleeper, 0, 0, 10);
-    }
-    heldPinsLocks.set(lock, { depth: 1, token });
-  }
-  let released = false;
-  return () => {
-    if (released) {
-      return;
-    }
-    released = true;
-    const entry = heldPinsLocks.get(lock);
-    if (!entry) {
-      return;
-    }
-    entry.depth -= 1;
-    if (entry.depth > 0) {
-      return;
-    }
-    heldPinsLocks.delete(lock);
-    // Someone took it over as dead meanwhile: the lock is theirs now.
-    if (lockOwner(lock) === entry.token) {
-      rmSync(lock, { recursive: true, force: true });
-    }
-  };
-}
-
-/** Runs `fn` holding the phone-pins lock in `dir`; see `holdPinsLock`. */
-export function withPinsLock<T>(dir: string, fn: () => T, options: { waitMs?: number } = {}): T {
-  const release = holdPinsLock(dir, options);
-  try {
-    return fn();
-  } finally {
-    release();
-  }
-}
-
-/**
- * The fence before every write: this process holds the lock, and the lock's
- * owner file still has the token it wrote. If another process took the lock
- * over (it believed this one dead), the write is not made.
- */
-function assertPinsLockOwned(dir: string): void {
-  const lock = pinsLockPath(dir);
-  const entry = heldPinsLocks.get(lock);
-  if (!entry) {
-    throw new Error("phone pins changed without the pins lock");
-  }
-  if (lockOwner(lock) !== entry.token) {
-    throw new Error("The phone pins lock was lost to another process; nothing was written");
-  }
-}
-
 export interface PinEntry {
   /** Normalised fingerprint. */
   fp: string;
@@ -490,13 +336,12 @@ export class PinStore {
   private readonly writeFile: (file: string, content: string) => void;
   private readonly clock: () => number;
   private readonly logger?: Logger;
-  private readonly lockWaitMs?: number;
-  private readonly afterLockedReload?: (operation: string) => void;
+  private readonly afterReload?: (operation: string) => void;
 
   /**
    * Without a file the set lives only as long as the process. `writeFile`,
-   * `now`, `lockWaitMs` and `afterLockedReload` (called inside the lock, after
-   * the reload and before anything is decided) are for tests.
+   * `now` and `afterReload` (called in a change after its reload, before
+   * anything is decided) are for tests.
    */
   constructor(
     private readonly file?: string,
@@ -504,15 +349,13 @@ export class PinStore {
       writeFile?: (file: string, content: string) => void;
       now?: () => number;
       logger?: Logger;
-      lockWaitMs?: number;
-      afterLockedReload?: (operation: string) => void;
+      afterReload?: (operation: string) => void;
     } = {},
   ) {
     this.writeFile = options.writeFile ?? writePrivate;
     this.clock = options.now ?? Date.now;
     this.logger = options.logger;
-    this.lockWaitMs = options.lockWaitMs;
-    this.afterLockedReload = options.afterLockedReload;
+    this.afterReload = options.afterReload;
     this.reload();
     this.absorbLegacyProvisional();
   }
@@ -561,7 +404,7 @@ export class PinStore {
       this.expire(now, ttlMs);
       return false;
     };
-    // Read on every steering frame: the lock is taken only when there is something to write.
+    // Read on every steering frame: it goes through a change only when there is something to write.
     const entry = this.durableEntry(fp);
     return this.pendingClamp(now) || (entry !== undefined && isStale(entry, now, ttlMs)) ? this.mutate("isTrusted", check) : check();
   }
@@ -623,7 +466,7 @@ export class PinStore {
    * A last use in the future means the clock went back since it was recorded.
    * It counts as now from here on, and the correction is written once, so an
    * unused pairing never gains the rolled-back time as extra life. Only ever
-   * called holding the lock.
+   * called inside a change.
    */
   private clampToNow(now: number): void {
     if (!this.pendingClamp(now)) {
@@ -695,9 +538,7 @@ export class PinStore {
    * Step 3: the provisional pin of exactly this attempt, still live, becomes
    * durable in one write. False, with nothing written, when that entry is gone
    * (forgotten, rotated away, dropped), expired, or another attempt's. Throws
-   * when the write fails, which leaves the provisional entry as it was. The
-   * check and the write happen under the pins lock, so no other process's
-   * forget can land between them.
+   * when the write fails, which leaves the provisional entry as it was.
    */
   promote(fp: string, attempt: string, now: number = this.clock()): boolean {
     return this.mutate("promote", () => {
@@ -797,24 +638,17 @@ export class PinStore {
   }
 
   /**
-   * Every change to the file: under the pins lock, from a fresh read, so the
-   * decision `fn` makes is about what is on disk now and nothing another
-   * process writes can land between that read and this write.
+   * Every change to the file: from a fresh read, decided and written in one
+   * synchronous step. Across processes, only the holder of agentd's hook port
+   * writes (R209): agentd for its whole run, or the CLI while agentd is down,
+   * so no other writer can land between this read and this write.
    */
   private mutate<T>(operation: string, fn: () => T): T {
-    if (!this.file) {
-      return fn();
-    }
-    return withPinsLock(
-      path.dirname(this.file),
-      () => {
-        this.reload();
-        this.afterLockedReload?.(operation);
-        return fn();
-      },
-      this.lockWaitMs === undefined ? {} : { waitMs: this.lockWaitMs },
-    );
+    this.reload();
+    this.afterReload?.(operation);
+    return fn();
   }
+
 
   // A pin file that cannot be read is an error, not an empty store: starting
   // over would turn the next stranger into the first-use phone.
@@ -902,8 +736,6 @@ export class PinStore {
   private commit(phones: Map<string, StoredPin>, allowNextUntil: number, pinnedBefore: boolean): void {
     if (this.file) {
       privateDir(path.dirname(this.file));
-      // Last thing before the write: a lock lost meanwhile writes nothing.
-      assertPinsLockOwned(path.dirname(this.file));
       this.writeFile(
         this.file,
         `${JSON.stringify(

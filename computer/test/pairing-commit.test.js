@@ -383,34 +383,38 @@ function phone_commit(phone) {
   phone.sendRaw({ type: "pair_committed", v: 2, attempt: phone.state.attempt });
 }
 
-// ---------------------------------------------------------------- the pins lock, across processes
+// ---------------------------------------------------------------- the pin writer lock: the hook port (R209)
 
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const fs = require("node:fs");
+const { freePort } = require("./helpers/daemon.js");
+const { holdHookPort, writePinsDirectly } = require("../dist/pairing/pin-writer.js");
 const TLS_JS = path.join(__dirname, "..", "dist", "tls.js");
+const PIN_WRITER_JS = path.join(__dirname, "..", "dist", "pairing", "pin-writer.js");
 
-/** A second node process, as the CLI is, with the same tls.js; `script` sees PinStore, withPinsLock, fs and sleep. */
+/** A second node process, as the CLI is; `script` sees PinStore, holdHookPort, writePinsDirectly, fs and sleep. */
 function secondProcess(script) {
   const child = spawn(
     process.execPath,
     [
       "-e",
       `const fs = require("node:fs");
-       const { PinStore, withPinsLock } = require(${JSON.stringify(TLS_JS)});
+       const { PinStore } = require(${JSON.stringify(TLS_JS)});
+       const { holdHookPort, writePinsDirectly } = require(${JSON.stringify(PIN_WRITER_JS)});
        const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-       ${script}`,
+       (async () => { ${script} })().catch((error) => { console.error(error); process.exit(1); });`,
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk; });
   child.stderr.on("data", (chunk) => { output += chunk; });
-  const exited = new Promise((resolve) => child.on("exit", (code) => resolve({ code, output })));
-  track(() => child.kill());
+  const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal, output })));
+  track(() => child.kill("SIGKILL"));
   return { child, exited };
 }
 
-/** Blocks this process (as the lock's holder does) until `file` exists. */
+/** Blocks this process, as a paused writer does, until `file` exists. */
 function blockUntilExists(file, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (!fs.existsSync(file)) {
@@ -419,117 +423,92 @@ function blockUntilExists(file, timeoutMs = 5000) {
   }
 }
 
+/** A CLI's direct forget of `prefix`, holding the hook port; it records its outcome in `outcome`. */
+const directForget = (port, file, prefix, outcome) => secondProcess(`
+  try {
+    const removed = await writePinsDirectly(${port}, () => new PinStore(${JSON.stringify(file)}).forget(${JSON.stringify(prefix)}));
+    fs.writeFileSync(${JSON.stringify(outcome)}, "removed " + removed.length);
+  } catch (error) {
+    fs.writeFileSync(${JSON.stringify(outcome)}, "refused " + error.message);
+  }
+`);
+
 test("two_process_forget_during_promotion_never_restores_trust", async () => {
   const dir = await tempDir();
   const file = path.join(dir, "phone-pins.json");
+  const port = await freePort();
   const fp = (await phoneCert("two-process-phone")).fingerprint256;
   const prefix = fp.slice(0, 20);
   const attempt = "0123456789abcdef";
-  const waiting = path.join(dir, "cli-waiting");
-  const done = path.join(dir, "cli-done");
+  const during = path.join(dir, "forget-during");
   let paused = false;
   const pins = new PinStore(file, {
-    afterLockedReload: (operation) => {
+    afterReload: (operation) => {
       if (operation !== "promote" || paused) return;
       paused = true;
-      // Paused after the reload, holding the lock: the CLI's forget arrives exactly now.
-      blockUntilExists(waiting);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
-      assert.equal(fs.existsSync(done), false, "the other process's forget landed inside the promotion");
+      // Paused after the reload: a CLI's direct forget arrives exactly now, and cannot get the port.
+      blockUntilExists(during);
+      assert.match(fs.readFileSync(during, "utf8"), /^refused agentd is running or starting/);
     },
   });
 
-  // 1. The forget arrives between the promotion's read and its write: it waits, then wins.
+  // 1. agentd holds the hook port; the forget arrives between the promotion's read and its write.
+  let release = await holdHookPort(port);
+  assert.ok(release, "the port was not free");
   pins.addProvisional(fp, attempt);
-  const cli = secondProcess(`
-    fs.writeFileSync(${JSON.stringify(waiting)}, "1");
-    const removed = new PinStore(${JSON.stringify(file)}, { lockWaitMs: 10000 }).forget(${JSON.stringify(prefix)});
-    fs.writeFileSync(${JSON.stringify(done)}, JSON.stringify(removed));
-  `);
+  const cli = directForget(port, file, prefix, during);
   assert.equal(pins.promote(fp, attempt), true);
-  const first = await cli.exited;
-  assert.equal(first.code, 0, first.output);
-  assert.deepEqual(JSON.parse(fs.readFileSync(done, "utf8")), [fp]);
-  assert.equal(new PinStore(file).has(fp), false, "the promotion restored a forgotten pairing");
-  assert.equal(new PinStore(file).provisional(fp), undefined);
+  await cli.exited;
+  // The forget was refused, out loud, not lost: the pairing is as the promotion left it, and a retry wins.
+  assert.equal(new PinStore(file).has(fp), true);
+  await release();
+  const after = path.join(dir, "forget-after");
+  await directForget(port, file, prefix, after).exited;
+  assert.equal(fs.readFileSync(after, "utf8"), "removed 1");
+  assert.equal(new PinStore(file).has(fp), false);
 
-  // 2. The other process holds the lock first and forgets: the promotion waits, then finds nothing to promote.
+  // 2. A CLI writes first and holds the port: agentd's promotion, which needs the port, waits for it and then finds nothing.
   pins.addProvisional(fp, attempt);
   const held = path.join(dir, "cli-held");
   const holder = secondProcess(`
-    withPinsLock(${JSON.stringify(dir)}, () => {
+    await writePinsDirectly(${port}, () => {
       new PinStore(${JSON.stringify(file)}).forget(${JSON.stringify(prefix)});
       fs.writeFileSync(${JSON.stringify(held)}, "1");
-      sleep(300);
+      sleep(400);
     });
   `);
-  await waitUntil(() => fs.existsSync(held), "the other process never took the lock");
+  await waitUntil(() => fs.existsSync(held), "the CLI never took the port");
+  assert.equal(await holdHookPort(port), undefined, "the port was free while the CLI wrote");
+  await waitUntil(async () => (release = await holdHookPort(port)) !== undefined, "the port was never freed");
   assert.equal(pins.promote(fp, attempt), false);
+  await release();
   assert.equal((await holder.exited).code, 0);
   assert.equal(new PinStore(file).has(fp), false);
   assert.deepEqual(new PinStore(file).provisionalEntries(), []);
 });
 
-test("live_holder_lock_is_never_stolen", async () => {
+test("crashed_holder_releases_lock_automatically", async () => {
   const dir = await tempDir();
   const file = path.join(dir, "phone-pins.json");
-  const lock = path.join(dir, "phone-pins.lock");
-  const fp = (await phoneCert("live-lock")).fingerprint256;
+  const port = await freePort();
+  const fp = (await phoneCert("crash-holder")).fingerprint256;
   const held = path.join(dir, "held");
   const holder = secondProcess(`
-    withPinsLock(${JSON.stringify(dir)}, () => {
-      fs.writeFileSync(${JSON.stringify(held)}, "1");
-      sleep(1500);
-    });
+    await holdHookPort(${port});
+    fs.writeFileSync(${JSON.stringify(held)}, "1");
+    setInterval(() => {}, 1000);
   `);
-  await waitUntil(() => fs.existsSync(held), "the holder never took the lock");
-  const owner = fs.readFileSync(path.join(lock, "owner"), "utf8");
-  assert.ok(owner.startsWith(`${holder.child.pid}:`));
-  // However old it looks, a live holder's lock is not taken: the change fails closed and says why.
-  const old = new Date(Date.now() - 60 * 60_000);
-  fs.utimesSync(lock, old, old);
-  const started = Date.now();
-  assert.throws(
-    () => new PinStore(file, { lockWaitMs: 300 }).add(fp),
-    (error) => error.message.includes(`held by another process (pid ${holder.child.pid})`),
-  );
-  assert.ok(Date.now() - started >= 300);
-  assert.equal(fs.readFileSync(path.join(lock, "owner"), "utf8"), owner, "a live lock was taken");
+  await waitUntil(() => fs.existsSync(held), "the holder never took the port");
+  await assert.rejects(writePinsDirectly(port, () => new PinStore(file).add(fp)), /127\.0\.0\.1:\d+ is taken/);
   assert.equal(new PinStore(file).has(fp), false);
-  assert.equal((await holder.exited).code, 0);
-  new PinStore(file).add(fp);
-  assert.equal(new PinStore(file).has(fp), true);
-  assert.equal(fs.existsSync(lock), false, "the lock is released");
-});
-
-test("dead_holder_recovered_and_token_fence_aborts_stale_writer", async () => {
-  const dir = await tempDir();
-  const file = path.join(dir, "phone-pins.json");
-  const lock = path.join(dir, "phone-pins.lock");
-  const [a, b] = await Promise.all(["dead-a", "dead-b"].map(async (name) => (await phoneCert(name)).fingerprint256));
-
-  // A holder that died: taken over at once.
-  const dead = spawnSync(process.execPath, ["-e", ""]).pid;
-  fs.mkdirSync(lock);
-  fs.writeFileSync(path.join(lock, "owner"), `${dead}:deadbeef`);
+  // The holder dies mid-write: the kernel frees the port, and there is nothing on disk to recover.
+  holder.child.kill("SIGKILL");
+  assert.equal((await holder.exited).signal, "SIGKILL");
   const started = Date.now();
-  new PinStore(file).add(a);
-  assert.ok(Date.now() - started < 1000, "a dead holder's lock was waited on");
-  assert.equal(fs.existsSync(lock), false);
-
-  // A writer that lost its lock (another process took it over, believing this one dead) writes nothing.
-  const taker = `${process.pid + 1}:${"0".repeat(32)}`;
-  const pins = new PinStore(file, {
-    afterLockedReload: (operation) => {
-      if (operation === "add") fs.writeFileSync(path.join(lock, "owner"), taker);
-    },
-  });
-  assert.throws(() => pins.add(b), /lock was lost/);
-  assert.equal(new PinStore(file).has(b), false);
-  assert.equal(new PinStore(file).has(a), true);
-  // And the lock it lost is left to its new owner.
-  assert.equal(fs.readFileSync(path.join(lock, "owner"), "utf8"), taker);
-  fs.rmSync(lock, { recursive: true, force: true });
+  await writePinsDirectly(port, () => new PinStore(file).add(fp));
+  assert.ok(Date.now() - started < 1000, "the next writer waited");
+  assert.equal(new PinStore(file).has(fp), true);
+  assert.equal(fs.existsSync(path.join(dir, "phone-pins.lock")), false);
 });
 
 test("legacy_provisional_file_migrates_into_pin_store", async () => {

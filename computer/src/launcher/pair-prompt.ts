@@ -1,6 +1,6 @@
 import type { PinStore } from "../tls";
 import { confirmInTerminal } from "../pairing/terminal-client";
-import { launcherConfigDir, phonePinsFile } from "./status-probe";
+import { agentdHttpPort, launcherConfigDir, phonePinsFile } from "./status-probe";
 
 /**
  * Pairing as a step of `rk claude` and `rk codex` (U6), before the agent
@@ -113,10 +113,12 @@ export async function offerPairing(): Promise<void> {
       return;
     }
     const { PinStore } = await import("../tls.js");
+    const { writePinsDirectly } = await import("../pairing/pin-writer.js");
     const pins = new PinStore(phonePinsFile());
     let until: number;
     try {
-      until = pins.armAllowNext(Date.now(), pairWindowMs());
+      // No agentd answers: this process writes, holding agentd's hook port as the pin writer lock (R209).
+      until = await writePinsDirectly(agentdHttpPort(), () => pins.armAllowNext(Date.now(), pairWindowMs()));
     } catch (error) {
       err.write(`Could not open the pairing window: ${error instanceof Error ? error.message : String(error)}\n${PAIR_LATER}\n`);
       return;
@@ -148,7 +150,7 @@ export async function offerPairing(): Promise<void> {
     if (outcome === "skipped") {
       // A user who skipped is not left with a window still open for a stranger.
       try {
-        pins.closeAllowNext();
+        await writePinsDirectly(agentdHttpPort(), () => pins.closeAllowNext());
       } catch {
         // the window still ends by itself
       }
