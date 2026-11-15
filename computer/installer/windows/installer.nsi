@@ -297,9 +297,13 @@ Section "Uninstall"
   keep:
   ; A visible console: uninstall.ps1 may ask "Keep mirrored networking? [Y/n]".
   ExecWait '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\uninstall.ps1" $0' $1
+  ; Only a complete removal takes the uninstaller, the launchers and the Apps & Features entry with it:
+  ; after a failed step everything stays, so uninstalling again retries.
   ${If} $1 != 0
-    MessageBox MB_ICONEXCLAMATION "Some of Rokid Coder could not be removed (exit $1); see the console output."
+    MessageBox MB_ICONEXCLAMATION "Rokid Coder could not be removed completely (exit $1); see the console output. Nothing else was removed: uninstall it again to retry."
+    SetErrorLevel 1
+  ${Else}
+    RMDir /r "$INSTDIR"
+    DeleteRegKey HKCU "${UNINST_KEY}"
   ${EndIf}
-  RMDir /r "$INSTDIR"
-  DeleteRegKey HKCU "${UNINST_KEY}"
 SectionEnd

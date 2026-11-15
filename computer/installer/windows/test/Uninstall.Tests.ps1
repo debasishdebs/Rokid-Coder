@@ -48,6 +48,7 @@ Describe 'uninstall' {
     Mock Invoke-WslExec $script:fakeWsl
     Mock -ModuleName RokidCoder Invoke-WslExec $script:fakeWsl
     Mock -ModuleName RokidCoder Get-ScheduledTask $script:fakeTask
+    Mock Get-ScheduledTask $script:fakeTask
     Mock -ModuleName RokidCoder Get-LxssDistros { @('Ubuntu', 'Ubuntu-24.04') | ForEach-Object { [pscustomobject]@{ Guid = "{$_}"; Name = $_; Version = 2; Default = ($_ -eq 'Ubuntu') } } }
     Mock Get-LxssDistros { @('Ubuntu', 'Ubuntu-24.04') | ForEach-Object { [pscustomobject]@{ Guid = "{$_}"; Name = $_; Version = 2; Default = ($_ -eq 'Ubuntu') } } }
     Mock Unregister-ScheduledTask { }
@@ -101,6 +102,50 @@ Describe 'uninstall' {
     & $script:Uninstall
     $LASTEXITCODE | Should -Be 0
     $script:wsl | Should -Be $expected -Because 'rokid-setup uninstall ran in the committed distro, as its user'
+  }
+
+  It 'failed_cleanup_keeps_everything_for_a_retry' {
+    $paths = New-InstalledLayout
+    $kept = {
+      @(Get-ChildItem -LiteralPath $paths.InstallRoot -Directory | Where-Object { $_.Name -match '-\d{14}$' }).Count | Should -Be 1 -Because 'the launcher generation stays'
+      @(Get-ChildItem -LiteralPath $paths.DataRoot -Filter 'binding-*.json').Count | Should -Be 1 -Because 'the binding stays'
+      Test-Path -LiteralPath $paths.Journal | Should -BeTrue -Because 'the journal stays'
+      @((Read-MachineState -StatePath $paths.MachineState).objects).Count | Should -Be 1 -Because 'the machine record stays'
+    }
+    # rokid-setup uninstall fails in the distro: nothing else is touched, not even the task.
+    $script:setupExit = 1
+    & $script:Uninstall 3>$null
+    $LASTEXITCODE | Should -Be 1
+    & $kept
+    Should -Invoke Unregister-ScheduledTask -Times 0 -Exactly
+    Should -Invoke Invoke-MachineHelper -Times 0 -Exactly
+    # Then elevation is refused: the task is gone, but the record, bindings and journal stay.
+    $script:setupExit = 0
+    Mock Invoke-MachineHelper { throw 'The operation was canceled by the user.' }
+    & $script:Uninstall 3>$null
+    $LASTEXITCODE | Should -Be 1
+    & $kept
+    Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly
+    # And the retry finishes the job.
+    $script:taskBinding = $null
+    Mock Invoke-MachineHelper { 0 }
+    & $script:Uninstall
+    $LASTEXITCODE | Should -Be 0
+    @(Get-ChildItem -LiteralPath $paths.DataRoot -Filter 'binding-*.json') | Should -BeNullOrEmpty
+    Test-Path -LiteralPath $paths.Journal | Should -BeFalse
+    # A committed distro that was unregistered since has nothing left to remove: not a failure.
+    New-InstalledLayout | Out-Null
+    $script:wsl.Clear()
+    Mock Get-LxssDistros { @([pscustomobject]@{ Guid = '{x}'; Name = 'Ubuntu-24.04'; Version = 2; Default = $true }) }
+    & $script:Uninstall
+    $LASTEXITCODE | Should -Be 0
+    $script:wsl | Should -BeNullOrEmpty
+  }
+
+  It 'nsis_uninstaller_keeps_itself_and_its_registration_on_failure' {
+    $nsi = Get-Content -LiteralPath (Join-Path $script:WindowsDir 'installer.nsi') -Raw
+    $section = [regex]::Match($nsi, '(?s)Section "Uninstall".*?SectionEnd').Value
+    $section | Should -Match '(?s)\$\{If\} \$1 != 0.*?\$\{Else\}\s+RMDir /r "\$INSTDIR"\s+DeleteRegKey HKCU "\$\{UNINST_KEY\}"\s+\$\{EndIf\}'
   }
 
   It 'uninstall_asks_before_reverting_mirrored_mode' {
