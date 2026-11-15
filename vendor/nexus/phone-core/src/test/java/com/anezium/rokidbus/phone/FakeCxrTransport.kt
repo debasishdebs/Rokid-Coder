@@ -38,7 +38,11 @@ internal class FakeCxrTransport : CxrTransport {
         serviceConnected = true
         return true
     }
-    override fun disconnect() { serviceConnected = false }
+    @Volatile var onDisconnect: () -> Unit = {}
+    override fun disconnect() {
+        onDisconnect()
+        serviceConnected = false
+    }
     override fun isServiceConnected(): Boolean = serviceConnected
 
     override fun sendCustomCmd(key: String, payload: ByteArray): Int? {
