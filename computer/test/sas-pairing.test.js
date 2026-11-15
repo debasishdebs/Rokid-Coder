@@ -10,7 +10,6 @@ const assert = require("node:assert/strict");
 const VECTORS = require("../../contracts/sas-vectors.json");
 const { computeCommit, computeSas, computeCommitProof } = require("../dist/pairing/sas.js");
 const { PairingCoordinator } = require("../dist/pairing/coordinator.js");
-const { ProvisionalPins } = require("../dist/pairing/provisional-pins.js");
 const { PhoneLink } = require("../dist/phone-link.js");
 const { SessionStore } = require("../dist/session-store.js");
 const { WsHub } = require("../dist/ws-server.js");
@@ -53,18 +52,17 @@ async function waitUntil(predicate, message, timeoutMs = 3000) {
   throw new Error(message);
 }
 
-function newPairing({ config = baseConfig, pins = new PinStore(), provisional = new ProvisionalPins(), logs = loggerHarness(), ...extra } = {}) {
+function newPairing({ config = baseConfig, pins = new PinStore(), logs = loggerHarness(), ...extra } = {}) {
   const pairing = new PairingCoordinator({
     config,
     pins,
-    provisional,
     logger: logs.logger,
     steer: () => STEER,
     wsHost: () => "127.0.0.1",
     ...extra,
   });
   track(() => pairing.dispose());
-  return { pairing, pins, provisional, logs };
+  return { pairing, pins, logs };
 }
 
 async function newHub({ pairing, pins, logs, config = baseConfig }) {
@@ -135,7 +133,7 @@ test("no_pin_or_steering_before_both_confirm (wshub)", async () => {
   await waitUntil(() => ctx.pairing.status()?.state === "AWAITING_CONFIRM", "agentd never reached the code");
   assert.equal(ctx.pairing.status().code, phone.state.code, "both sides show the same code");
   assert.equal(ctx.pins.has(cert.fingerprint256), false);
-  assert.equal(ctx.provisional.get(cert.fingerprint256, Date.now()), undefined);
+  assert.equal(ctx.pins.provisional(cert.fingerprint256, Date.now()), undefined);
   assert.equal(hub.hasTrustedClient, false, "no steering");
   // Only the phone confirmed: still nothing.
   phone.confirm(true);
@@ -171,11 +169,11 @@ test("credentials_sent_only_after_both_confirm_and_agentd_durable_only_after_pai
     },
   );
   assert.equal(ctx.pairing.status().state, "PINNED");
-  assert.ok(ctx.provisional.get(cert.fingerprint256, Date.now()), "provisional before the phone commits");
+  assert.ok(ctx.pins.provisional(cert.fingerprint256, Date.now()), "provisional before the phone commits");
   assert.equal(ctx.pins.has(cert.fingerprint256), false, "not durable before pair_committed");
   phone.sendRaw({ type: "pair_committed", v: 2, attempt: phone.state.attempt });
   await waitUntil(() => ctx.pins.has(cert.fingerprint256), "pair_committed did not make the pin durable");
-  assert.equal(ctx.provisional.get(cert.fingerprint256, Date.now()), undefined);
+  assert.equal(ctx.pins.provisional(cert.fingerprint256, Date.now()), undefined);
   await phone.closed;
 });
 
@@ -210,7 +208,7 @@ test("mismatch_discards_both_pins_and_closes_window (wshub)", async () => {
   await phone.closed;
   assert.equal(ctx.pairing.status()?.state ?? "ABORTED", "ABORTED");
   assert.equal(ctx.pins.has(cert.fingerprint256), false);
-  assert.equal(ctx.provisional.get(cert.fingerprint256, Date.now()), undefined);
+  assert.equal(ctx.pins.provisional(cert.fingerprint256, Date.now()), undefined);
   assert.equal(ctx.pins.allowNextOpen(Date.now()), false, "the window is closed");
   assert.equal(phone.state.frames.some((f) => f.type === "pair_credentials"), false);
   // No retry inside the window: the next peer gets nothing.
@@ -230,7 +228,7 @@ test("disconnect_mid_attempt_aborts_and_discards (wshub)", async () => {
   await waitUntil(() => ctx.pairing.status()?.state === "ABORTED", "not aborted");
   assert.equal(ctx.pairing.status().reason, "disconnect");
   assert.equal(ctx.pins.has(cert.fingerprint256), false);
-  assert.equal(ctx.provisional.get(cert.fingerprint256, Date.now()), undefined);
+  assert.equal(ctx.pins.provisional(cert.fingerprint256, Date.now()), undefined);
   assert.equal(ctx.pins.allowNextOpen(Date.now()), false);
 });
 
@@ -357,7 +355,7 @@ test("credentials_sent_only_after_both_confirm_and_agentd_durable_only_after_pai
   const credentials = await session.waitForFrame("pair_credentials");
   assert.equal(credentials.token, TOKEN);
   assert.equal(credentials.steer, STEER);
-  assert.ok(ctx.provisional.get(phoneCertificate.fingerprint256, Date.now()));
+  assert.ok(ctx.pins.provisional(phoneCertificate.fingerprint256, Date.now()));
   assert.equal(ctx.pins.has(phoneCertificate.fingerprint256), false);
   session.socket.write(`${JSON.stringify({ type: "pair_committed", v: 2, attempt: session.state.attempt })}\n`);
   await waitUntil(() => ctx.pins.has(phoneCertificate.fingerprint256), "not durable");

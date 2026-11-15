@@ -322,7 +322,7 @@ test("a_version_1_host_keyed_pin_file_is_migrated_into_the_set", async () => {
     const store = new PinStore(file);
     assert.deepEqual(store.list(), [fp]);
     store.add((await phoneCert("b")).fingerprint256);
-    assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).version, 3, "rewritten as version 3");
+    assert.equal(JSON.parse(await fsp.readFile(file, "utf8")).version, 4, "rewritten as the current version");
   });
 });
 
@@ -706,16 +706,14 @@ test("a_hello_that_is_never_acknowledged_pins_nothing", async () => {
 test("a_pin_store_that_cannot_save_a_promotion_leaves_the_link_untrusted_and_closed", async () => {
   // The one write left on this path: a provisional phone's proof makes its pin durable.
   const { PairingCoordinator } = require("../dist/pairing/coordinator.js");
-  const { ProvisionalPins } = require("../dist/pairing/provisional-pins.js");
   const { commitProof } = require("./helpers/sas-phone.js");
   const agent = await agentCert();
   const phoneId = await phoneCert("phone");
-  const provisional = new ProvisionalPins();
-  provisional.add(phoneId.fingerprint256, "0123456789abcdef", Date.now());
   const pins = new PinStore();
-  pins.add = () => { throw new Error("disk full"); };
+  pins.addProvisional(phoneId.fingerprint256, "0123456789abcdef", Date.now());
+  pins.promote = () => { throw new Error("disk full"); };
   const logs = loggerHarness();
-  const pairing = new PairingCoordinator({ config, pins, provisional, logger: logs.logger, steer: () => STEER, wsHost: () => "127.0.0.1" });
+  const pairing = new PairingCoordinator({ config, pins, logger: logs.logger, steer: () => STEER, wsHost: () => "127.0.0.1" });
   track(() => pairing.dispose());
   const server = await listenAsPhone(phoneId);
   const { link, logs: linkLogs, stop } = newLink(pins, { pairing, clientCert: { key: agent.key, cert: agent.cert } });
@@ -1581,10 +1579,10 @@ test("v2_pins_migrate_to_v3_with_now_as_last_used", async () => {
     // The first expiry run writes the migration down, so a restart does not start the clock over.
     assert.deepEqual(store.expire(5_000_000 + 1, 14 * DAY), []);
     const written = JSON.parse(await fsp.readFile(file, "utf8"));
-    assert.equal(written.version, 3);
+    assert.equal(written.version, 4);
     assert.deepEqual(written.phones, [
-      { fp: fpA, addedAt: 5_000_000, lastUsedAt: 5_000_000 },
-      { fp: fpB, addedAt: 5_000_000, lastUsedAt: 5_000_000 },
+      { fp: fpA, addedAt: 5_000_000, lastUsedAt: 5_000_000, state: "durable" },
+      { fp: fpB, addedAt: 5_000_000, lastUsedAt: 5_000_000, state: "durable" },
     ]);
     assert.deepEqual(new PinStore(file, { now: () => 99_000_000 }).entries()[0].lastUsedAt, 5_000_000);
   });
@@ -1898,7 +1896,6 @@ test("expired_phone_reconnecting_before_sweep_is_refused (wshub)", async () => {
 test("a_phone_that_expired_can_pair_again_through_the_window", async () => {
   await withTempDir(async (dir) => {
     const { PairingCoordinator } = require("../dist/pairing/coordinator.js");
-    const { ProvisionalPins } = require("../dist/pairing/provisional-pins.js");
     const { wssSasPhone } = require("./helpers/sas-phone.js");
     const file = pinsFileOf(dir);
     const phoneId = await phoneCert("phone");
@@ -1906,7 +1903,7 @@ test("a_phone_that_expired_can_pair_again_through_the_window", async () => {
     const pins = new PinStore(file);
     pins.add(phoneId.fingerprint256, now - 20 * DAY);
     const logs = loggerHarness();
-    const pairing = new PairingCoordinator({ config, pins, provisional: new ProvisionalPins(), logger: logs.logger, steer: () => STEER, wsHost: () => "127.0.0.1" });
+    const pairing = new PairingCoordinator({ config, pins, logger: logs.logger, steer: () => STEER, wsHost: () => "127.0.0.1" });
     track(() => pairing.dispose());
     const { hub, agent } = await newHub({ pins, pairing, now: () => now });
     // The expired phone's own hello is refused (and forgets it on the spot); it pairs again by SAS.

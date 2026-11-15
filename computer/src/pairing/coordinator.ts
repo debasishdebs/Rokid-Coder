@@ -1,7 +1,6 @@
-import { ALLOW_NEXT_WINDOW_MS, PinStore, normalizeFingerprint, shortFingerprint } from "../tls";
+import { ALLOW_NEXT_WINDOW_MS, PROVISIONAL_PIN_MS, PinStore, normalizeFingerprint, shortFingerprint } from "../tls";
 import type { AgentConfig, Logger } from "../types";
 import { SasAttempt, type AbortReason, type AttemptState } from "./attempt";
-import { PROVISIONAL_PIN_MS, ProvisionalPins } from "./provisional-pins";
 import { computeCommitProof, hexDigestMatches, isAttemptId, newAttemptId } from "./sas";
 
 /** What every computer-side pairing client is told (`pair_status` on the launcher socket). */
@@ -28,8 +27,8 @@ export interface PairingSession {
 
 export interface CoordinatorOptions {
   config: AgentConfig;
+  /** Durable and provisional phone pins, in one store (R207). */
   pins: PinStore;
-  provisional: ProvisionalPins;
   logger: Logger;
   /** Read when the credentials go out, so a rotation since the window opened is what the phone gets. */
   steer: () => string | undefined;
@@ -64,10 +63,6 @@ export class PairingCoordinator {
 
   constructor(private readonly options: CoordinatorOptions) {
     this.now = options.now ?? Date.now;
-  }
-
-  get provisional(): ProvisionalPins {
-    return this.options.provisional;
   }
 
   // ---------------------------------------------------------------- the window
@@ -230,9 +225,9 @@ export class PairingCoordinator {
         }
       },
       onPinned: () => this.pinProvisional(attempt),
-      onCommitted: () => this.promote(phoneFp, "pair_committed"),
+      onCommitted: () => this.promote(phoneFp, attemptId, "pair_committed"),
       onPhoneAborted: (reason) => {
-        this.dropProvisional(phoneFp);
+        this.dropProvisional(phoneFp, attemptId);
         this.options.logger.warn("pairing_provisional_dropped", { reason, fingerprint: shortFingerprint(phoneFp) });
       },
       onChange: () => this.onAttemptChange(attempt, close),
@@ -264,7 +259,7 @@ export class PairingCoordinator {
   /** A live provisional pin for `fp`: it never admits a normal link on its own. */
   provisionalFor(fp: string): { attempt: string } | undefined {
     try {
-      const entry = this.options.provisional.get(fp, this.now());
+      const entry = this.options.pins.provisional(fp, this.now());
       return entry ? { attempt: entry.attempt } : undefined;
     } catch {
       return undefined;
@@ -286,22 +281,31 @@ export class PairingCoordinator {
     return hexDigestMatches(proof, computeCommitProof(steer, entry.attempt, agentd, phone));
   }
 
-  /** The phone proved it stored the credentials: the pin becomes durable. */
-  promote(fp: string, how: "pair_committed" | "recovery_hello" | "recovery_proof"): boolean {
+  /**
+   * The phone proved it stored the credentials of `attempt`: that attempt's
+   * provisional pin becomes durable, in one write. Refused when the entry was
+   * forgotten, rotated away, dropped or expired since, or belongs to another
+   * attempt: a revoked pairing never comes back by a late commit.
+   */
+  promote(fp: string, attempt: string, how: "pair_committed" | "recovery_hello" | "recovery_proof"): boolean {
+    let promoted: boolean;
     try {
-      this.options.pins.add(fp, this.now());
+      promoted = this.options.pins.promote(fp, attempt, this.now());
     } catch (error) {
       this.options.logger.error("pairing_promote_failed", { reason: error instanceof Error ? error.message : String(error) });
       return false;
     }
-    this.dropProvisional(fp);
+    if (!promoted) {
+      this.options.logger.warn("pairing_promote_refused", { how, attempt, fingerprint: shortFingerprint(fp) });
+      return false;
+    }
     this.options.logger.info("phone_pinned", { how, fingerprint: shortFingerprint(fp) });
     return true;
   }
 
   /** The hourly sweep: provisional pins past their deadline go. */
   expire(): string[] {
-    return this.options.provisional.expire(this.now());
+    return this.options.pins.expireProvisional(this.now());
   }
 
   dispose(): void {
@@ -328,7 +332,7 @@ export class PairingCoordinator {
     if (!steer) {
       throw new Error("no steering secret");
     }
-    this.options.provisional.add(attempt.phoneFp, attempt.attempt, this.now(), PROVISIONAL_PIN_MS);
+    this.options.pins.addProvisional(attempt.phoneFp, attempt.attempt, this.now(), PROVISIONAL_PIN_MS);
     this.options.logger.info("pairing_pinned_provisional", { attempt: attempt.attempt, fingerprint: shortFingerprint(attempt.phoneFp) });
     return {
       type: "pair_credentials",
@@ -343,9 +347,9 @@ export class PairingCoordinator {
     };
   }
 
-  private dropProvisional(fp: string): void {
+  private dropProvisional(fp: string, attempt: string): void {
     try {
-      this.options.provisional.remove(fp);
+      this.options.pins.dropProvisional(fp, attempt);
     } catch (error) {
       this.options.logger.error("pairing_provisional_unavailable", { reason: error instanceof Error ? error.message : String(error) });
     }

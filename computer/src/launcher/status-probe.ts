@@ -136,7 +136,8 @@ export function phonePaired(): boolean {
       : record?.pins && typeof record.pins === "object"
         ? Object.values(record.pins)
         : undefined;
-    return phones === undefined || phones.length > 0;
+    // A provisional pin (v4) is a pairing still being committed, not a paired phone.
+    return phones === undefined || phones.some((entry) => (entry as { state?: unknown } | null)?.state !== "provisional");
   } catch {
     return true;
   }

@@ -49,8 +49,8 @@ export interface AttemptHooks {
   send(frame: Record<string, unknown>): void;
   /** Both sides confirmed: store the phone pin as provisional, then return the credentials frame (or throw). */
   onPinned(): Record<string, unknown>;
-  /** The phone said it stored the credentials. */
-  onCommitted(): void;
+  /** The phone said it stored the credentials; false when agentd refused to make the pin durable. */
+  onCommitted(): boolean;
   /** The phone could not store them, or the session ended before it did: whatever was provisional goes. */
   onPhoneAborted(reason: AbortReason): void;
   onChange(): void;
@@ -246,9 +246,13 @@ export class SasAttempt {
     if (this.committed) {
       return;
     }
-    this.committed = true;
     this.credentials = undefined;
-    this.hooks.onCommitted();
+    // A refused promotion (the pairing was revoked meanwhile) ends the session with nothing durable.
+    if (!this.hooks.onCommitted()) {
+      this.hooks.close();
+      return;
+    }
+    this.committed = true;
     this.hooks.onChange();
     this.hooks.close();
   }

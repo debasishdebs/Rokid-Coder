@@ -777,7 +777,7 @@ export class PhoneLink {
       clientCert !== undefined &&
       message.type === "pair_committed" &&
       this.options.pairing?.proofValid(owed.fingerprint, fingerprintOfCert(clientCert.cert), message.attempt, message.proof) === true &&
-      this.options.pairing.promote(owed.fingerprint, "recovery_proof");
+      this.options.pairing.promote(owed.fingerprint, owed.attempt, "recovery_proof");
     if (!valid) {
       this.options.logger.warn("phone_link_commit_proof_refused", {
         target: this.connectedTo ?? "unknown",

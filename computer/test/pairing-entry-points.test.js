@@ -14,7 +14,6 @@ const net = require("node:net");
 const path = require("node:path");
 const { pairingPayload } = require("../dist/pairing.js");
 const { PairingCoordinator } = require("../dist/pairing/coordinator.js");
-const { ProvisionalPins } = require("../dist/pairing/provisional-pins.js");
 const { PAIR_TEXT } = require("../dist/attach-command.js");
 const { PinStore } = require("../dist/tls.js");
 const { createFakePhone } = require("./fake-phone.js");
@@ -231,7 +230,7 @@ test("pair_ready_announcement_carries_no_secrets_and_stops_once_a_peer_arrives",
   const logger = { info: (e, m) => logs.push([e, m]), warn: (e, m) => logs.push([e, m]), error: (e, m) => logs.push([e, m]) };
   const config = { token: "TOKEN-Y", wsPort: 8792, machineId: "m", machineName: "desk" };
   const pins = new PinStore();
-  const pairing = new PairingCoordinator({ config, pins, provisional: new ProvisionalPins(), logger, steer: () => "STEER-Y", wsHost: () => "10.0.0.2" });
+  const pairing = new PairingCoordinator({ config, pins, logger, steer: () => "STEER-Y", wsHost: () => "10.0.0.2" });
   track(() => pairing.dispose());
   assert.equal(pairing.pairReady(), undefined, "nothing while no window is open");
   const opened = pairing.openWindow();
@@ -275,11 +274,10 @@ test("rotate_steer_requires_new_sas_pairing", async () => {
 
 test("phones_forget_also_drops_a_provisional_pin", async () => {
   await withDaemon({ transport: "wshub" }, async ({ coderDir }) => {
-    const provisional = new ProvisionalPins(path.join(coderDir, "tls", "phone-pins-provisional.json"));
     const fp = (await phoneCert("half-phone")).fingerprint256;
-    provisional.add(fp, "0123456789abcdef", Date.now());
+    pinsOf(coderDir).addProvisional(fp, "0123456789abcdef", Date.now());
     const run = runCli(coderDir, ["phones", "forget", fp.slice(0, 23)]);
     assert.equal(await run.exited, 0, run.out);
-    assert.deepEqual(provisional.entries(), []);
+    assert.deepEqual(pinsOf(coderDir).provisionalEntries(), []);
   });
 });

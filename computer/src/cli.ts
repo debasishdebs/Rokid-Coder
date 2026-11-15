@@ -11,7 +11,6 @@ import {
 import { startDaemon } from "./daemon";
 import { LineReader } from "./launcher/pair-prompt";
 import { pairingPayload } from "./pairing";
-import { ProvisionalPins } from "./pairing/provisional-pins";
 import { confirmInTerminal } from "./pairing/terminal-client";
 import { PhoneSettingsStore } from "./phone-settings";
 import {
@@ -130,7 +129,6 @@ async function main(): Promise<void> {
         rotateSteerSecret(tlsDir);
         // PhoneLink checks the pin, not the secret: a rotation that kept the pins would revoke nothing there.
         new PinStore(path.join(tlsDir, "phone-pins.json")).forgetAll();
-        new ProvisionalPins(path.join(tlsDir, "phone-pins-provisional.json")).forgetAll();
         process.stderr.write(
           "Steering secret rotated and every phone forgotten. A running agentd disconnects them on both links now; each must pair again with a code.\n",
         );
@@ -186,7 +184,6 @@ async function main(): Promise<void> {
       const config = ensureConfig(defaultStateDir());
       const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
       const pins = new PinStore(path.join(tlsDir, "phone-pins.json"));
-      const provisional = new ProvisionalPins(path.join(tlsDir, "phone-pins-provisional.json"));
       const action = process.argv[3];
       if (action === "list") {
         const entries = pins.entries();
@@ -216,14 +213,13 @@ async function main(): Promise<void> {
           // Forgetting everything revokes both transports: a phone that dials in
           // over wss is trusted by the steering secret, not by a pin.
           pins.forgetAll();
-          provisional.forgetAll();
           rotateSteerSecret(tlsDir);
           process.stdout.write(
             `Forgot all phones. A running agentd drops its dialled link.\nThe steering secret was rotated too, so a running agentd also cuts off every phone steering over the paired WebSocket link; to steer again, a phone must pair again with "pair".\n${none}`,
           );
         } else if (which) {
           // One phone is one pairing: a half-finished one (provisional) goes with it.
-          const removed = [...pins.forget(which), ...provisional.forget(which)];
+          const removed = pins.forget(which);
           process.stdout.write(
             removed.length > 0
               ? `Forgotten. That phone's links close now; it must pair again to reconnect.\n${pins.isEmpty() ? none : ""}`

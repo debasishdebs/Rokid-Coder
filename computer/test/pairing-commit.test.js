@@ -10,12 +10,11 @@ const fsp = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { PairingCoordinator } = require("../dist/pairing/coordinator.js");
-const { ProvisionalPins, PROVISIONAL_PIN_MS } = require("../dist/pairing/provisional-pins.js");
 const { computeCommitProof } = require("../dist/pairing/sas.js");
 const { PhoneLink } = require("../dist/phone-link.js");
 const { SessionStore } = require("../dist/session-store.js");
 const { WsHub } = require("../dist/ws-server.js");
-const { PinStore } = require("../dist/tls.js");
+const { PinStore, PROVISIONAL_PIN_MS } = require("../dist/tls.js");
 const { createFakePhone } = require("./fake-phone.js");
 const { agentCert, phoneCert } = require("./helpers/tls.js");
 const { wssSasPhone, phoneLinkSasPhone } = require("./helpers/sas-phone.js");
@@ -65,12 +64,11 @@ async function tempDir() {
 function stores(dir, now) {
   return {
     pins: new PinStore(path.join(dir, "phone-pins.json"), now ? { now } : {}),
-    provisional: new ProvisionalPins(path.join(dir, "phone-pins-provisional.json")),
   };
 }
 
-function coordinator({ pins, provisional, logs = loggerHarness(), now, steer = () => STEER }) {
-  const pairing = new PairingCoordinator({ config: baseConfig, pins, provisional, logger: logs.logger, steer, wsHost: () => "127.0.0.1", now });
+function coordinator({ pins, logs = loggerHarness(), now, steer = () => STEER }) {
+  const pairing = new PairingCoordinator({ config: baseConfig, pins, logger: logs.logger, steer, wsHost: () => "127.0.0.1", now });
   track(() => pairing.dispose());
   return pairing;
 }
@@ -137,7 +135,7 @@ test("phone_storage_failure_aborts_and_agentd_drops_provisional", async () => {
   const { hub } = await hubFor({ ...s, pairing });
   const { phone, cert } = await pairOverWss(hub, pairing, "full-phone", { storage: "fail" });
   await phone.closed;
-  await waitUntil(() => s.provisional.get(cert.fingerprint256, Date.now()) === undefined, "provisional pin kept");
+  await waitUntil(() => s.pins.provisional(cert.fingerprint256, Date.now()) === undefined, "provisional pin kept");
   assert.equal(s.pins.has(cert.fingerprint256), false);
   assert.equal(pairing.status().reason, "storage");
 });
@@ -150,13 +148,13 @@ test("lost_pair_committed_recovered_by_first_valid_hello", async () => {
   // The phone stored the credentials; its pair_committed never arrived.
   const { phone, cert } = await pairOverWss(hub, pairing, "quiet-phone", { storage: "silent" });
   phone.close();
-  assert.ok(s.provisional.get(cert.fingerprint256, Date.now()));
+  assert.ok(s.pins.provisional(cert.fingerprint256, Date.now()));
   assert.equal(s.pins.has(cert.fingerprint256), false);
   const { first } = await helloWith(hub, agent, cert, { token: phone.state.credentials.token, steer: phone.state.credentials.steer });
   assert.equal(first.type, "hello_ack");
   assert.equal(first.steering, true);
   assert.equal(s.pins.has(cert.fingerprint256), true, "promoted to durable");
-  assert.equal(s.provisional.get(cert.fingerprint256, Date.now()), undefined);
+  assert.equal(s.pins.provisional(cert.fingerprint256, Date.now()), undefined);
 });
 
 test("agentd_restart_between_send_and_commit_recovers_via_hello", async () => {
@@ -170,7 +168,7 @@ test("agentd_restart_between_send_and_commit_recovers_via_hello", async () => {
   await first.hub.stop();
   pairing.dispose();
   const after = stores(dir);
-  assert.ok(after.provisional.get(cert.fingerprint256, Date.now()), "the provisional pin survived the restart");
+  assert.ok(after.pins.provisional(cert.fingerprint256, Date.now()), "the provisional pin survived the restart");
   const restarted = coordinator(after);
   const { hub, agent } = await hubFor({ ...after, pairing: restarted });
   const { first: reply } = await helloWith(hub, agent, cert);
@@ -184,11 +182,11 @@ test("provisional_pin_never_admits_without_token_and_steer", async () => {
   const pairing = coordinator(s);
   const { hub, agent } = await hubFor({ ...s, pairing });
   const cert = await phoneCert("provisional-phone");
-  s.provisional.add(cert.fingerprint256, "0123456789abcdef", Date.now());
+  s.pins.addProvisional(cert.fingerprint256, "0123456789abcdef", Date.now());
   assert.deepEqual((await helloWith(hub, agent, cert, { steer: "not-the-steering-secret-at-all-000000" })).first, REPAIR_NEEDED);
   assert.equal((await helloWith(hub, agent, cert, { token: "wrong-token" })).first.reason, "bad_token");
   assert.equal(s.pins.has(cert.fingerprint256), false);
-  assert.ok(s.provisional.get(cert.fingerprint256, Date.now()), "a failed hello changes nothing");
+  assert.ok(s.pins.provisional(cert.fingerprint256, Date.now()), "a failed hello changes nothing");
   // PhoneLink: no proof, no hello.
   const phone = await phoneLinkSasPhone({ cert });
   track(() => phone.close());
@@ -208,10 +206,10 @@ test("provisional_expiry_purges_and_phone_gets_repair_needed", async () => {
   const pairing = coordinator({ ...s, now: () => now });
   const { hub, agent } = await hubFor({ ...s, pairing });
   const cert = await phoneCert("late-phone");
-  s.provisional.add(cert.fingerprint256, "0123456789abcdef", now);
+  s.pins.addProvisional(cert.fingerprint256, "0123456789abcdef", now);
   now += PROVISIONAL_PIN_MS + 1;
   assert.deepEqual(pairing.expire(), [cert.fingerprint256], "the sweep purges it");
-  assert.deepEqual(s.provisional.entries(), []);
+  assert.deepEqual(s.pins.provisionalEntries(), []);
   assert.deepEqual((await helloWith(hub, agent, cert)).first, REPAIR_NEEDED);
   assert.equal(s.pins.has(cert.fingerprint256), false);
 });
@@ -230,7 +228,7 @@ test("phone_crash_before_persist_leaves_no_trust_anywhere", async () => {
   assert.equal(first.type, "hello_reject");
   now += PROVISIONAL_PIN_MS + 1;
   pairing.expire();
-  assert.deepEqual(s.provisional.entries(), []);
+  assert.deepEqual(s.pins.provisionalEntries(), []);
   assert.equal(s.pins.isEmpty(), true);
 });
 
@@ -247,13 +245,180 @@ test("duplicate_credentials_frame_is_idempotent (pair_committed twice)", async (
   assert.equal(s.pins.list().length, 1);
 });
 
+// ---------------------------------------------------------------- the promotion is bound to its attempt (R207)
+
+/** What a second process (the CLI) sees: the same pins file, opened fresh. */
+const cliPins = (dir) => new PinStore(path.join(dir, "phone-pins.json"));
+
+test("late_commit_after_forget_never_restores_trust", async () => {
+  const dir = await tempDir();
+  const s = stores(dir);
+  const pairing = coordinator(s);
+  const { hub, agent } = await hubFor({ ...s, pairing });
+  const { phone, cert } = await pairOverWss(hub, pairing, "late-forget-phone", { storage: "silent" });
+  assert.ok(s.pins.provisional(cert.fingerprint256, Date.now()), "provisional while the commit is in flight");
+  // `agentd phones forget` runs before the phone's pair_committed reaches agentd.
+  assert.deepEqual(cliPins(dir).forget(cert.fingerprint256.slice(0, 20)), [cert.fingerprint256]);
+  phone.sendRaw({ type: "pair_committed", v: 2, attempt: phone.state.attempt });
+  await phone.closed;
+  assert.equal(s.pins.has(cert.fingerprint256), false, "a late commit restored a forgotten pairing");
+  assert.equal(s.pins.provisional(cert.fingerprint256, Date.now()), undefined);
+  // Nor can the recovery hello bring it back.
+  const { first } = await helloWith(hub, agent, cert, { token: phone.state.credentials.token, steer: phone.state.credentials.steer });
+  assert.deepEqual(first, REPAIR_NEEDED);
+  assert.equal(s.pins.has(cert.fingerprint256), false);
+});
+
+test("late_commit_after_rotate_steer_rejected", async () => {
+  const dir = await tempDir();
+  const s = stores(dir);
+  let steer = STEER;
+  const pairing = coordinator({ ...s, steer: () => steer });
+  const { hub, agent } = await hubFor({ ...s, pairing, steer: () => steer });
+  const { phone, cert } = await pairOverWss(hub, pairing, "late-rotate-phone", { storage: "silent" });
+  // `agentd pair --rotate-steer`: a new secret, and every pin of either kind forgotten.
+  steer = "rotated-steering-secret-the-phone-never-saw-0001";
+  cliPins(dir).forgetAll();
+  phone.sendRaw({ type: "pair_committed", v: 2, attempt: phone.state.attempt });
+  await phone.closed;
+  assert.equal(s.pins.has(cert.fingerprint256), false);
+  assert.deepEqual(s.pins.provisionalEntries(), []);
+  const { first } = await helloWith(hub, agent, cert, { token: phone.state.credentials.token, steer: phone.state.credentials.steer });
+  assert.deepEqual(first, REPAIR_NEEDED);
+  assert.equal(s.pins.has(cert.fingerprint256), false);
+});
+
+test("promotion_is_atomic_single_write", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "phone-pins.json");
+  let now = Date.now();
+  const writes = [];
+  let failNext = false;
+  const { writeFileSync } = require("node:fs");
+  const pins = new PinStore(file, {
+    now: () => now,
+    writeFile: (target, content) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("disk full");
+      }
+      writes.push(JSON.parse(content));
+      writeFileSync(target, content, { mode: 0o600 });
+    },
+  });
+  const cert = await phoneCert("atomic-phone");
+  const fp = cert.fingerprint256;
+  pins.addProvisional(fp, "0123456789abcdef", now);
+  assert.equal(pins.has(fp), false, "a provisional pin is not a pin");
+  assert.equal(pins.isTrusted(fp, now, 14 * 86_400_000), false);
+  writes.length = 0;
+
+  // Not this attempt's, or not live: nothing moves, nothing is written.
+  assert.equal(pins.promote(fp, "fedcba9876543210", now), false);
+  assert.equal(writes.length, 0);
+
+  // A write that fails leaves the provisional entry exactly as it was, on disk and in memory.
+  failNext = true;
+  assert.throws(() => pins.promote(fp, "0123456789abcdef", now));
+  assert.equal(pins.has(fp), false);
+  assert.ok(pins.provisional(fp, now));
+  assert.ok(new PinStore(file).provisional(fp, now));
+
+  // The transition itself: one write, which both removes the provisional entry and adds the durable one.
+  assert.equal(pins.promote(fp, "0123456789abcdef", now), true);
+  assert.equal(writes.length, 1);
+  const [written] = writes;
+  assert.equal(written.version, 4);
+  assert.deepEqual(written.phones.map((entry) => [entry.fp, entry.state]), [[fp, "durable"]]);
+  assert.equal(new PinStore(file).has(fp), true);
+  assert.equal(new PinStore(file).provisional(fp, now), undefined);
+  // A second promotion of the same attempt is refused: it is no longer provisional.
+  assert.equal(pins.promote(fp, "0123456789abcdef", now), false);
+
+  // An expired attempt can never become durable.
+  const other = (await phoneCert("expired-phone")).fingerprint256;
+  pins.addProvisional(other, "1111111111111111", now);
+  now += PROVISIONAL_PIN_MS + 1;
+  assert.equal(pins.promote(other, "1111111111111111", now), false);
+  assert.equal(pins.has(other), false);
+  // There is no second store to fall out of step with.
+  await assert.rejects(fsp.stat(path.join(dir, "phone-pins-provisional.json")), { code: "ENOENT" });
+});
+
+test("concurrent_forget_and_commit", async () => {
+  const dir = await tempDir();
+  const s = stores(dir);
+  const pairing = coordinator(s);
+  const { hub, agent } = await hubFor({ ...s, pairing });
+
+  // The forget and the commit sent together: whichever lands first, the phone ends up forgotten.
+  const first = await pairOverWss(hub, pairing, "race-one", { storage: "silent" });
+  phone_commit(first.phone);
+  cliPins(dir).forget(first.cert.fingerprint256.slice(0, 20));
+  await first.phone.closed;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(s.pins.has(first.cert.fingerprint256), false);
+  assert.equal(s.pins.provisional(first.cert.fingerprint256, Date.now()), undefined);
+
+  // The commit wins outright, then the forget: still forgotten, and the hello is refused.
+  const second = await pairOverWss(hub, pairing, "race-two", { storage: "silent" });
+  phone_commit(second.phone);
+  await waitUntil(() => s.pins.has(second.cert.fingerprint256), "not durable");
+  cliPins(dir).forget(second.cert.fingerprint256.slice(0, 20));
+  assert.equal(s.pins.has(second.cert.fingerprint256), false);
+  const { first: reply } = await helloWith(hub, agent, second.cert, {
+    token: second.phone.state.credentials.token,
+    steer: second.phone.state.credentials.steer,
+  });
+  assert.deepEqual(reply, REPAIR_NEEDED);
+
+  // A forget of one phone never touches another phone's attempt.
+  const third = await pairOverWss(hub, pairing, "race-three", { storage: "silent" });
+  cliPins(dir).forget(second.cert.fingerprint256.slice(0, 20));
+  phone_commit(third.phone);
+  await waitUntil(() => s.pins.has(third.cert.fingerprint256), "the other phone's commit was lost");
+});
+
+function phone_commit(phone) {
+  phone.sendRaw({ type: "pair_committed", v: 2, attempt: phone.state.attempt });
+}
+
+test("legacy_provisional_file_migrates_into_pin_store", async () => {
+  const dir = await tempDir();
+  const now = Date.now();
+  const live = (await phoneCert("legacy-live")).fingerprint256;
+  const durable = (await phoneCert("legacy-durable")).fingerprint256;
+  const legacy = path.join(dir, "phone-pins-provisional.json");
+  const entry = (fp, attempt) => ({ fp, addedAt: now, lastUsedAt: now, state: "provisional", attempt, provisionalUntil: now + 60_000 });
+  new PinStore(path.join(dir, "phone-pins.json")).add(durable, now);
+  await fsp.writeFile(legacy, JSON.stringify({ version: 4, phones: [entry(live, "0123456789abcdef"), entry(durable, "fedcba9876543210")] }));
+  const pins = new PinStore(path.join(dir, "phone-pins.json"));
+  assert.equal(pins.provisional(live, now)?.attempt, "0123456789abcdef");
+  // A durable pin is never downgraded by a leftover provisional one.
+  assert.equal(pins.has(durable), true);
+  assert.equal(pins.provisional(durable, now), undefined);
+  await assert.rejects(fsp.stat(legacy), { code: "ENOENT" });
+});
+
+test("v3_pins_migrate_to_v4_as_durable", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "phone-pins.json");
+  const fp = (await phoneCert("v3-phone")).fingerprint256;
+  await fsp.writeFile(file, JSON.stringify({ version: 3, everPinned: true, phones: [{ fp, addedAt: 1, lastUsedAt: 2 }], allowNextUntil: 0 }));
+  const pins = new PinStore(file, { now: () => 3 });
+  assert.equal(pins.isTrusted(fp, 3, 14 * 86_400_000), true);
+  const written = JSON.parse(await fsp.readFile(file, "utf8"));
+  assert.equal(written.version, 4);
+  assert.deepEqual(written.phones, [{ fp, addedAt: 1, lastUsedAt: 2, state: "durable" }]);
+});
+
 test("phonelink_recovery_promotes_with_valid_proof_only", async () => {
   const dir = await tempDir();
   const s = stores(dir);
   const pairing = coordinator(s);
   const agent = await agentCert();
   const cert = await phoneCert("proof-phone");
-  s.provisional.add(cert.fingerprint256, "fedcba9876543210", Date.now());
+  s.pins.addProvisional(cert.fingerprint256, "fedcba9876543210", Date.now());
   // The phone kept the steering secret it was handed, so it can prove it.
   const phone = await phoneLinkSasPhone({ cert, options: { proofSteer: STEER } });
   track(() => phone.close());
@@ -268,7 +433,7 @@ test("phonelink_recovery_promotes_with_valid_proof_only", async () => {
     64,
   );
   assert.equal(s.pins.has(cert.fingerprint256), true);
-  assert.equal(s.provisional.get(cert.fingerprint256, Date.now()), undefined);
+  assert.equal(s.pins.provisional(cert.fingerprint256, Date.now()), undefined);
   await waitUntil(() => link.trustedConnected, "recovered link is not trusted");
 });
 
@@ -277,7 +442,7 @@ test("phonelink_wrong_proof_closes_without_hello", async () => {
   const s = stores(dir);
   const pairing = coordinator(s);
   const cert = await phoneCert("bad-proof-phone");
-  s.provisional.add(cert.fingerprint256, "fedcba9876543210", Date.now());
+  s.pins.addProvisional(cert.fingerprint256, "fedcba9876543210", Date.now());
   const phone = await phoneLinkSasPhone({ cert, options: { proofSteer: "a-steering-secret-the-phone-never-got-00" } });
   track(() => phone.close());
   const { link } = await linkFor({ ...s, pairing, phonePort: phone.port });
@@ -286,7 +451,7 @@ test("phonelink_wrong_proof_closes_without_hello", async () => {
   await session.closed;
   assert.equal(session.hellos.length, 0);
   assert.equal(s.pins.has(cert.fingerprint256), false);
-  assert.ok(s.provisional.get(cert.fingerprint256, Date.now()), "a wrong proof promotes nothing");
+  assert.ok(s.pins.provisional(cert.fingerprint256, Date.now()), "a wrong proof promotes nothing");
 });
 
 // ---------------------------------------------------------------- one pairing, both transports
@@ -342,7 +507,6 @@ test("rotate_steer_forgets_pins_and_blocks_phonelink_too", async () => {
   const ctx = await liveOnBoth(dir);
   // What `agentd pair --rotate-steer` does to the pin stores.
   ctx.pins.forgetAll();
-  ctx.provisional.forgetAll();
   await waitUntil(() => !ctx.link.trustedConnected, "PhoneLink survived the rotation");
   // PhoneLink checks the pin, not the secret, and the pin is gone.
   await redialRefused(ctx);

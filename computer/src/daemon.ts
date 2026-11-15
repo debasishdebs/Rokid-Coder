@@ -18,7 +18,6 @@ import { claudeSessionsDir, liveClaudeSessionIds, readClaudeSession } from "./la
 import { LauncherHub } from "./launcher/launcher-hub";
 import { bestHostGuess } from "./pairing";
 import { PairingCoordinator } from "./pairing/coordinator";
-import { ProvisionalPins } from "./pairing/provisional-pins";
 import { COMPACT_LIMIT_MS, LauncherRouter, READY_WAIT_MS, SessionStates } from "./launcher/session-state";
 import { FileLogger } from "./logger";
 import { SessionStore } from "./session-store";
@@ -476,7 +475,6 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   const pairing = new PairingCoordinator({
     config,
     pins,
-    provisional: new ProvisionalPins(path.join(tlsDir, "phone-pins-provisional.json")),
     logger,
     steer: () => readSteerSecret(tlsDir),
     wsHost: () => bestHostGuess(),

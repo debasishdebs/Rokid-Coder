@@ -22,7 +22,11 @@ import type { Logger } from "./types";
 
 const CERT_COMMON_NAME = "rokid-coder-agentd";
 const CERT_VALID_DAYS = 3650;
-const PINS_VERSION = 3;
+const PINS_VERSION = 4;
+/** How long a phone that was handed credentials has to prove it stored them (6a-R4′). */
+export const PROVISIONAL_PIN_MS = 10 * 60 * 1000;
+/** Where an earlier build kept provisional pins, beside the pin file; read once, folded in, then deleted. */
+const LEGACY_PROVISIONAL_FILE = "phone-pins-provisional.json";
 /** A phone whose pairing goes unused for this long must pair again; the phone's settings may change it. */
 export const DEFAULT_PAIRING_TTL_DAYS = 14;
 export const DAY_MS = 24 * 60 * 60 * 1000;
@@ -281,6 +285,23 @@ export interface PinEntry {
 }
 
 /**
+ * A phone agentd sent credentials to and has not yet heard store them. It
+ * admits nothing: only `promote`, for this attempt and before
+ * `provisionalUntil`, turns it into a pin.
+ */
+export interface ProvisionalPin extends PinEntry {
+  state: "provisional";
+  attempt: string;
+  provisionalUntil: number;
+}
+
+/** An entry as the v4 file keeps it: durable pins and provisional ones, in one store. */
+type DurablePin = PinEntry & { state: "durable" };
+type StoredPin = DurablePin | ProvisionalPin;
+
+const isDurable = (entry: StoredPin): entry is DurablePin => entry.state === "durable";
+
+/**
  * The set of phone certificates agentd trusts, by `fingerprint256`. A phone is
  * its cert, wherever it is dialled from, so an IP change needs nothing.
  *
@@ -298,9 +319,15 @@ export interface PinEntry {
  * The CLI edits the same file the daemon uses, so every read looks at the file
  * again; a file that cannot be read throws rather than reading as empty. A
  * change is kept only once it is on disk.
+ *
+ * Provisional pins (6a-R4′) live in the same file, and every method that
+ * admits, lists or touches a phone sees durable pins only. Forgetting a phone
+ * forgets both kinds, and a provisional pin becomes durable in one write that
+ * checks its attempt and deadline first, so a forgotten, expired or rotated
+ * attempt can never come back.
  */
 export class PinStore {
-  private phones = new Map<string, PinEntry>();
+  private phones = new Map<string, StoredPin>();
   private allowNextUntil = 0;
   private pinnedBefore = false;
   /** True while what was read differs from the file (an older format, or a time in the future), until the next write. */
@@ -319,6 +346,7 @@ export class PinStore {
     this.clock = options.now ?? Date.now;
     this.logger = options.logger;
     this.reload();
+    this.absorbLegacyProvisional();
   }
 
   /** The backing file, for watchers; undefined for a store that lives only in memory. */
@@ -327,15 +355,13 @@ export class PinStore {
   }
 
   list(): string[] {
-    this.reload();
-    return [...this.phones.keys()];
+    return this.durable().map((entry) => entry.fp);
   }
 
   /** Each pinned phone with when it was added and last used (never later than now). */
   entries(): PinEntry[] {
-    this.reload();
     const now = this.clock();
-    return [...this.phones.values()].map((entry) => ({
+    return this.durable().map((entry) => ({
       fp: entry.fp,
       addedAt: entry.addedAt,
       lastUsedAt: Math.min(entry.lastUsedAt, now),
@@ -345,8 +371,7 @@ export class PinStore {
   /** Pinned, whether or not stale. For the CLI; admission and trust checks use `isTrusted`. */
   has(fp: string): boolean {
     this.reload();
-    const normalized = normalizeFingerprint(fp);
-    return normalized !== undefined && this.phones.has(normalized);
+    return this.durableEntry(fp) !== undefined;
   }
 
   /**
@@ -357,8 +382,7 @@ export class PinStore {
   isTrusted(fp: string, now: number, ttlMs: number): boolean {
     this.reload();
     this.clampToNow(now);
-    const normalized = normalizeFingerprint(fp);
-    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+    const entry = this.durableEntry(fp);
     if (!entry) {
       return false;
     }
@@ -376,8 +400,7 @@ export class PinStore {
   touch(fp: string, now: number): void {
     this.reload();
     this.clampToNow(now);
-    const normalized = normalizeFingerprint(fp);
-    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+    const entry = this.durableEntry(fp);
     if (!entry) {
       return;
     }
@@ -396,7 +419,7 @@ export class PinStore {
   expire(now: number, ttlMs: number): string[] {
     this.reload();
     this.clampToNow(now);
-    const gone = [...this.phones.values()].filter((entry) => isStale(entry, now, ttlMs));
+    const gone = [...this.phones.values()].filter((entry) => isDurable(entry) && isStale(entry, now, ttlMs));
     if (gone.length === 0 && !this.needsWrite) {
       return [];
     }
@@ -434,8 +457,7 @@ export class PinStore {
   }
 
   isEmpty(): boolean {
-    this.reload();
-    return this.phones.size === 0;
+    return this.durable().length === 0;
   }
 
   /** True once setup has begun (a pin file exists), even if every phone was forgotten since. */
@@ -452,11 +474,88 @@ export class PinStore {
     this.reload();
     // A phone admitted through the empty set used up an open window too.
     const next = new Map(this.phones);
-    next.set(normalized, { fp: normalized, addedAt: this.phones.get(normalized)?.addedAt ?? now, lastUsedAt: now });
+    next.set(normalized, { fp: normalized, addedAt: this.phones.get(normalized)?.addedAt ?? now, lastUsedAt: now, state: "durable" });
     this.commit(next, 0, true);
   }
 
-  /** Removes the phone whose fingerprint is `fp` or starts with it; returns what was removed. */
+  /** The live provisional pin for `fp`, if any: it never admits a link by itself. */
+  provisional(fp: string, now: number = this.clock()): ProvisionalPin | undefined {
+    this.reload();
+    const normalized = normalizeFingerprint(fp);
+    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+    return entry && !isDurable(entry) && entry.provisionalUntil > now ? { ...entry } : undefined;
+  }
+
+  provisionalEntries(): ProvisionalPin[] {
+    this.reload();
+    return [...this.phones.values()].filter((entry): entry is ProvisionalPin => !isDurable(entry)).map((entry) => ({ ...entry }));
+  }
+
+  /** Step 1 of the commit (6a-R4′): the phone was handed credentials for `attempt`. Never replaces a durable pin. */
+  addProvisional(fp: string, attempt: string, now: number = this.clock(), ttlMs: number = PROVISIONAL_PIN_MS): ProvisionalPin {
+    const normalized = normalizeFingerprint(fp);
+    if (!normalized) {
+      throw new Error("not a SHA-256 certificate fingerprint");
+    }
+    this.reload();
+    if (this.durableEntry(normalized)) {
+      throw new Error("that phone is already pinned");
+    }
+    const entry: ProvisionalPin = { fp: normalized, addedAt: now, lastUsedAt: now, state: "provisional", attempt, provisionalUntil: now + ttlMs };
+    const next = new Map(this.phones);
+    next.set(normalized, entry);
+    this.commit(next, this.allowNextUntil, true);
+    return { ...entry };
+  }
+
+  /**
+   * Step 3: the provisional pin of exactly this attempt, still live, becomes
+   * durable in one write. False, with nothing written, when that entry is gone
+   * (forgotten, rotated away, dropped), expired, or another attempt's. Throws
+   * when the write fails, which leaves the provisional entry as it was.
+   */
+  promote(fp: string, attempt: string, now: number = this.clock()): boolean {
+    this.reload();
+    const normalized = normalizeFingerprint(fp);
+    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+    if (!entry || isDurable(entry) || entry.attempt !== attempt || entry.provisionalUntil <= now) {
+      return false;
+    }
+    const next = new Map(this.phones);
+    next.set(entry.fp, { fp: entry.fp, addedAt: entry.addedAt, lastUsedAt: now, state: "durable" });
+    this.commit(next, this.allowNextUntil, this.pinnedBefore);
+    return true;
+  }
+
+  /** The phone could not store the credentials: this attempt's provisional pin goes, and nothing else. */
+  dropProvisional(fp: string, attempt: string): boolean {
+    this.reload();
+    const normalized = normalizeFingerprint(fp);
+    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+    if (!entry || isDurable(entry) || entry.attempt !== attempt) {
+      return false;
+    }
+    const next = new Map(this.phones);
+    next.delete(entry.fp);
+    this.commit(next, this.allowNextUntil, this.pinnedBefore);
+    return true;
+  }
+
+  /** Purges provisional pins past their deadline; returns their fingerprints. */
+  expireProvisional(now: number = this.clock()): string[] {
+    this.reload();
+    const gone = [...this.phones.values()].filter((entry) => !isDurable(entry) && entry.provisionalUntil <= now).map((entry) => entry.fp);
+    if (gone.length > 0) {
+      const next = new Map(this.phones);
+      for (const fp of gone) {
+        next.delete(fp);
+      }
+      this.commit(next, this.allowNextUntil, this.pinnedBefore);
+    }
+    return gone;
+  }
+
+  /** Removes the phone whose fingerprint is `fp` or starts with it, pinned or provisional; returns what was removed. */
   forget(fp: string): string[] {
     this.reload();
     const wanted = fp.replace(/:/g, "").toUpperCase();
@@ -477,7 +576,7 @@ export class PinStore {
     return hits;
   }
 
-  /** Empties the set. Not a fresh install: a new phone then needs `phones allow-next`. */
+  /** Empties the set, provisional pins included. Not a fresh install: a new phone then needs `phones allow-next`. */
   forgetAll(): void {
     this.reload();
     this.commit(new Map(), 0, this.pinnedBefore);
@@ -541,20 +640,28 @@ export class PinStore {
     const readAt = this.clock();
     let raw: unknown[];
     let migrated = true;
+    let parse: (item: unknown) => StoredPin | undefined = (item) => migratedEntry(item, readAt);
     if (record.version === 1 && record.pins && typeof record.pins === "object" && !Array.isArray(record.pins)) {
       raw = Object.values(record.pins);
     } else if (record.version === 2 && Array.isArray(record.phones)) {
       raw = record.phones;
+    } else if (record.version === 3 && Array.isArray(record.phones)) {
+      raw = record.phones;
+      parse = (item) => {
+        const entry = parseEntry(item);
+        return entry && { ...entry, state: "durable" };
+      };
     } else if (record.version === PINS_VERSION && Array.isArray(record.phones)) {
       raw = record.phones;
       migrated = false;
+      parse = parseStoredEntry;
     } else {
       throw new Error(`Invalid phone pins file at ${file}`);
     }
-    const phones = new Map<string, PinEntry>();
+    const phones = new Map<string, StoredPin>();
     let needsWrite = migrated;
     for (const item of raw) {
-      const entry = migrated ? migratedEntry(item, readAt) : parseEntry(item);
+      const entry = parse(item);
       if (!entry) {
         throw new Error(`Invalid phone pins file at ${file}`);
       }
@@ -578,7 +685,7 @@ export class PinStore {
   }
 
   /** Writes the new state and keeps it only once the write succeeded: a pin the disk lacks is no pin. */
-  private commit(phones: Map<string, PinEntry>, allowNextUntil: number, pinnedBefore: boolean): void {
+  private commit(phones: Map<string, StoredPin>, allowNextUntil: number, pinnedBefore: boolean): void {
     if (this.file) {
       privateDir(path.dirname(this.file));
       this.writeFile(
@@ -604,6 +711,56 @@ export class PinStore {
     this.allowNextUntil = allowNextUntil;
     this.pinnedBefore = pinnedBefore || this.file !== undefined;
   }
+
+  private durable(): DurablePin[] {
+    this.reload();
+    return [...this.phones.values()].filter(isDurable);
+  }
+
+  private durableEntry(fp: string): DurablePin | undefined {
+    this.reload();
+    const normalized = normalizeFingerprint(fp);
+    const entry = normalized === undefined ? undefined : this.phones.get(normalized);
+    return entry && isDurable(entry) ? entry : undefined;
+  }
+
+  /**
+   * An earlier build kept provisional pins in a file of their own. Its live
+   * entries move into this store (never over a durable pin), and the file goes,
+   * so there is one store to promote from. One that cannot be read held no
+   * trust, only half-finished pairings, so it is dropped.
+   */
+  private absorbLegacyProvisional(): void {
+    if (!this.file) {
+      return;
+    }
+    const legacy = path.join(path.dirname(this.file), LEGACY_PROVISIONAL_FILE);
+    if (!existsSync(legacy)) {
+      return;
+    }
+    let found: ProvisionalPin[] = [];
+    try {
+      const record = JSON.parse(readFileSync(legacy, "utf8")) as { version?: unknown; phones?: unknown };
+      if (record?.version === 4 && Array.isArray(record.phones)) {
+        found = record.phones
+          .map(parseStoredEntry)
+          .filter((entry): entry is ProvisionalPin => entry !== undefined && !isDurable(entry));
+      }
+    } catch {
+      found = [];
+    }
+    this.reload();
+    const next = new Map(this.phones);
+    for (const entry of found) {
+      if (!next.has(entry.fp)) {
+        next.set(entry.fp, entry);
+      }
+    }
+    if (next.size !== this.phones.size) {
+      this.commit(next, this.allowNextUntil, this.pinnedBefore);
+    }
+    unlinkSync(legacy);
+  }
 }
 
 /** A recorded use in the future (the clock went back) counts as now. */
@@ -611,9 +768,9 @@ function isStale(entry: PinEntry, now: number, ttlMs: number): boolean {
   return now - Math.min(entry.lastUsedAt, now) >= ttlMs;
 }
 
-function migratedEntry(item: unknown, at: number): PinEntry | undefined {
+function migratedEntry(item: unknown, at: number): StoredPin | undefined {
   const fp = typeof item === "string" ? normalizeFingerprint(item) : undefined;
-  return fp ? { fp, addedAt: at, lastUsedAt: at } : undefined;
+  return fp ? { fp, addedAt: at, lastUsedAt: at, state: "durable" } : undefined;
 }
 
 function parseEntry(item: unknown): PinEntry | undefined {
@@ -625,6 +782,21 @@ function parseEntry(item: unknown): PinEntry | undefined {
   return normalized && typeof addedAt === "number" && Number.isFinite(addedAt) &&
     typeof lastUsedAt === "number" && Number.isFinite(lastUsedAt)
     ? { fp: normalized, addedAt, lastUsedAt }
+    : undefined;
+}
+
+function parseStoredEntry(item: unknown): StoredPin | undefined {
+  const entry = parseEntry(item);
+  if (!entry) {
+    return undefined;
+  }
+  const { state, attempt, provisionalUntil } = item as Record<string, unknown>;
+  if (state === "durable") {
+    return { ...entry, state };
+  }
+  return state === "provisional" && typeof attempt === "string" && attempt.length > 0 &&
+    typeof provisionalUntil === "number" && Number.isFinite(provisionalUntil)
+    ? { ...entry, state, attempt, provisionalUntil }
     : undefined;
 }
 

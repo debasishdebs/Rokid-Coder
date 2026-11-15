@@ -63,7 +63,7 @@ type HelloRejectReason = "repair_needed" | "bad_token";
  * it stored the credentials), or why not, for the phone and the log.
  */
 type Admission =
-  | { ok: true; recovery: boolean }
+  | { ok: true; recovery?: string }
   | { ok: false; reason: HelloRejectReason; log: string };
 
 function refuseHttp(_request: IncomingMessage, response: ServerResponse): void {
@@ -498,7 +498,7 @@ export class WsHub {
       // Recovery admission (6a-R4′): a provisional cert's hello with the token
       // and the steering secret proves the phone stored the credentials, so its
       // pin becomes durable here. A promotion that fails admits nobody.
-      if (verdict.ok && verdict.recovery && fingerprint && !this.options.pairing?.promote(fingerprint, "recovery_hello")) {
+      if (verdict.ok && verdict.recovery && fingerprint && !this.options.pairing?.promote(fingerprint, verdict.recovery, "recovery_hello")) {
         verdict = { ok: false, reason: "repair_needed", log: "pins_unavailable" };
       }
     } catch (error) {
@@ -586,10 +586,11 @@ export class WsHub {
     // Stale counts as unpinned (and is forgotten on the spot): an expired phone cannot renew itself by reconnecting.
     // A new phone never gets in by a hello: it pairs by SAS, so a window no longer trusts on first use.
     if (this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs())) {
-      return { ok: true, recovery: false };
+      return { ok: true };
     }
-    if (this.options.pairing?.provisionalFor(fingerprint)) {
-      return { ok: true, recovery: true };
+    const provisional = this.options.pairing?.provisionalFor(fingerprint);
+    if (provisional) {
+      return { ok: true, recovery: provisional.attempt };
     }
     return { ok: false, reason: "repair_needed", log: "unpinned_cert" };
   }
