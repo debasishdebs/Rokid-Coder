@@ -79,6 +79,7 @@ jobs:
             :phone-hub:testDebugUnitTest \
             :glasses-core:testDebugUnitTest \
             :glasses-hub:testDebugUnitTest \
+            :glasses-app:testDebugUnitTest \
             :mobile:agents:testDebugUnitTest \
             --continue
 
