@@ -9,10 +9,19 @@ name: Tests
 # reports the commit it tested (`product_shas`).
 
 on:
-  # Branches only: a release tag runs release.yml, which calls this for the tag's commit.
+  # U44: feature branches run nothing; a PR into a release branch and a merge into one run the
+  # Linux jobs only; release.yml (rc tags) calls this with `ref` for the full macOS/emulator/Windows
+  # set, and a manual run can ask for it with `full`.
   push:
-    branches: ["**"]
+    branches: ["release/**"]
   pull_request:
+    branches: ["release/**"]
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Also run the macOS, emulator and Windows jobs"
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       ref:
@@ -115,7 +124,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS only for a release (called with ref) or a manual full run: its minutes count 10x.
+        os: ${{ (inputs.ref || inputs.full) && fromJSON('["ubuntu-latest","macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     outputs:
       ubuntu-latest: ${{ steps.tested.outputs.ubuntu-latest }}
@@ -273,6 +283,7 @@ jobs:
 
   emulator:
     name: Emulator
+    if: ${{ inputs.ref || inputs.full }}
     uses: ./.github/workflows/emulator.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
@@ -282,7 +293,7 @@ jobs:
   # the mocked-wsl.exe node tests) runs here.
   windows:
     name: Windows
-    if: ${{ !inputs.skip-windows }}
+    if: ${{ (inputs.ref || inputs.full) && !inputs.skip-windows }}
     uses: ./.github/workflows/windows-installer.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
