@@ -119,7 +119,8 @@ internal class HubCoreHarness(
         shadowOf(Looper.getMainLooper()).idle()
     }
 
-    fun await(what: String, timeoutMs: Long = 5_000, condition: () -> Boolean) {
+    // Generous: hosted CI runners are several times slower than a laptop; a pass returns early.
+    fun await(what: String, timeoutMs: Long = 20_000, condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             shadowOf(Looper.getMainLooper()).idle()
