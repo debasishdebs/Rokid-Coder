@@ -6,6 +6,34 @@ const { makeWorld } = require("./fixtures/plugin-cli/harness");
 const { createDriver, syncPlugin, removePlugin, helpCommands } = require("../dist/setup/plugins.js");
 
 const options = (world) => ({ home: world.home, env: world.env });
+const RECORDED = path.join(__dirname, "fixtures", "plugin-cli", "recorded");
+/** One help screen of a recorded capture: from the line that starts it to the next capture's first line. */
+function recordedHelp(file, first, next) {
+  const text = fs.readFileSync(path.join(RECORDED, file), "utf8");
+  const start = text.indexOf(first);
+  assert.ok(start >= 0, `${file} has ${first}`);
+  const end = next ? text.indexOf(next, start + first.length) : -1;
+  return end < 0 ? text.slice(start) : text.slice(start, end);
+}
+
+test("help_commands_parse_recorded_help_with_wrapped_descriptions", () => {
+  const claude = recordedHelp("claude-plugin-help.txt", "Usage: claude plugin|plugins", "Usage: claude plugin install");
+  assert.deepEqual([...helpCommands(claude)].sort(), [
+    "autoremove", "configure", "details", "disable", "enable", "eval", "help", "i", "init", "install", "list",
+    "marketplace", "new", "prune", "remove", "tag", "uninstall", "update", "validate",
+  ]);
+  const marketplace = recordedHelp("claude-plugin-help.txt", "Usage: claude plugin marketplace");
+  assert.deepEqual([...helpCommands(marketplace)].sort(), ["add", "help", "list", "remove", "rm", "update"]);
+  // The whole capture: the command list ends at the next unindented line, not inside a wrapped description.
+  assert.deepEqual(helpCommands(fs.readFileSync(path.join(RECORDED, "claude-plugin-help.txt"), "utf8")), helpCommands(claude));
+
+  const codexTop = recordedHelp("codex-help.txt", "Codex CLI", "Manage Codex plugins\n\nUsage");
+  const top = helpCommands(codexTop);
+  assert.ok(top.has("plugin") && top.has("apply") && top.has("fork") && top.has("help"), [...top].join(" "));
+  assert.ok(!top.has("working") && !top.has("the"), "a wrapped description line is not a command");
+  const codex = recordedHelp("codex-help.txt", "Manage Codex plugins\n\nUsage");
+  assert.deepEqual([...helpCommands(codex)].sort(), ["add", "help", "list", "marketplace", "remove"]);
+});
 
 test("plugins_sync_installs_both_and_is_idempotent", async (t) => {
   const world = makeWorld(t);

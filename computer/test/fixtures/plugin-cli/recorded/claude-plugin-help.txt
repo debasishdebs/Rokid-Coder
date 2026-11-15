@@ -1,0 +1,108 @@
+2.1.285 (Claude Code)
+Usage: claude plugin|plugins [options] [command]
+
+Manage Claude Code plugins
+
+Options:
+  -h, --help                           Display help for command
+
+Commands:
+  configure [options] <plugin>         Show a plugin's options and which are
+                                       unset, or save values from stdin with
+                                       --values-stdin
+  details [options] <name>             Show a plugin's component inventory and
+                                       projected token cost
+  disable [options] [plugin]           Disable an enabled plugin
+  enable [options] <plugin>            Enable a disabled plugin
+  eval [options] [target]              Run eval cases (<eval dir>/**/case.yaml
+                                       or prompt.md + graders/*.md; the eval dir
+                                       is evals/ unless --eval-dir or the
+                                       manifest says otherwise) against a plugin
+                                       and report scored results. Target is a
+                                       path, a plugin name, or a
+                                       `plugin@marketplace` id — installed and
+                                       skills-dir plugins both resolve (and add
+                                       a no-plugin baseline arm). It loads the
+                                       plugin and runs its eval suite (prompts,
+                                       graders; scaffold scripts and real MCP
+                                       servers only when you opt in) on your
+                                       machine, as you: only evaluate plugins
+                                       you trust — the run's sandboxing limits
+                                       what a malicious plugin can reach but is
+                                       not a guarantee, and a bundled suite
+                                       passing is not a security vetting. The
+                                       first run in an untrusted plugin
+                                       directory asks you to confirm
+                                       (--trust-plugin answers for CI)
+  help [command]                       display help for command
+  init|new [options] <name>            Scaffold a new plugin at
+                                       ~/.claude/skills/<name>/ (auto-loads next
+                                       session as <name>@skills-dir)
+  install|i [options] <plugin>         Install a plugin from available
+                                       marketplaces (use plugin@marketplace for
+                                       specific marketplace)
+  list [options]                       List installed plugins
+  marketplace                          Manage Claude Code marketplaces
+  prune|autoremove [options]           Remove auto-installed dependencies that
+                                       are no longer needed
+  tag [options] [path]                 Create a {name}--v{version} git tag for a
+                                       plugin release, validating that
+                                       plugin.json and any enclosing marketplace
+                                       entry agree
+  uninstall|remove [options] <plugin>  Uninstall an installed plugin
+  update [options] <plugin>            Update a plugin to the latest version
+                                       (restart required to apply)
+  validate [options] <path>            Validate a plugin or marketplace
+                                       manifest, or the skills, agents, and
+                                       commands in a directory
+Usage: claude plugin install|i [options] <plugin>
+
+Install a plugin from available marketplaces (use plugin@marketplace for
+specific marketplace)
+
+Options:
+  --accept-command <sha256>  Accept the marketplace-declared command (a
+                             command-source install, or the headersHelper that
+                             fetches the archive) whose sha256 a previous --json
+                             run reported as shownCommand.sha256; counts as -y
+                             for exactly that command, for that plugin and
+                             marketplace catalog, and nothing else. If either
+                             changed (a refresh that moved the catalog counts),
+                             the run refuses and reports the command again, to
+                             be shown to a person again
+  --config <key=value>       Set a userConfig option declared in the plugin's
+                             manifest, or a bundled .mcpb server's own
+                             user_config field as <server>.<key>=<value> (a bare
+                             key works when only one bundled server declares
+                             it). Repeatable. Values are validated against the
+                             schema and stored via the same path as the
+                             interactive /plugin configure flow.
+  -h, --help                 Display help for command
+  --json                     Print one machine-readable result line on stdout
+                             instead of the human message (same exit codes; a
+                             marketplace-declared command is still shown and
+                             must be confirmed — pass -y when not interactive)
+  --registry <url>           For a <package>@npm install: resolve and download
+                             from this npm registry instead of the one your npm
+                             configuration selects
+  -s, --scope <scope>        Installation scope: user, project, or local
+                             (default: "user")
+  -y, --yes                  Accept the displayed marketplace-declared command
+                             without the confirmation prompt — a plugin
+                             installed by running a command, or one whose
+                             archive is fetched through a headersHelper command
+                             (required when stdin or stdout is not a TTY)
+Usage: claude plugin marketplace [options] [command]
+
+Manage Claude Code marketplaces
+
+Options:
+  -h, --help                  Display help for command
+
+Commands:
+  add [options] <source>      Add a marketplace from a URL, path, or GitHub repo
+  help [command]              display help for command
+  list [options]              List all configured marketplaces
+  remove|rm [options] <name>  Remove a configured marketplace
+  update [options] [name]     Update marketplace(s) from their source - updates
+                              all if no name specified

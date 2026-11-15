@@ -79,16 +79,26 @@ function runCli(cli: string, args: string[], options: DriverOptions): Promise<st
   });
 }
 
-/** The command names (and `a|b` aliases) a `--help` lists under `Commands:`. */
+/**
+ * The command names (and `a|b` aliases) a `--help` lists under `Commands:`.
+ * A command row is indented like the first one; a long description wraps
+ * onto deeper-indented lines, which are skipped whatever they start with.
+ * The list ends at the first line indented less, such as the next heading.
+ */
 export function helpCommands(help: string): Set<string> {
   const at = help.indexOf("Commands:");
   if (at < 0) {
     return new Set();
   }
   const names = new Set<string>();
-  for (const line of help.slice(at + "Commands:".length).split(/\r?\n/)) {
+  let rowIndent: number | undefined;
+  for (const line of help.slice(at + "Commands:".length).split(/\r?\n/).slice(1)) {
     if (line.trim() === "") continue;
-    const match = /^\s+([a-z][\w|-]*)/.exec(line);
+    const indent = line.length - line.trimStart().length;
+    rowIndent ??= indent;
+    if (indent < rowIndent || indent === 0) break;
+    if (indent > rowIndent) continue;
+    const match = /^([a-z][\w|-]*)(\s|$)/.exec(line.trimStart());
     if (!match) break;
     for (const name of match[1].split("|")) names.add(name);
   }
