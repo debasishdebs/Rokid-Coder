@@ -62,6 +62,13 @@ Last updated 2026-11-15. The detailed SDD ledgers exist only on the original Mac
   - installer prerequisite checks
   - Tailscale as an optional connector
   - Nexus as the embedded core, with a coexistence warning
+- **2026-11-15/16: Plan 6a is BUILT and COMPLETE on release/1.0.0.**
+  - Done: T1 restructure, T2 core split, T3 one phone app, T6 SAS pairing, T12 identity + glasses app.
+  - Codex final review → fix wave → READY.
+  - Suites: computer 736; `:mobile:app` 532; phone-core 386, phone-hub 543, glasses-core 980 (+2 known), glasses-app 6; the emulator test passes.
+  - Rulings R203–R212 are in the ledger (not in git).
+  - **This Mac has 8 GB RAM:** run one Gradle build at a time, with `-Dorg.gradle.jvmargs=-Xmx2g -Pkotlin.daemon.jvmargs=-Xmx1g --max-workers=2`.
+  - Next: 6b and 6c.
 - **Plan 6 is SPLIT into three (U40, user, 2026-11-15)** after a full Codex re-review found the combined plan too big to specify well:
   - **6a, foundation + pairing:** `docs/coding-agent/claude/plan/2026-11-15-plan-6a-foundation-pairing.md`. **Codex READY** after 4 rounds (`…plan-6a-*`). Execute this first.
   - **6b, installers:** `…plan-6b-installers.md`. **Codex READY** (5 rounds).
