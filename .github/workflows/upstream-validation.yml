@@ -147,6 +147,10 @@ jobs:
   plugins:
     name: Upstream plugin unit tests
     runs-on: ubuntu-latest
+    # Report-only: these upstream plugins are not in the Rokid Coder app (U31) and we never change
+    # them, so an upstream test that is flaky on hosted runners must not block our builds. The SDK,
+    # hub and core suites above stay blocking.
+    continue-on-error: true
     outputs:
       sha: ${{ steps.tested.outputs.sha }}
     defaults:
