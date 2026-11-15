@@ -75,6 +75,8 @@ Last updated 2026-11-15. The detailed SDD ledgers exist only on the original Mac
        - make `release/1.0.0` the default branch
        - create an Environment `release` with the user as required reviewer
        - allow Actions to create PRs
+    - **U42 (2026-11-16):** the repo is private on GitHub Free, which can't use environment required reviewers. Ruling R219: the `release` environment exists WITHOUT reviewers; the manual `publish-release` dispatch by the sole maintainer is the approval, and the release gate (every required checklist row PASS, READY reviews, matching hashes) still applies. Add a reviewer if the repo goes public or Pro.
+    - **Done by the user:** the release key, the three secrets, the signer pin (committed 83863df8), the default branch = release/1.0.0.
     3. Push an rc tag `rokid-coder-v1.0.0-rc.1` to get the draft release. Run the device checklist, W1–W9 and M1–M3 on it. Then run publish-release (manual, approval-gated).
 - **2026-11-15/16: Plan 6a is BUILT and COMPLETE on release/1.0.0.**
   - Done: T1 restructure, T2 core split, T3 one phone app, T6 SAS pairing, T12 identity + glasses app.
