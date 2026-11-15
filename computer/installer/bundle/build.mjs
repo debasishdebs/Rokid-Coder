@@ -149,6 +149,15 @@ export function prepareNodePty(appDir, target, { nodeBin, headersDir } = {}) {
       throw new Error(`node-pty has no ${target} prebuild`);
     }
     fs.chmodSync(helper, 0o755);
+    // node-pty's darwin-x64 prebuilds ship unsigned (arm64's are ad-hoc signed, as arm64 requires);
+    // ad-hoc sign whichever is not, so every Mach-O in the bundle passes codesign --verify.
+    if (process.platform === "darwin") {
+      for (const file of [native, helper]) {
+        if (spawnSync("/usr/bin/codesign", ["--verify", file], { stdio: "ignore" }).status !== 0) {
+          run("/usr/bin/codesign", ["--force", "--sign", "-", file]);
+        }
+      }
+    }
     return "napi-prebuild";
   }
   const gyp = path.join(path.dirname(path.dirname(nodeBin)), "lib", "node_modules", "npm", "node_modules", "node-gyp", "bin", "node-gyp.js");
