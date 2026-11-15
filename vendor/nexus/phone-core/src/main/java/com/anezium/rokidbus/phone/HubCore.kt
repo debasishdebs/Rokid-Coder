@@ -701,7 +701,7 @@ class HubCore internal constructor(
                 emitDone = ::emitPhoneTtsDone,
             ),
             emitDone = ::emitPhoneTtsDone,
-            phoneRoute = phoneSpeakerRouteProbe::classifyRoute,
+            phoneRoute = seams.ttsRoute ?: phoneSpeakerRouteProbe::classifyRoute,
             logger = ::log,
         )
         phoneTtsDispatcher.initialize()
