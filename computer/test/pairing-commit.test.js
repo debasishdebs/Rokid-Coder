@@ -479,7 +479,12 @@ test("two_process_forget_during_promotion_never_restores_trust", async () => {
   `);
   await waitUntil(() => fs.existsSync(held), "the CLI never took the port");
   assert.equal(await holdHookPort(port), undefined, "the port was free while the CLI wrote");
-  await waitUntil(async () => (release = await holdHookPort(port)) !== undefined, "the port was never freed");
+  // agentd starting: it binds the port before it reads anything, waiting while the CLI holds it.
+  const deadline = Date.now() + 5000;
+  while ((release = await holdHookPort(port)) === undefined) {
+    assert.ok(Date.now() < deadline, "the port was never freed");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   assert.equal(pins.promote(fp, attempt), false);
   await release();
   assert.equal((await holder.exited).code, 0);

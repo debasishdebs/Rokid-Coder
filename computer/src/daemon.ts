@@ -120,6 +120,19 @@ async function bindHookPort(server: HookHttpServer, port: number): Promise<void>
 }
 
 export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<RunningDaemon> {
+  // Whatever startup took that would outlive a failed start: the hook port above all, the pin writer lock (R209).
+  const undoOnFailure: Array<() => Promise<void>> = [];
+  try {
+    return await startDaemonUndoable(daemonOptions, undoOnFailure);
+  } catch (error) {
+    for (const undo of undoOnFailure.reverse()) {
+      await undo().catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: Array<() => Promise<void>>): Promise<RunningDaemon> {
   const stateDir = defaultStateDir();
   const config = ensureConfig(stateDir);
   const logger = new FileLogger(stateDir);
@@ -524,6 +537,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     extraHealth: () => ({ codex: codex.availability() }),
   });
   await bindHookPort(httpServer, config.httpPort);
+  undoOnFailure.push(() => httpServer.stop());
   // The file lock an earlier build used; inert now.
   rmSync(path.join(tlsDir, "phone-pins.lock"), { recursive: true, force: true });
   const pins = new PinStore(path.join(tlsDir, "phone-pins.json"), { logger });

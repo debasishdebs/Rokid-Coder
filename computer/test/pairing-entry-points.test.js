@@ -411,6 +411,24 @@ test("agentd_and_cli_never_write_concurrently", async () => {
   });
 });
 
+test("startup_failure_after_bind_releases_port_and_exits", async () => {
+  const { coderDir, httpPort } = await cliWithoutAgentd();
+  // A leftover file lock that cannot be removed: agentd fails right after it bound the hook port.
+  const lock = path.join(coderDir, "tls", "phone-pins.lock");
+  await fsp.mkdir(lock, { recursive: true, mode: 0o700 });
+  await fsp.writeFile(path.join(lock, "owner"), "1:stuck");
+  await fsp.chmod(lock, 0o500);
+  track(() => fsp.chmod(lock, 0o700));
+  const run = runCli(coderDir, ["run"]);
+  const code = await Promise.race([run.exited, new Promise((resolve) => setTimeout(() => resolve("still running"), 15_000))]);
+  assert.equal(code, 1, `agentd run did not exit: ${run.out}`);
+  assert.match(run.out, /phone-pins\.lock/);
+  // The port went with it: the next writer gets it at once.
+  const release = await holdHookPort(httpPort);
+  assert.ok(release, "the failed agentd left the hook port bound");
+  await release();
+});
+
 test("phones_forget_also_drops_a_provisional_pin", async () => {
   await withDaemon({ transport: "wshub" }, async ({ coderDir }) => {
     const fp = (await phoneCert("half-phone")).fingerprint256;

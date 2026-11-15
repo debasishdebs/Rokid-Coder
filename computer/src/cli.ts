@@ -70,7 +70,15 @@ function getHealth(port: number): Promise<Health | undefined> {
 }
 
 async function run(): Promise<void> {
-  const daemon = await startDaemon();
+  let daemon: Awaited<ReturnType<typeof startDaemon>>;
+  try {
+    daemon = await startDaemon();
+  } catch (error) {
+    // A failed start exits for certain: nothing it opened may keep this process, or the hook port, alive.
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}
+`);
+    process.exit(1);
+  }
   process.stdout.write(
     `nexus-agentd listening on 127.0.0.1:${daemon.config.httpPort} and wss on 0.0.0.0:${daemon.config.wsPort}\n`,
   );

@@ -89,12 +89,12 @@ test("rk_codex_refuses_dash_c", async () => {
 });
 
 /** A real hub over `dir`, for the tests that need agentd's side of the socket. */
-async function withHub(dir, body, { logger = silentLogger, autostart = true, extraEnv = {}, unpaired = false } = {}) {
+async function withHub(dir, body, { logger = silentLogger, autostart = true, extraEnv = {}, unpaired = false, pairing } = {}) {
   const { env, sessionsDir, configDir } = await rkEnv(dir, extraEnv, { unpaired });
   const file = path.join(configDir, "attached.json");
   const make = () => {
     const registry = new AttachRegistry({ file, logger: silentLogger });
-    return { registry, hub: new LauncherHub({ configDir, claudeSessionsDir: sessionsDir, logger, registry }) };
+    return { registry, hub: new LauncherHub({ configDir, claudeSessionsDir: sessionsDir, logger, registry, pairing }) };
   };
   let current = make();
   if (autostart) {
@@ -720,6 +720,48 @@ async function atPairQuestion(ctx, dir) {
 }
 
 const pins = (ctx) => new PinStore(path.join(ctx.configDir, "tls", "phone-pins.json"));
+
+test("rk_pair_prompt_pairs_through_running_agentd", async () => {
+  // agentd's pairing IPC, as the coordinator serves it: one window, a code once a phone arrives, then PINNED.
+  const watchers = new Set();
+  const emit = (status) => watchers.forEach((watcher) => watcher(status));
+  const attempt = "0123456789abcdef";
+  const confirms = [];
+  const pairing = {
+    open: () => emit({ attempt, state: "WINDOW_OPEN" }),
+    watch: (listener) => {
+      watchers.add(listener);
+      return () => watchers.delete(listener);
+    },
+    confirm: (id, ok) => confirms.push({ id, ok }),
+  };
+  await withTempDir(async (dir) => {
+    await withHub(
+      dir,
+      async (ctx) => {
+        const run = await atPairQuestion(ctx, dir);
+        run.write("y\r");
+        await run.until("Waiting for your phone");
+        emit({ attempt, state: "AWAITING_CONFIRM", code: "123456" });
+        await run.until("Pairing code: 123 456");
+        await run.until("[y/N]");
+        run.write("y\r");
+        await run.until("Now confirm on the phone.");
+        assert.deepEqual(confirms, [{ id: attempt, ok: true }]);
+        // The phone confirmed too: agentd pinned it.
+        pairPhone(ctx.configDir);
+        emit({ attempt, state: "PINNED", code: "123456" });
+        await run.until("Paired ✓", 3000);
+        await run.until("fake-claude ready");
+        assert.ok(run.out.indexOf("Paired ✓") < run.out.indexOf("fake-claude ready"));
+        // agentd made every pin change; rk wrote none itself.
+        assert.equal(pins(ctx).allowNextOpen(Date.now()), false);
+        assert.equal(run.out.includes(PHONE_STEP), false, "rk fell back to writing the pins");
+      },
+      { unpaired: true, pairing },
+    );
+  });
+});
 
 test("pair_prompt_yes_opens_window_and_waits_until_pinned", async () => {
   await withTempDir(async (dir) => {
