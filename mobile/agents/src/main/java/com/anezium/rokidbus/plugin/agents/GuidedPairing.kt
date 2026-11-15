@@ -170,6 +170,10 @@ internal object GuidedPairingCopy {
     const val GLASSES_BODY = "On your computer: type /rokid:pair in Claude, or run agentd pair"
     const val GLASSES_TIMED_OUT = "Time's up — try again"
 
+    /** The code check, on every screen that shows it: the human compares, then confirms here. */
+    const val COMPARE = "Check that your computer shows this same code, then confirm. Cancel if it differs."
+    const val GLASSES_COMPARE = "Same code on your computer? Tap to confirm"
+
     /** The status line under the steps; null while there is nothing to say. */
     fun status(state: GuidedPairing.State): String? = when (state) {
         GuidedPairing.State.Idle -> null

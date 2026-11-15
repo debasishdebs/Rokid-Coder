@@ -59,10 +59,18 @@ class PhoneTlsServerTest {
         scope.cancel()
     }
 
+    /** This computer paired earlier, by SAS: its record holds the token and the pinned cert. */
+    private fun pairedEarlier(cert: String = agentA.fingerprint) {
+        assertTrue(
+            config.commitPairing(
+                PairingRecord("pc-1", "Desk", cert, "secret", "steer-secret-0123456789abcdefghijk", "10.0.0.2", 8792, "0123456789abcdef"),
+            ),
+        )
+    }
+
     @Test
     fun tls_server_accepts_tls_client_and_line_protocol_unchanged() {
-        // The wearer opened the door for this computer (R121).
-        config.armLinkWindow()
+        pairedEarlier()
         listen { listener ->
             dial(listener, agentA).use { agentd ->
                 // agentd's dial: chain validation off, its pinned set is the identity check.
@@ -134,26 +142,25 @@ class PhoneTlsServerTest {
     }
 
     @Test
-    fun first_machine_inside_window_trusted() {
+    fun first_machine_inside_window_is_not_trusted_by_its_hello() {
+        // The door is open, but a computer joins only through a SAS pairing, never by a hello.
         config.armLinkWindow()
         listen { listener ->
             dial(listener, agentA).use { agentd ->
                 agentd.hello()
-                assertEquals("hello_ack", agentd.next()?.getString("type"))
+                val reply = agentd.next()
+                assertEquals("hello_reject", reply?.getString("type"))
+                assertEquals(AgentdProtocolCodec.REJECT_UNKNOWN_MACHINE, reply?.getString("reason"))
             }
             awaitServed()
-            assertEquals(agentA.fingerprint, prefs.map["machine.cert.pc-1"])
-            assertTrue((events.first() as AgentdEvent.LinkUp).secure)
+            assertTrue(events.filterIsInstance<AgentdEvent.LinkUp>().isEmpty())
         }
-        // The window closes with the trust it allowed: the next stranger needs the door again.
-        assertFalse(config.isLinkWindowOpen())
-        assertEquals(MachineTrustResult.REJECTED_NOT_INVITED, config.authorizeMachine("pc-2", "t", "Laptop", agentB.fingerprint))
+        assertFalse(prefs.map.keys.any { it.startsWith("machine.") && it != "machine.link_window_deadline" })
     }
 
     @Test
     fun inbound_pins_client_cert_on_first_trust() {
-        // The wearer opened the door for this computer (R121).
-        config.armLinkWindow()
+        pairedEarlier()
         listen { listener ->
             dial(listener, agentA).use { agentd ->
                 agentd.hello()
@@ -190,8 +197,7 @@ class PhoneTlsServerTest {
 
     @Test
     fun inbound_mismatched_client_cert_refused_before_hello_ack() {
-        // The wearer opened the door for this computer (R121).
-        config.armLinkWindow()
+        pairedEarlier()
         listen { listener ->
             dial(listener, agentA).use { agentd ->
                 agentd.hello()
@@ -219,8 +225,7 @@ class PhoneTlsServerTest {
 
     @Test
     fun replayed_token_with_other_cert_never_secure() {
-        // The wearer opened the door for this computer (R121).
-        config.armLinkWindow()
+        pairedEarlier()
         listen { listener ->
             dial(listener, agentA).use { live ->
                 live.hello()
@@ -263,18 +268,14 @@ class PhoneTlsServerTest {
 
     @Test
     fun forget_machine_clears_client_pin() {
-        config.armLinkWindow()
-        assertEquals(MachineTrustResult.NEWLY_TRUSTED, config.authorizeMachine("pc-1", "secret", "Desk", agentA.fingerprint))
+        pairedEarlier()
         assertTrue(config.isClientCertPinned("pc-1", agentA.fingerprint))
         config.forgetMachine("pc-1")
         assertNull(prefs.map["machine.cert.pc-1"])
         assertFalse(config.isClientCertPinned("pc-1", agentA.fingerprint))
 
-        // Linked again inside the window, the pin is the new cert's.
-        config.armLinkWindow()
-        config.authorizeMachine("pc-2", "other", "Laptop", agentA.fingerprint)
-        config.armLinkWindow()
-        assertEquals(MachineTrustResult.NEWLY_TRUSTED, config.authorizeMachine("pc-1", "secret", "Desk", agentB.fingerprint))
+        // Paired again (by SAS), the pin is the new cert's.
+        pairedEarlier(agentB.fingerprint)
         assertTrue(config.isClientCertPinned("pc-1", agentB.fingerprint))
 
         config.forgetMachines()
@@ -313,7 +314,7 @@ class PhoneTlsServerTest {
 
     @Test
     fun inbound_trust_revoked_closes_link() {
-        config.armLinkWindow()
+        pairedEarlier()
         listen { listener ->
             dial(listener, agentA).use { agentd ->
                 agentd.hello()

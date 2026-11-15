@@ -40,6 +40,9 @@ internal class GlassesScreen(
 
         /** BACK on the pairing card: the phone's door shuts and the attempt ends. */
         fun cancelPairing() = Unit
+
+        /** A tap on the pairing card while it shows a code: the wearer's confirmation, sent through the phone. */
+        fun confirmPairing(): Boolean = false
     }
 
     private val active = ActiveCard(guardMs)
@@ -329,8 +332,12 @@ internal class GlassesScreen(
         }
     }
 
-    /** Nothing on the card is tapped: BACK is the one key, and it shuts the door. */
+    /** A tap confirms the code the card shows (and does nothing before one); BACK shuts the door. */
     private fun onPairingInput(event: NexusInputEvent) {
+        if (GlassesKeys.isEnter(event)) {
+            if (host.confirmPairing()) host.render()
+            return
+        }
         if (event.keyCode != KeyEvent.KEYCODE_BACK) return
         close(ActiveCard.Kind.PAIRING)
         host.cancelPairing()

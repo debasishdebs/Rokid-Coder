@@ -109,6 +109,7 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
                 return true
             }
             override fun cancelPairing() = glassesPairing.cancel()
+            override fun confirmPairing() = glassesPairing.confirm()
         },
     )
 
@@ -317,6 +318,10 @@ class AgentsPluginService : NexusPluginService(), AlertGlasses {
         serviceScope.launch {
             // A computer that connected, or a door shut from the phone, ends the card.
             AgentsRuntime.guidedPairing.state.collect { glassesPairing.sync() }
+        }
+        serviceScope.launch {
+            // The code arrived, or the attempt moved on: the card shows it.
+            PairingAttempts.state.collect { glassesPairing.sync() }
         }
         serviceScope.launch {
             AgentsRuntime.store.sessionInputResult.collectLatest { result ->

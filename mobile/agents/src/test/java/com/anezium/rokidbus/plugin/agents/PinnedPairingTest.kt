@@ -79,11 +79,12 @@ class PinnedPairingTest {
 
     @Test
     fun line_without_fp_is_refused_with_copy() {
-        val older = AgentdPairingParseResult.Invalid("This pairing line is from an older agentd — run agentd pair again")
-        // A line from before pins carried neither; one from before steering secrets carried no steer.
-        assertEquals(older, AgentdPairingParser.parse(line(fp = null, steer = null)))
-        assertEquals(older, AgentdPairingParser.parse(line(fp = null)))
-        assertEquals(older, AgentdPairingParser.parse(line(steer = null)))
+        // Every v1 line, with or without its pin and secret, is an old one: credentials never come from a line.
+        val older = AgentdPairingParseResult.Invalid("This pairing line is from an older version — pair again")
+        assertEquals(older, AgentdPairingParser.parse(legacyLine(fp = null, steer = null)))
+        assertEquals(older, AgentdPairingParser.parse(legacyLine(fp = null)))
+        assertEquals(older, AgentdPairingParser.parse(legacyLine()))
+        assertEquals(AgentdPairingParseResult.Invalid("Pairing line has a bad fingerprint"), AgentdPairingParser.parse(line(fp = null)))
         assertTrue(AgentdPairingParser.parse(line()) is AgentdPairingParseResult.Valid)
     }
 
@@ -115,8 +116,9 @@ class PinnedPairingTest {
 
     @Test
     fun fp_persists_across_store_reload() {
-        val parsed = (AgentdPairingParser.parse(line(fp = FP.lowercase())) as AgentdPairingParseResult.Valid).config
-        assertEquals(FP, parsed.fp)
+        // The line's fp is normalised as it is read; the slot itself now comes from a SAS pairing.
+        assertEquals(FP, (AgentdPairingParser.parse(line(fp = FP.lowercase())) as AgentdPairingParseResult.Valid).target.fp)
+        val parsed = config()
         assertTrue(store().saveAgentd(parsed, enabled = true))
         assertEquals(FP, prefs.map["agentd.fp"])
         assertEquals(STEER, prefs.map["agentd.steer"])
@@ -136,7 +138,7 @@ class PinnedPairingTest {
 
     @Test
     fun pinned_slot_refuses_line_without_fp() {
-        val pinned = (AgentdPairingParser.parse(line()) as AgentdPairingParseResult.Valid).config
+        val pinned = config()
         // The parser refuses such a line now; the store still holds the pin against one built by hand.
         val legacy = pinned.copy(fp = null, steer = null)
         // A legacy slot is re-paired with a pinned line freely.
@@ -517,7 +519,17 @@ class PinnedPairingTest {
 
     private fun store() = AgentsConfigStore(prefs) { 0L }
 
-    private fun line(fp: Any? = FP, steer: Any? = STEER): String = JSONObject()
+    /** A v2 pairing line: where to dial and which cert, nothing secret. */
+    private fun line(fp: Any? = FP): String = JSONObject()
+        .put("v", 2)
+        .put("kind", "rokid-coder")
+        .put("host", "127.0.0.1")
+        .put("port", 8790)
+        .apply { if (fp != null) put("fp", fp) }
+        .toString()
+
+    /** A v1 line, as 0.8.x printed it, with the token and the steering secret in it. */
+    private fun legacyLine(fp: Any? = FP, steer: Any? = STEER): String = JSONObject()
         .put("v", 1)
         .put("kind", "nexus-agentd")
         .put("name", "Desk")

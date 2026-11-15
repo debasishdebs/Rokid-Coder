@@ -46,6 +46,9 @@ class AddComputerActivity : Activity() {
     private lateinit var tailscaleGet: Button
     private lateinit var pairingField: EditText
     private lateinit var pairingSummary: TextView
+    private lateinit var codeCard: LinearLayout
+    private lateinit var codeText: TextView
+    private lateinit var codeStatus: TextView
     private var ticker: Job? = null
     private var knownMachines = 0
     private var guided = false
@@ -60,6 +63,7 @@ class AddComputerActivity : Activity() {
         pairing.acknowledge()
         buildUi()
         uiScope.launch { pairing.state.collect(::renderDoorState) }
+        uiScope.launch { PairingAttempts.state.collect(::renderAttempt) }
         uiScope.launch {
             AgentsRuntime.linkedMachines.collect { machineName ->
                 // Replay hands us the last machine that ever linked; only a
@@ -73,8 +77,15 @@ class AddComputerActivity : Activity() {
         }
     }
 
+    override fun onPause() {
+        PairingAttempts.pairingScreenOpen = false
+        super.onPause()
+    }
+
     override fun onResume() {
         super.onResume()
+        // agentd's pair-ready announcements are acted on only while this screen is up.
+        PairingAttempts.pairingScreenOpen = true
         pairing.tick(SystemClock.elapsedRealtime())
         renderDoorState(pairing.state.value)
         renderTailscaleState()
@@ -120,9 +131,30 @@ class AddComputerActivity : Activity() {
         tailscaleGet = NexusUi.textButton(this, "Get Tailscale for this phone").apply {
             setOnClickListener { openTailscaleInstall(this@AddComputerActivity) }
         }
-        pairingField = NexusUi.field(this, "Paste the pairing line from nexus-agentd").apply {
-            // The pairing line carries the token (and the pin), so it is a secret: masked, no
-            // keyboard learning or suggestions, no autofill. Never logged. A masked field is one line.
+        codeText = NexusUi.rowTitle(this, "").apply { setTextSize(TypedValue.COMPLEX_UNIT_SP, 34f) }
+        codeStatus = NexusUi.cardBody(this, GuidedPairingCopy.COMPARE)
+        codeCard = NexusUi.card(this).apply {
+            visibility = View.GONE
+            addView(NexusUi.rowTitle(this@AddComputerActivity, "Pairing code"), NexusUi.block())
+            addView(BusTheme.gap(this@AddComputerActivity, 6))
+            addView(codeText, NexusUi.block())
+            addView(BusTheme.gap(this@AddComputerActivity, 6))
+            addView(codeStatus, NexusUi.block())
+            addView(BusTheme.gap(this@AddComputerActivity, 12))
+            // The phone's half of the confirmation: a human tap here, never anything from the network.
+            addView(
+                actionRow(
+                    this@AddComputerActivity,
+                    primary = "Confirm",
+                    onPrimary = { PairingAttempts.state.value?.let { PairingAttempts.confirm(it.attempt, true) } },
+                    secondary = "Cancel",
+                    onSecondary = { PairingAttempts.state.value?.let { PairingAttempts.confirm(it.attempt, false) } },
+                ),
+                NexusUi.block(),
+            )
+        }
+        pairingField = NexusUi.field(this, "Paste the pairing line from agentd pair").apply {
+            // The line holds no secret now, but it is still not a thing to learn or autofill.
             inputType = InputType.TYPE_CLASS_TEXT or
                 InputType.TYPE_TEXT_VARIATION_PASSWORD or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -139,6 +171,8 @@ class AddComputerActivity : Activity() {
         pairingSummary = NexusUi.cardBody(this, "No daemon paired.")
 
         val content = NexusUi.contentColumn(this).apply {
+            addView(codeCard, NexusUi.block())
+            addView(BusTheme.gap(this@AddComputerActivity, 14))
             if (guided) {
                 addView(guidedCard(), NexusUi.block())
                 addView(BusTheme.gap(this@AddComputerActivity, 20))
@@ -266,7 +300,7 @@ class AddComputerActivity : Activity() {
             NexusUi.cardBody(
                 this@AddComputerActivity,
                 "If you would rather use neither, paste the pairing line that " +
-                    "“nexus-agentd pair” prints and this phone dials the computer.",
+                    "“agentd pair” prints: this phone dials the computer, and both show a code to compare.",
             ),
             NexusUi.block(),
         )
@@ -275,16 +309,7 @@ class AddComputerActivity : Activity() {
         addView(BusTheme.gap(this@AddComputerActivity, 10))
         addView(pairingSummary, NexusUi.block())
         addView(BusTheme.gap(this@AddComputerActivity, 12))
-        addView(
-            actionRow(
-                this@AddComputerActivity,
-                primary = "Save",
-                onPrimary = { savePairing(test = false) },
-                secondary = "Test connection",
-                onSecondary = { savePairing(test = true) },
-            ),
-            NexusUi.block(),
-        )
+        addView(NexusUi.pillButton(this@AddComputerActivity, "Pair").apply { setOnClickListener { pairWithLine() } }, NexusUi.block())
     }
 
     private fun currentPairing(): PairingSnapshot = pairingSnapshot(
@@ -333,43 +358,35 @@ class AddComputerActivity : Activity() {
             return
         }
         pairingSummary.text = when (val parsed = AgentdPairingParser.parse(raw)) {
-            is AgentdPairingParseResult.Valid -> configStore.agentdPairingRefusal(parsed.config)
-                ?: "Parsed: ${parsed.config.name} · ${parsed.config.host}:${parsed.config.port}"
+            is AgentdPairingParseResult.Valid -> "Read: ${parsed.target.host}:${parsed.target.port} — tap Pair, then compare the codes"
             is AgentdPairingParseResult.Invalid -> parsed.reason
         }
     }
 
-    private fun savePairing(test: Boolean) {
-        val raw = pairingField.text.toString()
-        val config = if (raw.isBlank()) {
-            configStore.load().agentd
-        } else {
-            when (val parsed = AgentdPairingParser.parse(raw)) {
-                is AgentdPairingParseResult.Valid -> parsed.config
-                is AgentdPairingParseResult.Invalid -> {
-                    pairingSummary.text = parsed.reason
-                    toast("Fix the pairing data first.")
-                    return
-                }
+    /** The line only says where to dial: the pairing itself is the code check that follows. */
+    private fun pairWithLine() {
+        when (val parsed = AgentdPairingParser.parse(pairingField.text.toString())) {
+            is AgentdPairingParseResult.Valid -> {
+                pairingField.text.clear()
+                pairingSummary.text = "Connecting to ${parsed.target.host}:${parsed.target.port}…"
+                AgentsMonitorService.pairWithLine(applicationContext, parsed.target)
+            }
+            is AgentdPairingParseResult.Invalid -> {
+                pairingSummary.text = parsed.reason
+                toast("Fix the pairing line first.")
             }
         }
-        if (config == null) {
-            toast("Paste pairing data first.")
-            return
-        }
-        if (!configStore.saveAgentd(config, configStore.load().agentdEnabled)) {
-            pairingSummary.text = configStore.agentdPairingRefusal(config)
-            toast("Fix the pairing data first.")
-            return
-        }
-        pairingField.text.clear()
-        pairingSummary.text = "Paired: ${config.name} · ${config.host}:${config.port}"
-        if (test) {
-            AgentsMonitorService.test(applicationContext, AgentProvider.CLAUDE)
-            toast("Testing the computer link…")
-        } else {
-            AgentsMonitorService.reconcile(applicationContext)
-            toast("Computer link settings saved.")
+    }
+
+    private fun renderAttempt(view: AttemptView?) {
+        val code = view?.code?.takeIf { view.state == AttemptState.AWAITING_CONFIRM }
+        codeCard.visibility = if (code != null) View.VISIBLE else View.GONE
+        codeText.text = code?.let { "${it.take(3)} ${it.drop(3)}" }.orEmpty()
+        codeStatus.text = GuidedPairingCopy.COMPARE
+        when (view?.state) {
+            AttemptState.PINNED -> pairingSummary.text = "Paired with ${view.peerName} ✓"
+            AttemptState.ABORTED -> pairingSummary.text = "Not paired — the codes were not confirmed on both screens."
+            else -> Unit
         }
     }
 

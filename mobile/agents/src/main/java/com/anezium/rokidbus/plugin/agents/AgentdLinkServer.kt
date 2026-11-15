@@ -53,6 +53,12 @@ class AgentdLinkServer internal constructor(
     /** A link that was bound has ended: the service decides whether this listener still has a job. */
     private val onLinkEnded: () -> Unit = {},
     onEvent: (AgentdEvent) -> Unit,
+    /**
+     * Pairing on this link (Plan 6a T6): while the door is open, a computer that dials in and
+     * opens with `sas_commit` gets a SAS session instead of a hello, and a computer that pinned
+     * this phone only provisionally may ask for the commit proof before its hello.
+     */
+    private val door: SasDoor? = null,
 ) {
     constructor(
         store: AgentSessionStore,
@@ -62,6 +68,7 @@ class AgentdLinkServer internal constructor(
         onSecureConnected: (machineId: String, machineName: String) -> Unit = { _, _ -> },
         onLinkEnded: () -> Unit = {},
         onMachineTrusted: (String) -> Unit = {},
+        door: SasDoor? = null,
     ) : this(
         store = store,
         authorizeMachine = { hello, clientCert ->
@@ -80,6 +87,7 @@ class AgentdLinkServer internal constructor(
         onSecureConnected = onSecureConnected,
         onLinkEnded = onLinkEnded,
         onEvent = AgentsRuntime::emitEvent,
+        door = door,
     )
 
     private var acceptJob: Job? = null
@@ -213,11 +221,32 @@ class AgentdLinkServer internal constructor(
         val gate = AgentdInboundGate { hello -> authorizeMachine(hello, connection.clientCert) }
         codec.reset()
         var bound = false
+        var first = true
+        var sas: SasResponder? = null
         try {
             // Before the writer and the first line: nothing is read or written until TLS is up.
             connection.handshake()
             connection.startWriter(scope)
             connection.lines { line ->
+                // A pairing session takes every line, and nothing else happens on it.
+                sas?.let {
+                    it.receive(line)
+                    return@lines true
+                }
+                if (first) {
+                    first = false
+                    when (pairingOpening(line)) {
+                        "sas_commit" -> {
+                            sas = pairingSession(connection) ?: return@lines false
+                            sas!!.receive(line)
+                            return@lines true
+                        }
+                        "pair_commit_query" -> {
+                            // Answered, and then the normal hello follows on this same session.
+                            return@lines answerCommitQuery(connection, line)
+                        }
+                    }
+                }
                 when (val decision = gate.receive(codec.parse(line))) {
                     is AgentdInboundDecision.HelloAccepted -> {
                         connection.machineId = decision.hello.machineId
@@ -264,6 +293,7 @@ class AgentdLinkServer internal constructor(
         } catch (_: Throwable) {
             // Fall through: the connection is finished either way.
         } finally {
+            sas?.disconnected()
             // The link ends before the socket closes, so no write is reported Sent onto it.
             val wasActive = synchronized(clientLock) {
                 connections.remove(connection)
@@ -293,6 +323,56 @@ class AgentdLinkServer internal constructor(
                 if (bound) onLinkEnded()
             }
         }
+    }
+
+    /** The type of a connection's first line when it is a pairing frame, so the hello gate never sees it. */
+    private fun pairingOpening(line: String): String? {
+        if (door == null) return null
+        val type = runCatching { JSONObject(line).optString("type") }.getOrNull()
+        return type?.takeIf { it == "sas_commit" || it == "pair_commit_query" }
+    }
+
+    /**
+     * Before any pin, a computer's cert is accepted for SAS frames only, and only while the door
+     * is open. Null (the connection then closes) when it is shut.
+     */
+    private fun pairingSession(connection: LinkConnection): SasResponder? {
+        val door = door ?: return null
+        val agentdFp = connection.clientCert ?: return null
+        if (!door.open()) return null
+        return SasResponder(
+            attempts = door.attempts,
+            agentdFp = agentdFp,
+            phoneFp = door.phoneFingerprint(),
+            peerName = connection.remoteAddress ?: "computer",
+            // The phone's confirm comes from the UI thread: every line goes through the writer.
+            send = { line -> connection.enqueue(line) },
+            store = door.commit,
+            // Closed a moment later, so the last pairing frame is written before the socket goes.
+            close = {
+                scope.launch(Dispatchers.IO) {
+                    kotlinx.coroutines.delay(SESSION_CLOSE_DRAIN_MS)
+                    connection.close()
+                }
+            },
+            onPaired = door.onPaired,
+        )
+    }
+
+    /**
+     * 6a-R4″: agentd pinned this phone only provisionally and asks, on the mutually pinned session,
+     * whether the credentials were stored. The answer proves it with the steering secret from that
+     * very attempt. A cert or attempt this phone holds no record of gets no answer: the link closes.
+     */
+    private fun answerCommitQuery(connection: LinkConnection, line: String): Boolean {
+        val door = door ?: return false
+        val agentdFp = connection.clientCert ?: return false
+        val attempt = runCatching { JSONObject(line).optString("attempt") }.getOrNull() ?: return false
+        val record = door.recordForCert(agentdFp)?.takeIf { it.attempt == attempt } ?: return false
+        val proof = SasPairing.proof(record.steer, attempt, agentdFp, door.phoneFingerprint())
+        return connection.send(
+            JSONObject().put("type", "pair_committed").put("v", 2).put("attempt", attempt).put("proof", proof).toString(),
+        )
     }
 
     /** The previous connection's trust ends before this one becomes the client. False once stopped. */
@@ -427,6 +507,11 @@ class AgentdLinkServer internal constructor(
                     socket.receive(packet)
                     if (isDaemonBeacon(packet)) {
                         replyTo(socket, packet.address, packet.port)
+                    } else {
+                        // agentd's window, waiting for a phone on its pairing screen to dial its wss.
+                        PairReady.parse(String(packet.data, packet.offset, packet.length, Charsets.UTF_8))
+                            ?.takeIf { door?.attempts?.acceptPairReady(it) == true }
+                            ?.let { door?.onPairReady?.invoke(it) }
                     }
                 }
             } catch (_: SocketException) {
@@ -449,7 +534,8 @@ class AgentdLinkServer internal constructor(
     }
 
     private fun replyTo(socket: DatagramSocket, address: InetAddress, port: Int) {
-        val payload = discoveryReply(android.os.Build.MODEL ?: "phone").toByteArray(Charsets.UTF_8)
+        val payload = discoveryReply(android.os.Build.MODEL ?: "phone", pairing = door?.open() == true)
+            .toByteArray(Charsets.UTF_8)
         runCatching { socket.send(DatagramPacket(payload, payload.size, address, port)) }
     }
 
@@ -457,14 +543,19 @@ class AgentdLinkServer internal constructor(
         const val LINK_PORT = 8792
         const val DISCOVERY_PORT = 8793
         private const val RETRY_DELAY_MS = 2000L
+        private const val SESSION_CLOSE_DRAIN_MS = 300L
 
-        /** `tls: true` tells agentd to dial TLS; once it has pinned a phone it dials nothing else. */
-        internal fun discoveryReply(name: String): String = JSONObject()
+        /**
+         * `tls: true` tells agentd to dial TLS; once it has pinned a phone it dials nothing else.
+         * `pairing: true` says the door is open, so agentd inside its own window may pair by SAS.
+         */
+        internal fun discoveryReply(name: String, pairing: Boolean = false): String = JSONObject()
             .put("nexus", "agents-phone")
             .put("v", 1)
             .put("port", LINK_PORT)
             .put("name", name)
             .put("tls", true)
+            .apply { if (pairing) put("pairing", true) }
             .toString()
 
         private val HELLO_ACK = JSONObject()

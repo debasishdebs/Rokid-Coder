@@ -71,7 +71,28 @@ class AgentsMonitorService : Service() {
                 alertScope.launch { reconcile() }
             },
             onMachineTrusted = { machineName -> AgentsRuntime.announceLinkedMachine(machineName) },
+            // A new computer pairs only by SAS: the door decides whether one may start here.
+            door = SasDoor(
+                open = configStore::isLinkWindowOpen,
+                attempts = PairingAttempts,
+                phoneFingerprint = tlsIdentity::fingerprint256,
+                commit = configStore::commitPairing,
+                recordForCert = configStore::pairingRecordForCert,
+                onPaired = ::onPaired,
+                onPairReady = { ready -> sasDialer.dial(ready.host, ready.wsPort, expectedFp = null, peerName = ready.machineName) },
+            ),
         )
+    }
+
+    /** The phone dialling agentd's wss for a SAS session: from a pair-ready announcement or a v2 line. */
+    private val sasDialer by lazy {
+        SasWssDialer(httpClient, tlsIdentity, PairingAttempts, configStore::commitPairing, ::onPaired)
+    }
+
+    /** A SAS pairing stored its record: the computer is linked, and the monitor dials it as usual now. */
+    private fun onPaired(record: PairingRecord) {
+        AgentsRuntime.announceLinkedMachine(record.machineName)
+        alertScope.launch { reconcile() }
     }
     private var runningAgentd: AgentdConfig? = null
     private var listenerBesideDialled = false
@@ -129,7 +150,16 @@ class AgentsMonitorService : Service() {
             }.collect(AgentsRuntime::setLinkSecure)
         }
         serviceScope.launch {
-            agentdClient.needsRepair.collect(AgentsRuntime::setNeedsRepair)
+            agentdClient.needsRepair.collect { refused ->
+                AgentsRuntime.setNeedsRepair(refused)
+                // A refusal acts on the whole pairing (6a-R3): the same computer's PhoneLink trust goes too.
+                if (refused) {
+                    configStore.slotMachineId()?.let { machineId ->
+                        configStore.forgetMachine(machineId)
+                        linkServer.dropMachine(machineId)
+                    }
+                }
+            }
         }
         configStore.clearRetiredKeys()
         // Before the first reconcile: whatever went unused while the service was down is signed out first.
@@ -179,6 +209,14 @@ class AgentsMonitorService : Service() {
             }
             ACTION_DROP_MACHINE -> {
                 intent.getStringExtra(EXTRA_MACHINE_ID)?.let(linkServer::dropMachine)
+                // Its outbound slot went with the pairing: the dialled link stops too.
+                reconcile()
+            }
+            ACTION_PAIR_LINE -> {
+                val host = intent.getStringExtra(EXTRA_HOST)
+                val fp = intent.getStringExtra(EXTRA_FP)
+                val port = intent.getIntExtra(EXTRA_PORT, -1)
+                if (host != null && fp != null && port in 1..65535) sasDialer.dial(host, port, fp, peerName = host)
             }
             ACTION_FS_LIST -> {
                 val requestId = intent.getStringExtra(EXTRA_REQUEST_ID)
@@ -480,6 +518,11 @@ class AgentsMonitorService : Service() {
             "com.anezium.rokidbus.plugin.agents.action.SEND_V2"
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_MACHINE_ID = "machineId"
+        const val ACTION_PAIR_LINE =
+            "com.anezium.rokidbus.plugin.agents.action.PAIR_LINE"
+        const val EXTRA_HOST = "host"
+        const val EXTRA_PORT = "port"
+        const val EXTRA_FP = "fp"
         const val EXTRA_PATH = "path"
         const val EXTRA_PROVIDER = "provider"
         const val EXTRA_PROMPT = "prompt"
@@ -574,8 +617,26 @@ class AgentsMonitorService : Service() {
          * live right now, a disconnect — the trust is gone, so the connection
          * that rode on it goes too.
          */
+        /**
+         * A v2 pairing line: dial agentd's wss there for a SAS session. Pairing is an explicit
+         * request to monitor, as opening the door is.
+         */
+        fun pairWithLine(context: Context, target: PairLineTarget) {
+            val store = AgentsConfigStore(context)
+            if (!store.load().agentdEnabled) store.setAgentdEnabled(true)
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, AgentsMonitorService::class.java)
+                    .setAction(ACTION_PAIR_LINE)
+                    .putExtra(EXTRA_HOST, target.host)
+                    .putExtra(EXTRA_PORT, target.port)
+                    .putExtra(EXTRA_FP, target.fp),
+            )
+        }
+
         fun forgetMachine(context: Context, machineId: String) {
-            AgentsConfigStore(context).forgetMachine(machineId)
+            // One pairing, both transports (6a-R3): its outbound slot goes with its PhoneLink trust.
+            AgentsConfigStore(context).forgetPairing(machineId)
             if (AgentsConfigStore(context).load().shouldMonitor) {
                 ContextCompat.startForegroundService(
                     context,

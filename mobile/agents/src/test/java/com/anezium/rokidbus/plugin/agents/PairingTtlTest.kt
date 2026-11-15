@@ -236,13 +236,12 @@ class PairingTtlTest {
         assertEquals(listOf("Desk"), store.signedOut().map { it.name })
         assertTrue(store.isLinkWindowOpen())
 
-        // A fresh attempt is an unknown computer, under the normal window rules.
+        // A fresh attempt is an unknown computer, which pairs only by SAS, never by its hello.
         assertEquals(
-            MachineTrustResult.NEWLY_TRUSTED,
+            MachineTrustResult.REJECTED_NOT_INVITED,
             store.authorizeMachine("pc-1", "secret", "Desk", FixturePhoneTlsIdentity.FINGERPRINT),
         )
-        assertEquals(now, prefs.map["machine.seen.pc-1"])
-        assertTrue(store.signedOut().isEmpty())
+        assertTrue(store.isLinkWindowOpen())
     }
 
     // ------------------------------------------------------------------ live links
@@ -299,7 +298,11 @@ class PairingTtlTest {
             tlsIdentity = identity,
             onEvent = { events += it },
         )
-        store.armLinkWindow()
+        // Paired earlier, by SAS: one record, for both transports.
+        store.commitPairing(
+            PairingRecord("pc-1", "Desk", agentA.fingerprint, "secret", "steer-secret-0123456789abcdefghijk", "10.0.0.2", 8792, "0123456789abcdef"),
+            now,
+        )
         tlsServerSocket(identity, 0).use { listener ->
             val serving = thread(isDaemon = true) {
                 server.serve(LinkConnection(listener.accept()))
