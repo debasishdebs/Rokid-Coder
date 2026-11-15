@@ -1,0 +1,293 @@
+# Changelog
+
+## 1.5.1
+
+- **Conversations can stay open indefinitely.** Settings → Start fresh after now
+  offers **Unlimited**: the conversation never starts fresh on its own, only when
+  you start a new one. Requests still carry only the most recent turns, so a long
+  conversation does not grow what is sent to the AI provider.
+
+## 1.5.0
+
+- Requires both Nexus hubs 1.7.0 for the published Skills flow. Enable
+  Assistant's Skills access and approve each provider operation in Nexus.
+- Workspace keeps its local index across sessions and opens a named PDF page
+  when asked what it shows, including pages without extracted text.
+- Device qualification covers written questions, cited PDF answers, visual
+  pages, approved Skills, restart recovery, and Workspace withdrawal. Voice,
+  real moving journeys, and real music players remain unverified. Workspace
+  retrieval is lexical; large-folder and semantic-search qualification is pending.
+- Relevant Workspace passages and requested page images can reach the chosen
+  AI provider. Disabling Workspace clears its derived local cache.
+
+- **Answer questions that span several Workspace files.** When the passages found
+  first cover only part of a question, or the question uses other words or another
+  language than the files, Assistant searches the Workspace once more for the
+  missing part instead of answering from an unrelated passage.
+- **Use the current GPT-6 models.** ChatGPT offers GPT-6-Luna (still the
+  fast default), GPT-6.1-Sol, and GPT-6-Astra; a GPT-5.6 or GPT-6-Sol model
+  you picked before moves to its current equivalent instead of resetting.
+  Reasoning effort is kept to what the chosen model accepts: None is preserved
+  for Luna and clamped to Low for Sol/Astra. A live ChatGPT backend check confirmed
+  Luna accepts None. The OpenAI API preset suggests the same three models and
+  uses Responses for their tool calls, including Workspace page images.
+- **Read PDFs and images in Workspace.** Index `.pdf` files page by page and
+  cite the page with the file name. Scanned pages and photos (`.jpg`, `.png`,
+  `.webp`, `.heic`) are read with on-device text recognition while indexing,
+  so asking a question never waits for it. Password-protected files and images
+  without text are reported in the folder status.
+- **Look at a page when text is not enough.** With an image-capable provider,
+  Assistant can view the one PDF page or image an excerpt cites, for charts,
+  diagrams, table layouts, or poorly recognized text. Pages that show a chart,
+  table, or picture are marked while indexing so models know to look instead
+  of guessing. Only the indexed version of a cited file is rendered, once per
+  question.
+- **Keep answering when a provider refuses a tool.** ChatGPT now retries
+  without tools after a refused declaration, as the other providers already
+  did, instead of flashing an error and staying silent.
+- **Index large folders in the background.** Slow files are read over several
+  passes that resume after the last page read, and their finished pages are
+  searchable right away. Text added this way no longer cancels an answer in
+  progress; only removed or changed passages do.
+- Uses plugin operations the wearer approves, such as Transit's departures and
+  journey guidance, with a phone hub that routes skills.
+- One shared tool loop for every structured provider: up to four rounds and
+  eight calls per turn, with no new round after 60 seconds, so a lookup can
+  lead to a dependent call while a long answer is never cut short. Built-in
+  once-per-turn guards, calendar deletion included, still hold across rounds.
+- Follow-ups such as "and the one after that?" continue from the departure
+  just mentioned; choices a plugin asks for appear as chips on the answer band.
+- **Return from stalled folder checks.** Bound provider calls and cancellation
+  attempts, release indexing on timeout, and reject late selection results.
+  Keep another folder usable while one provider ignores cancellation.
+
+- **Accept verified local document providers.** Use the selected root's local-only
+  metadata for third-party file managers, retain the system-storage fast path,
+  and reject cloud or unverifiable roots.
+
+- **Keep active questions bound to their Workspace.** Reject delayed searches
+  after folder/index changes or Off–On. Stop follow-up AI requests and retries
+  when that turn's Workspace becomes unavailable, so old excerpts are not sent
+  again after disabling it.
+
+- **Ask about documents on your phone.** Choose a local Workspace folder in
+  Assistant settings. Index Text, Markdown, and Word body text (`.txt`, `.md`,
+  `.docx`) and send relevant passages with the first question request to any
+  configured provider, including Hermes. Cite the source file when answering.
+- **Keep document context bounded.** Retrieve at most 2,500 characters of
+  passages, within the existing Memory and notes envelope. Skip unrelated
+  passages and allow one fallback search per turn on structured-tool providers.
+- **Manage the folder locally.** Recheck document metadata on Assistant open,
+  folder changes, or Re-index now; reuse unchanged files. Display indexed counts
+  and safe error reasons, and clear private cached documents when Workspace is
+  turned off or folder access is lost.
+
+## 1.4.8
+
+- **With the assist button, typing keeps to the band.** No full Assistant card
+  opens behind it, while you type or after you send: only the band, with
+  Thinking and then the answer, as when you ask out loud. Assistant closes on
+  its own once the answer has been shown and read.
+- **A question asked out loud with the assist button no longer leaves
+  Assistant open.** Once its band and its voice were done, the hub still counted
+  Assistant as the plugin on screen, so another plugin's card — Relay's *Type*,
+  for one — was refused as "Screen busy" until Assistant was stopped. It now
+  closes as soon as nothing of the question is left, heard or not.
+- **Choose how answers are drawn.** A new *Visual answers* setting.
+  *Templates only*, the new default, keeps drawn answers to the fixed layouts
+  made for the glasses — forecast, figures, steps, ranking, comparison,
+  schedule, chart — so the model no longer lays out pages of its own that come
+  out too big, cut off or half empty. *Free pages* brings those back alongside
+  the templates, as before. *Off* keeps every answer as text in the band.
+- **Template pages keep to what fits.** Every text in a template now has a
+  length the glasses draw whole — a tile's value, a row's label, a schedule's
+  time — and the model is told those lengths up front. Anything longer is sent
+  back to be shortened, instead of arriving cut off, squeezed or spilling out of
+  its box. With Rokid Nexus 1.5.0, a grid of figures also keeps every row at
+  full height.
+
+## 1.4.7
+
+- **Type the question instead.** A new *Input* setting picks how you ask.
+  *Voice only* stays the default and changes nothing. *Voice + Type button*
+  adds a *Type* chip to the band a moment after it starts listening: tap it
+  and the microphone stops. *Type first* skips the microphone and opens the
+  field straight away, however the question starts. Either way the band itself
+  becomes the text field, with your text and the caret drawn live inside it,
+  like an inline reply to an Android notification. The phone's Keyboard &
+  remote comes up on its own and closes again when you are done. Enter asks
+  the question exactly as if you had said it; Back cancels. Needs Rokid Nexus
+  1.4.13; with a glasses hub from 1.4.6 to 1.4.12 the field opens as its own
+  card instead, and an older one keeps to voice.
+
+## 1.4.6
+
+- **Ink answers keep the Thinking band off.** An answer drawn as a page is no
+  longer covered by "Thinking" after the page appears, and that band no longer
+  lingers after the reply.
+
+## 1.4.5
+
+- **Picked from the launcher, Assistant listens at once.** No more "press the
+  assist button" card: choose Assistant in the glasses launcher and ask. Tap the
+  card to ask again. This is the way in when the assist button is left to
+  Rokid's assistant.
+- **Swipe for options.** On that card, a swipe opens one row: *Assist button:
+  Nexus* or *Rokid*. Tap it to hand the button over or take it back, without
+  touching the permission on the phone. Needs Rokid Nexus 1.4.8 on the phone;
+  an older hub says so. Asked for in #35.
+
+## 1.4.4
+
+- **Add note, typed.** A new *Add note* button on the Productivity screen opens
+  a text field on the glasses to type a note directly: no model call and no
+  microphone, so it works without any AI provider configured. Needs Assistant
+  open on the glasses, and Rokid Nexus 1.4.6. Thanks to ruruw.
+- **Long Hermes answers now show whole.** A long answer was cut line by line, so
+  anything past the eighth line was silently lost on the glasses. The answer is
+  now trimmed against the notice's overall budget instead, and the glasses page
+  through the rest.
+
+## 1.4.3
+
+- **Hermes draws the cards now.** A weather question through a Hermes backend
+  came back as plain text while the same model on any other provider drew the
+  card. The seven bounded templates — weather, charts, metrics, rankings,
+  comparisons, schedules and steps — now travel the same plain-text bridge as
+  the other phone tools. Freeform Ink pages remain out of it.
+
+## 1.4.2
+
+- **Reminders, notes, timers and the calendar now work on Hermes.** A server that
+  runs its own tools never hands one back to the phone, so the assistant asks for
+  a Nexus phone tool in plain text and Nexus runs it — the same twelve tools every
+  other provider gets, minus the Ink pages.
+
+## 1.4.1
+
+- **Hermes is a provider of its own.** Give Settings the `/v1` root of your Hermes
+  API server and its key, and the assistant answers from it — camera included: a
+  server that runs its own tools still gets to look through the glasses.
+- One conversation is now one Hermes session, from the first question to the last,
+  instead of a fresh session for every sentence.
+- An existing **Custom** connection recognises itself as Hermes when the server
+  says so; a plain OpenAI-compatible server is left exactly as it was.
+- Conversations can now stay open for seven days before starting fresh.
+
+## 1.4.0
+
+- **Your phone calendar is a real tool too.** Ask the assistant to add an
+  appointment, read what is coming up, or delete one by its exact title and
+  start time. Ambiguous matches and recurring series are refused instead of
+  guessed.
+- **Answers can become native interactive pages.** The assistant can author a
+  strict Ink page or choose one of seven bounded templates for results that
+  benefit from layout, charts, progress, or an action. The same phone compiler,
+  native glasses renderer, typed limits, and `ink_surface` grant used by public
+  plugins apply; plain text/card output remains the fallback.
+- **The answer no longer goes dark during handover.** Listening, processing,
+  and the final card or Ink page now share one display episode. Its scoped wake
+  lock survives the band-to-surface morph and is released when that episode
+  actually ends.
+
+## 1.3.0
+
+- **Ask it to remember, and it will.** Say "remind me in twenty minutes to
+  check the oven", "set a timer for ten minutes", or "take a note that the
+  spare key is under the pot" — the assistant schedules it, and at the moment
+  it comes due your phone notifies you and the glasses raise the reminder,
+  waking the display if it went dark. If the glasses are away, the phone still
+  tells you and the reminder waits on the HUD for your return.
+- It can also list what is pending, cancel a reminder by name, and search your
+  notes back — all out loud, mid-conversation.
+- **Notes & reminders**, a new section in settings, is where all of it lands:
+  read a note in full, delete one, cancel a reminder before it rings. Nothing
+  leaves the phone.
+- Android guards precise alarms and notifications behind explicit consent, so
+  the screen offers both — and only while something is actually missing. Without
+  them a reminder still arrives, just later or only on the glasses; the
+  assistant says so rather than pretending.
+- Reminders survive a reboot, and one that came due while the phone was off is
+  delivered once you turn it back on.
+- **Every provider gets the new abilities**, not just ChatGPT: notes, reminders
+  and timers are text, so a model that cannot see photos is no longer cut off
+  from tools it could use perfectly well.
+- Answers no longer show their formatting: models like to bold the time they
+  just scheduled, and the glasses were rendering the asterisks.
+
+## 1.2.0
+
+- **Every provider can look now.** Photo questions were a ChatGPT-only power;
+  API providers were told they could look and could only pretend. Now a
+  vision-capable model on MiniMax, OpenRouter, GLM, DeepSeek, or your own
+  server takes a real photo through the glasses camera — same one-photo-per-
+  question rule, same privacy: never saved to the glasses' gallery.
+- A model that cannot see images is now told so and answers honestly, instead
+  of inventing tool-call syntax in the middle of its reply. Set the "can see
+  photos" switch for your model in the provider's settings to enable the
+  camera.
+- A server that does not understand tools is retried once without them, so
+  plain custom endpoints keep answering as before.
+
+## 1.1.1
+
+- **No more thinking out loud.** Models that reason inline — MiniMax, GLM,
+  DeepSeek and anything similar behind OpenRouter or a custom server — were
+  showing their raw `<think>` traces in every answer. Those blocks are now
+  stripped from the stream before the glasses display them, the voice reads
+  them, or the conversation keeps them: only the answer itself gets through.
+
+## 1.1.0
+
+- **Choose who answers.** Settings now opens on a provider list: your ChatGPT
+  plan, an OpenAI key, OpenRouter, MiniMax (a Coding Plan key works as-is),
+  DeepSeek, GLM (Z.ai), or any OpenAI-compatible server of your own. Each
+  provider keeps its own key — encrypted on the phone — its own model choice,
+  and its own endpoint, so switching is one tap, not a re-setup.
+- **Any model id.** Pick from the suggestions or type the exact model your
+  provider serves. For a model the app does not know, say whether it can see
+  photos; photo questions are handled gracefully either way.
+- **Give it a personality.** A new Personality box holds standing instructions
+  — a persona, a tone, house rules — layered under the HUD formatting rules.
+- Your notes and synced ChatGPT memories keep riding along with every question,
+  whichever provider answers; the Memory toggle remains the single off switch.
+- Signing out of ChatGPT no longer forgets the keys you saved for other
+  providers.
+
+## 1.0.1
+
+- **Answers at full length.** The model is no longer told to stay under two
+  short sentences: ask for detail and it answers as fully as the question
+  deserves, in real paragraphs that the glasses render with hard line breaks
+  instead of one flattened run of text. The notice band on the glasses grows
+  and paginates to hold it — this needs Nexus 1.2.0 or later on both the
+  phone and the glasses.
+- While you dictate, the band keeps showing the tail of what it heard rather
+  than paginating your own words away mid-sentence.
+
+## 1.0.0
+
+- First release: press the assist gesture, speak, and the answer streams onto
+  the glasses. The stock Rokid assistant window is closed for you the moment it
+  appears; your words transcribe live in a band on the HUD and the reply
+  arrives in the same band, then is spoken aloud.
+- **Sign in with ChatGPT.** Answers come from your own ChatGPT plan — nothing
+  to paste, no per-token bill. An OpenAI API key works as the alternative
+  route.
+- **It can look.** Ask about what is in front of you and the model takes one
+  photo through the glasses camera — one per question, only when the question
+  needs eyes, and never saved to the glasses' own gallery.
+- **Conversations continue.** A follow-up question keeps its context instead of
+  starting over; a thread ends on its own after a quiet delay you choose. The
+  phone keeps the transcripts — with the photos, if you want them kept — and
+  both can be deleted at any time.
+- **It starts out knowing you.** Memories and custom instructions from the
+  ChatGPT account you signed in with are carried into the assistant, so you do
+  not introduce yourself twice. Optional, synced automatically, and it can be
+  turned off.
+- **Web search built in.** The model decides when a question needs the web, so
+  the weather and the news are answerable from your face.
+- Pick the model (fastest to deepest) and how long it may think, in Settings.
+- Requires Rokid Nexus 1.1.6 or newer, with *Show on your glasses*, *Glasses
+  microphone*, *Speech to text*, *Text to speech*, *Replace the glasses
+  assistant* and *Glasses camera* approved in Nexus → Settings → Plugin access.

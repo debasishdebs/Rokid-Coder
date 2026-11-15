@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The phone-side twin of Relay's launcher mark. Nexus shows this drawable where
+  it has the plugin's APK, and renders the identical geometry from
+  `res/values/nexus_glyphs.xml` on the glasses, where it does not. The two must
+  stay in step: if you move a point here, move it there.
+  Stroke only, no fill - see the glyph array for why the overlap is drawn as a
+  break in the upper outline rather than as a filled gutter.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <!-- The message that arrived, its outline stopping where the reply crosses it. -->
+    <path android:pathData="M9.6,11.8 L8.4,11.8 L5.4,15.2 L5.4,11.8 L4.4,11.8 A2,2 0 0 1 2.4,9.8 L2.4,4.4 A2,2 0 0 1 4.4,2.4 L13.6,2.4 A2,2 0 0 1 15.6,4.4 L15.6,9.6"
+        android:strokeColor="#FF4DFF8C" android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round" />
+    <!-- The answer going back, passing in front. -->
+    <path android:pathData="M12.6,10.6 L19.6,10.6 A2,2 0 0 1 21.6,12.6 L21.6,16.6 A2,2 0 0 1 19.6,18.6 L19.6,21.8 L16.4,18.6 L12.6,18.6 A2,2 0 0 1 10.6,16.6 L10.6,12.6 A2,2 0 0 1 12.6,10.6 Z"
+        android:strokeColor="#FF4DFF8C" android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round" />
+</vector>
