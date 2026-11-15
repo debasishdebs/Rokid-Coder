@@ -400,6 +400,7 @@ function Get-Netsh { Join-Path $env:SystemRoot 'System32\netsh.exe' }
 function Get-PortProxyEntries {
   <# The v4tov4 table, as numbers only: netsh's headers are localized, its rows are not. #>
   $run = Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'show', 'v4tov4')
+  if ($run.ExitCode -ne 0) { throw "netsh portproxy show failed ($($run.ExitCode))" }
   @(foreach ($line in $run.Output) {
       if ($line -match '^\s*(\S+)\s+(\d+)\s+(\S+)\s+(\d+)\s*$') {
         [pscustomobject]@{ ListenAddress = $Matches[1]; ListenPort = [int]$Matches[2]; ConnectAddress = $Matches[3]; ConnectPort = [int]$Matches[4] }
@@ -588,15 +589,28 @@ function New-PlanObject {
 }
 
 function Remove-PlanObject {
-  <# Removes one recorded object by its name (a port proxy by its exact entry), and nothing else. #>
+  <#
+    Removes one recorded object by its name (a port proxy by its exact entry), and
+    nothing else. One that is already gone counts as removed; any other failure
+    throws, so its caller keeps the record for a retry.
+  #>
   param([Parameter(Mandatory = $true)]$Object)
   switch ($Object.kind) {
-    'firewall' { Remove-NetFirewallRule -Name $Object.name -ErrorAction SilentlyContinue }
-    'hyperv' { Remove-NetFirewallHyperVRule -Name $Object.name -ErrorAction SilentlyContinue }
+    'firewall' {
+      try { Remove-NetFirewallRule -Name $Object.name -ErrorAction Stop }
+      catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }
+    }
+    'hyperv' {
+      try { Remove-NetFirewallHyperVRule -Name $Object.name -ErrorAction Stop }
+      catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }
+    }
     'portproxy' {
       $p = $Object.parameters
       $present = Get-PortProxyEntries | Where-Object { $_.ListenAddress -eq $p.ListenAddress -and $_.ListenPort -eq [int]$p.ListenPort -and $_.ConnectAddress -eq $p.ConnectAddress -and $_.ConnectPort -eq [int]$p.ConnectPort }
-      if ($present) { Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'delete', 'v4tov4', "listenaddress=$($p.ListenAddress)", "listenport=$($p.ListenPort)") | Out-Null }
+      if ($present) {
+        $run = Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'delete', 'v4tov4', "listenaddress=$($p.ListenAddress)", "listenport=$($p.ListenPort)")
+        if ($run.ExitCode -ne 0) { throw "netsh portproxy delete failed ($($run.ExitCode))" }
+      }
     }
   }
 }
@@ -690,7 +704,9 @@ function Invoke-MachineRevert {
   <#
     Removes what machine-state.json records, and nothing it does not: one run's
     objects, each replaced rule re-created as the earlier run recorded it; or -All,
-    every recorded object.
+    every recorded object. Each object's record goes only once it is removed: one
+    that fails keeps its record, the rest are still attempted, and the revert then
+    throws, naming each failure.
   #>
   param(
     [Parameter(Mandatory = $true)][string]$StatePath,
@@ -700,16 +716,20 @@ function Invoke-MachineRevert {
   Assert-MachineStatePath -StatePath $StatePath
   if (-not $All -and -not $RunId) { throw 'Revert needs -RunId or -All' }
   $state = Read-MachineState -StatePath $StatePath
-  if ($All) {
-    foreach ($object in @($state.objects)) { Remove-PlanObject -Object $object }
-    $state.objects = @()
-  } else {
-    foreach ($object in @(@($state.objects) | Where-Object { $_.runId -eq $RunId })) {
-      $state = Undo-MachineObject -State $state -Object $object
-      Write-MachineState -StatePath $StatePath -State $state
-    }
+  $failed = @()
+  foreach ($object in @(@($state.objects) | Where-Object { $All -or $_.runId -eq $RunId })) {
+    try {
+      if ($All) {
+        Remove-PlanObject -Object $object
+        $state.objects = @(@($state.objects) | Where-Object { -not ($_.kind -eq $object.kind -and $_.name -eq $object.name) })
+      } else {
+        $state = Undo-MachineObject -State $state -Object $object
+      }
+    } catch { $failed += "$($object.name): $($_.Exception.Message)" }
+    Write-MachineState -StatePath $StatePath -State $state
   }
   Write-MachineState -StatePath $StatePath -State $state
+  if ($failed.Count -gt 0) { throw "These could not be removed and stay recorded for a retry: $($failed -join '; ')" }
 }
 
 function Invoke-MachineHelper {

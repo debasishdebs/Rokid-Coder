@@ -299,6 +299,44 @@ Describe 'the machine plan' {
     Should -Invoke -ModuleName RokidCoder Invoke-Native -Times 0 -Exactly -ParameterFilter { $ArgumentList -contains 'listenport=9000' }
     @((Read-MachineState -StatePath $state).objects) | Should -BeNullOrEmpty
   }
+
+  It 'failed_rule_or_proxy_removal_fails_and_keeps_its_record' {
+    $state = (Get-RokidPaths).MachineState
+    $proxy = [pscustomobject]@{ kind = 'portproxy'; name = 'v4tov4 0.0.0.0:8794'; ids = @('0.0.0.0:8794->127.0.0.1:8792'); runId = 'a'; mode = 'nat'; parameters = @{ ListenAddress = '0.0.0.0'; ListenPort = 8794; ConnectAddress = '127.0.0.1'; ConnectPort = 8792 } }
+    $write = {
+      Write-MachineState -StatePath $state -State ([pscustomobject]@{ schema = 1; objects = @(
+            [pscustomobject]@{ kind = 'firewall'; name = 'RokidCoder-proxy'; ids = @('RokidCoder-proxy'); runId = 'a'; mode = 'nat'; parameters = @{} }
+            $proxy
+            [pscustomobject]@{ kind = 'hyperv'; name = 'RokidCoder-wss'; ids = @('RokidCoder-wss'); runId = 'b'; mode = 'mirrored'; parameters = @{} }
+          ) })
+    }
+    $recorded = { @((Read-MachineState -StatePath $state).objects | ForEach-Object { $_.name }) }
+    $script:netsh = @{ show = 0; delete = 1 }
+    Mock -ModuleName RokidCoder Invoke-Native {
+      if ($ArgumentList -contains 'show') { return [pscustomobject]@{ ExitCode = $script:netsh.show; Output = @('0.0.0.0  8794  127.0.0.1  8792') } }
+      [pscustomobject]@{ ExitCode = $script:netsh.delete; Output = @() }
+    }
+    Mock -ModuleName RokidCoder Remove-NetFirewallRule { throw 'Access is denied.' }
+    Mock -ModuleName RokidCoder Remove-NetFirewallHyperVRule { }
+    # A refused rule and a failed netsh delete fail the revert; each keeps its record, and the rest still go.
+    & $write
+    { Invoke-MachineRevert -StatePath $state -All } | Should -Throw '*RokidCoder-proxy*Access is denied*v4tov4 0.0.0.0:8794*'
+    & $recorded | Should -Be @('RokidCoder-proxy', 'v4tov4 0.0.0.0:8794')
+    Should -Invoke -ModuleName RokidCoder Remove-NetFirewallHyperVRule -Times 1 -Exactly
+    # So does a netsh that cannot even list the table: the entry is not known to be gone.
+    $script:netsh = @{ show = 1; delete = 0 }
+    { Invoke-MachineRevert -StatePath $state -All } | Should -Throw '*v4tov4 0.0.0.0:8794*'
+    & $recorded | Should -Contain 'v4tov4 0.0.0.0:8794'
+    # One run's revert keeps the record of what it could not remove, too.
+    & $write
+    { Invoke-MachineRevert -StatePath $state -RunId 'a' } | Should -Throw '*RokidCoder-proxy*'
+    & $recorded | Should -Contain 'RokidCoder-proxy'
+    # A rule already gone counts as removed, and the retry clears the record.
+    Mock -ModuleName RokidCoder Remove-NetFirewallRule { Write-Error -Message "No MSFT_NetFirewallRule objects found with property 'Name' equal to '$Name'" -Category ObjectNotFound }
+    $script:netsh = @{ show = 0; delete = 0 }
+    Invoke-MachineRevert -StatePath $state -All
+    & $recorded | Should -BeNullOrEmpty
+  }
 }
 
 Describe 'firewall filters on the hosted runner, for real' {

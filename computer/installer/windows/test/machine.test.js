@@ -51,3 +51,22 @@ test("firewall_validation_compares_every_planned_rule_parameter", () => {
     }
   }
 });
+
+test("machine_cleanup_failures_fail_and_keep_their_records", () => {
+  const remove = functionBody("Remove-PlanObject");
+  assert.doesNotMatch(remove, /SilentlyContinue/, "a refused removal is never suppressed");
+  for (const cmdlet of ["Remove-NetFirewallRule", "Remove-NetFirewallHyperVRule"]) {
+    assert.match(remove, new RegExp(`${cmdlet} -Name \\$Object\\.name -ErrorAction Stop`), `${cmdlet} stops on its error`);
+  }
+  // Only "it is not there" counts as removed.
+  assert.match(remove, /ObjectNotFound/);
+  const deleteCall = between(remove, "'portproxy', 'delete'", "\n");
+  assert.doesNotMatch(deleteCall, /Out-Null/, "netsh delete's result is not thrown away");
+  assert.match(remove, /\$\w+\.ExitCode -ne 0\) \{ throw "netsh portproxy delete/, "its exit code is checked");
+  assert.match(functionBody("Get-PortProxyEntries"), /\$run\.ExitCode -ne 0\) \{ throw/, "a table netsh could not list is not an empty one");
+
+  const revert = functionBody("Invoke-MachineRevert");
+  assert.doesNotMatch(revert, /\$state\.objects = @\(\)/, "the records are never dropped wholesale");
+  assert.match(revert, /catch \{ \$failed \+=/, "every object is attempted, each failure collected");
+  assert.match(revert, /if \(\$failed\.Count -gt 0\) \{ throw/, "and any failure fails the revert");
+});
