@@ -1,0 +1,122 @@
+name: Emulator
+
+# The phone app's release gates and its one on-device check. The release checks refuse a release
+# APK that exports anyone else's service, asks to see Nexus plugins, allows cleartext, carries the
+# plugin runtime, store, updater, Patcher, cloud speech or kadb. The emulator job installs the
+# phone app and an unrelated app signed with another key, and proves the stranger can neither
+# bind nor start any of the phone app's services.
+
+on:
+  push:
+    paths:
+      - "mobile/**"
+      - "vendor/**"
+      - "gradle.properties"
+      - "settings.gradle.kts"
+      - ".github/workflows/emulator.yml"
+  pull_request:
+    paths:
+      - "mobile/**"
+      - "vendor/**"
+      - "gradle.properties"
+      - "settings.gradle.kts"
+      - ".github/workflows/emulator.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emulator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-checks:
+    name: Phone app release manifest, dex and dependency checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Rokid-Coder
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+        with:
+          path: Rokid-Coder
+
+      # The phone core links the CXR vendor library from the sibling checkout <repo>/../CxrGlobal.
+      - name: Check out CxrGlobal 0.3.0
+        uses: actions/checkout@v6
+        with:
+          repository: Anezium/CxrGlobal
+          ref: v0.3.0
+          path: CxrGlobal
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      # The runner's SDK has cmdline-tools, so checkReleaseDex lists classes with apkanalyzer.
+      - name: Run the release checks
+        run: ./gradlew :mobile:app:checkRelease :mobile:app:dependencies --configuration releaseRuntimeClasspath
+
+  unrelated-caller:
+    name: An unrelated app cannot bind or start the phone app's services
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: Rokid-Coder
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v6
+        with:
+          path: Rokid-Coder
+
+      - name: Check out CxrGlobal 0.3.0
+        uses: actions/checkout@v6
+        with:
+          repository: Anezium/CxrGlobal
+          ref: v0.3.0
+          path: CxrGlobal
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build both apps and the instrumented test
+        run: ./gradlew :mobile:app:assembleDebug :mobile:caller-test:assembleDebug :mobile:caller-test:assembleDebugAndroidTest
+
+      # The phone app goes on first, under the runner's debug key; caller-test carries its own key.
+      - name: Run the unrelated caller on an API 34 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          working-directory: Rokid-Coder
+          script: ./gradlew :mobile:app:installDebug :mobile:caller-test:connectedDebugAndroidTest
+
+      - name: Keep the instrumented test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unrelated-caller-report
+          path: Rokid-Coder/mobile/caller-test/build/reports/androidTests/
+          if-no-files-found: warn

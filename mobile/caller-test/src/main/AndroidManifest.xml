@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Seeing the phone app is what lets the test name its services; seeing is all it gets. -->
+    <queries>
+        <package android:name="${targetPackage}" />
+    </queries>
+
+    <application android:label="Unrelated caller" />
+</manifest>
