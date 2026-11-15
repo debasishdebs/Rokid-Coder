@@ -6,18 +6,24 @@ plugins {
 
 apply(from = rootProject.file("gradle/plugin-release-signing.gradle"))
 
+// Rokid Coder's pair, shared with the glasses app (gradle.properties).
+val phoneApplicationId = providers.gradleProperty("rokid.phoneApplicationId").get()
+val glassesApplicationId = providers.gradleProperty("rokid.glassesApplicationId").get()
+
 android {
     // The Kotlin namespace stays com.anezium.rokidbus.*, so R, BuildConfig and every test identity are unchanged.
     namespace = "com.anezium.rokidbus.plugin.agents"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "io.github.debasishdebs.rokidcoder"
+        applicationId = phoneApplicationId
         minSdk = 30
         targetSdk = 36
         versionCode = 800
         versionName = "0.8.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "PHONE_APPLICATION_ID", "\"$phoneApplicationId\"")
+        buildConfigField("String", "GLASSES_APPLICATION_ID", "\"$glassesApplicationId\"")
     }
 
     buildFeatures {

@@ -10,6 +10,7 @@ import com.anezium.rokidbus.phone.HubCore
 import com.anezium.rokidbus.phone.HubCoreConfig
 import com.anezium.rokidbus.phone.HubForegroundHost
 import com.anezium.rokidbus.phone.InProcessApp
+import com.anezium.rokidbus.shared.AppIdentity
 import com.anezium.rokidbus.shared.plugin.PluginCapability
 
 /**
@@ -23,7 +24,8 @@ class AgentsHubService : Service(), HubForegroundHost {
 
     override fun onCreate() {
         super.onCreate()
-        val hub = HubCore(this, HubCoreConfig(foreground = this, inProcessApp = AGENTS_APP))
+        val identity = AppIdentity(BuildConfig.PHONE_APPLICATION_ID, BuildConfig.GLASSES_APPLICATION_ID)
+        val hub = HubCore(this, HubCoreConfig(foreground = this, identity = identity, inProcessApp = AGENTS_APP))
         core = hub
         hub.start()
         agents = AgentsCore(hub.surface(), this).also(AgentsCore::start)
