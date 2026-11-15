@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[4]
-ASSET = ROOT / "glasses-hub/src/main/assets/rokid-nexus-cmd-bridge.sh"
+ASSET = ROOT / "glasses-core/src/main/assets/rokid-nexus-cmd-bridge.sh"
 BASH = r"C:\Program Files\Git\bin\bash.exe" if os.name == "nt" else "/bin/bash"
 SECRET = "0" * 64
 SOURCE = ASSET.read_text(encoding="utf-8").rsplit('case "$1" in', 1)[0].replace(

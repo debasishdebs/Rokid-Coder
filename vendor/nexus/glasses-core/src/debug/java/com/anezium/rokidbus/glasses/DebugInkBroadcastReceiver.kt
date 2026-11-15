@@ -3,6 +3,7 @@ package com.anezium.rokidbus.glasses
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import com.anezium.rokidbus.ink.InkWireLimits
 import com.anezium.rokidbus.shared.BusEnvelope
 import com.anezium.rokidbus.shared.BusPaths
@@ -13,7 +14,9 @@ import java.util.concurrent.atomic.AtomicLong
 /** DUMP-protected, debug-build-only bridge from pushed wire files to the real surface path. */
 class DebugInkBroadcastReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (!BuildConfig.DEBUG || intent.action != ACTION) return
+        // A library has no BuildConfig.DEBUG; the hosting app's debuggable flag is the same gate.
+        val debuggable = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        if (!debuggable || intent.action != ACTION) return
         val mode = intent.getStringExtra(EXTRA_MODE).orEmpty()
         val meter = intent.getBooleanExtra(EXTRA_METER, false)
         if (mode == MODE_HIDE) {

@@ -742,7 +742,10 @@ object GlassesHub {
             editableSurfaceVersion = EditableSurfaceContract.VERSION,
             activityExtrasVersion = ActivitySurfaceContract.EXTRAS_VERSION,
             maxImageBytes = ImageSurfaceContract.MAX_IMAGE_BYTES,
-            versionName = BuildConfig.VERSION_NAME,
+            // A library has no version of its own; the hosting app's is the one released.
+            versionName = runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            }.getOrNull(),
             setupComplete = onboardingState.stage == SelfArmOnboardingState.Stage.COMPLETE,
             setupFailureState = onboarding.failureState,
             setupFailureDiagnostic = onboarding.failureDiagnostic,

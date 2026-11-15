@@ -8,11 +8,11 @@ gradle.beforeProject { project ->
             def prepare = project.tasks.register('prepareFilesAnswerLossTest', Sync) {
                 into(sources)
                 from(project.file('src/test/bridge')) { include '*.kt' }
-                from(project.rootProject.file('glasses-hub/src/main/java/com/anezium/rokidbus/glasses')) {
+                from(project.rootProject.file('glasses-core/src/main/java/com/anezium/rokidbus/glasses')) {
                     include 'GlassesFilesLaneServer.kt', 'GlassesFilesDownload.kt', 'GlassesFilesUpload.kt',
                             'GlassesFileStore.kt', 'GlassesFsPrimitives.kt'
                 }
-                from(project.rootProject.file('glasses-hub/src/test/java/com/anezium/rokidbus/glasses')) {
+                from(project.rootProject.file('glasses-core/src/test/java/com/anezium/rokidbus/glasses')) {
                     include 'JvmFsPrimitives.kt'
                 }
             }
