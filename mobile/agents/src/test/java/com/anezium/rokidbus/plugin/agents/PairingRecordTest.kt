@@ -43,6 +43,54 @@ class PairingRecordTest {
     }
 
     @Test
+    fun prefs_disk_failure_never_publishes_trust() {
+        // Android's commit() changes the in-memory map first and only then finds the disk write failed.
+        val failing = AndroidFailingPrefs(prefs)
+        val store = AgentsConfigStore(failing, wallClock = { now }, elapsedRealtime = { 0L })
+        assertTrue(store.commitPairing(record.copy(machineId = "pc-0", agentdFp = "EF:".repeat(31) + "EF")))
+        failing.failCommits = true
+        // A second reader of the same prefs, as the PhoneLink listener is, looks while the write is under way.
+        val reader = AgentsConfigStore(failing, wallClock = { now }, elapsedRealtime = { 0L })
+        var seenDuringWrite: Boolean? = null
+        val readerThread = Thread { seenDuringWrite = reader.isMachineTrusted("pc-1", "token-0123456789") }
+        failing.duringCommit = { readerThread.start() }
+        assertFalse(store.commitPairing(record))
+        readerThread.join(5_000)
+        assertEquals(false, seenDuringWrite)
+        for (view in listOf(store, AgentsConfigStore(failing, wallClock = { now }, elapsedRealtime = { 0L }))) {
+            assertFalse(view.isMachineTrusted("pc-1", "token-0123456789"))
+            assertFalse(view.isClientCertPinned("pc-1", agentdFp))
+            assertNull(view.pairingRecordForCert(agentdFp))
+            assertEquals(MachineTrustResult.REJECTED_NOT_INVITED, view.authorizeMachine("pc-1", "token-0123456789", "Desk", agentdFp))
+            // The slot is still the earlier computer's, exactly as it was.
+            assertEquals("pc-0", view.slotMachineId())
+            assertEquals("EF:".repeat(31) + "EF", view.load().agentd?.fp)
+        }
+        assertFalse(prefs.map.keys.any { it.endsWith("pc-1") })
+    }
+
+    @Test
+    fun refusal_then_restart_never_retries_without_sas() {
+        store.commitPairing(record)
+        // agentd refused the slot's hello: the whole pairing goes, both transports.
+        assertEquals("pc-1", store.revokeRefusedPairing())
+        // The service restarts: nothing is left to dial or to admit without a new SAS pairing.
+        val restarted = AgentsConfigStore(prefs, wallClock = { now }, elapsedRealtime = { 0L })
+        assertNull(restarted.load().agentd)
+        assertFalse(restarted.outboundAdmitted())
+        assertFalse(restarted.isMachineTrusted("pc-1", "token-0123456789"))
+        assertFalse(restarted.isClientCertPinned("pc-1", agentdFp))
+        assertNull(restarted.pairingRecordForCert(agentdFp))
+        assertEquals(MachineTrustResult.REJECTED_NOT_INVITED, restarted.authorizeMachine("pc-1", "token-0123456789", "Desk", agentdFp))
+        assertFalse(prefs.map.keys.any { it.startsWith("agentd.token") || it.startsWith("agentd.steer") || it.startsWith("agentd.fp") })
+        // A slot a SAS pairing did not make (no machine id) is no exception.
+        store.saveAgentd(record.outbound(), enabled = true)
+        assertNull(store.slotMachineId())
+        assertNull(store.revokeRefusedPairing())
+        assertNull(AgentsConfigStore(prefs, wallClock = { now }, elapsedRealtime = { 0L }).load().agentd)
+    }
+
+    @Test
     fun a_failed_write_leaves_nothing_behind() {
         val failing = AgentsConfigStore(FailingPrefs(), wallClock = { now }, elapsedRealtime = { 0L })
         assertFalse(failing.commitPairing(record))
@@ -141,13 +189,34 @@ class PairingRecordTest {
         assertNotNull(text)
     }
 
-    /** Prefs whose commit fails and writes nothing, as a full disk does. */
+    /** Prefs whose commit fails as a full disk makes Android's fail: memory is changed, the disk is not. */
     private class FailingPrefs(private val inner: MemoryPrefs = MemoryPrefs()) : SharedPreferences by inner {
         override fun edit(): SharedPreferences.Editor {
             val real = inner.edit()
             return object : SharedPreferences.Editor by real {
-                override fun commit(): Boolean = false
-                override fun apply() = Unit
+                override fun commit(): Boolean {
+                    real.apply()
+                    return false
+                }
+            }
+        }
+    }
+
+    /** As [FailingPrefs], once [failCommits] is set, with a hook that runs after memory changed and before the failure is reported. */
+    private class AndroidFailingPrefs(private val inner: MemoryPrefs) : SharedPreferences by inner {
+        @Volatile var failCommits = false
+        var duringCommit: () -> Unit = {}
+
+        override fun edit(): SharedPreferences.Editor {
+            val real = inner.edit()
+            return object : SharedPreferences.Editor by real {
+                override fun commit(): Boolean {
+                    real.apply()
+                    if (!failCommits) return true
+                    duringCommit()
+                    duringCommit = {}
+                    return false
+                }
             }
         }
     }

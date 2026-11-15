@@ -40,6 +40,8 @@ class AddComputerActivity : Activity() {
     private lateinit var doorDot: View
     private lateinit var guidedStatus: TextView
     private lateinit var doorOpen: Button
+    /** The attempt whose code this screen shows: what its Confirm and Cancel answer. */
+    private val shownAttempt = ShownAttempt()
     private lateinit var doorArmed: LinearLayout
     private lateinit var tailscaleStatus: TextView
     private lateinit var tailscaleDot: View
@@ -146,9 +148,10 @@ class AddComputerActivity : Activity() {
                 actionRow(
                     this@AddComputerActivity,
                     primary = "Confirm",
-                    onPrimary = { PairingAttempts.state.value?.let { PairingAttempts.confirm(it.attempt, true) } },
+                    // Bound to the attempt whose code is on screen: a replacement is drawn before it can be confirmed.
+                    onPrimary = { shownAttempt.confirm(true) },
                     secondary = "Cancel",
-                    onSecondary = { PairingAttempts.state.value?.let { PairingAttempts.confirm(it.attempt, false) } },
+                    onSecondary = { shownAttempt.confirm(false) },
                 ),
                 NexusUi.block(),
             )
@@ -379,7 +382,7 @@ class AddComputerActivity : Activity() {
     }
 
     private fun renderAttempt(view: AttemptView?) {
-        val code = view?.code?.takeIf { view.state == AttemptState.AWAITING_CONFIRM }
+        val code = shownAttempt.render(view)
         codeCard.visibility = if (code != null) View.VISIBLE else View.GONE
         codeText.text = code?.let { "${it.take(3)} ${it.drop(3)}" }.orEmpty()
         codeStatus.text = GuidedPairingCopy.COMPARE

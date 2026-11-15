@@ -157,22 +157,24 @@ class AgentsConfigStore internal constructor(
     ) : this(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE), wallClock, elapsedRealtime)
 
     fun load(): AgentsConfig {
-        val agentdHost = prefs.getString(KEY_AGENTD_HOST, null)
-        val agentd = agentdHost?.let {
-            AgentdConfig(
-                host = it,
-                port = prefs.getInt(KEY_AGENTD_PORT, 8792),
-                token = prefs.getString(KEY_AGENTD_TOKEN, "").orEmpty(),
-                name = prefs.getString(KEY_AGENTD_NAME, it).orEmpty(),
-                // As stored: a pin that no longer parses is refused by the client, not dropped here.
-                fp = prefs.getString(KEY_AGENTD_FP, null),
-                steer = prefs.getString(KEY_AGENTD_STEER, null),
+        synchronized(STORE_LOCK) {
+            val agentdHost = prefs.getString(KEY_AGENTD_HOST, null)
+            val agentd = agentdHost?.let {
+                AgentdConfig(
+                    host = it,
+                    port = prefs.getInt(KEY_AGENTD_PORT, 8792),
+                    token = prefs.getString(KEY_AGENTD_TOKEN, "").orEmpty(),
+                    name = prefs.getString(KEY_AGENTD_NAME, it).orEmpty(),
+                    // As stored: a pin that no longer parses is refused by the client, not dropped here.
+                    fp = prefs.getString(KEY_AGENTD_FP, null),
+                    steer = prefs.getString(KEY_AGENTD_STEER, null),
+                )
+            }?.takeIf(AgentdConfig::configured)
+            return AgentsConfig(
+                agentdEnabled = prefs.getBoolean(KEY_AGENTD_ENABLED, false),
+                agentd = agentd,
             )
-        }?.takeIf(AgentdConfig::configured)
-        return AgentsConfig(
-            agentdEnabled = prefs.getBoolean(KEY_AGENTD_ENABLED, false),
-            agentd = agentd,
-        )
+        }
     }
 
     /**
@@ -194,43 +196,44 @@ class AgentsConfigStore internal constructor(
      * False, with nothing written, when [agentdPairingRefusal] turns [config] away.
      * A non-null [config] is a pairing the wearer just made, so it counts as a use.
      */
-    @Synchronized
     fun saveAgentd(config: AgentdConfig?, enabled: Boolean): Boolean {
-        if (config != null && agentdPairingRefusal(config) != null) return false
-        val current = load().agentd
-        val forgottenName = prefs.getString(KEY_AGENTD_NAME, null)
-        // One pairing, both transports (6a-R3): forgetting the slot forgets its machine's PhoneLink trust too.
-        if (config == null) prefs.getString(KEY_AGENTD_MACHINE_ID, null)?.let(::forgetMachine)
-        prefs.edit().apply {
-            putBoolean(KEY_AGENTD_ENABLED, enabled)
-            // A different computer, or none: what the old one proved is not this one's.
-            val sameComputer = current != null && config != null && current.host == config.host &&
-                current.port == config.port && current.token == config.token && current.fp == config.fp
-            if (config == null || (current != null && !sameComputer)) {
-                remove(v2SeenKey(DIALLED))
-            }
-            if (config == null) {
-                remove(KEY_AGENTD_HOST)
-                remove(KEY_AGENTD_PORT)
-                remove(KEY_AGENTD_TOKEN)
-                remove(KEY_AGENTD_NAME)
-                remove(KEY_AGENTD_FP)
-                remove(KEY_AGENTD_STEER)
-                remove(KEY_AGENTD_LAST_USED)
-                remove(KEY_AGENTD_MACHINE_ID)
-                forgottenName?.let { removeSignedOut(this, it) }
-            } else {
-                putLong(KEY_AGENTD_LAST_USED, wallClock())
-                removeSignedOut(this, config.name)
-                putString(KEY_AGENTD_HOST, config.host)
-                putInt(KEY_AGENTD_PORT, config.port)
-                putString(KEY_AGENTD_TOKEN, config.token)
-                putString(KEY_AGENTD_NAME, config.name)
-                if (config.fp != null) putString(KEY_AGENTD_FP, config.fp) else remove(KEY_AGENTD_FP)
-                if (config.steer != null) putString(KEY_AGENTD_STEER, config.steer) else remove(KEY_AGENTD_STEER)
-            }
-        }.apply()
-        return true
+        synchronized(STORE_LOCK) {
+            if (config != null && agentdPairingRefusal(config) != null) return false
+            val current = load().agentd
+            val forgottenName = prefs.getString(KEY_AGENTD_NAME, null)
+            // One pairing, both transports (6a-R3): forgetting the slot forgets its machine's PhoneLink trust too.
+            if (config == null) prefs.getString(KEY_AGENTD_MACHINE_ID, null)?.let(::forgetMachine)
+            prefs.edit().apply {
+                putBoolean(KEY_AGENTD_ENABLED, enabled)
+                // A different computer, or none: what the old one proved is not this one's.
+                val sameComputer = current != null && config != null && current.host == config.host &&
+                    current.port == config.port && current.token == config.token && current.fp == config.fp
+                if (config == null || (current != null && !sameComputer)) {
+                    remove(v2SeenKey(DIALLED))
+                }
+                if (config == null) {
+                    remove(KEY_AGENTD_HOST)
+                    remove(KEY_AGENTD_PORT)
+                    remove(KEY_AGENTD_TOKEN)
+                    remove(KEY_AGENTD_NAME)
+                    remove(KEY_AGENTD_FP)
+                    remove(KEY_AGENTD_STEER)
+                    remove(KEY_AGENTD_LAST_USED)
+                    remove(KEY_AGENTD_MACHINE_ID)
+                    forgottenName?.let { removeSignedOut(this, it) }
+                } else {
+                    putLong(KEY_AGENTD_LAST_USED, wallClock())
+                    removeSignedOut(this, config.name)
+                    putString(KEY_AGENTD_HOST, config.host)
+                    putInt(KEY_AGENTD_PORT, config.port)
+                    putString(KEY_AGENTD_TOKEN, config.token)
+                    putString(KEY_AGENTD_NAME, config.name)
+                    if (config.fp != null) putString(KEY_AGENTD_FP, config.fp) else remove(KEY_AGENTD_FP)
+                    if (config.steer != null) putString(KEY_AGENTD_STEER, config.steer) else remove(KEY_AGENTD_STEER)
+                }
+            }.apply()
+            return true
+        }
     }
 
     /**
@@ -276,7 +279,7 @@ class AgentsConfigStore internal constructor(
      * and later connections must present the same one: a stranger on the network
      * cannot take over a known machine's identity.
      */
-    fun isMachineTrusted(machineId: String, token: String): Boolean {
+    fun isMachineTrusted(machineId: String, token: String): Boolean = synchronized(STORE_LOCK) {
         val known = prefs.getString(machineKey(machineId), null) ?: return false
         return known == token
     }
@@ -293,45 +296,47 @@ class AgentsConfigStore internal constructor(
      * So an accepted result with a [clientCert] always means that cert is the
      * machine's pin.
      */
-    @Synchronized
     internal fun authorizeMachine(
         machineId: String,
         token: String,
         machineName: String,
         clientCert: String? = null,
     ): MachineTrustResult {
-        val key = machineKey(machineId)
-        // Before any trust decision: a computer unused past the TTL is signed out and turned away
-        // on this very attempt, so it can neither renew itself by reconnecting before a sweep nor
-        // spend the wearer's Add a computer window. Its next attempt is an unknown computer's.
-        val now = wallClock()
-        migrateTtl(now)
-        if (prefs.getString(key, null) != null && isMachineStale(machineId, now)) {
-            signOutMachine(machineId, now)
-            return MachineTrustResult.REJECTED_NOT_INVITED
+        synchronized(STORE_LOCK) {
+            val key = machineKey(machineId)
+            // Before any trust decision: a computer unused past the TTL is signed out and turned away
+            // on this very attempt, so it can neither renew itself by reconnecting before a sweep nor
+            // spend the wearer's Add a computer window. Its next attempt is an unknown computer's.
+            val now = wallClock()
+            migrateTtl(now)
+            if (prefs.getString(key, null) != null && isMachineStale(machineId, now)) {
+                signOutMachine(machineId, now)
+                return MachineTrustResult.REJECTED_NOT_INVITED
+            }
+            val knownToken = prefs.getString(key, null)
+            // An open door no longer trusts a stranger's hello: a new computer joins only through a
+            // SAS pairing, whose credentials [commitPairing] stores. So the window is not consulted.
+            val result = decideMachineTrust(
+                knownToken = knownToken,
+                linkWindowOpen = false,
+                presentedToken = token,
+            )
+            val pinKey = "$KEY_MACHINE_CERT_PREFIX$machineId"
+            val pinned = prefs.getString(pinKey, null)
+            if (result == MachineTrustResult.TRUSTED && pinned != null && pinned != clientCert) {
+                return MachineTrustResult.REJECTED_CERT_CHANGED
+            }
+            if (result == MachineTrustResult.TRUSTED && pinned == null && clientCert != null) {
+                prefs.edit().putString(pinKey, clientCert).apply()
+            }
+            return result
         }
-        val knownToken = prefs.getString(key, null)
-        // An open door no longer trusts a stranger's hello: a new computer joins only through a
-        // SAS pairing, whose credentials [commitPairing] stores. So the window is not consulted.
-        val result = decideMachineTrust(
-            knownToken = knownToken,
-            linkWindowOpen = false,
-            presentedToken = token,
-        )
-        val pinKey = "$KEY_MACHINE_CERT_PREFIX$machineId"
-        val pinned = prefs.getString(pinKey, null)
-        if (result == MachineTrustResult.TRUSTED && pinned != null && pinned != clientCert) {
-            return MachineTrustResult.REJECTED_CERT_CHANGED
-        }
-        if (result == MachineTrustResult.TRUSTED && pinned == null && clientCert != null) {
-            prefs.edit().putString(pinKey, clientCert).apply()
-        }
-        return result
     }
 
     /** True when [fingerprint] is the certificate pinned for [machineId]. */
-    internal fun isClientCertPinned(machineId: String, fingerprint: String): Boolean =
+    internal fun isClientCertPinned(machineId: String, fingerprint: String): Boolean = synchronized(STORE_LOCK) {
         prefs.getString("$KEY_MACHINE_CERT_PREFIX$machineId", null) == fingerprint
+    }
 
     fun trustMachine(machineId: String, token: String, machineName: String) {
         prefs.edit()
@@ -348,18 +353,28 @@ class AgentsConfigStore internal constructor(
             .apply()
     }
 
-    @Synchronized
     fun isLinkWindowOpen(): Boolean = linkWindowRemainingMs() > 0L
 
-    @Synchronized
+    /**
+     * Spends the door: true when it was open, and then it is shut. The first SAS commitment on
+     * either transport calls this, so one opening is one attempt, and only the wearer opens another.
+     */
+    fun consumeLinkWindow(): Boolean = synchronized(STORE_LOCK) {
+        if (!isLinkWindowOpen()) return false
+        prefs.edit().remove(KEY_LINK_WINDOW_DEADLINE).commit()
+        true
+    }
+
     fun linkWindowRemainingMs(): Long {
-        val deadline = prefs.getLong(KEY_LINK_WINDOW_DEADLINE, 0L)
-        val now = elapsedRealtime()
-        val remaining = if (isLinkWindowDeadlineOpen(deadline, now)) deadline - now else 0L
-        if (remaining == 0L && deadline != 0L) {
-            prefs.edit().remove(KEY_LINK_WINDOW_DEADLINE).apply()
+        synchronized(STORE_LOCK) {
+            val deadline = prefs.getLong(KEY_LINK_WINDOW_DEADLINE, 0L)
+            val now = elapsedRealtime()
+            val remaining = if (isLinkWindowDeadlineOpen(deadline, now)) deadline - now else 0L
+            if (remaining == 0L && deadline != 0L) {
+                prefs.edit().remove(KEY_LINK_WINDOW_DEADLINE).apply()
+            }
+            return remaining
         }
-        return remaining
     }
 
     fun trustedMachineNames(): List<String> = prefs.all.keys
@@ -431,47 +446,50 @@ class AgentsConfigStore internal constructor(
     }
 
     /** The outbound pairing was used just now: a secure hello_ack, or a link that is still up. */
-    @Synchronized
     fun touchAgentdUsed(now: Long = wallClock()) {
-        if (prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank()) return
-        prefs.edit().putLong(KEY_AGENTD_LAST_USED, now).apply()
+        synchronized(STORE_LOCK) {
+            if (prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank()) return
+            prefs.edit().putLong(KEY_AGENTD_LAST_USED, now).apply()
+        }
     }
 
     /**
      * Signs out of every computer unused for longer than [pairingTtlDays] as of [now], and says which.
      * An outbound slot keeps its host and name for the re-pair hint; an inbound machine is forgotten.
      */
-    @Synchronized
     fun expireUnused(now: Long = wallClock()): List<SignedOut> {
-        migrateTtl(now)
-        val out = mutableListOf<SignedOut>()
-        if (!prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank() && isSlotStale(now)) {
-            // Its machine's trust is just as stale (the record's last use is the later of both), so it goes below.
-            out += signOutAgentd(now)
+        synchronized(STORE_LOCK) {
+            migrateTtl(now)
+            val out = mutableListOf<SignedOut>()
+            if (!prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank() && isSlotStale(now)) {
+                // Its machine's trust is just as stale (the record's last use is the later of both), so it goes below.
+                out += signOutAgentd(now)
+            }
+            prefs.all.keys
+                .filter { it.startsWith(KEY_MACHINE_PREFIX) }
+                .map { it.removePrefix(KEY_MACHINE_PREFIX) }
+                .filter { isMachineStale(it, now) }
+                .forEach { out += signOutMachine(it, now) }
+            // One pairing signs out once, though both its transports went.
+            return out.distinctBy { it.name }
         }
-        prefs.all.keys
-            .filter { it.startsWith(KEY_MACHINE_PREFIX) }
-            .map { it.removePrefix(KEY_MACHINE_PREFIX) }
-            .filter { isMachineStale(it, now) }
-            .forEach { out += signOutMachine(it, now) }
-        // One pairing signs out once, though both its transports went.
-        return out.distinctBy { it.name }
     }
 
     /**
      * Whether the outbound pairing may be dialled now. A slot unused past the TTL is signed out
      * here and not dialled, so a stale computer cannot renew itself between sweeps.
      */
-    @Synchronized
     fun outboundAdmitted(now: Long = wallClock()): Boolean {
-        migrateTtl(now)
-        if (prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank()) return false
-        if (!isSlotStale(now)) return true
-        val machine = prefs.getString(KEY_AGENTD_MACHINE_ID, null)
-        signOutAgentd(now)
-        // The whole record signs out, both transports.
-        machine?.takeIf { prefs.getString(machineKey(it), null) != null }?.let { signOutMachine(it, now) }
-        return false
+        synchronized(STORE_LOCK) {
+            migrateTtl(now)
+            if (prefs.getString(KEY_AGENTD_TOKEN, "").isNullOrBlank()) return false
+            if (!isSlotStale(now)) return true
+            val machine = prefs.getString(KEY_AGENTD_MACHINE_ID, null)
+            signOutAgentd(now)
+            // The whole record signs out, both transports.
+            machine?.takeIf { prefs.getString(machineKey(it), null) != null }?.let { signOutMachine(it, now) }
+            return false
+        }
     }
 
     /** Computers signed out and not yet added again, most recent first. */
@@ -581,25 +599,27 @@ class AgentsConfigStore internal constructor(
      * the phone froze the app at some point, not only that it is running in the
      * instant they happen to open the screen.
      */
-    @Synchronized
     fun recordMonitorHeartbeat(intervalMs: Long, now: Long = elapsedRealtime()): Boolean {
-        val previous = prefs.getLong(KEY_HEARTBEAT_AT, 0L)
-        val suspended = previous > 0L &&
-            AgentsFreezeWatch.wasSuspended(intervalMs, now - previous)
-        prefs.edit().apply {
-            putLong(KEY_HEARTBEAT_AT, now)
-            if (suspended) putBoolean(KEY_WAS_SUSPENDED, true)
-        }.apply()
-        return suspended
+        synchronized(STORE_LOCK) {
+            val previous = prefs.getLong(KEY_HEARTBEAT_AT, 0L)
+            val suspended = previous > 0L &&
+                AgentsFreezeWatch.wasSuspended(intervalMs, now - previous)
+            prefs.edit().apply {
+                putLong(KEY_HEARTBEAT_AT, now)
+                if (suspended) putBoolean(KEY_WAS_SUSPENDED, true)
+            }.apply()
+            return suspended
+        }
     }
 
     /** Whether this install has ever caught the system freezing it. */
     fun monitorWasSuspended(): Boolean = prefs.getBoolean(KEY_WAS_SUSPENDED, false)
 
     /** Clears the verdict so a fix can be seen to work rather than only claimed. */
-    @Synchronized
     fun clearMonitorSuspension() {
-        prefs.edit().remove(KEY_WAS_SUSPENDED).remove(KEY_HEARTBEAT_AT).apply()
+        synchronized(STORE_LOCK) {
+            prefs.edit().remove(KEY_WAS_SUSPENDED).remove(KEY_HEARTBEAT_AT).apply()
+        }
     }
 
     /** The sticky v2-seen flags (R92) went with the monitor-only link; their keys are only cleared now. */
@@ -611,52 +631,94 @@ class AgentsConfigStore internal constructor(
      * Stores what a confirmed SAS session handed over as ONE atomic write (6a-R4′, step 2): the
      * record, the outbound slot and the PhoneLink machine trust land together or not at all. False
      * when the write did not reach the disk; the phone then tells agentd `pair_abort storage`.
+     *
+     * Android's commit() changes the in-memory map before it learns the disk write failed, and
+     * every admission check reads that map. So the write and, on failure, the restoring of exactly
+     * what was there happen under [STORE_LOCK], which every admission read takes too: nothing ever
+     * admits a link, or dials, on a pairing that is not on disk.
      */
-    @Synchronized
     fun commitPairing(record: PairingRecord, now: Long = wallClock()): Boolean {
-        val id = record.machineId
-        val editor = prefs.edit()
-        editor.putString("$KEY_PAIRING_RECORD_PREFIX$id", record.toJson())
-        editor.putString(KEY_AGENTD_HOST, record.wsHost)
-        editor.putInt(KEY_AGENTD_PORT, record.wsPort)
-        editor.putString(KEY_AGENTD_TOKEN, record.token)
-        editor.putString(KEY_AGENTD_NAME, record.machineName)
-        editor.putString(KEY_AGENTD_FP, record.agentdFp)
-        editor.putString(KEY_AGENTD_STEER, record.steer)
-        editor.putString(KEY_AGENTD_MACHINE_ID, id)
-        editor.putLong(KEY_AGENTD_LAST_USED, now)
-        editor.remove(v2SeenKey(DIALLED))
-        editor.putString(machineKey(id), record.token)
-        editor.putString("$KEY_MACHINE_NAME_PREFIX$id", record.machineName)
-        editor.putLong("$KEY_MACHINE_SEEN_PREFIX$id", now)
-        editor.putString("$KEY_MACHINE_CERT_PREFIX$id", record.agentdFp)
-        editor.remove(v2SeenKey(id))
-        removeSignedOut(editor, record.machineName)
-        // The door did its job.
-        editor.remove(KEY_LINK_WINDOW_DEADLINE)
-        return editor.commit()
+        synchronized(STORE_LOCK) {
+            val id = record.machineId
+            val writes = linkedMapOf<String, Any?>(
+                "$KEY_PAIRING_RECORD_PREFIX$id" to record.toJson(),
+                KEY_AGENTD_HOST to record.wsHost,
+                KEY_AGENTD_PORT to record.wsPort,
+                KEY_AGENTD_TOKEN to record.token,
+                KEY_AGENTD_NAME to record.machineName,
+                KEY_AGENTD_FP to record.agentdFp,
+                KEY_AGENTD_STEER to record.steer,
+                KEY_AGENTD_MACHINE_ID to id,
+                KEY_AGENTD_LAST_USED to now,
+                v2SeenKey(DIALLED) to null,
+                machineKey(id) to record.token,
+                "$KEY_MACHINE_NAME_PREFIX$id" to record.machineName,
+                "$KEY_MACHINE_SEEN_PREFIX$id" to now,
+                "$KEY_MACHINE_CERT_PREFIX$id" to record.agentdFp,
+                v2SeenKey(id) to null,
+                "$KEY_SIGNED_OUT_PREFIX${record.machineName}" to null,
+                "$KEY_SIGNED_OUT_DAYS_PREFIX${record.machineName}" to null,
+                // The door did its job.
+                KEY_LINK_WINDOW_DEADLINE to null,
+            )
+            val current = prefs.all
+            val before = writes.keys.associateWith { current[it] }
+            if (prefs.edit().putAll(writes).commit()) return true
+            // Memory took the write, the disk did not: put memory back as the disk still has it.
+            prefs.edit().putAll(before).commit()
+            return false
+        }
+    }
+
+    private fun SharedPreferences.Editor.putAll(values: Map<String, Any?>): SharedPreferences.Editor = apply {
+        values.forEach { (key, value) ->
+            when (value) {
+                null -> remove(key)
+                is String -> putString(key, value)
+                is Int -> putInt(key, value)
+                is Long -> putLong(key, value)
+                is Boolean -> putBoolean(key, value)
+                is Float -> putFloat(key, value)
+                else -> error("unexpected preference type for $key")
+            }
+        }
     }
 
     /** The pairing whose agentd cert is [agentdFp]: what a PhoneLink commit proof is answered from. */
     fun pairingRecordForCert(agentdFp: String): PairingRecord? {
-        val pin = (CertPins.parse(agentdFp) as? PinParse.Valid)?.fp ?: return null
-        return prefs.all.keys
-            .filter { it.startsWith(KEY_PAIRING_RECORD_PREFIX) }
-            .mapNotNull { PairingRecord.fromJson(prefs.getString(it, null)) }
-            .firstOrNull { it.agentdFp == pin && isClientCertPinned(it.machineId, pin) }
+        synchronized(STORE_LOCK) {
+            val pin = (CertPins.parse(agentdFp) as? PinParse.Valid)?.fp ?: return null
+            return prefs.all.keys
+                .filter { it.startsWith(KEY_PAIRING_RECORD_PREFIX) }
+                .mapNotNull { PairingRecord.fromJson(prefs.getString(it, null)) }
+                .firstOrNull { it.agentdFp == pin && isClientCertPinned(it.machineId, pin) }
+        }
     }
 
     /** The computer whose outbound slot this is, when a SAS pairing made it. */
-    fun slotMachineId(): String? = prefs.getString(KEY_AGENTD_MACHINE_ID, null)
+    fun slotMachineId(): String? = synchronized(STORE_LOCK) { prefs.getString(KEY_AGENTD_MACHINE_ID, null) }
+
+    /**
+     * agentd refused the outbound slot's hello: the whole pairing it belongs to goes, its PhoneLink
+     * trust and its slot, so no restart can dial those credentials again without a new SAS pairing.
+     * A slot no SAS pairing made goes too. Returns the machine whose pairing went, if any; the
+     * caller then ends that machine's live links on both transports.
+     */
+    fun revokeRefusedPairing(): String? = synchronized(STORE_LOCK) {
+        val machineId = slotMachineId()
+        if (machineId != null) forgetPairing(machineId) else saveAgentd(null, load().agentdEnabled)
+        machineId
+    }
 
     /** Forgets the whole pairing: its PhoneLink trust, and its outbound slot when the slot is its own. */
-    @Synchronized
     fun forgetPairing(machineId: String) {
-        val record = PairingRecord.fromJson(prefs.getString("$KEY_PAIRING_RECORD_PREFIX$machineId", null))
-        val slotIsIts = slotMachineId() == machineId ||
-            (record != null && prefs.getString(KEY_AGENTD_FP, null) == record.agentdFp)
-        forgetMachine(machineId)
-        if (slotIsIts) saveAgentd(null, load().agentdEnabled)
+        synchronized(STORE_LOCK) {
+            val record = PairingRecord.fromJson(prefs.getString("$KEY_PAIRING_RECORD_PREFIX$machineId", null))
+            val slotIsIts = slotMachineId() == machineId ||
+                (record != null && prefs.getString(KEY_AGENTD_FP, null) == record.agentdFp)
+            forgetMachine(machineId)
+            if (slotIsIts) saveAgentd(null, load().agentdEnabled)
+        }
     }
 
     fun forgetMachine(machineId: String) {
@@ -741,6 +803,11 @@ class AgentsConfigStore internal constructor(
     }
 
     private companion object {
+        /**
+         * One lock for every store over the prefs file, wherever it was made: a pairing's write and
+         * every check that admits on it never interleave.
+         */
+        val STORE_LOCK = Any()
         const val PREFS = "nexus_plugin_agents"
         const val KEY_AGENTD_ENABLED = "agentd.enabled"
         const val KEY_AGENTD_HOST = "agentd.host"

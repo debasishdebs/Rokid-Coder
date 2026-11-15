@@ -510,7 +510,8 @@ class AgentdLinkServer internal constructor(
                     } else {
                         // agentd's window, waiting for a phone on its pairing screen to dial its wss.
                         PairReady.parse(String(packet.data, packet.offset, packet.length, Charsets.UTF_8))
-                            ?.takeIf { door?.attempts?.acceptPairReady(it) == true }
+                            // Only into a window the wearer opened: an announcement never opens one.
+                            ?.takeIf { door?.open?.invoke() == true && door.attempts.acceptPairReady(it) }
                             ?.let { door?.onPairReady?.invoke(it) }
                     }
                 }

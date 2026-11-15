@@ -110,7 +110,17 @@ data class PairReady(val machineName: String, val host: String, val wsPort: Int,
  * glasses card are its only callers of [confirm]: a frame from the network never confirms for the
  * phone's human, which is what makes the pairing need a person at the phone.
  */
-open class PairingAttemptsModel internal constructor(private val clock: () -> Long) {
+open class PairingAttemptsModel internal constructor(
+    private val clock: () -> Long,
+    window: (() -> Boolean)? = null,
+) {
+    /**
+     * Spends the phone's pairing window and says whether it was open. The first commitment on
+     * either transport calls it, so one window is one attempt: after an abort, a disconnect or a
+     * second peer it stays shut until the wearer opens it again. Unset, it is shut.
+     */
+    @Volatile var window: (() -> Boolean)? = window
+
     private val _state = MutableStateFlow<AttemptView?>(null)
     val state: StateFlow<AttemptView?> = _state.asStateFlow()
 
@@ -128,6 +138,19 @@ open class PairingAttemptsModel internal constructor(private val clock: () -> Lo
     }
 
     /**
+     * The answer to exactly what a screen drew: [shown] must still be the attempt in progress,
+     * with the same code. False, and nothing sent, when another attempt (even one reusing the id)
+     * has taken its place since.
+     */
+    fun confirm(shown: AttemptView, ok: Boolean): Boolean {
+        val responder = synchronized(this) {
+            current?.takeIf { shown.code != null && it.attempt == shown.attempt && _state.value == shown }
+        } ?: return false
+        responder.localConfirm(ok)
+        return true
+    }
+
+    /**
      * A `pair-ready` announcement is acted on only while a pairing screen is open, once per
      * attempt, and at most one window per [PAIR_READY_SPACING_MS].
      */
@@ -141,7 +164,11 @@ open class PairingAttemptsModel internal constructor(private val clock: () -> Lo
         return true
     }
 
-    /** A commitment arrived on [responder]'s session. False when another attempt is running: both end. */
+    /**
+     * A commitment arrived on [responder]'s session. False when another attempt is running (both
+     * end), or when the window is shut: it is spent here, by the first commitment on either
+     * transport, and only the wearer opens another.
+     */
     @Synchronized
     internal fun begin(responder: SasResponder): Boolean {
         val running = current?.takeIf { it !== responder && it.active }
@@ -149,6 +176,7 @@ open class PairingAttemptsModel internal constructor(private val clock: () -> Lo
             running.abort("second_peer")
             return false
         }
+        if (window?.invoke() != true) return false
         current = responder
         return true
     }
@@ -169,8 +197,26 @@ open class PairingAttemptsModel internal constructor(private val clock: () -> Lo
     }
 }
 
-/** The process's attempts: the phone UI and the glasses card confirm here. */
+/** The process's attempts: the phone UI and the glasses card confirm here. The service sets its [window]. */
 object PairingAttempts : PairingAttemptsModel(System::currentTimeMillis)
+
+/**
+ * What one screen drew of the attempt, so its Confirm and Cancel answer that attempt and code and
+ * never one that replaced it before the screen redrew (6a-R5).
+ */
+internal class ShownAttempt(private val attempts: PairingAttemptsModel = PairingAttempts) {
+    @Volatile var view: AttemptView? = null
+        private set
+
+    /** Records what is being drawn; returns the code to show, or null when there is none to confirm. */
+    fun render(view: AttemptView?): String? {
+        val awaiting = view?.takeIf { it.state == AttemptState.AWAITING_CONFIRM && it.code != null }
+        this.view = awaiting
+        return awaiting?.code
+    }
+
+    fun confirm(ok: Boolean): Boolean = view?.let { attempts.confirm(it, ok) } ?: false
+}
 
 /**
  * One SAS session from the phone's side, on a TLS session whose two certificates the handshake

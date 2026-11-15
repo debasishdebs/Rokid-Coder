@@ -23,6 +23,7 @@ import okhttp3.OkHttpClient
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Holds the connections to the agent providers while the HUD is closed.
@@ -89,6 +90,9 @@ class AgentsMonitorService : Service() {
         SasWssDialer(httpClient, tlsIdentity, PairingAttempts, configStore::commitPairing, ::onPaired)
     }
 
+    /** Set by a pasted pairing line, the wearer's own request to pair: it opens the window for that one dial. */
+    private val lineArmed = AtomicBoolean(false)
+
     /** A SAS pairing stored its record: the computer is linked, and the monitor dials it as usual now. */
     private fun onPaired(record: PairingRecord) {
         AgentsRuntime.announceLinkedMachine(record.machineName)
@@ -133,6 +137,13 @@ class AgentsMonitorService : Service() {
     override fun onCreate() {
         super.onCreate()
         notifications.createChannels()
+        // The phone's one pairing window, for both transports: the first commitment spends the door and a pasted line's
+        // arming together, and an attempt that ends leaves both shut until the wearer opens one again.
+        PairingAttempts.window = {
+            val door = configStore.consumeLinkWindow()
+            val line = lineArmed.getAndSet(false)
+            door || line
+        }
         startForeground(
             AgentNotifications.MONITOR_NOTIFICATION_ID,
             notifications.monitorNotification(AgentsRuntime.store.sessions.value.size),
@@ -152,12 +163,11 @@ class AgentsMonitorService : Service() {
         serviceScope.launch {
             agentdClient.needsRepair.collect { refused ->
                 AgentsRuntime.setNeedsRepair(refused)
-                // A refusal acts on the whole pairing (6a-R3): the same computer's PhoneLink trust goes too.
+                // A refusal acts on the whole pairing (6a-R3): its PhoneLink trust and its outbound slot both go,
+                // so a restart has no credentials to retry, and both transports' links to it end now.
                 if (refused) {
-                    configStore.slotMachineId()?.let { machineId ->
-                        configStore.forgetMachine(machineId)
-                        linkServer.dropMachine(machineId)
-                    }
+                    configStore.revokeRefusedPairing()?.let(linkServer::dropMachine)
+                    withContext(Dispatchers.Main) { reconcile() }
                 }
             }
         }
@@ -216,7 +226,10 @@ class AgentsMonitorService : Service() {
                 val host = intent.getStringExtra(EXTRA_HOST)
                 val fp = intent.getStringExtra(EXTRA_FP)
                 val port = intent.getIntExtra(EXTRA_PORT, -1)
-                if (host != null && fp != null && port in 1..65535) sasDialer.dial(host, port, fp, peerName = host)
+                if (host != null && fp != null && port in 1..65535) {
+                    lineArmed.set(true)
+                    sasDialer.dial(host, port, fp, peerName = host)
+                }
             }
             ACTION_FS_LIST -> {
                 val requestId = intent.getStringExtra(EXTRA_REQUEST_ID)

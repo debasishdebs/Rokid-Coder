@@ -35,7 +35,7 @@ class AgentdLinkServerSasTest {
     private val agentA = FixturePhoneTlsIdentity.agentdA()
     private val prefs = MemoryPrefs()
     private val config = AgentsConfigStore(prefs, wallClock = { 1_000_000L }, elapsedRealtime = { 0L })
-    private val attempts = PairingAttemptsModel(clock = { 0L })
+    private val attempts = PairingAttemptsModel(clock = { 0L }, window = { doorOpen })
     private var doorOpen = true
     private val paired = mutableListOf<PairingRecord>()
     private val server = AgentdLinkServer(

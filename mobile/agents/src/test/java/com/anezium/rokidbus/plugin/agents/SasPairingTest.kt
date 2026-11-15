@@ -23,7 +23,7 @@ class SasPairingTest {
     private val nc = ByteArray(32) { (it * 7).toByte() }
 
     private inner class Session(
-        val attempts: PairingAttemptsModel = PairingAttemptsModel(clock = { now }),
+        val attempts: PairingAttemptsModel = openModel(),
         storage: ((PairingRecord) -> Boolean)? = null,
     ) {
         val sent = mutableListOf<JSONObject>()
@@ -70,6 +70,128 @@ class SasPairingTest {
     }
 
     private var now = 1_000_000L
+
+    /** A model whose window every commitment finds open: for tests about anything but the window. */
+    private fun openModel() = PairingAttemptsModel(clock = { now }, window = { true })
+
+    /** The phone's window as the door keeps it: open once armed, spent by the first commitment. */
+    private class TestWindow {
+        var armed = false
+        var spent = 0
+        fun arm() {
+            armed = true
+        }
+        fun consume(): Boolean = armed.also {
+            if (it) {
+                armed = false
+                spent++
+            }
+        }
+    }
+
+    private fun Session.gotNonce() = types().contains("sas_nonce")
+
+    private fun card(attempts: PairingAttemptsModel) = GlassesPairingCard(
+        pairing = GuidedPairing(clock = { now }),
+        clock = { now },
+        host = object : GlassesPairingCard.Host {
+            override fun snapshot() = PairingSnapshot(emptySet(), emptySet(), needed = true)
+            override fun armWindow() = Unit
+            override fun cancelWindow() = Unit
+            override fun openCard() = Unit
+            override fun closeCard() = Unit
+            override fun onScreen() = true
+            override fun render() = Unit
+            override fun brief(title: String, body: String) = Unit
+        },
+        attempts = attempts,
+    )
+
+    @Test
+    fun phone_window_consumed_by_first_commit_and_needs_rearm() {
+        val window = TestWindow().apply { arm() }
+        val attempts = PairingAttemptsModel(clock = { now }, window = window::consume)
+        // The first commitment, here over wss, spends the window.
+        val wss = Session(attempts)
+        wss.commit()
+        assertTrue(wss.gotNonce())
+        assertFalse(window.armed)
+        // It ends early. The window stays shut: a PhoneLink peer gets no nonce, and neither does a reconnect.
+        wss.responder.disconnected()
+        for (peer in listOf(Session(attempts), Session(attempts))) {
+            peer.commit()
+            assertFalse(peer.gotNonce())
+            assertTrue(peer.closed)
+        }
+        // The wearer opens it again: exactly one more attempt.
+        window.arm()
+        val rearmed = Session(attempts)
+        rearmed.commit()
+        assertTrue(rearmed.gotNonce())
+        // A second peer ends both, and the window stays shut after it.
+        val intruder = Session(attempts)
+        intruder.commit()
+        assertTrue(rearmed.closed)
+        assertFalse(intruder.gotNonce())
+        val afterSecondPeer = Session(attempts)
+        afterSecondPeer.commit()
+        assertFalse(afterSecondPeer.gotNonce())
+        // A refused code too.
+        window.arm()
+        val declined = Session(attempts)
+        declined.toCode()
+        attempts.confirm(attempt, false)
+        val afterMismatch = Session(attempts)
+        afterMismatch.commit()
+        assertFalse(afterMismatch.gotNonce())
+        assertEquals(3, window.spent)
+
+        // The phone's door is that window: armed by the wearer, spent once.
+        val store = AgentsConfigStore(MemoryPrefs(), wallClock = { now }, elapsedRealtime = { 0L })
+        assertFalse(store.consumeLinkWindow())
+        store.armLinkWindow()
+        assertTrue(store.consumeLinkWindow())
+        assertFalse(store.isLinkWindowOpen())
+        assertFalse(store.consumeLinkWindow())
+    }
+
+    @Test
+    fun confirm_targets_only_the_rendered_attempt() {
+        // The phone's Add a computer screen.
+        val attempts = openModel()
+        val first = Session(attempts)
+        first.toCode()
+        val shown = ShownAttempt(attempts)
+        assertNotNull(shown.render(attempts.state.value))
+        // That attempt ends, and another (even with the same id) reaches its code before the screen redraws.
+        first.responder.disconnected()
+        val second = Session(attempts)
+        second.toCode()
+        assertFalse(shown.confirm(true))
+        assertFalse(shown.confirm(false))
+        assertFalse(second.types().contains("sas_confirm"))
+        assertEquals(AttemptState.AWAITING_CONFIRM, attempts.state.value?.state)
+        // Once drawn, it is what a tap confirms.
+        shown.render(attempts.state.value)
+        assertTrue(shown.confirm(true))
+        assertEquals("sas_confirm", second.sent.last().getString("type"))
+
+        // The glasses card: the code it drew is the one a tap confirms.
+        val glassesAttempts = openModel()
+        val drawn = Session(glassesAttempts)
+        drawn.toCode()
+        val card = card(glassesAttempts)
+        card.start()
+        card.card()
+        drawn.responder.disconnected()
+        val replacement = Session(glassesAttempts)
+        replacement.toCode()
+        assertFalse(card.confirm())
+        assertFalse(replacement.types().contains("sas_confirm"))
+        card.card()
+        assertTrue(card.confirm())
+        assertEquals("sas_confirm", replacement.sent.last().getString("type"))
+    }
 
     @Test
     fun sas_vectors_match_on_node_and_kotlin() {
@@ -139,7 +261,7 @@ class SasPairingTest {
 
     @Test
     fun second_peer_aborts_both() {
-        val attempts = PairingAttemptsModel(clock = { now })
+        val attempts = openModel()
         val first = Session(attempts)
         first.toCode()
         val second = Session(attempts)
@@ -260,7 +382,7 @@ class SasPairingTest {
 
     @Test
     fun stale_confirm_from_aborted_attempt_rejected() {
-        val attempts = PairingAttemptsModel(clock = { now })
+        val attempts = openModel()
         val first = Session(attempts)
         first.toCode()
         first.responder.disconnected()
@@ -290,7 +412,7 @@ class SasPairingTest {
 
     @Test
     fun pair_ready_one_shot_and_ignored_outside_pairing_screens() {
-        val attempts = PairingAttemptsModel(clock = { now })
+        val attempts = openModel()
         val ready = PairReady.parse(
             """{"nexus":"agentd-pair-ready","v":1,"machineName":"Desk","host":"10.0.0.2","wsPort":8792,"attempt":"$attempt"}""",
         )
@@ -309,24 +431,10 @@ class SasPairingTest {
 
     @Test
     fun glasses_card_confirm_reaches_attempt() {
-        val attempts = PairingAttemptsModel(clock = { now })
+        val attempts = openModel()
         val session = Session(attempts)
         val code = session.toCode()
-        val card = GlassesPairingCard(
-            pairing = GuidedPairing(clock = { now }),
-            clock = { now },
-            host = object : GlassesPairingCard.Host {
-                override fun snapshot() = PairingSnapshot(emptySet(), emptySet(), needed = true)
-                override fun armWindow() = Unit
-                override fun cancelWindow() = Unit
-                override fun openCard() = Unit
-                override fun closeCard() = Unit
-                override fun onScreen() = true
-                override fun render() = Unit
-                override fun brief(title: String, body: String) = Unit
-            },
-            attempts = attempts,
-        )
+        val card = card(attempts)
         card.start()
         assertTrue(card.card().title.contains(code.take(3)))
         assertTrue(card.confirm())

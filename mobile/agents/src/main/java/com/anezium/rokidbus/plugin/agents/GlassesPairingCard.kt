@@ -29,6 +29,9 @@ internal class GlassesPairingCard(
         fun brief(title: String, body: String)
     }
 
+    /** The code the card last drew: a tap confirms that attempt, never one that replaced it. */
+    private val shown = ShownAttempt(attempts)
+
     /** True from the tap until the attempt ends, is cancelled, or the glasses surface goes away. */
     var active = false
         private set
@@ -44,21 +47,20 @@ internal class GlassesPairingCard(
 
     /**
      * A tap on the card: the wearer compared the code on the glasses with the computer's and it
-     * matches. False when there is no code to confirm yet.
+     * matches. False when there is no code to confirm yet, or the attempt changed since it was
+     * drawn; the card is then drawn again.
      */
     fun confirm(): Boolean {
-        val view = awaiting() ?: return false
-        attempts.confirm(view.attempt, true)
-        return true
+        if (shown.confirm(true)) return true
+        if (host.onScreen()) host.render()
+        return false
     }
-
-    private fun awaiting(): AttemptView? = attempts.state.value?.takeIf { it.state == AttemptState.AWAITING_CONFIRM }
 
     /** BACK on the card: the door shuts, and nothing more is said. */
     fun cancel() {
         if (!active) return
         // A code on screen is declined, so the computer's side ends too.
-        awaiting()?.let { attempts.confirm(it.attempt, false) }
+        shown.confirm(false)
         active = false
         host.cancelWindow()
         pairing.cancel()
@@ -100,10 +102,10 @@ internal class GlassesPairingCard(
     private fun String.fitBrief(): String = if (length > BRIEF_NAME_CHARS) take(BRIEF_NAME_CHARS - 1) + "…" else this
 
     fun card(): NexusCard {
-        awaiting()?.code?.let { code ->
+        shown.render(attempts.state.value)?.let { code ->
             return BoardCards.card(
                 title = "Code ${code.take(3)} ${code.drop(3)}",
-                subtitle = "pair ${awaiting()?.peerName.orEmpty()}".trim(),
+                subtitle = "pair ${shown.view?.peerName.orEmpty()}".trim(),
                 rows = listOf(NexusCardLine(text = GuidedPairingCopy.GLASSES_COMPARE, tone = NexusRowTone.BODY)),
                 footer = "Tap to confirm · Back to cancel",
             )
