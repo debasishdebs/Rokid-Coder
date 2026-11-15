@@ -10,20 +10,8 @@ name: Emulator
 # exact signed APKs and AAB release.yml's android job uploaded.
 
 on:
-  push:
-    paths:
-      - "mobile/**"
-      - "vendor/**"
-      - "gradle.properties"
-      - "settings.gradle.kts"
-      - ".github/workflows/emulator.yml"
-  pull_request:
-    paths:
-      - "mobile/**"
-      - "vendor/**"
-      - "gradle.properties"
-      - "settings.gradle.kts"
-      - ".github/workflows/emulator.yml"
+  # Cost (U43): hosted macOS/Windows minutes are scarce on a private Free repo, so this runs only
+  # when started by hand or called by release.yml (rc tags) / upstream-sync.yml, never on every push.
   workflow_dispatch:
   workflow_call:
     inputs:

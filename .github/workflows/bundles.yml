@@ -10,26 +10,8 @@ name: Bundles
 # since upload-artifact drops modes and dotfiles.
 
 on:
-  push:
-    paths:
-      - "computer/**"
-      - "plugin/**"
-      - ".claude-plugin/**"
-      - ".agents/**"
-      - "package.json"
-      - "package-lock.json"
-      - ".npmrc"
-      - ".github/workflows/bundles.yml"
-  pull_request:
-    paths:
-      - "computer/**"
-      - "plugin/**"
-      - ".claude-plugin/**"
-      - ".agents/**"
-      - "package.json"
-      - "package-lock.json"
-      - ".npmrc"
-      - ".github/workflows/bundles.yml"
+  # Cost (U43): hosted macOS/Windows minutes are scarce on a private Free repo, so this runs only
+  # when started by hand or called by release.yml (rc tags) / upstream-sync.yml, never on every push.
   workflow_dispatch:
   workflow_call:
     inputs:
