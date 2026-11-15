@@ -30,15 +30,8 @@ internal interface CoderCore {
 }
 
 /** One [HubCore], with Agents as its in-process app. */
-internal class HubCoderCore(context: Context, host: HubForegroundHost) : CoderCore {
-    private val hub = HubCore(
-        context,
-        HubCoreConfig(
-            foreground = host,
-            identity = AppIdentity(BuildConfig.PHONE_APPLICATION_ID, BuildConfig.GLASSES_APPLICATION_ID),
-            inProcessApp = AGENTS_APP,
-        ),
-    )
+internal class HubCoderCore(private val hub: HubCore) : CoderCore {
+    constructor(context: Context, host: HubForegroundHost) : this(HubCore(context, config(host)))
 
     override val surface: GlassesSurface get() = hub.surface()
 
@@ -54,6 +47,13 @@ internal class HubCoderCore(context: Context, host: HubForegroundHost) : CoderCo
     override fun close() = hub.close()
 
     companion object {
+        /** The core's configuration: this service promotes, and Agents is the one in-process app. */
+        fun config(host: HubForegroundHost) = HubCoreConfig(
+            foreground = host,
+            identity = AppIdentity(BuildConfig.PHONE_APPLICATION_ID, BuildConfig.GLASSES_APPLICATION_ID),
+            inProcessApp = AGENTS_APP,
+        )
+
         /** What the hub knows the Agents app as: the grants and prefixes its plugin manifest declared. */
         val AGENTS_APP = InProcessApp(
             pluginId = "agents",
