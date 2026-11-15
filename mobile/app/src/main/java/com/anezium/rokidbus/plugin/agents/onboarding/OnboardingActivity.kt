@@ -358,9 +358,11 @@ class OnboardingActivity : ComponentActivity() {
         if (view.phase == PairingPhase.SAS) {
             title(copy.title)
             copy.lines.forEach(::body)
-            // The wearer's own tap, on this phone: the code is never confirmed for them.
-            primary(OnboardingCopy.CODES_MATCH) { pairing?.confirm(match = true) }
-            secondary(OnboardingCopy.CODES_DONT_MATCH) { pairing?.confirm(match = false) }
+            // The wearer's own tap, on this phone: the code is never confirmed for them. The buttons
+            // answer the attempt drawn here, never one that replaced it before the screen redrew.
+            val shown = view.attempt
+            primary(OnboardingCopy.CODES_MATCH) { pairing?.confirm(shown, match = true) }
+            secondary(OnboardingCopy.CODES_DONT_MATCH) { pairing?.confirm(shown, match = false) }
             return
         }
         if (view.phase == PairingPhase.PAIRED) {

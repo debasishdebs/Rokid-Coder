@@ -40,13 +40,16 @@ enum class PairingPhase { READY, WINDOW_OPEN, SAS, FINISHING, ABORTED, EXPIRED, 
 internal data class PairingView(
     val phase: PairingPhase,
     val remainingMs: Long = 0L,
-    val code: String? = null,
+    /** The exact attempt whose code this view shows: what its Confirm and Cancel answer. */
+    val attempt: AttemptView? = null,
     val pairedName: String? = null,
     /** The Tailscale connector and the scan-the-code fallback are on offer. */
     val offerFallback: Boolean = false,
     /** The wearer said the codes differ. */
     val mismatch: Boolean = false,
-)
+) {
+    val code: String? get() = attempt?.code
+}
 
 /** The first secure link to a computer outside [baseline], from either path: what LAPTOP_DONE waits for. */
 internal fun laptopDoneLink(links: Map<LinkKey, SecureLink>, baseline: Set<String>): SecureLink? =
@@ -122,11 +125,17 @@ internal class PairingStepController(
         publish(_view.value.copy(offerFallback = true))
     }
 
-    /** The wearer's answer to the code on screen, from a touch here only. */
-    fun confirm(match: Boolean) {
-        val shown = attempts.state.value?.takeIf { it.state == AttemptState.AWAITING_CONFIRM } ?: return
+    /**
+     * The wearer's answer to [shown], the attempt the tapped screen drew, from a touch here only.
+     * False, and nothing sent, once another attempt or code has taken its place, even if the
+     * screen has not redrawn yet.
+     */
+    fun confirm(shown: AttemptView?, match: Boolean): Boolean {
+        if (shown == null || shown.state != AttemptState.AWAITING_CONFIRM) return false
+        val before = saidMismatch
+        // Set first: the abort a mismatch causes is published before attempts.confirm returns.
         if (!match) saidMismatch = true
-        attempts.confirm(shown, match)
+        return attempts.confirm(shown, match).also { if (!it) saidMismatch = before }
     }
 
     /** Once a second while the screen is up. */
@@ -149,7 +158,7 @@ internal class PairingStepController(
         if (_view.value.phase == PairingPhase.PAIRED || view == null || view == stale || !windowOpened) return
         peerSeen = true
         when (view.state) {
-            AttemptState.AWAITING_CONFIRM -> publish(PairingView(PairingPhase.SAS, code = view.code))
+            AttemptState.AWAITING_CONFIRM -> publish(PairingView(PairingPhase.SAS, attempt = view))
             AttemptState.PINNED -> publish(PairingView(PairingPhase.FINISHING))
             AttemptState.ABORTED -> {
                 windowOpened = false

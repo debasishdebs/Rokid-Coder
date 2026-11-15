@@ -77,12 +77,12 @@ class PairingStepTest {
     private val nc = ByteArray(32) { (it * 7).toByte() }
     private val attempt = "0123456789abcdef"
 
-    private inner class Agentd {
+    private inner class Agentd(private val id: String = attempt) {
         val sent = mutableListOf<JSONObject>()
         val stored = mutableListOf<PairingRecord>()
         val responder = SasResponder(attempts, agentdFp, phoneFp, "Laptop", { sent += JSONObject(it) }, { stored += it; true }, {})
         fun frame(type: String, vararg fields: Pair<String, Any>) {
-            val json = JSONObject().put("type", type).put("v", 2).put("attempt", attempt)
+            val json = JSONObject().put("type", type).put("v", 2).put("attempt", id)
             fields.forEach { (key, value) -> json.put(key, value) }
             responder.receive(json.toString())
         }
@@ -197,9 +197,37 @@ class PairingStepTest {
         assertEquals(listOf("Codes match", "Codes don't match"), OnboardingCopy.SAS_ACTIONS)
         assertFalse("nothing confirms on its own", agentd.sent.any { it.getString("type") == "sas_confirm" })
 
-        step.confirm(match = true)
+        assertTrue(step.confirm(step.view.value.attempt, match = true))
         assertTrue(agentd.sent.any { it.getString("type") == "sas_confirm" && it.getBoolean("ok") })
         assertFalse(store.isComplete(OnboardingStep.LAPTOP_DONE))
+    }
+
+    @Test
+    fun replaced_attempt_before_click_is_never_confirmed() = runTest(UnconfinedTestDispatcher()) {
+        val step = controller()
+        step.enter()
+        step.openWindow()
+        val first = Agentd()
+        first.toCode()
+        // What the screen drew, and what its buttons answer.
+        val drawn = step.view.value.attempt!!
+        assertEquals(PairingPhase.SAS, step.view.value.phase)
+
+        // Attempt A ends and B takes its place before the screen redraws.
+        first.responder.disconnected()
+        step.openWindow()
+        val second = Agentd(id = "fedcba9876543210")
+        second.toCode()
+        assertEquals(PairingPhase.SAS, step.view.value.phase)
+
+        assertFalse("the tap answered A's code, not B's", step.confirm(drawn, match = true))
+        assertFalse(step.confirm(drawn, match = false))
+        assertFalse(second.sent.any { it.getString("type") == "sas_confirm" })
+        assertFalse(step.confirm(null, match = true))
+
+        // B's own drawing confirms B.
+        assertTrue(step.confirm(step.view.value.attempt, match = true))
+        assertTrue(second.sent.any { it.getString("type") == "sas_confirm" && it.getBoolean("ok") })
     }
 
     @Test
@@ -209,7 +237,7 @@ class PairingStepTest {
         step.openWindow()
         val agentd = Agentd()
         agentd.toCode()
-        step.confirm(match = false)
+        assertTrue(step.confirm(step.view.value.attempt, match = false))
         assertTrue(agentd.sent.any { it.getString("type") == "sas_confirm" && !it.getBoolean("ok") })
         assertEquals(PairingPhase.ABORTED, step.view.value.phase)
         val copy = OnboardingCopy.pairing(step.view.value)
