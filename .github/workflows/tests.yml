@@ -211,7 +211,7 @@ jobs:
         run: |
           set -uo pipefail
           ./gradlew \
-            :shared:test \
+            :shared:testDebugUnitTest \
             :bus-client:testDebugUnitTest \
             :ink-engine:test \
             :phone-core:testDebugUnitTest \
@@ -226,7 +226,7 @@ jobs:
         shell: bash
         run: |
           node scripts/check-test-results.mjs \
-            vendor/nexus/shared/build/test-results/test \
+            vendor/nexus/shared/build/test-results/testDebugUnitTest \
             vendor/nexus/bus-client/build/test-results/testDebugUnitTest \
             vendor/nexus/ink-engine/build/test-results/test \
             vendor/nexus/phone-core/build/test-results/testDebugUnitTest \
