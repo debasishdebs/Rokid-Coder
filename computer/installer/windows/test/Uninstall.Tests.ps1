@@ -5,10 +5,18 @@ BeforeAll {
   # install.json per distro (what `cat ~/.rokid-coder/install.json` prints), and the registered task's -Binding.
   $script:manifests = @{}
   $script:taskBinding = $null
+  # $script:unreadable: distros whose install.json is there but cat cannot read it; $script:wslBroken: wsl.exe runs nothing.
+  $script:unreadable = @{}
+  $script:wslBroken = $false
   $script:fakeWsl = {
+    if ($script:wslBroken) { return [pscustomobject]@{ ExitCode = 1; Output = @() } }
+    if ($Path -eq '/usr/bin/true') { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
+    if ($Path -eq '/usr/bin/test' -and $Arguments[0] -eq '-e') {
+      return [pscustomobject]@{ ExitCode = $(if ($script:manifests[$Distro] -or $script:unreadable[$Distro]) { 0 } else { 1 }); Output = @() }
+    }
     if ($Path -eq '/usr/bin/cat') {
       $manifest = $script:manifests[$Distro]
-      if ($manifest) { return [pscustomobject]@{ ExitCode = 0; Output = @($manifest) } }
+      if ($manifest -and -not $script:unreadable[$Distro]) { return [pscustomobject]@{ ExitCode = 0; Output = @($manifest) } }
       return [pscustomobject]@{ ExitCode = 1; Output = @() }
     }
     $script:wsl.Add("$Distro|$User|$Path|$($Arguments -join ' ')")
@@ -44,6 +52,8 @@ Describe 'uninstall' {
     $script:wsl = New-Object System.Collections.Generic.List[string]
     $script:setupExit = 0
     $script:manifests = @{}
+    $script:unreadable = @{}
+    $script:wslBroken = $false
     $script:taskBinding = $null
     Mock Invoke-WslExec $script:fakeWsl
     Mock -ModuleName RokidCoder Invoke-WslExec $script:fakeWsl
@@ -140,6 +150,40 @@ Describe 'uninstall' {
     & $script:Uninstall
     $LASTEXITCODE | Should -Be 0
     $script:wsl | Should -BeNullOrEmpty
+  }
+
+  It 'unreadable_or_corrupt_manifest_stops_uninstall_while_the_distro_exists' {
+    $paths = New-InstalledLayout
+    $good = $script:manifests['Ubuntu']
+    $untouched = {
+      $script:wsl | Should -BeNullOrEmpty -Because 'rokid-setup uninstall did not run'
+      Should -Invoke Unregister-ScheduledTask -Times 0 -Exactly
+      Should -Invoke Invoke-MachineHelper -Times 0 -Exactly
+      @(Get-ChildItem -LiteralPath $paths.DataRoot -Filter 'binding-*.json').Count | Should -Be 1 -Because 'the binding stays for a retry'
+      Test-Path -LiteralPath $paths.Journal | Should -BeTrue
+    }
+    $cases = @(
+      @{ Why = 'corrupt'; Set = { $script:manifests['Ubuntu'] = '{"schema":1,"binding":' }; Says = '*install.json*Ubuntu*not valid JSON*' }
+      @{ Why = 'unreadable'; Set = { $script:unreadable['Ubuntu'] = $true }; Says = '*install.json*Ubuntu*could not be read*' }
+      @{ Why = 'wsl.exe runs nothing'; Set = { $script:wslBroken = $true }; Says = '*install.json*Ubuntu*could not be read*' }
+    )
+    foreach ($case in $cases) {
+      $script:manifests['Ubuntu'] = $good; $script:unreadable = @{}; $script:wslBroken = $false
+      & $case.Set
+      { Resolve-CommittedBinding } | Should -Throw $case.Says -Because $case.Why
+      $warnings = @(& $script:Uninstall 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
+      $LASTEXITCODE | Should -Be 1 -Because $case.Why
+      $warnings -join ' ' | Should -BeLike $case.Says
+      $warnings -join ' ' | Should -BeLike '*run the uninstaller again*'
+      & $untouched
+    }
+    # Absent from a registered distro is no committed install; an unregistered distro is never asked.
+    $script:manifests = @{}; $script:unreadable = @{}; $script:wslBroken = $false
+    Resolve-CommittedBinding | Should -BeNullOrEmpty
+    # (Were it asked, the broken wsl.exe would make that an error.)
+    Mock -ModuleName RokidCoder Get-LxssDistros { @() }
+    $script:wslBroken = $true
+    Resolve-CommittedBinding | Should -BeNullOrEmpty
   }
 
   It 'nsis_uninstaller_keeps_itself_and_its_registration_on_failure' {

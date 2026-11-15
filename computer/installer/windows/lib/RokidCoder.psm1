@@ -1101,11 +1101,26 @@ function Start-SetupWindow {
 }
 
 function Read-InstallManifest {
-  <# install.json inside the binding's distro: the commit point of rokid-setup install. $null when absent or unreadable. #>
+  <#
+    install.json inside the binding's distro: the commit point of rokid-setup install.
+    $null only when the distro is not registered or the file is not there; one that is
+    there but cannot be read or parsed, or a distro wsl.exe cannot run, throws.
+  #>
   param([Parameter(Mandatory = $true)]$Binding)
-  $run = Invoke-WslExec -Distro $Binding.distroName -User $Binding.linuxUser -Path '/usr/bin/cat' -Arguments @("$($Binding.linuxHome)/.rokid-coder/install.json")
-  if ($run.ExitCode -ne 0) { return $null }
-  try { ($run.Output -join "`n") | ConvertFrom-Json } catch { $null }
+  if (-not (@(Get-LxssDistros) | Where-Object { $_.Name -eq $Binding.distroName })) { return $null }
+  $file = "$($Binding.linuxHome)/.rokid-coder/install.json"
+  $exec = { param($path, [string[]]$argv) Invoke-WslExec -Distro $Binding.distroName -User $Binding.linuxUser -Path $path -Arguments $argv }
+  $where = "The Rokid Coder install record $file in $($Binding.distroName)"
+  # cat exits 1 for a missing and an unreadable file alike, and so does a wsl.exe that
+  # ran nothing: test's 1 is "not there" only once /usr/bin/true shows the distro runs.
+  $probe = & $exec '/usr/bin/test' @('-e', $file)
+  if ($probe.ExitCode -eq 1 -and (& $exec '/usr/bin/true' @()).ExitCode -eq 0) { return $null }
+  if ($probe.ExitCode -ne 0) { throw "$where could not be read (wsl.exe exited $($probe.ExitCode))" }
+  $run = & $exec '/usr/bin/cat' @($file)
+  if ($run.ExitCode -ne 0) { throw "$where could not be read (wsl.exe exited $($run.ExitCode))" }
+  $text = $run.Output -join "`n"
+  if (-not $text.Trim()) { throw "$where is not valid JSON: it is empty" }
+  try { $text | ConvertFrom-Json } catch { throw "$where is not valid JSON: $($_.Exception.Message)" }
 }
 
 function Get-RegisteredBindingPath {
@@ -1146,7 +1161,8 @@ function Resolve-CommittedBinding {
 function Get-CommittedGenerations {
   <# The committed generation and its previous, from install.json inside the distro. #>
   param([Parameter(Mandatory = $true)]$Binding)
-  $manifest = Read-InstallManifest -Binding $Binding
+  # After a committed install, a record that cannot be read only means nothing is pruned.
+  try { $manifest = Read-InstallManifest -Binding $Binding } catch { return @() }
   if (-not $manifest) { return @() }
   $previous = Get-PropertyValue (Get-PropertyValue (Get-PropertyValue $manifest 'previous') 'manifest') 'binding'
   @(

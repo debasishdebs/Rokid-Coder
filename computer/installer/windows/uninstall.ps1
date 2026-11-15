@@ -4,7 +4,9 @@
   1. rokid-setup uninstall [--purge --yes] in the committed binding's distro (the
      registered task's binding, confirmed by that distro's install.json): stops agentd
      and removes the plugins, wrappers, PATH block and bundles; state stays unless purged.
-     A distro that is no longer registered has nothing left to remove.
+     A distro that is no longer registered has nothing left to remove; an install.json
+     that is there but cannot be read or parsed stops it, since it cannot be told apart
+     from a committed install.
   2. Unregister-ScheduledTask \RokidCoder\agentd.
   3. The elevated machine.ps1 -Revert -All: every rule and proxy entry recorded
      in machine-state.json, and nothing it did not create.
@@ -34,7 +36,8 @@ function Stop-Uninstall {
 }
 
 # 1: in the distro of the COMMITTED binding (the one install.json names), never a failed Repair's newer one
-$committed = Resolve-CommittedBinding -Paths $paths
+try { $committed = Resolve-CommittedBinding -Paths $paths }
+catch { Stop-Uninstall "$($_.Exception.Message). Without it, the uninstaller cannot tell what Rokid Coder left in that distro, so it removed nothing: restore that file, then run the uninstaller again." }
 if ($committed) {
   $binding = $committed.Binding
   if (-not (@(Get-LxssDistros) | Where-Object { $_.Name -eq $binding.distroName })) {
