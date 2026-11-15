@@ -470,32 +470,11 @@ test("two_process_forget_during_promotion_never_restores_trust", async () => {
   assert.deepEqual(new PinStore(file).provisionalEntries(), []);
 });
 
-test("stale_lock_recovered_and_live_lock_respected", async () => {
+test("live_holder_lock_is_never_stolen", async () => {
   const dir = await tempDir();
   const file = path.join(dir, "phone-pins.json");
   const lock = path.join(dir, "phone-pins.lock");
-  const [a, b, c] = await Promise.all(["lock-a", "lock-b", "lock-c"].map(async (name) => (await phoneCert(name)).fingerprint256));
-
-  // A holder that died: taken over at once.
-  const dead = spawnSync(process.execPath, ["-e", ""]).pid;
-  fs.mkdirSync(lock);
-  fs.writeFileSync(path.join(lock, "owner"), `${dead}:dead`);
-  let started = Date.now();
-  new PinStore(file).add(a);
-  assert.ok(Date.now() - started < 1000, "a dead holder's lock was waited on");
-  assert.equal(fs.existsSync(lock), false);
-
-  // A live holder that has held it past the stale age: taken over too.
-  const sleeper = secondProcess("sleep(10000);");
-  fs.mkdirSync(lock);
-  fs.writeFileSync(path.join(lock, "owner"), `${sleeper.child.pid}:hung`);
-  const old = new Date(Date.now() - 11_000);
-  fs.utimesSync(lock, old, old);
-  new PinStore(file).add(b);
-  assert.equal(new PinStore(file).has(b), true);
-  sleeper.child.kill();
-
-  // A live, fresh lock is respected: the change fails closed and writes nothing.
+  const fp = (await phoneCert("live-lock")).fingerprint256;
   const held = path.join(dir, "held");
   const holder = secondProcess(`
     withPinsLock(${JSON.stringify(dir)}, () => {
@@ -504,15 +483,53 @@ test("stale_lock_recovered_and_live_lock_respected", async () => {
     });
   `);
   await waitUntil(() => fs.existsSync(held), "the holder never took the lock");
-  started = Date.now();
-  assert.throws(() => new PinStore(file, { lockWaitMs: 200 }).add(c), /locked by another process/);
-  assert.ok(Date.now() - started >= 200);
-  assert.ok(fs.readFileSync(path.join(lock, "owner"), "utf8").startsWith(`${holder.child.pid}:`), "a live lock was broken");
-  assert.equal(new PinStore(file).has(c), false);
+  const owner = fs.readFileSync(path.join(lock, "owner"), "utf8");
+  assert.ok(owner.startsWith(`${holder.child.pid}:`));
+  // However old it looks, a live holder's lock is not taken: the change fails closed and says why.
+  const old = new Date(Date.now() - 60 * 60_000);
+  fs.utimesSync(lock, old, old);
+  const started = Date.now();
+  assert.throws(
+    () => new PinStore(file, { lockWaitMs: 300 }).add(fp),
+    (error) => error.message.includes(`held by another process (pid ${holder.child.pid})`),
+  );
+  assert.ok(Date.now() - started >= 300);
+  assert.equal(fs.readFileSync(path.join(lock, "owner"), "utf8"), owner, "a live lock was taken");
+  assert.equal(new PinStore(file).has(fp), false);
   assert.equal((await holder.exited).code, 0);
-  new PinStore(file).add(c);
-  assert.equal(new PinStore(file).has(c), true);
+  new PinStore(file).add(fp);
+  assert.equal(new PinStore(file).has(fp), true);
   assert.equal(fs.existsSync(lock), false, "the lock is released");
+});
+
+test("dead_holder_recovered_and_token_fence_aborts_stale_writer", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "phone-pins.json");
+  const lock = path.join(dir, "phone-pins.lock");
+  const [a, b] = await Promise.all(["dead-a", "dead-b"].map(async (name) => (await phoneCert(name)).fingerprint256));
+
+  // A holder that died: taken over at once.
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, "owner"), `${dead}:deadbeef`);
+  const started = Date.now();
+  new PinStore(file).add(a);
+  assert.ok(Date.now() - started < 1000, "a dead holder's lock was waited on");
+  assert.equal(fs.existsSync(lock), false);
+
+  // A writer that lost its lock (another process took it over, believing this one dead) writes nothing.
+  const taker = `${process.pid + 1}:${"0".repeat(32)}`;
+  const pins = new PinStore(file, {
+    afterLockedReload: (operation) => {
+      if (operation === "add") fs.writeFileSync(path.join(lock, "owner"), taker);
+    },
+  });
+  assert.throws(() => pins.add(b), /lock was lost/);
+  assert.equal(new PinStore(file).has(b), false);
+  assert.equal(new PinStore(file).has(a), true);
+  // And the lock it lost is left to its new owner.
+  assert.equal(fs.readFileSync(path.join(lock, "owner"), "utf8"), taker);
+  fs.rmSync(lock, { recursive: true, force: true });
 });
 
 test("legacy_provisional_file_migrates_into_pin_store", async () => {

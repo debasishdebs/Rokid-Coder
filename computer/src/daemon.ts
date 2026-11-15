@@ -30,7 +30,7 @@ import { QuestionRelay } from "./question-relay";
 import { TranscriptTailManager, readTranscriptHeading } from "./transcript";
 import { DETAIL_MESSAGE_LIMIT, readRecentMessages } from "./transcript-messages";
 import { sessionKeyOf } from "./protocol-v2";
-import { DAY_MS, ensureAgentCert, ensureSteerSecret, PinStore, readSteerSecret, steerSecretFile } from "./tls";
+import { DAY_MS, ensureAgentCert, ensureSteerSecret, holdPinsLock, PinStore, readSteerSecret, steerSecretFile } from "./tls";
 import type { AgentProvider, HookPayload } from "./types";
 import { WsHub } from "./ws-server";
 
@@ -165,6 +165,21 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     // It only opens the window: the code is confirmed in a terminal and on the phone.
     armPairing: () => {
       pairing.openWindow();
+    },
+    // R208: while agentd runs, the CLI's pin changes are made here, by the one writer.
+    pins: {
+      change: (op, fp) => {
+        logger.info("phone_pins_changed", { op, via: "cli" });
+        if (op === "forget") {
+          const removed = pins.forget(fp ?? "");
+          return { removed: removed.length, empty: pins.isEmpty() };
+        }
+        if (op === "forget_all") {
+          pins.forgetAll();
+          return {};
+        }
+        return { until: pins.armAllowNext(Date.now()) };
+      },
     },
     pairing: {
       open: () => {
@@ -470,6 +485,9 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
   const agentCert = await ensureAgentCert(tlsDir);
   ensureSteerSecret(tlsDir);
+  // The only pin writer while it runs (R208): the lock is taken before the first read and held until stop,
+  // so no other process can change the pins underneath it; the CLI asks over the launcher socket instead.
+  const releasePinsLock = holdPinsLock(tlsDir);
   const pins = new PinStore(path.join(tlsDir, "phone-pins.json"), { logger });
   // One window, one attempt, for both transports and every entry point.
   const pairing = new PairingCoordinator({
@@ -757,6 +775,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     await hub.stop().catch(() => undefined);
     tailManager.stopAll();
     sessions.dispose();
+    releasePinsLock();
     throw error;
   }
 
@@ -807,6 +826,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       tailManager.stopAll();
       await Promise.all([httpServer.stop(), hub.stop()]);
       sessions.dispose();
+      releasePinsLock();
       logger.info("daemon_stopped");
     },
   };

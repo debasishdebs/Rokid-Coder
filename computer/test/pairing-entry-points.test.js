@@ -15,7 +15,8 @@ const path = require("node:path");
 const { pairingPayload } = require("../dist/pairing.js");
 const { PairingCoordinator } = require("../dist/pairing/coordinator.js");
 const { PAIR_TEXT } = require("../dist/attach-command.js");
-const { PinStore } = require("../dist/tls.js");
+const { PinStore, holdPinsLock } = require("../dist/tls.js");
+const { ensureConfig, saveConfig } = require("../dist/config.js");
 const { createFakePhone } = require("./fake-phone.js");
 const { withDaemon, settle } = require("./helpers/daemon.js");
 const { phoneCert } = require("./helpers/tls.js");
@@ -270,6 +271,55 @@ test("rotate_steer_requires_new_sas_pairing", async () => {
     await waitUntil(async () => pinsOf(coderDir).has((await phoneCert("phone")).fingerprint256), "re-pairing failed");
     assert.equal(again.state.credentials.steer, fresh, "the phone is handed the new secret");
   });
+});
+
+// ---------------------------------------------------------------- one pin writer (R208)
+
+test("cli_forget_goes_through_running_agentd", async () => {
+  await withDaemon({ transport: "wshub" }, async ({ coderDir }) => {
+    const tlsDir = path.join(coderDir, "tls");
+    // agentd holds the pins lock for its whole run, so a direct write from the CLI could not happen.
+    const owner = await fsp.readFile(path.join(tlsDir, "phone-pins.lock", "owner"), "utf8");
+    assert.ok(owner.startsWith(`${process.pid}:`), "agentd does not hold the pins lock");
+    const fp = (await phoneCert("cli-forget-phone")).fingerprint256;
+    pinsOf(coderDir).add(fp);
+    const forget = runCli(coderDir, ["phones", "forget", fp.slice(0, 23)]);
+    assert.equal(await forget.exited, 0, forget.out);
+    assert.match(forget.out, /^Forgotten\. That phone's links close now/);
+    assert.equal(pinsOf(coderDir).has(fp), false);
+    const allow = runCli(coderDir, ["phones", "allow-next"]);
+    assert.equal(await allow.exited, 0, allow.out);
+    assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), true);
+    // What agentd refuses, the CLI says as it always has.
+    const bad = runCli(coderDir, ["phones", "forget", "12"]);
+    assert.notEqual(await bad.exited, 0);
+    assert.match(bad.out, /give at least 8 hex digits/);
+    assert.equal(await fsp.readFile(path.join(tlsDir, "phone-pins.lock", "owner"), "utf8"), owner, "the lock changed hands");
+  });
+});
+
+test("cli_writes_directly_only_when_agentd_down", async () => {
+  const root = await fsp.mkdtemp(path.join(require("node:os").tmpdir(), "rokid-coder-cli-"));
+  track(() => fsp.rm(root, { recursive: true, force: true }));
+  const coderDir = path.join(root, "rokid-coder");
+  const stateDir = path.join(root, "nexus-agentd");
+  saveConfig({ ...ensureConfig(stateDir), rokidCoder: { stateDir: coderDir } }, stateDir);
+  const [a, b] = await Promise.all(["down-a", "down-b"].map(async (name) => (await phoneCert(name)).fingerprint256));
+  pinsOf(coderDir).add(a);
+  pinsOf(coderDir).add(b);
+  // No agentd: the CLI writes the pins itself, under the lock.
+  const direct = runCli(coderDir, ["phones", "forget", a.slice(0, 23)]);
+  assert.equal(await direct.exited, 0, direct.out);
+  assert.match(direct.out, /^Forgotten\./);
+  assert.equal(pinsOf(coderDir).has(a), false);
+  // An agentd that holds the pins but whose socket cannot be reached: the CLI fails closed and writes nothing.
+  const release = holdPinsLock(path.join(coderDir, "tls"));
+  track(release);
+  const refused = runCli(coderDir, ["phones", "forget", b.slice(0, 23)]);
+  assert.notEqual(await refused.exited, 0);
+  assert.match(refused.out, new RegExp(`held by another process \\(pid ${process.pid}\\)`));
+  release();
+  assert.equal(pinsOf(coderDir).has(b), true);
 });
 
 test("phones_forget_also_drops_a_provisional_pin", async () => {

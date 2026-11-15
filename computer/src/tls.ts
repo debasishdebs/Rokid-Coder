@@ -36,8 +36,6 @@ const TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 /** How long `phones allow-next` leaves the door open for one more phone. */
 export const ALLOW_NEXT_WINDOW_MS = 2 * 60 * 1000;
 const CERT_LOCK_STALE_MS = 30_000;
-/** A pins lock whose holder died, or held this long, is taken over. */
-export const PINS_LOCK_STALE_MS = 10_000;
 /** How long a pin change waits for another process's before it fails closed. */
 const PINS_LOCK_WAIT_MS = 3_000;
 const PINS_LOCK_NAME = "phone-pins.lock";
@@ -285,8 +283,12 @@ export function watchFiles(files: string[], intervalMs: number, onChange: () => 
 
 // ---- the pins lock ----
 
-/** Locks this process holds, with their depth: a pin change made inside another is not a second acquire. */
-const heldPinsLocks = new Map<string, number>();
+/**
+ * The pins locks this process holds: how many holds are open, and the token it
+ * wrote into the lock's owner file. A pin change made inside another, or while
+ * agentd holds the lock for its whole run, is not a second acquire.
+ */
+const heldPinsLocks = new Map<string, { depth: number; token: string }>();
 const lockSleeper = new Int32Array(new SharedArrayBuffer(4));
 
 function pinsLockPath(dir: string): string {
@@ -310,29 +312,26 @@ function lockOwner(lock: string): string | undefined {
   }
 }
 
-/**
- * Takes over a lock whose holder is dead, or that is older than
- * PINS_LOCK_STALE_MS. The lock is renamed away before it is removed, and only
- * if its owner is still the one judged stale, so a lock someone just took is
- * left alone.
- */
-function breakStaleLock(lock: string): void {
-  let ageMs: number;
-  try {
-    ageMs = Date.now() - statSync(lock).mtimeMs;
-  } catch {
-    return;
-  }
-  const owner = lockOwner(lock);
+function ownerPid(owner: string | undefined): number | undefined {
   const pid = owner === undefined ? NaN : Number(owner.split(":")[0]);
-  const dead = Number.isInteger(pid) && pid > 0 && !pidAlive(pid);
-  if (!dead && ageMs <= PINS_LOCK_STALE_MS) {
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+/**
+ * Takes over a lock only when its holder's process is dead: a live holder's
+ * lock is never taken, however long it has been held. The lock is renamed
+ * aside, and only if its owner is still the dead one, before it is removed.
+ */
+function breakDeadLock(lock: string): void {
+  const owner = lockOwner(lock);
+  const pid = ownerPid(owner);
+  if (pid === undefined || pidAlive(pid)) {
     return;
   }
   if (lockOwner(lock) !== owner) {
     return;
   }
-  const aside = `${lock}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
+  const aside = `${lock}.dead-${process.pid}-${randomBytes(4).toString("hex")}`;
   try {
     renameSync(lock, aside);
   } catch {
@@ -342,62 +341,94 @@ function breakStaleLock(lock: string): void {
 }
 
 /**
- * Runs `fn` holding the phone-pins lock in `dir`: a directory made with mkdir,
- * which is atomic, so agentd and the CLI never interleave a read-validate-write
- * of the pins file. Synchronous, as PinStore is. Waits at most `waitMs` for
- * another process, then throws: a pin change that cannot be made safely is not
- * made. Reentrant within this process.
+ * Takes the phone-pins lock in `dir` and returns its release. The lock is a
+ * directory that appears in one rename with its owner file (pid and a random
+ * token) already inside, so it is never seen without an owner. A lock held by
+ * a live process makes this wait at most `waitMs` and then throw: a pin change
+ * that cannot be made safely is not made. Reentrant within this process.
+ * agentd holds it from before its first read of the pins until it stops
+ * (R208), so while it runs no other process can write them.
  */
-export function withPinsLock<T>(dir: string, fn: () => T, { waitMs = PINS_LOCK_WAIT_MS }: { waitMs?: number } = {}): T {
+export function holdPinsLock(dir: string, { waitMs = PINS_LOCK_WAIT_MS }: { waitMs?: number } = {}): () => void {
   const lock = pinsLockPath(dir);
-  const depth = heldPinsLocks.get(lock) ?? 0;
-  if (depth > 0) {
-    heldPinsLocks.set(lock, depth + 1);
-    try {
-      return fn();
-    } finally {
-      heldPinsLocks.set(lock, depth);
-    }
-  }
-  privateDir(dir);
-  const token = `${process.pid}:${randomBytes(8).toString("hex")}`;
-  const deadline = Date.now() + waitMs;
-  for (;;) {
-    try {
-      mkdirSync(lock, { mode: 0o700 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error;
+  const held = heldPinsLocks.get(lock);
+  if (held) {
+    held.depth += 1;
+  } else {
+    privateDir(dir);
+    const token = `${process.pid}:${randomBytes(16).toString("hex")}`;
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const staging = `${lock}.new-${randomBytes(4).toString("hex")}`;
+      mkdirSync(staging, { mode: 0o700 });
+      try {
+        writeFileSync(path.join(staging, "owner"), token, { mode: 0o600 });
+        renameSync(staging, lock);
+        break;
+      } catch (error) {
+        rmSync(staging, { recursive: true, force: true });
+        if (!["EEXIST", "ENOTEMPTY", "EISDIR", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+          throw error;
+        }
       }
-      breakStaleLock(lock);
+      breakDeadLock(lock);
       if (Date.now() >= deadline) {
-        throw new Error(`The phone pins at ${dir} are locked by another process`);
+        const pid = ownerPid(lockOwner(lock));
+        throw new Error(
+          `The phone pins at ${dir} are held by another process${pid ? ` (pid ${pid})` : ""}. ` +
+            "While agentd runs it is the only one that changes them; if it is not running, try again.",
+        );
       }
       Atomics.wait(lockSleeper, 0, 0, 10);
-      continue;
     }
-    try {
-      writeFileSync(path.join(lock, "owner"), token, { mode: 0o600 });
-    } catch (error) {
-      rmSync(lock, { recursive: true, force: true });
-      throw error;
-    }
-    break;
+    heldPinsLocks.set(lock, { depth: 1, token });
   }
-  heldPinsLocks.set(lock, 1);
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    const entry = heldPinsLocks.get(lock);
+    if (!entry) {
+      return;
+    }
+    entry.depth -= 1;
+    if (entry.depth > 0) {
+      return;
+    }
+    heldPinsLocks.delete(lock);
+    // Someone took it over as dead meanwhile: the lock is theirs now.
+    if (lockOwner(lock) === entry.token) {
+      rmSync(lock, { recursive: true, force: true });
+    }
+  };
+}
+
+/** Runs `fn` holding the phone-pins lock in `dir`; see `holdPinsLock`. */
+export function withPinsLock<T>(dir: string, fn: () => T, options: { waitMs?: number } = {}): T {
+  const release = holdPinsLock(dir, options);
   try {
     return fn();
   } finally {
-    heldPinsLocks.delete(lock);
-    // Taken over as stale meanwhile: the lock is someone else's now.
-    if (lockOwner(lock) === token) {
-      rmSync(lock, { recursive: true, force: true });
-    }
+    release();
   }
 }
 
-function pinsLockHeld(dir: string): boolean {
-  return (heldPinsLocks.get(pinsLockPath(dir)) ?? 0) > 0;
+/**
+ * The fence before every write: this process holds the lock, and the lock's
+ * owner file still has the token it wrote. If another process took the lock
+ * over (it believed this one dead), the write is not made.
+ */
+function assertPinsLockOwned(dir: string): void {
+  const lock = pinsLockPath(dir);
+  const entry = heldPinsLocks.get(lock);
+  if (!entry) {
+    throw new Error("phone pins changed without the pins lock");
+  }
+  if (lockOwner(lock) !== entry.token) {
+    throw new Error("The phone pins lock was lost to another process; nothing was written");
+  }
 }
 
 export interface PinEntry {
@@ -870,10 +901,9 @@ export class PinStore {
   /** Writes the new state and keeps it only once the write succeeded: a pin the disk lacks is no pin. */
   private commit(phones: Map<string, StoredPin>, allowNextUntil: number, pinnedBefore: boolean): void {
     if (this.file) {
-      if (!pinsLockHeld(path.dirname(this.file))) {
-        throw new Error("phone pins changed without the pins lock");
-      }
       privateDir(path.dirname(this.file));
+      // Last thing before the write: a lock lost meanwhile writes nothing.
+      assertPinsLockOwned(path.dirname(this.file));
       this.writeFile(
         this.file,
         `${JSON.stringify(

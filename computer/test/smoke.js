@@ -132,6 +132,11 @@ async function main() {
     rokidCoder: { stateDir: coderDir },
   }, stateDir);
 
+  // A phone paired earlier: pinned before agentd starts, since while it runs it is the only pin writer (R208).
+  const tlsDir = path.join(coderDir, "tls");
+  const phone = await phoneCert("smoke-phone");
+  new PinStore(path.join(tlsDir, "phone-pins.json")).add(phone.fingerprint256);
+
   const child = spawn(process.execPath, [path.join(projectRoot, "dist", "cli.js"), "run"], {
     cwd: projectRoot,
     env: {
@@ -167,9 +172,6 @@ async function main() {
     postWithCurl(httpPort, { ...base, hook_event_name: "SessionStart", source: "startup" });
 
     // The phone port is wss only, and admits a pinned client cert with the steering secret.
-    const tlsDir = path.join(coderDir, "tls");
-    const phone = await phoneCert("smoke-phone");
-    new PinStore(path.join(tlsDir, "phone-pins.json")).add(phone.fingerprint256);
     const steer = fs.readFileSync(path.join(tlsDir, "steer.secret"), "utf8").trim();
     socket = new WebSocket(`wss://127.0.0.1:${wsPort}`, { rejectUnauthorized: false, key: phone.key, cert: phone.cert });
     const frames = [];

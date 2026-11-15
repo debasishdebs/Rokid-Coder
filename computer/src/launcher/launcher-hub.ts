@@ -85,11 +85,24 @@ export interface LauncherHubOptions {
    */
   pairing?: PairingIpc;
   /**
+   * The CLI's pin changes (R208): while agentd runs it is the only process
+   * that writes the phone pins, so `phones forget`, `forget --all`,
+   * `allow-next` and `pair --rotate-steer` ask it here.
+   */
+  pins?: PinsIpc;
+  /**
    * A launcher has just bound this session. Claude's own SessionStart hook
    * normally arrives before the bind and is dropped as unattached, so this is
    * what lets the phone see the session before the first prompt.
    */
   onBound?: (session: { sessionId: string; status: string; cwd?: string }) => void;
+}
+
+export type PinsChangeOp = "forget" | "forget_all" | "allow_next";
+
+export interface PinsIpc {
+  /** Applies one change through agentd's own PinStore and returns what the CLI prints from; throws to refuse it. */
+  change(op: PinsChangeOp, fp?: string): Record<string, unknown>;
 }
 
 export interface PairingIpc {
@@ -558,6 +571,9 @@ export class LauncherHub {
       if (frame.type === "pair_open") {
         return this.onPairOpen(connection, frame);
       }
+      if (frame.type === "pins_change") {
+        return this.onPinsChange(connection, frame);
+      }
       if (frame.type === "pair_confirm") {
         if (!hasShape(frame, ["type", "attempt", "ok"]) || !this.options.pairing) {
           return "bad_frame";
@@ -902,6 +918,29 @@ export class LauncherHub {
       this.options.logger.error("arm_pairing_failed", { reason: errorCode(error) });
     }
     this.write(connection, { type: "pairing_armed", ok });
+    connection.socket.end();
+    this.onClose(connection);
+    return undefined;
+  }
+
+  /** A one-shot pin change from the CLI: applied here, answered, and the connection closes. */
+  private onPinsChange(connection: Connection, frame: Frame): string | undefined {
+    const pins = this.options.pins;
+    const op = frame.op;
+    const valid =
+      pins !== undefined &&
+      hasShape(frame, ["type", "op"], ["fp"]) &&
+      (op === "forget" ? typeof frame.fp === "string" : (op === "forget_all" || op === "allow_next") && frame.fp === undefined);
+    if (!valid) {
+      return "bad_frame";
+    }
+    let reply: Record<string, unknown>;
+    try {
+      reply = { type: "pins_result", ok: true, ...pins.change(op as PinsChangeOp, frame.fp as string | undefined) };
+    } catch (error) {
+      reply = { type: "pins_result", ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    this.write(connection, reply);
     connection.socket.end();
     this.onClose(connection);
     return undefined;
