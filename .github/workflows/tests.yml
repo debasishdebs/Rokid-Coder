@@ -75,7 +75,56 @@ jobs:
             :shared:test \
             :bus-client:testDebugUnitTest \
             :ink-engine:test \
+            :phone-core:testDebugUnitTest \
             :phone-hub:testDebugUnitTest \
+            :glasses-core:testDebugUnitTest \
             :glasses-hub:testDebugUnitTest \
             :mobile:agents:testDebugUnitTest \
             --continue
+
+      # The hub suites now run as each upstream shell plus its core. Their union must keep every
+      # identity and outcome of the pre-split baseline; a new test must pass.
+      - name: Check hub suite parity across the core split
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          nexus, baseline = "vendor/nexus/", ".github/suite-baselines/hubs.txt"
+          current = {}
+          for group, modules in {"phone": ["phone-hub", "phone-core"], "glasses": ["glasses-hub", "glasses-core"]}.items():
+              for module in modules:
+                  for report in glob.glob(f"{nexus}{module}/build/test-results/testDebugUnitTest/*.xml"):
+                      for case in ET.parse(report).getroot().iter("testcase"):
+                          failed = case.find("failure") is not None or case.find("error") is not None
+                          skipped = case.find("skipped") is not None
+                          outcome = "FAILED" if failed else ("SKIPPED" if skipped else "PASSED")
+                          current[f"{group}|{case.get('classname')}#{case.get('name')}"] = outcome
+          expected = {}
+          for line in open(baseline):
+              if line.startswith("#") or not line.strip():
+                  continue
+              key, outcome = line.rstrip("\n").rsplit("|", 1)
+              expected[key] = outcome
+          problems = [f"missing {k}" for k in expected if k not in current]
+          problems += [f"changed {k}: {expected[k]} -> {current[k]}" for k in expected if k in current and current[k] != expected[k]]
+          problems += [f"new test not passing {k}" for k in current if k not in expected and current[k] != "PASSED"]
+          print(f"hub parity: baseline={len(expected)} current={len(current)} problems={len(problems)}")
+          for problem in problems:
+              print(problem)
+          sys.exit(1 if problems else 0)
+          PY
+
+      - name: Check the SPP authentication files are upstream's, byte for byte
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -v '^#' ".github/suite-baselines/spp-blobs.txt" | while read -r blob path; do
+            actual="$(git hash-object "$path")"
+            if [ "$actual" != "$blob" ]; then
+              echo "$path changed: $actual != upstream $blob"
+              exit 1
+            fi
+          done

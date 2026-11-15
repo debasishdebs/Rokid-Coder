@@ -1,0 +1,4 @@
+# Upstream 15cd98ad blob ids of the SPP authentication files, which move byte for byte (R204).
+b600c87a8b79749b73c9c08f66b2afb561e3dd8a vendor/nexus/phone-core/src/main/java/com/anezium/rokidbus/phone/PhoneSppPairing.kt
+468d3e90bf9b68b3275c7cde586c7e9f0f8bf37f vendor/nexus/phone-core/src/main/java/com/anezium/rokidbus/phone/PhoneSppPairingStorage.kt
+65d19f73f4079097c096c20039d7137c9527b72a vendor/nexus/glasses-core/src/main/java/com/anezium/rokidbus/glasses/AuthenticatedSppServer.kt
