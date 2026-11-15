@@ -55,7 +55,7 @@ function wslBundle(home, version) {
  * RokidCoder.psm1): binding-<gen>.json, <gen>\start-agentd.ps1 and <gen>\task.xml,
  * the task rendered from the same task.xml.template, UTF-16LE with a BOM.
  */
-function stage(win, { gen, home, bundleDir, mode = "mirrored" }) {
+function stage(win, { gen, home, bundleDir, mode = "mirrored", hosts = mode === "nat" ? ["192.168.1.40"] : undefined }) {
   const binding = `${LOCAL}\\RokidCoder\\binding-${gen}.json`;
   const launcher = `${LOCAL}\\Programs\\RokidCoder\\${gen}\\start-agentd.ps1`;
   const taskXml = `${LOCAL}\\Programs\\RokidCoder\\${gen}\\task.xml`;
@@ -72,6 +72,7 @@ function stage(win, { gen, home, bundleDir, mode = "mirrored" }) {
     wslExe: "C:\\Windows\\System32\\wsl.exe",
     networkMode: mode,
     advertisePort: mode === "nat" ? 8794 : 8792,
+    ...(hosts ? { advertiseHosts: hosts } : {}),
   };
   fs.mkdirSync(path.dirname(win.toLinux(binding)), { recursive: true });
   fs.writeFileSync(win.toLinux(binding), `${JSON.stringify(contents, null, 2)}\n`);
@@ -352,4 +353,49 @@ test("wsl_failed_upgrade_restarts_previous_bundle_from_its_own_task_and_binding"
   const creates = win.calls().filter((call) => call[0] === "schtasks.exe" && call[1] === "/Create");
   assert.equal(creates.length, 2);
   for (const call of creates) assert.match(call[5], /^[A-Z]:\\/);
+});
+
+test("wsl_advertise_changes_inside_the_transaction_and_rollback_restores_its_bytes", async (t) => {
+  const { win, world, install } = await wslWorld(t);
+  const file = path.join(world.home, ".rokid-coder", "advertise.json");
+  const bytes = () => (fs.existsSync(file) ? fs.readFileSync(file).toString("base64") : null);
+  const b1 = wslBundle(world.home, "1.0.0-wsl.1");
+
+  // A NAT binding without hosts is refused before anything is stopped or journaled.
+  const hostless = install(b1, stage(win, { gen: "1.0.0-wsl.1-20261114100000", home: world.home, bundleDir: b1, mode: "nat", hosts: [] }));
+  assert.equal(hostless.status, 1, hostless.output);
+  assert.match(hostless.output, /advertiseHosts/);
+  assert.equal(world.journal(), undefined, "nothing was journaled");
+
+  // A fresh NAT install that fails: the record it wrote goes, as it was absent before.
+  const fresh = install(b1, stage(win, { gen: "1.0.0-wsl.1-20261114110000", home: world.home, bundleDir: b1, mode: "nat" }), { ROKID_SETUP_FAIL_AT: "9" });
+  assert.equal(fresh.status, 1, fresh.output);
+  assert.equal(world.journal().steps[5].advertise.previous, null, "the journal recorded that there was none");
+  assert.equal(bytes(), null, "no advertise.json is left behind");
+
+  const g1 = stage(win, { gen: "1.0.0-wsl.1-20261115100000", home: world.home, bundleDir: b1 });
+  const first = install(b1, g1);
+  assert.equal(first.status, 0, first.output);
+  assert.equal(bytes(), null, "mirrored mode advertises nothing");
+  // An endpoint written since (start-agentd.ps1 at a logon), in bytes setup itself never produces.
+  fs.writeFileSync(file, '{"mode":"nat","hosts":["10.0.0.7"],"port":8794,"updatedAt":"2026-11-15T08:00:00.000Z"}', { mode: 0o600 });
+  const before = bytes();
+
+  // A mirrored -> NAT Repair that fails after the new agentd started.
+  const hosts = ["192.168.1.40", "100.101.102.103"];
+  const failed = install(b1, stage(win, { gen: "1.0.0-wsl.1-20261116100000", home: world.home, bundleDir: b1, mode: "nat", hosts }), { ROKID_SETUP_FAIL_AT: "9" });
+  assert.equal(failed.status, 1, failed.output);
+  assert.match(failed.output, /Rolled back to 1\.0\.0-wsl\.1\n/);
+  assert.equal(bytes(), before, "the previous endpoint is back, byte for byte");
+  const journal = world.journal();
+  assert.equal(journal.steps[5].advertise.previous, before, "the journal held the exact previous bytes");
+  assert.ok(journal.steps[4], "and the change came after the snapshot");
+
+  // The same Repair, committed: the binding's endpoint, written after the snapshot took the old one.
+  const repaired = install(b1, stage(win, { gen: "1.0.0-wsl.1-20261116110000", home: world.home, bundleDir: b1, mode: "nat", hosts }));
+  assert.equal(repaired.status, 0, repaired.output);
+  const record = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepEqual([record.mode, record.hosts, record.port], ["nat", hosts, 8794]);
+  const snapshot = world.manifest().previous.snapshot;
+  assert.equal(fs.readFileSync(path.join(snapshot, "files", "state", "advertise.json")).toString("base64"), before, "the snapshot keeps the endpoint from before the change");
 });

@@ -1,5 +1,6 @@
 import { accessSync, constants, copyFileSync, existsSync, readFileSync, realpathSync, rmSync, statfsSync } from "node:fs";
 import path from "node:path";
+import { advertiseChangeFor, advertisePath, clearAdvertise, readAdvertiseBytes, restoreAdvertiseBytes, writeAdvertise } from "../advertise";
 import { type CliInstallIo, offerCliInstall, realCliInstallIo, resolveCli } from "../launcher/cli-install";
 import { PinStore } from "../tls";
 import { WRAPPER_NAMES, installUserWrappers, renderUserWrapper } from "../wrappers";
@@ -95,8 +96,8 @@ export interface Journal {
   steps: {
     3?: { stopCurrent: boolean; retiredLegacy?: RetiredRecord };
     4?: { snapshot: string };
-    /** `settings`: only in a journal from before R217, when install itself removed the install-hooks entries; still undone. */
-    5?: { wrappers: Record<string, string | null>; pathBlocks: Record<string, string | null>; settings?: { settingsPath: string; backupPath?: string } };
+    /** `settings`: only in a journal from before R217, when install itself removed the install-hooks entries; still undone. `advertise`: advertise.json's bytes (base64) before a WSL binding changed it; null: there was none. */
+    5?: { wrappers: Record<string, string | null>; pathBlocks: Record<string, string | null>; settings?: { settingsPath: string; backupPath?: string }; advertise?: { file: string; previous: string | null } };
     7?: { env: string | null };
     8?: { plugins: Partial<Record<Tool, PluginUndo>> };
     9?: { started: true };
@@ -216,6 +217,8 @@ export interface RestorePlan {
   /** 2 */
   snapshot?: string;
   locations: StateLocations;
+  /** 2, after the state: the advertised endpoint's exact previous bytes. */
+  advertise?: { file: string; previous: string | null };
   /** 3: each program file's previous content; null removes it. */
   wrappers?: Record<string, string | null>;
   pathBlocks?: Record<string, string | null>;
@@ -261,6 +264,10 @@ export async function runRestore(ctx: SetupContext, plan: RestorePlan): Promise<
   if (isCompleteSnapshot(plan.snapshot)) {
     const snapshot = plan.snapshot;
     stateRestored = stopped && (await attempt("restoring the state", () => void restoreSnapshot(plan.locations, snapshot, ctx.now())));
+  }
+  if (plan.advertise) {
+    const { file, previous } = plan.advertise;
+    stateRestored = stopped && (await attempt("restoring the advertised endpoint", () => restoreAdvertiseBytes(file, previous))) && stateRestored;
   }
   // 3
   await attempt("restoring the program files", () => {
@@ -337,6 +344,7 @@ function restorePlanFromJournal(journal: Journal): RestorePlan {
     plan.wrappers = step5.wrappers;
     plan.pathBlocks = step5.pathBlocks;
     if (step5.settings?.backupPath) plan.settings = { settingsPath: step5.settings.settingsPath, backupPath: step5.settings.backupPath };
+    if (step5.advertise) plan.advertise = step5.advertise;
   }
   if (steps[7]) plan.env = { content: steps[7].env };
   if (steps[8]) plan.plugins = steps[8].plugins;
@@ -428,6 +436,7 @@ function alreadyPaired(locations: StateLocations): boolean {
 export async function install(ctx: SetupContext, options: InstallOptions): Promise<number> {
   // 0
   preconditions(ctx);
+  const advertise = options.binding ? advertiseChangeFor(options.binding.contents) : undefined;
   const open = readJournal(ctx.home);
   if (open?.open) {
     ctx.io.write("An earlier setup did not finish. Undoing it first.\n");
@@ -524,6 +533,14 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     record();
     installUserWrappers(ctx.home, bundleDir);
     for (const file of profiles) writeBlock(file, renderBlock());
+    // The WSL endpoint [6b-R3]: after the quiesce and the snapshot, its previous bytes journaled first.
+    if (advertise) {
+      const file = advertisePath(locations.stateDir);
+      journal.steps[5].advertise = { file, previous: readAdvertiseBytes(file) };
+      record();
+      if (advertise === "clear") clearAdvertise(locations.stateDir);
+      else writeAdvertise(locations.stateDir, advertise.hosts, advertise.port, ctx.now());
+    }
     inject(ctx, 5);
 
     // 6: the CLI step (a vendor install is never undone)

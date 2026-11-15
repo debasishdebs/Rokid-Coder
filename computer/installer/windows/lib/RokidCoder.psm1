@@ -859,21 +859,6 @@ function Get-AdvertiseHosts {
   @($hosts)
 }
 
-function Set-AdvertisedEndpoint {
-  <# rokid-setup advertise set (NAT) or clear (mirrored): the one record every pairing client reads [6b-R3]. #>
-  param([Parameter(Mandatory = $true)]$Binding)
-  $setup = "$($Binding.bundleDir)/bin/rokid-setup"
-  if ($Binding.networkMode -eq 'nat') {
-    $hosts = @(Get-AdvertiseHosts)
-    if ($hosts.Count -eq 0) { throw 'This computer has no network with a default gateway to advertise' }
-    $argv = @('advertise', 'set', '--hosts', ($hosts -join ','), '--port', "$($Binding.advertisePort)")
-  } else {
-    $argv = @('advertise', 'clear')
-  }
-  $run = Invoke-WslExec -Distro $Binding.distroName -User $Binding.linuxUser -Path $setup -Arguments $argv
-  if ($run.ExitCode -ne 0) { throw "rokid-setup advertise failed ($($run.ExitCode))" }
-}
-
 function Start-SetupWindow {
   <# rokid-setup install in a console window of its own: the CLI step and the pairing are interactive. #>
   param([Parameter(Mandatory = $true)]$Binding, [Parameter(Mandatory = $true)]$Staged)
@@ -901,7 +886,9 @@ function Get-CommittedGenerations {
 function Invoke-UserInstall {
   <#
     The per-user install after preflight: resolve, stage a NEW generation, put the
-    bundle into WSL, write the advertised endpoint, then run rokid-setup install.
+    bundle into WSL, then run rokid-setup install. NAT's advertised endpoint goes
+    into the binding: rokid-setup writes it inside its transaction, after the
+    quiesce and the snapshot, and a rollback puts the previous bytes back [6b-R3].
     Old generations are pruned only after it committed.
   #>
   param(
@@ -915,10 +902,13 @@ function Invoke-UserInstall {
   )
   Assert-SessionUser
   $binding = Resolve-Binding -Distro $Distro -Mode $Mode -Version $Version
+  if ($Mode -eq 'nat') {
+    $binding.advertiseHosts = @(Get-AdvertiseHosts)
+    if ($binding.advertiseHosts.Count -eq 0) { throw 'This computer has no network with a default gateway to advertise' }
+  }
   $generation = New-Generation -Version $Version -Now $Now
   $staged = New-StagedGeneration -Generation $generation -Binding $binding -Paths $Paths
   Install-BundleIntoDistro -Binding $binding -Archive $Archive -Sha256 $Sha256 -Generation $generation | Out-Null
-  Set-AdvertisedEndpoint -Binding $binding
   $code = Start-SetupWindow -Binding $binding -Staged $staged
   if ($code -ne 0) { return [pscustomobject]@{ ExitCode = $code; Generation = $generation; Staged = $staged } }
   $keep = @(Get-CommittedGenerations -Binding $binding)

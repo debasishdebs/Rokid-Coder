@@ -101,6 +101,45 @@ export function clearAdvertise(stateDir: string): void {
   rmSync(advertisePath(stateDir), { force: true });
 }
 
+/** What a WSL binding (user-setup.ps1's binding-<gen>.json) asks of the record: NAT's endpoint, "clear" in mirrored mode. */
+export type AdvertiseChange = { hosts: string[]; port: number } | "clear";
+
+/** Throws, before setup changes anything, for a NAT binding without a usable endpoint. */
+export function advertiseChangeFor(binding: Record<string, unknown>): AdvertiseChange | undefined {
+  if (binding.networkMode === "mirrored") return "clear";
+  if (binding.networkMode !== "nat") return undefined;
+  const hosts = binding.advertiseHosts;
+  if (!Array.isArray(hosts) || hosts.length === 0 || !hosts.every((host) => typeof host === "string" && isUsableIpv4(host))) {
+    throw new Error("The NAT binding has no usable advertiseHosts: run the Windows installer again");
+  }
+  const port = binding.advertisePort;
+  if (typeof port !== "number" || !validPort(port)) throw new Error("The NAT binding has no usable advertisePort");
+  return { hosts: hosts as string[], port };
+}
+
+/** The record's exact bytes (base64), or null when there is none: what setup's journal keeps to put back. */
+export function readAdvertiseBytes(file: string): string | null {
+  return existsSync(file) ? readFileSync(file).toString("base64") : null;
+}
+
+/** Puts back what readAdvertiseBytes returned, 0600, by temp file and rename; null removes the record. */
+export function restoreAdvertiseBytes(file: string, previous: string | null): void {
+  if (previous === null) {
+    rmSync(file, { force: true });
+    return;
+  }
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temp = `${file}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, Buffer.from(previous, "base64"), { mode: 0o600 });
+    chmodSync(temp, 0o600);
+    renameSync(temp, file);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+}
+
 /** The record for this config's state dir; a config without one (a partial test config) has none. */
 function recordFor(config: AgentConfig): AdvertiseRecord | undefined {
   const stateDir = config.rokidCoder?.stateDir;

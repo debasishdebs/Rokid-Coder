@@ -13,7 +13,7 @@ BeforeAll {
     Mock -ModuleName RokidCoder Assert-SessionUser { }
     Mock -ModuleName RokidCoder Resolve-Binding { New-TestBinding -Mode $Mode -Version $Version }
     Mock -ModuleName RokidCoder Install-BundleIntoDistro { 'extracted' }
-    Mock -ModuleName RokidCoder Set-AdvertisedEndpoint { }
+    Mock -ModuleName RokidCoder Get-AdvertiseHosts { @('192.168.1.40') }
     Mock -ModuleName RokidCoder Start-SetupWindow { $script:setupExit }
     Mock -ModuleName RokidCoder Get-CommittedGenerations { $script:committed }
     Mock -ModuleName RokidCoder Register-ScheduledTask { throw 'user-setup must never register the task' }
@@ -104,6 +104,29 @@ Describe 'staging' {
     Should -Invoke -ModuleName RokidCoder Register-ScheduledTask -Times 0 -Exactly
     Should -Invoke -ModuleName RokidCoder Invoke-Native -Times 0 -Exactly
     Should -Invoke -ModuleName RokidCoder Start-SetupWindow -Times 1 -Exactly -ParameterFilter { $Staged.TaskXml -eq $files[2] -and $Staged.Binding -eq $files[0] }
+  }
+
+  It 'nat_endpoint_rides_in_the_binding_and_is_never_written_before_setup' {
+    Set-InstallMocks
+    $script:setupExit = 0
+    $script:committed = @()
+    # No network to advertise: refused before anything is staged.
+    Mock -ModuleName RokidCoder Get-AdvertiseHosts { @() }
+    { Invoke-UserInstall -Version '1.0.0' -Mode nat -Distro $script:Distro -Archive 'C:\t\a.tar.gz' -Sha256 'abc' } | Should -Throw '*default gateway*'
+    @(Get-ChildItem -LiteralPath $env:LOCALAPPDATA -Recurse -File) | Should -BeNullOrEmpty
+    Mock -ModuleName RokidCoder Get-AdvertiseHosts { @('100.101.102.103', '192.168.1.40') }
+    $nat = Invoke-UserInstall -Version '1.0.0' -Mode nat -Distro $script:Distro -Archive 'C:\t\a.tar.gz' -Sha256 'abc' -Now ([datetime]::new(2026, 11, 15, 10, 0, 0, [DateTimeKind]::Utc))
+    $persisted = Get-Content -LiteralPath $nat.Staged.Binding -Raw -Encoding UTF8 | ConvertFrom-Json
+    @($persisted.advertiseHosts) | Should -Be @('100.101.102.103', '192.168.1.40')
+    $persisted.advertisePort | Should -Be 8794
+    Mock -ModuleName RokidCoder Get-AdvertiseHosts { @('192.168.1.40') }
+    $one = Invoke-UserInstall -Version '1.0.0' -Mode nat -Distro $script:Distro -Archive 'C:\t\a.tar.gz' -Sha256 'abc' -Now ([datetime]::new(2026, 11, 15, 11, 0, 0, [DateTimeKind]::Utc))
+    (Get-Content -LiteralPath $one.Staged.Binding -Raw -Encoding UTF8) | Should -Match '"advertiseHosts":\s*\[\s*"192\.168\.1\.40"\s*\]' -Because 'one host is still a JSON array'
+    $mirrored = Invoke-UserInstall -Version '1.0.0' -Mode mirrored -Distro $script:Distro -Archive 'C:\t\a.tar.gz' -Sha256 'abc' -Now ([datetime]::new(2026, 11, 15, 12, 0, 0, [DateTimeKind]::Utc))
+    (Get-Content -LiteralPath $mirrored.Staged.Binding -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties.Name | Should -Not -Contain 'advertiseHosts'
+    # Nothing ran rokid-setup advertise, or anything else in WSL, before the transaction (Invoke-Native throws if called).
+    Should -Invoke -ModuleName RokidCoder Invoke-Native -Times 0 -Exactly
+    (Get-Command -Module RokidCoder -Name Set-AdvertisedEndpoint -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
   }
 
   It 'same_version_repair_failure_restores_original_binding_launcher_and_task' {
