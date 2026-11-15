@@ -190,12 +190,13 @@ test("steer_secret_is_32_random_bytes_stored_0600_and_rotates", async () => {
 
 test("pairing_payload_includes_fp", async () => {
   const agent = await agentCert();
-  const payload = JSON.parse(pairingPayload({ ...config, wsPort: 8792 }, agent.fingerprint256, STEER));
+  const payload = JSON.parse(pairingPayload({ ...config, wsPort: 8792 }, agent.fingerprint256));
   assert.equal(payload.fp, agent.fingerprint256);
-  assert.equal(payload.steer, STEER);
-  assert.equal(payload.token, TOKEN);
   assert.equal(payload.port, 8792);
-  assert.equal(payload.kind, "nexus-agentd");
+  assert.equal(payload.v, 2);
+  assert.equal(payload.kind, "rokid-coder");
+  // v2 carries no secret: the credentials come only after the SAS code check.
+  assert.equal("steer" in payload || "token" in payload, false);
 });
 
 test("isSteeringAllowed_is_true_only_for_tls", () => {
@@ -371,26 +372,21 @@ function dialTls(link, server, extra = {}) {
   link.connectToPhone({ host: "127.0.0.1", port: server.port, name: "phone", ...extra });
 }
 
-test("first_authenticated_hello_pins_the_phone_and_trusts_the_link", async () => {
+test("a_window_never_pins_a_phone_on_its_hello (phonelink)", async () => {
   await withTempDir(async (dir) => {
     const file = path.join(dir, "tls", "phone-pins.json");
     const phoneId = await phoneCert("phone");
     const server = await listenAsPhone(phoneId);
     const pins = new PinStore(file);
-    pins.armAllowNext(Date.now()); // `pair`
+    pins.armAllowNext(Date.now()); // a window, but no SAS session to pair through
     const { link, logs, stop } = newLink(pins);
     try {
-      assert.equal(pins.isEmpty(), true);
       dialTls(link, server);
-      await waitUntil(() => link.trustedConnected, "link never became trusted");
-      assert.deepEqual(pins.list(), [phoneId.fingerprint256]);
-      assert.deepEqual(new PinStore(file).list(), [phoneId.fingerprint256], "on disk");
-      const pinned = logs.entries.find((e) => e.event === "phone_link_pinned");
-      assert.equal(
-        pinned.meta.fingerprint,
-        phoneId.fingerprint256.replace(/:/g, "").slice(0, 16),
-        "the first 16 hex digits, to compare with the phone's screen",
-      );
+      await waitUntil(() => logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "not refused");
+      await settle(40);
+      assert.deepEqual(server.seen.lines, [], "no hello, so no token");
+      assert.equal(pins.isEmpty(), true, "a new phone joins only through SAS");
+      assert.equal(link.trustedConnected, false);
       assert.equal(JSON.stringify(logs.entries).includes(TOKEN), false, "the token is never logged");
     } finally {
       stop();
@@ -421,7 +417,7 @@ test("second_host_with_unknown_cert_refused_before_hello_no_token_sent", async (
     assert.equal(JSON.stringify(logs.entries).includes(TOKEN), false);
     assert.deepEqual(pins.list(), [pinned.fingerprint256], "the set is untouched");
     assert.equal(operator.length, 1);
-    assert.match(operator[0], /phones allow-next/);
+    assert.match(operator[0], /agentd pair/);
 
     // Backed off: an immediate second dial does not even connect.
     const before = server.seen.connections;
@@ -506,12 +502,10 @@ test("an_unprefixed_target_is_dialled_over_tls_once_a_phone_is_trusted", async (
   }
 });
 
-test("allow_next_window_admits_one_new_phone_then_closes", async () => {
+test("allow_next_window_without_sas_still_refuses_an_unknown_phone", async () => {
   const first = await phoneCert("first");
   const second = await phoneCert("second");
-  const third = await phoneCert("third");
   const secondServer = await listenAsPhone(second);
-  const thirdServer = await listenAsPhone(third);
   const pins = new PinStore();
   pins.add(first.fingerprint256);
   let clock = 1_000_000;
@@ -522,29 +516,18 @@ test("allow_next_window_admits_one_new_phone_then_closes", async () => {
     await waitUntil(() => logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "not refused");
     assert.equal(pins.has(second.fingerprint256), false);
 
-    // Armed: it is admitted, once.
+    // Armed: still refused before any hello, since trust comes only from a SAS pairing.
     clock += 100_000; // past the refusal backoff
     pins.armAllowNext(clock);
+    const refusals = () => logs.entries.filter((e) => e.event === "phone_link_untrusted_peer").length;
     dialTls(link, secondServer);
-    await waitUntil(() => link.trustedConnected, "the window did not admit the phone");
-    assert.equal(pins.has(second.fingerprint256), true);
-    assert.equal(pins.allowNextOpen(clock), false, "admitting one phone closes the window");
-    link.stop();
-
-    // A third phone is refused: the window was for one.
-    const again = newLink(pins, { now: () => clock });
-    dialTls(again.link, thirdServer);
-    await waitUntil(
-      () => again.logs.entries.some((e) => e.event === "phone_link_untrusted_peer"),
-      "the third phone was not refused",
-    );
-    assert.equal(pins.has(third.fingerprint256), false);
-    assert.deepEqual(thirdServer.seen.lines, []);
-    again.stop();
+    await waitUntil(() => refusals() === 2, "the armed window let an unknown phone in");
+    await settle(40);
+    assert.equal(pins.has(second.fingerprint256), false);
+    assert.deepEqual(secondServer.seen.lines, []);
   } finally {
     stop();
     secondServer.close();
-    thirdServer.close();
   }
 });
 
@@ -588,40 +571,20 @@ test("fresh_install_without_window_refuses_tls_peer", async () => {
   });
 });
 
-test("pair_arms_window_and_admits_one", async () => {
+test("pair_without_a_running_agentd_says_so_and_admits_nobody", async () => {
   await withTempDir(async (dir) => {
     const stateDir = path.join(dir, "nexus-agentd");
     const coderDir = path.join(dir, "rokid-coder");
     const { ensureConfig, saveConfig } = require("../dist/config.js");
     saveConfig({ ...ensureConfig(stateDir), rokidCoder: { stateDir: coderDir } }, stateDir);
-    const { stdout } = await runCli(coderDir, ["pair"]);
-    assert.ok(
-      stdout.includes(
-        "Phone pairing window open for 2 minutes. When your phone connects, agentd logs its fingerprint; compare it with the one shown on the phone.",
-      ),
-      stdout,
-    );
-    assert.equal(stdout.includes("<"), false, "no placeholder is printed");
-    const file = path.join(coderDir, "tls", "phone-pins.json");
-    const pins = new PinStore(file);
-    assert.equal(pins.allowNextOpen(Date.now()), true, "pairing opened the window");
-    assert.equal(pins.allowNextOpen(Date.now() + 2 * 60_000 + 1), false, "for two minutes");
-
-    const first = await phoneCert("first");
-    const second = await phoneCert("second");
-    const firstServer = await listenAsPhone(first);
-    const secondServer = await listenAsPhone(second);
-    const one = newLink(pins);
-    dialTls(one.link, firstServer);
-    await waitUntil(() => one.link.trustedConnected, "the window did not admit the phone");
-    assert.deepEqual(new PinStore(file).list(), [first.fingerprint256]);
-    one.stop();
-
-    const two = newLink(pins);
-    dialTls(two.link, secondServer);
-    await waitUntil(() => two.logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "a second phone got in");
-    assert.deepEqual(secondServer.seen.lines, []);
-    two.stop();
+    // The code check runs in agentd, so `pair` is its client and needs it running.
+    const failure = await runCli(coderDir, ["pair"]).then(() => undefined, (error) => error);
+    assert.ok(failure, "pair exits non-zero without agentd");
+    assert.match(failure.stderr, /agentd isn't running/);
+    assert.equal(failure.stdout.includes("<"), false, "no placeholder is printed");
+    const line = JSON.parse(failure.stdout.split("\n")[0]);
+    assert.deepEqual(Object.keys(line).sort(), ["fp", "host", "kind", "port", "v"]);
+    assert.equal(new PinStore(path.join(coderDir, "tls", "phone-pins.json")).isEmpty(), true);
   });
 });
 
@@ -632,7 +595,7 @@ test("forget_only_phone_does_not_retofu_on_redial", async () => {
     const server = await listenAsPhone(phoneId);
     const pins = new PinStore(file);
     let clock = 1_000_000;
-    pins.armAllowNext(clock);
+    pins.add(phoneId.fingerprint256, clock); // paired earlier, by SAS
     const { link, logs, stop } = newLink(pins, { now: () => clock });
     dialTls(link, server);
     await waitUntil(() => link.trustedConnected, "link never became trusted");
@@ -658,7 +621,7 @@ test("forget_only_phone_does_not_retofu_on_redial", async () => {
   });
 });
 
-test("forget_all_then_allow_next_admits_one", async () => {
+test("forget_all_then_allow_next_still_needs_sas", async () => {
   await withTempDir(async (dir) => {
     const file = path.join(dir, "tls", "phone-pins.json");
     const first = await phoneCert("first");
@@ -674,13 +637,15 @@ test("forget_all_then_allow_next_admits_one", async () => {
     await waitUntil(() => one.logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "not refused");
     assert.deepEqual(firstServer.seen.lines, [], "no hello without allow-next");
 
-    // `phones allow-next`: one phone, and the window closes behind it.
+    // `phones allow-next` opens a window, but a phone gets in only through a SAS pairing in it.
     clock += 100_000;
     new PinStore(file).armAllowNext(clock);
+    const refusals = () => one.logs.entries.filter((e) => e.event === "phone_link_untrusted_peer").length;
     dialTls(one.link, firstServer);
-    await waitUntil(() => one.link.trustedConnected, "allow-next did not admit the phone");
-    assert.deepEqual(pins.list(), [first.fingerprint256]);
-    assert.equal(pins.allowNextOpen(clock), false);
+    await waitUntil(() => refusals() === 2, "allow-next alone admitted the phone");
+    await settle(40);
+    assert.deepEqual(firstServer.seen.lines, []);
+    assert.equal(pins.isEmpty(), true);
     one.link.stop();
 
     const two = newLink(pins, { now: () => clock });
@@ -697,7 +662,7 @@ test("stalled_tls_handshake_times_out_and_redial_resumes", async () => {
   const phoneId = await phoneCert("phone");
   const real = await listenAsPhone(phoneId);
   const pins = new PinStore();
-  pins.armAllowNext(Date.now());
+  pins.add(phoneId.fingerprint256);
   const { link, logs, stop } = newLink(pins, { helloTimeoutMs: 60 });
   try {
     link.connectToPhone({ host: "127.0.0.1", port: silentPort, name: "stall" });
@@ -721,7 +686,7 @@ test("a_hello_that_is_never_acknowledged_pins_nothing", async () => {
   const phoneId = await phoneCert("phone");
   const server = tlsServer({ key: phoneId.key, cert: phoneId.cert }, (socket) => {
     socket.on("error", () => {});
-    socket.on("data", () => {}); // reads the hello, never answers
+    socket.on("data", () => {}); // reads whatever comes, never answers
   });
   const port = await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
   const pins = new PinStore();
@@ -729,7 +694,7 @@ test("a_hello_that_is_never_acknowledged_pins_nothing", async () => {
   const { link, stop } = newLink(pins, { helloTimeoutMs: 60 });
   try {
     link.connectToPhone({ host: "127.0.0.1", port, name: "phone" });
-    await waitUntil(() => link.socket === undefined, "the hello deadline did not fire");
+    await waitUntil(() => link.socket === undefined, "the dial was not ended");
     assert.equal(pins.isEmpty(), true, "an unauthenticated peer is never pinned");
     assert.equal(link.trustedConnected, false);
   } finally {
@@ -738,59 +703,35 @@ test("a_hello_that_is_never_acknowledged_pins_nothing", async () => {
   }
 });
 
-test("a_pin_store_that_cannot_save_leaves_the_link_untrusted_and_closed", async () => {
+test("a_pin_store_that_cannot_save_a_promotion_leaves_the_link_untrusted_and_closed", async () => {
+  // The one write left on this path: a provisional phone's proof makes its pin durable.
+  const { PairingCoordinator } = require("../dist/pairing/coordinator.js");
+  const { ProvisionalPins } = require("../dist/pairing/provisional-pins.js");
+  const { commitProof } = require("./helpers/sas-phone.js");
+  const agent = await agentCert();
   const phoneId = await phoneCert("phone");
-  const server = await listenAsPhone(phoneId);
+  const provisional = new ProvisionalPins();
+  provisional.add(phoneId.fingerprint256, "0123456789abcdef", Date.now());
   const pins = new PinStore();
-  pins.armAllowNext(Date.now());
   pins.add = () => { throw new Error("disk full"); };
-  const { link, logs, stop } = newLink(pins);
+  const logs = loggerHarness();
+  const pairing = new PairingCoordinator({ config, pins, provisional, logger: logs.logger, steer: () => STEER, wsHost: () => "127.0.0.1" });
+  track(() => pairing.dispose());
+  const server = await listenAsPhone(phoneId);
+  const { link, logs: linkLogs, stop } = newLink(pins, { pairing, clientCert: { key: agent.key, cert: agent.cert } });
   try {
     dialTls(link, server);
-    await waitUntil(() => logs.entries.some((e) => e.event === "phone_link_pin_store_failed"), "not reported");
-    await settle(30);
-    assert.equal(logs.entries.some((e) => e.event === "phone_link_pins_unreadable"), false, "its own event, not a read failure");
+    await waitUntil(() => server.seen.lines.some((f) => f.type === "pair_commit_query"), "no commit query");
+    server.send({ type: "pair_committed", v: 2, attempt: "0123456789abcdef", proof: commitProof(STEER, "0123456789abcdef", agent.fingerprint256, phoneId.fingerprint256) });
+    await waitUntil(() => logs.entries.some((e) => e.event === "pairing_promote_failed"), "not reported");
+    await waitUntil(() => link.socket === undefined, "the link was not closed");
+    assert.equal(server.seen.lines.some((f) => f.type === "hello"), false, "no hello for a pin that was not saved");
+    assert.equal(linkLogs.entries.some((e) => e.event === "phone_link_pins_unreadable"), false, "its own event, not a read failure");
     assert.equal(link.trustedConnected, false);
-    assert.equal(link.connected, false);
   } finally {
     stop();
     server.close();
   }
-});
-
-test("pin_write_failure_does_not_trust", async () => {
-  await withTempDir(async (dir) => {
-    const file = path.join(dir, "tls", "phone-pins.json");
-    const known = await phoneCert("known");
-    const phoneId = await phoneCert("phone");
-    const server = await listenAsPhone(phoneId);
-    let failing = false;
-    const pins = new PinStore(file, {
-      writeFile: (target, content) => {
-        if (failing) throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
-        fs.writeFileSync(target, content);
-      },
-    });
-    pins.add(known.fingerprint256);
-    pins.armAllowNext(Date.now());
-    failing = true;
-    const { link, logs } = newLink(pins);
-    const failures = () => logs.entries.filter((e) => e.event === "phone_link_pin_store_failed").length;
-    dialTls(link, server);
-    await waitUntil(() => failures() === 1, "the failed write was not reported");
-    assert.equal(pins.has(phoneId.fingerprint256), false, "a pin that was not saved is not kept in memory");
-    assert.equal(link.trustedConnected, false);
-
-    // The redial finds nothing to trust it by and tries to pin it again.
-    await waitUntil(() => link.socket === undefined, "the refused link was not closed");
-    await settle(40);
-    dialTls(link, server);
-    await waitUntil(() => failures() === 2, "the redial was not refused on the same failure");
-    await settle(30);
-    assert.equal(link.trustedConnected, false, "never trusted while the pin cannot be saved");
-    assert.equal(pins.has(phoneId.fingerprint256), false);
-    assert.deepEqual(new PinStore(file).list(), [known.fingerprint256]);
-  });
 });
 
 test("an_unreadable_pins_file_refuses_every_dial", async () => {
@@ -936,7 +877,7 @@ test("forget_all_disconnects_all", async () => {
     const phoneId = await phoneCert("phone");
     const server = await listenAsPhone(phoneId);
     const pins = new PinStore(file);
-    pins.armAllowNext(Date.now());
+    pins.add(phoneId.fingerprint256);
     const { link, stop } = newLink(pins);
     try {
       dialTls(link, server);
@@ -951,31 +892,21 @@ test("forget_all_disconnects_all", async () => {
   });
 });
 
-test("allow_next_is_consumed_by_a_first_admission_through_the_empty_set", async () => {
+test("allow_next_alone_admits_nobody_through_the_empty_set", async () => {
   const first = await phoneCert("first");
-  const second = await phoneCert("second");
   const firstServer = await listenAsPhone(first);
-  const secondServer = await listenAsPhone(second);
   const pins = new PinStore();
   pins.armAllowNext(Date.now());
   const one = newLink(pins);
   try {
     dialTls(one.link, firstServer);
-    await waitUntil(() => one.link.trustedConnected, "first phone was not admitted");
-    assert.equal(pins.allowNextOpen(Date.now()), false, "the window went with the admission");
-    one.link.stop();
-    const two = newLink(pins);
-    try {
-      dialTls(two.link, secondServer);
-      await waitUntil(() => two.logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "second not refused");
-      assert.deepEqual(secondServer.seen.lines, []);
-    } finally {
-      two.stop();
-    }
+    await waitUntil(() => one.logs.entries.some((e) => e.event === "phone_link_untrusted_peer"), "first phone was admitted");
+    await settle(40);
+    assert.deepEqual(firstServer.seen.lines, []);
+    assert.equal(pins.isEmpty(), true);
   } finally {
     one.stop();
     firstServer.close();
-    secondServer.close();
   }
 });
 
@@ -1127,23 +1058,16 @@ test("wss_with_unpinned_cert_outside_window_gets_repair_needed", async () => {
   assert.equal(JSON.stringify(logs.entries).includes(stranger.fingerprint256), false, "never the full fingerprint");
 });
 
-test("wss_with_unpinned_cert_inside_window_is_pinned_and_steers", async () => {
+test("wss_with_unpinned_cert_inside_window_is_never_pinned_by_its_hello", async () => {
   const pins = new PinStore();
   pins.add((await phoneCert("first")).fingerprint256);
   pins.armAllowNext(Date.now());
-  const { hub, logs, agent } = await newHub({ pins });
+  const { hub, agent } = await newHub({ pins });
   const newcomer = await phoneCert("newcomer");
-  const phone = await connectPhone(hub, agent, { cert: newcomer });
-  assert.equal(phone.frames.find((f) => f.type === "hello_ack").steering, true);
-  assert.equal(pins.has(newcomer.fingerprint256), true, "pinned at its hello");
-  assert.equal(pins.allowNextOpen(Date.now()), false, "the window admitted exactly one");
-  assert.equal(hub.hasTrustedClient, true);
-  assert.equal(hub.sendApprovalRequest({ type: "approval_request", requestId: "r" }), true);
-  await phone.waitFor("approval_request");
-  assert.ok(logs.entries.some((e) => e.event === "ws_phone_pinned" && e.meta.fingerprint === short(newcomer.fingerprint256)));
-  // A second stranger right after finds the window shut.
-  const { reject } = await refusedHello(hub, agent, { cert: await phoneCert("late") });
-  assert.deepEqual(reject, REPAIR_NEEDED);
+  const { reject } = await refusedHello(hub, agent, { cert: newcomer });
+  assert.deepEqual(reject, REPAIR_NEEDED, "a new phone pairs by SAS, never by a hello");
+  assert.equal(pins.has(newcomer.fingerprint256), false);
+  assert.equal(hub.hasTrustedClient, false);
 });
 
 test("wss_with_pinned_cert_but_wrong_steer_gets_repair_needed", async () => {
@@ -1171,14 +1095,13 @@ test("failed_hello_inside_window_leaves_pins_and_window_unchanged", async () => 
   assert.deepEqual(wrongToken.reject, { type: "hello_reject", v: 2, reason: "bad_token" });
   assert.deepEqual(pins.list(), before, "a wrong token pins nothing");
   assert.equal(pins.allowNextOpen(Date.now()), true, "and leaves the window open");
-  // The window is still good for the real phone.
-  await connectPhone(hub, agent, { cert: newcomer });
-  assert.equal(pins.has(newcomer.fingerprint256), true);
 });
 
 test("steer_rotation_during_admission_leaves_pins_and_window_unchanged", async () => {
   const pins = new PinStore();
-  pins.add((await phoneCert("first")).fingerprint256);
+  const newcomer = await phoneCert("newcomer");
+  // A pinned phone whose secret is rotated mid-hello: refused at the commit point.
+  pins.add(newcomer.fingerprint256);
   pins.armAllowNext(Date.now());
   // The secret is rotated just after the hello's first read of it, while the phone is being admitted.
   let reads = 0;
@@ -1188,12 +1111,11 @@ test("steer_rotation_during_admission_leaves_pins_and_window_unchanged", async (
     trustCheckIntervalMs: 3_600_000,
   });
   const before = pins.list();
-  const newcomer = await phoneCert("newcomer");
   const { reject, code } = await refusedHello(hub, agent, { cert: newcomer });
   assert.ok(reads >= 2, "the secret was read again at the commit point");
   assert.deepEqual(reject, REPAIR_NEEDED);
   assert.equal(code, 4403);
-  assert.deepEqual(pins.list(), before, "the refused phone was not pinned");
+  assert.deepEqual(pins.list(), before, "the pins are unchanged");
   assert.equal(pins.allowNextOpen(Date.now()), true, "and the window is still open");
 });
 
@@ -1582,7 +1504,7 @@ function runCli(coderDir, args) {
       process.execPath,
       [path.join(__dirname, "..", "dist", "cli.js"), ...args],
       { env: { ...process.env, HOME: root, NEXUS_AGENTD_STATE_DIR: path.join(root, "nexus-agentd") }, timeout: 10_000 },
-      (error, stdout, stderr) => (error ? reject(Object.assign(error, { stderr })) : resolve({ stdout, stderr })),
+      (error, stdout, stderr) => (error ? reject(Object.assign(error, { stdout, stderr })) : resolve({ stdout, stderr })),
     );
   });
 }
@@ -1975,18 +1897,31 @@ test("expired_phone_reconnecting_before_sweep_is_refused (wshub)", async () => {
 
 test("a_phone_that_expired_can_pair_again_through_the_window", async () => {
   await withTempDir(async (dir) => {
+    const { PairingCoordinator } = require("../dist/pairing/coordinator.js");
+    const { ProvisionalPins } = require("../dist/pairing/provisional-pins.js");
+    const { wssSasPhone } = require("./helpers/sas-phone.js");
     const file = pinsFileOf(dir);
     const phoneId = await phoneCert("phone");
     const now = Date.now();
     const pins = new PinStore(file);
     pins.add(phoneId.fingerprint256, now - 20 * DAY);
-    pins.armAllowNext(now);
-    const { hub, agent } = await newHub({ pins, now: () => now });
-    const phone = await connectPhone(hub, agent, { cert: phoneId });
-    assert.equal(phone.frames.find((f) => f.type === "hello_ack").steering, true);
+    const logs = loggerHarness();
+    const pairing = new PairingCoordinator({ config, pins, provisional: new ProvisionalPins(), logger: logs.logger, steer: () => STEER, wsHost: () => "127.0.0.1" });
+    track(() => pairing.dispose());
+    const { hub, agent } = await newHub({ pins, pairing, now: () => now });
+    // The expired phone's own hello is refused (and forgets it on the spot); it pairs again by SAS.
+    assert.deepEqual((await refusedHello(hub, agent, { cert: phoneId })).reject, REPAIR_NEEDED);
+    assert.equal(pins.has(phoneId.fingerprint256), false);
+    pairing.openWindow();
+    const phone = await wssSasPhone({ port: hub.port(), cert: phoneId });
+    track(() => phone.close());
+    await phone.waitFor(() => phone.state.code !== undefined, "no code");
+    await waitUntil(() => pairing.status()?.state === "AWAITING_CONFIRM", "no code on agentd");
+    pairing.confirm(pairing.status().attempt, true);
+    phone.confirm(true);
+    await waitUntil(() => new PinStore(file).has(phoneId.fingerprint256), "not pinned again");
     const [entry] = new PinStore(file).entries();
-    assert.equal(entry.lastUsedAt, now, "pinned afresh, as new");
-    assert.equal(entry.addedAt, now);
+    assert.ok(entry.addedAt >= now, "pinned afresh, as new");
   });
 });
 

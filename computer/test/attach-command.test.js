@@ -196,7 +196,7 @@ test("rokid_pair_command_opens_window_and_shows_only_phone_step", async () => {
     assert.deepEqual(reply, { decision: "block", reason: PAIR_TEXT });
     assert.equal(
       PAIR_TEXT,
-      "Pairing window open: Open Agents on your phone → Add a computer within 2 minutes. The phone and this computer must be on the same Wi-Fi or on Tailscale.",
+      "Compare the 6-digit code on your phone with the one in a terminal (run agentd pair) — confirm on the phone",
     );
     assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), true, "the allow-next window is open");
     assert.equal(pinsOf(coderDir).allowNextOpen(Date.now() + 2 * 60_000 + 1), false, "for two minutes");

@@ -7,12 +7,14 @@ import path from "node:path";
 import type { TLSSocket } from "node:tls";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { NotAttachedError } from "./attach-registry";
+import type { PairingCoordinator, PairingSession } from "./pairing/coordinator";
 import { gateFrame, linkTrustFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
 import {
   DAY_MS,
   DEFAULT_PAIRING_TTL_DAYS,
   PinStore,
   digestMatchesSecret,
+  fingerprintOfCert,
   normalizeFingerprint,
   secretDigest,
   secretMatches,
@@ -56,9 +58,12 @@ const PLAINTEXT_ERRORS = new Set([
 /** Why a hello was refused, as the phone is told: re-pair, or the token is wrong. */
 type HelloRejectReason = "repair_needed" | "bad_token";
 
-/** A hello's checks: admitted (its cert already pinned or not), or why not, for the phone and the log. */
+/**
+ * A hello's checks: admitted (its cert pinned, or provisional and now proving
+ * it stored the credentials), or why not, for the phone and the log.
+ */
 type Admission =
-  | { ok: true; pinned: boolean }
+  | { ok: true; recovery: boolean }
   | { ok: false; reason: HelloRejectReason; log: string };
 
 function refuseHttp(_request: IncomingMessage, response: ServerResponse): void {
@@ -77,6 +82,8 @@ interface ClientState {
   steerDigest?: Buffer;
   /** The SHA-256 of the client cert the phone presented, or undefined when it presented none. */
   peerFingerprint?: string;
+  /** Set when this unpinned peer reached an open pairing window: every frame is the SAS session's. */
+  sas?: PairingSession;
   channel: PhoneChannel;
   lastPongAt: number;
   helloTimer: NodeJS.Timeout;
@@ -107,10 +114,16 @@ export interface WsHubOptions {
   tls?: { key: string; cert: string };
   /**
    * The trusted phone certificates, shared with PhoneLink. A wss client gets in
-   * only with a pinned client cert, or inside the pairing window, where its
-   * hello pins it. Without a store the set lasts only as long as the process.
+   * only with a pinned client cert. Without a store the set lasts only as long
+   * as the process.
    */
   pins?: PinStore;
+  /**
+   * The pairing window: an unpinned client cert that reaches it gets a SAS
+   * session instead of a hello, and nothing else. Without it no new phone can
+   * pair over wss.
+   */
+  pairing?: PairingCoordinator;
   /** How long a pairing may go unused before the phone must pair again; read live, since the phone can change it. */
   pairingTtlMs?: () => number;
   /** Test seam: the clock the pairing TTL is judged by. */
@@ -164,6 +177,7 @@ export class WsHub {
   private readonly pins: PinStore;
   private readonly now: () => number;
   private readonly tls: { key: string; cert: string };
+  private readonly agentdFingerprint: string;
 
   constructor(
     private readonly config: AgentConfig,
@@ -175,6 +189,7 @@ export class WsHub {
       throw new Error("WsHub needs agentd's TLS identity: the phone port is wss only");
     }
     this.tls = options.tls;
+    this.agentdFingerprint = fingerprintOfCert(options.tls.cert);
     this.pins = options.pins ?? new PinStore();
     this.now = options.now ?? Date.now;
     this.unsubscribeUpsert = store.onUpsert((session) => this.broadcastUpsert(session));
@@ -301,6 +316,10 @@ export class WsHub {
       lastUpserts: new Map(),
     };
     this.clients.set(socket, state);
+    state.sas = this.pairingSession(socket, state);
+    if (state.sas) {
+      clearTimeout(helloTimer);
+    }
 
     socket.on("message", (data, isBinary) => this.onMessage(socket, data, isBinary));
     socket.on("error", (error) => {
@@ -315,15 +334,58 @@ export class WsHub {
         }
       }
       this.clients.delete(socket);
+      state?.sas?.disconnected();
       if (state?.authenticated) {
         this.options.onClientDisconnected?.();
       }
     });
   }
 
+  /**
+   * Before a pin, a peer's cert is accepted only for SAS frames, and only
+   * while the window is open (or an attempt runs, which this second peer then
+   * aborts). A pinned or provisional cert is never a pairing peer.
+   */
+  private pairingSession(socket: WebSocket, state: ClientState): PairingSession | undefined {
+    const pairing = this.options.pairing;
+    const fingerprint = state.peerFingerprint;
+    if (!pairing || !fingerprint || this.isPinned(state) || pairing.provisionalFor(fingerprint) || !pairing.accepts()) {
+      return undefined;
+    }
+    const session = pairing.beginSession({
+      transport: "wshub",
+      agentdFp: this.agentdFingerprint,
+      phoneFp: fingerprint,
+      send: (frame) => this.send(socket, frame),
+      close: () => {
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+          socket.close(1000, "pairing session ended");
+        }
+      },
+    });
+    if (!session) {
+      socket.close(CLOSE_UNTRUSTED, "pairing refused");
+    }
+    return session;
+  }
+
   private onMessage(socket: WebSocket, data: RawData, isBinary: boolean): void {
     const state = this.clients.get(socket);
     if (!state) {
+      return;
+    }
+    if (state.sas) {
+      // Anything that is not a SAS frame ends the attempt.
+      let frame: Record<string, unknown> = {};
+      if (!isBinary) {
+        try {
+          const parsed: unknown = JSON.parse(data.toString());
+          frame = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+        } catch {
+          frame = {};
+        }
+      }
+      state.sas.receive(frame);
       return;
     }
     if (isBinary) {
@@ -433,11 +495,11 @@ export class WsHub {
       if (verdict.ok) {
         verdict = this.admission(message, fingerprint);
       }
-      if (verdict.ok && !verdict.pinned && fingerprint) {
-        // Adding also closes the allow-next window: one admission per arming.
-        // A failed write keeps nothing, so a refusal here changes nothing either.
-        this.pins.add(fingerprint, this.now());
-        this.logger.info("ws_phone_pinned", { fingerprint: short });
+      // Recovery admission (6a-R4′): a provisional cert's hello with the token
+      // and the steering secret proves the phone stored the credentials, so its
+      // pin becomes durable here. A promotion that fails admits nobody.
+      if (verdict.ok && verdict.recovery && fingerprint && !this.options.pairing?.promote(fingerprint, "recovery_hello")) {
+        verdict = { ok: false, reason: "repair_needed", log: "pins_unavailable" };
       }
     } catch (error) {
       // Fail closed: with the set unreadable, or a pin it cannot keep, nobody can be told from a stranger.
@@ -522,11 +584,14 @@ export class WsHub {
       return { ok: false, reason: "repair_needed", log: "no_client_cert" };
     }
     // Stale counts as unpinned (and is forgotten on the spot): an expired phone cannot renew itself by reconnecting.
-    const pinned = this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs());
-    if (!pinned && !this.pins.allowNextOpen(this.now())) {
-      return { ok: false, reason: "repair_needed", log: "unpinned_cert" };
+    // A new phone never gets in by a hello: it pairs by SAS, so a window no longer trusts on first use.
+    if (this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs())) {
+      return { ok: true, recovery: false };
     }
-    return { ok: true, pinned };
+    if (this.options.pairing?.provisionalFor(fingerprint)) {
+      return { ok: true, recovery: true };
+    }
+    return { ok: false, reason: "repair_needed", log: "unpinned_cert" };
   }
 
   private pairingTtlMs(): number {

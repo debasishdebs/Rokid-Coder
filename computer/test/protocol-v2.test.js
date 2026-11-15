@@ -10,6 +10,7 @@ const { PhoneSettingsStore, DEFAULT_ALERT_TIMINGS } = require("../dist/phone-set
 const { authorize, classifyFrame, gateFrame } = require("../dist/protocol-v2.js");
 const { buildFrame } = require("./fake-phone.js");
 const { withDaemon, pinFakePhone, postHook, settle } = require("./helpers/daemon.js");
+const { phoneCert } = require("./helpers/tls.js");
 
 const TRANSPORTS = ["phonelink", "wshub"];
 
@@ -948,12 +949,16 @@ test("fake_phone_cli_pairs_prints_frames_and_sends_a_frame_from_argv", async () 
     { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
     async ({ daemon, httpPort, wsPort, token, steer, agentFingerprint, coderDir }) => {
       await postHook(httpPort, sessionStart("s1"));
-      // The CLI phone makes its own cert, so it is admitted the way a new phone is: inside the window.
-      pinFakePhone({ coderDir }, { arm: true });
+      // The CLI phone presents a cert paired earlier: a window no longer pins a new phone on its hello.
+      const cli = await phoneCert("cli-phone");
+      await fsp.writeFile(path.join(coderDir, "cli-phone.crt"), cli.cert);
+      await fsp.writeFile(path.join(coderDir, "cli-phone.key"), cli.key);
+      pinFakePhone({ coderDir, phone: { fingerprint: cli.fingerprint256 } });
       const child = spawn(process.execPath, [
         path.join(__dirname, "fake-phone.js"),
         "--transport", "wshub", "--port", String(wsPort), "--token", token,
         "--pin", agentFingerprint, "--wait", "1500",
+        "--cert-file", path.join(coderDir, "cli-phone.crt"), "--key-file", path.join(coderDir, "cli-phone.key"),
         "mode_set", "claude:s1", "acceptEdits",
       ], { env: { ...process.env, FAKE_PHONE_STEER: steer } });
       let out = "";

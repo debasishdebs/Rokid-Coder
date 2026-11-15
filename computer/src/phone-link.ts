@@ -11,6 +11,7 @@ import type {
 } from "./approval-manager";
 import { NotAttachedError } from "./attach-registry";
 import { parsePhoneTarget, readPhoneLinkConfig } from "./config";
+import type { PairingCoordinator, PairingSession } from "./pairing/coordinator";
 import { gateFrame, linkTrustFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
 import {
   listDirectory,
@@ -25,7 +26,7 @@ import {
   DAY_MS,
   DEFAULT_PAIRING_TTL_DAYS,
   PinStore,
-  pinnedFingerprint,
+  fingerprintOfCert,
   shortFingerprint,
   watchFiles,
 } from "./tls";
@@ -85,12 +86,18 @@ export interface PhoneLinkOptions {
   onTrustRevoked?: () => void;
   /**
    * The trusted phone certificates. A link is trusted, and so may steer, only
-   * when it is TLS and its peer cert is in the set. A cert joins the set only on
-   * the first authenticated hello inside an open pairing window (`pair` or
-   * `phones allow-next`); a fresh install has none open and trusts nobody.
-   * Without a store the set lasts only as long as the process.
+   * when it is TLS and its peer cert is in the set. A cert joins the set only
+   * through a SAS pairing (`pairing`), never by a hello. Without a store the
+   * set lasts only as long as the process.
    */
   pins?: PinStore;
+  /**
+   * The pairing window. Inside it, a phone whose cert is not pinned and that
+   * says its door is open (or that the owner configured by address) is dialled
+   * for a SAS session instead of a hello. A phone pinned only provisionally
+   * must prove it stored its credentials before it is sent a hello.
+   */
+  pairing?: PairingCoordinator;
   /** How long a pairing may go unused before the phone must pair again; read live, since the phone can change it. */
   pairingTtlMs?: () => number;
   /**
@@ -123,12 +130,17 @@ interface PhoneAnnouncement {
   host: string;
   port: number;
   name: string;
+  /** The phone said its door is open (Add a computer, or onboarding's pairing step). */
+  pairing?: boolean;
 }
 
 /** A UDP announcement also says whether the phone serves TLS: false when the field is absent. */
 interface UdpAnnouncement extends PhoneAnnouncement {
   tls: boolean;
 }
+
+/** What a dialled peer's cert allows before anything is written to it. */
+type PeerVerdict = "pinned" | "provisional" | "pairing";
 
 interface RejectedPhone {
   retryAt: number;
@@ -154,6 +166,7 @@ function parseAnnouncement(raw: Buffer, host: string): UdpAnnouncement | undefin
       port,
       name: typeof record.name === "string" ? record.name.slice(0, 64) : "phone",
       tls: record.tls === true,
+      pairing: record.pairing === true,
     };
   } catch {
     return undefined;
@@ -230,8 +243,12 @@ export class PhoneLink {
   private authenticated = false;
   /** This connection's peer cert, set once a TLS handshake has passed the pin check. */
   private peerFingerprint?: string;
-  /** This connection proved itself: TLS, pin matched or first-used, hello accepted. */
+  /** This connection proved itself: TLS, pin matched, hello accepted. */
   private linkTrusted = false;
+  /** Set while this connection is a SAS pairing session: every line is the session's. */
+  private sas?: PairingSession;
+  /** Set while a provisionally pinned phone owes its commit proof, before any hello. */
+  private awaitingProof?: { fingerprint: string; attempt: string };
   private readonly pins: PinStore;
   private stopped = false;
   private unsubscribe?: () => void;
@@ -320,6 +337,9 @@ export class PhoneLink {
     this.unsubscribe = undefined;
     this.socket?.destroy();
     this.socket = undefined;
+    this.sas?.disconnected();
+    this.sas = undefined;
+    this.awaitingProof = undefined;
     this.authenticated = false;
     this.linkTrusted = false;
     this.peerFingerprint = undefined;
@@ -437,26 +457,41 @@ export class PhoneLink {
     this.announce();
   }
 
-  private announce(): void {
-    if (this.socket || !this.discovery) {
-      return;
-    }
-    const payload = Buffer.from(
-      JSON.stringify({
-        nexus: "agentd",
-        v: 1,
-        machineId: this.options.config.machineId,
-        machineName: this.options.config.machineName,
-      }),
-    );
+  private broadcast(payload: Buffer): void {
     const port = this.options.discoveryPort ?? DISCOVERY_PORT;
     for (const target of broadcastTargets()) {
-      this.discovery.send(payload, port, target, (error) => {
+      this.discovery?.send(payload, port, target, (error) => {
         if (error) {
           this.options.logger.warn("discovery_send_failed", { target, reason: error.name });
         }
       });
     }
+  }
+
+  private announce(): void {
+    if (!this.discovery) {
+      return;
+    }
+    // While the window waits for a phone, a phone on its pairing screen may dial
+    // agentd's wss instead; this says where. It carries no secret. Sent even
+    // while a paired phone holds the link: pairing another is not that link's.
+    const ready = this.options.pairing?.pairReady();
+    if (ready) {
+      this.broadcast(Buffer.from(JSON.stringify(ready)));
+    }
+    if (this.socket) {
+      return;
+    }
+    this.broadcast(
+      Buffer.from(
+        JSON.stringify({
+          nexus: "agentd",
+          v: 1,
+          machineId: this.options.config.machineId,
+          machineName: this.options.config.machineName,
+        }),
+      ),
+    );
     for (const target of buildPhoneDialTargets(
       this.phoneHosts,
       this.discoveredPhoneTargets,
@@ -503,7 +538,9 @@ export class PhoneLink {
     }
     const target = `${announcement.host}:${announcement.port}`;
     const now = this.now();
-    if ((this.rejectedPhones.get(target)?.retryAt ?? 0) > now) {
+    const refused = this.rejectedPhones.get(target);
+    // A phone refused for its unknown cert is worth one more dial once a window opens: that is how it pairs.
+    if (refused && refused.retryAt > now && !(refused.reportedReason === "untrusted_peer" && this.mayPair(announcement))) {
       return;
     }
     if ((this.retryAt.get(target) ?? 0) > now) {
@@ -545,16 +582,21 @@ export class PhoneLink {
     );
     this.helloTimer.unref();
     socket.on("secureConnect", () => {
-      if (!this.verifyPeer(socket as TLSSocket, target)) {
-        return;
+      switch (this.verifyPeer(socket as TLSSocket, target, announcement)) {
+        case "pinned":
+          this.writeHello();
+          break;
+        case "provisional":
+          // 6a-R4″: this hello would carry no steering secret, so it proves nothing.
+          // The phone proves it stored its credentials first, on this pinned session.
+          this.write({ type: "pair_commit_query", v: 2, attempt: this.awaitingProof?.attempt });
+          break;
+        case "pairing":
+          this.beginPairing(socket as TLSSocket);
+          break;
+        default:
+          break;
       }
-      this.write({
-        type: "hello",
-        v: 1,
-        machineId: this.options.config.machineId,
-        machineName: this.options.config.machineName,
-        token: this.options.config.token,
-      });
     });
     socket.on("data", (chunk) => this.onData(chunk));
     socket.on("error", (error) => {
@@ -620,42 +662,134 @@ export class PhoneLink {
 
   /**
    * Holds the dialled phone to the trusted set before anything is sent: a cert
-   * in the set is fine at any address; an unknown one is fine only for trust on
-   * first use, inside the pairing window. False means the link was refused and
-   * destroyed, with no hello and so no token written.
+   * in the set is fine at any address; a provisional one must first prove its
+   * commit; an unknown one is fine only for a SAS session, inside the pairing
+   * window. Undefined means the link was refused and destroyed, with no hello
+   * and so no token written.
    */
-  private verifyPeer(socket: TLSSocket, target: string): boolean {
+  private verifyPeer(socket: TLSSocket, target: string, announcement: PhoneAnnouncement): PeerVerdict | undefined {
     const actual = socket.getPeerCertificate().fingerprint256;
-    let admit = false;
+    let verdict: PeerVerdict | undefined;
     try {
-      admit = actual !== undefined && actual !== "" && this.mayTrust(actual);
+      verdict = actual !== undefined && actual !== "" ? this.verdictFor(actual, announcement) : undefined;
     } catch (error) {
       this.pinsUnreadable(error);
     }
-    if (!admit) {
-      // Fingerprint only, shortened; the token is never part of a log line.
-      this.options.logger.warn("phone_link_untrusted_peer", {
-        target,
-        fingerprint: actual ? shortFingerprint(actual) : "none",
-      });
-      this.rejectedPhones.set(target, {
-        retryAt: this.now() + REFUSAL_RECONNECT_DELAY_MS,
-        reportedReason: "untrusted_peer",
-      });
-      this.tellOperator(
-        "A phone presented a TLS certificate agentd does not trust, so the link was refused before any token was sent. To add a phone, run `agentd pair` (or `agentd phones allow-next`) and connect it within two minutes. List trusted phones with `agentd phones list`.",
-      );
-      socket.destroy();
-      return false;
+    if (verdict) {
+      this.peerFingerprint = actual;
+      return verdict;
     }
-    this.peerFingerprint = actual;
-    return true;
+    // Fingerprint only, shortened; the token is never part of a log line.
+    this.options.logger.warn("phone_link_untrusted_peer", {
+      target,
+      fingerprint: actual ? shortFingerprint(actual) : "none",
+    });
+    this.rejectedPhones.set(target, {
+      retryAt: this.now() + REFUSAL_RECONNECT_DELAY_MS,
+      reportedReason: "untrusted_peer",
+    });
+    this.tellOperator(
+      "A phone presented a TLS certificate agentd does not trust, so the link was refused before any token was sent. To add a phone, run `agentd pair` and open Add a computer on the phone, then compare the 6-digit codes. List trusted phones with `agentd phones list`.",
+    );
+    socket.destroy();
+    return undefined;
   }
 
-  /** In the set, or eligible for trust on first use: only inside an open pairing window. */
-  private mayTrust(fingerprint: string): boolean {
+  private verdictFor(fingerprint: string, announcement: PhoneAnnouncement): PeerVerdict | undefined {
     // Stale counts as unpinned (and is forgotten on the spot): an expired phone cannot renew itself by reconnecting.
-    return this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs()) || this.pins.allowNextOpen(this.now());
+    if (this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs())) {
+      return "pinned";
+    }
+    const provisional = this.options.pairing?.provisionalFor(fingerprint);
+    if (provisional) {
+      this.awaitingProof = { fingerprint, attempt: provisional.attempt };
+      return "provisional";
+    }
+    return this.mayPair(announcement) ? "pairing" : undefined;
+  }
+
+  /** Inside the window, and a phone that opened its door (or that the owner named by address). */
+  private mayPair(announcement: PhoneAnnouncement): boolean {
+    return (
+      this.options.pairing?.accepts() === true &&
+      this.options.clientCert !== undefined &&
+      (announcement.pairing === true || this.isConfiguredTarget(announcement))
+    );
+  }
+
+  private isConfiguredTarget(announcement: PhoneAnnouncement): boolean {
+    return this.phoneHosts.some((entry) => {
+      const target = parsePhoneTarget(entry);
+      return target !== undefined && normalizedHost(target.host) === normalizedHost(announcement.host) && target.port === announcement.port;
+    });
+  }
+
+  private writeHello(): void {
+    this.write({
+      type: "hello",
+      v: 1,
+      machineId: this.options.config.machineId,
+      machineName: this.options.config.machineName,
+      token: this.options.config.token,
+    });
+  }
+
+  /** The SAS session on this dial: no hello, no token, only the pairing frames until it ends. */
+  private beginPairing(socket: TLSSocket): void {
+    const pairing = this.options.pairing;
+    const clientCert = this.options.clientCert;
+    const phoneFp = this.peerFingerprint;
+    if (!pairing || !clientCert || !phoneFp) {
+      socket.destroy();
+      return;
+    }
+    // The attempt has its own deadline; the hello one would cut the humans short.
+    this.clearHelloTimer();
+    const session = pairing.beginSession({
+      transport: "phonelink",
+      agentdFp: fingerprintOfCert(clientCert.cert),
+      phoneFp,
+      send: (frame) => {
+        if (this.socket === socket) {
+          this.write(frame);
+        }
+      },
+      close: () => {
+        // Ended, either way: let the pairing frames reach the phone before the socket goes.
+        socket.end();
+        setTimeout(() => socket.destroy(), 200).unref();
+      },
+    });
+    if (!session) {
+      socket.destroy();
+      return;
+    }
+    this.sas = session;
+  }
+
+  /** The provisional phone's answer: a valid proof makes its pin durable, and only then is it sent a hello. */
+  private onCommitProof(message: Record<string, unknown>): void {
+    const owed = this.awaitingProof;
+    const clientCert = this.options.clientCert;
+    this.awaitingProof = undefined;
+    const valid =
+      owed !== undefined &&
+      clientCert !== undefined &&
+      message.type === "pair_committed" &&
+      this.options.pairing?.proofValid(owed.fingerprint, fingerprintOfCert(clientCert.cert), message.attempt, message.proof) === true &&
+      this.options.pairing.promote(owed.fingerprint, "recovery_proof");
+    if (!valid) {
+      this.options.logger.warn("phone_link_commit_proof_refused", {
+        target: this.connectedTo ?? "unknown",
+        fingerprint: owed ? shortFingerprint(owed.fingerprint) : "none",
+      });
+      if (this.connectedTo) {
+        this.rejectedPhones.set(this.connectedTo, { retryAt: this.now() + REFUSAL_RECONNECT_DELAY_MS, reportedReason: "bad_commit_proof" });
+      }
+      this.socket?.destroy();
+      return;
+    }
+    this.writeHello();
   }
 
   /**
@@ -692,6 +826,10 @@ export class PhoneLink {
     const wasAuthenticated = this.authenticated;
     const wasTrusted = this.linkTrusted;
     const target = this.connectedTo;
+    const sas = this.sas;
+    this.sas = undefined;
+    this.awaitingProof = undefined;
+    sas?.disconnected();
     this.clearHelloTimer();
     this.clearPingTimer();
     this.stopTrustWatch?.();
@@ -753,10 +891,21 @@ export class PhoneLink {
     try {
       const parsed: unknown = JSON.parse(line);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        // Before the pins a session takes SAS frames only: anything else ends it.
+        this.sas?.receive({});
         return;
       }
       message = parsed as Record<string, unknown>;
     } catch {
+      this.sas?.receive({});
+      return;
+    }
+    if (this.sas) {
+      this.sas.receive(message);
+      return;
+    }
+    if (this.awaitingProof) {
+      this.onCommitProof(message);
       return;
     }
     switch (message.type) {
@@ -914,39 +1063,22 @@ export class PhoneLink {
   }
 
   /**
-   * Trust on first use: the first authenticated hello over TLS adds the peer's
-   * cert to the trusted set, but only inside the pairing window (`pair` or
-   * `phones allow-next`), which admits exactly one phone. A cert already in the
-   * set is trusted as it stands.
+   * A hello_ack binds the link only for a cert that is pinned now. Nothing is
+   * trusted on first use any more: a new phone's cert joins the set through a
+   * SAS pairing, and a hello is never sent to one that has not.
    */
   private trustPeer(): boolean {
     const fingerprint = this.peerFingerprint;
     if (!fingerprint) {
       return false;
     }
-    let known: boolean;
     try {
-      known = this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs());
-      if (!known && !this.pins.allowNextOpen(this.now())) {
+      if (!this.pins.isTrusted(fingerprint, this.now(), this.pairingTtlMs())) {
         return false;
       }
     } catch (error) {
       this.pinsUnreadable(error);
       return false;
-    }
-    if (!known) {
-      try {
-        // Adding also closes an open allow-next window: one admission per arming.
-        this.pins.add(fingerprint, this.now());
-      } catch (error) {
-        // Unpinned means untrusted: better refused than trusted by a store that cannot remember it.
-        this.options.logger.error("phone_link_pin_store_failed", {
-          reason: error instanceof Error ? error.message : String(error),
-        });
-        return false;
-      }
-      // Long enough to check against the phone's own settings screen.
-      this.options.logger.info("phone_link_pinned", { fingerprint: pinnedFingerprint(fingerprint) });
     }
     this.linkTrusted = true;
     return true;

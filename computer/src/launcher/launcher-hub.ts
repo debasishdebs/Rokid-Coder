@@ -78,11 +78,25 @@ export interface LauncherHubOptions {
    */
   armPairing?: () => void;
   /**
+   * The pairing IPC for every computer-side client (`agentd pair`, `rk`'s
+   * prompt, the installer): `pair_open` subscribes to `pair_status`, and
+   * `pair_confirm` is the computer-side half of the SAS confirmation. Any
+   * same-user process can send it, so it never pins on its own.
+   */
+  pairing?: PairingIpc;
+  /**
    * A launcher has just bound this session. Claude's own SessionStart hook
    * normally arrives before the bind and is dropped as unattached, so this is
    * what lets the phone see the session before the first prompt.
    */
   onBound?: (session: { sessionId: string; status: string; cwd?: string }) => void;
+}
+
+export interface PairingIpc {
+  /** Opens the window unless an attempt is running; both ways, the client is then told every change. */
+  open(): void;
+  watch(listener: (status: Record<string, unknown>) => void): () => void;
+  confirm(attempt: unknown, ok: unknown): void;
 }
 
 const COMMAND_ERRORS: ReadonlySet<string> = new Set<CommandError>([
@@ -128,6 +142,8 @@ interface Connection {
   lastBind?: { sessionId: string };
   /** N2: the session this launcher was asked to bind again, and who waits for its answer. */
   asked?: { key: SessionKey; waiters: Array<(bound: boolean) => void> };
+  /** Set while this connection is a pairing client: stops its `pair_status` feed. */
+  pairingWatch?: () => void;
   draft: boolean;
   closed: boolean;
 }
@@ -539,6 +555,16 @@ export class LauncherHub {
       if (frame.type === "arm_pairing") {
         return this.onArmPairing(connection, frame);
       }
+      if (frame.type === "pair_open") {
+        return this.onPairOpen(connection, frame);
+      }
+      if (frame.type === "pair_confirm") {
+        if (!hasShape(frame, ["type", "attempt", "ok"]) || !this.options.pairing) {
+          return "bad_frame";
+        }
+        this.options.pairing.confirm(frame.attempt, frame.ok);
+        return undefined;
+      }
       return frame.type === "launcher_hello" ? this.onHello(connection, frame) : "hello_expected";
     }
     switch (frame.type) {
@@ -881,11 +907,31 @@ export class LauncherHub {
     return undefined;
   }
 
+  /** A pairing client: no hello, the window opened (or joined), then every status until it hangs up. */
+  private onPairOpen(connection: Connection, frame: Frame): string | undefined {
+    const pairing = this.options.pairing;
+    if (!hasShape(frame, ["type"]) || !pairing) {
+      return "bad_frame";
+    }
+    clearTimeout(connection.helloTimer);
+    // A client already watching may open the next window after the last one ended.
+    connection.pairingWatch ??= pairing.watch((status) => this.write(connection, { type: "pair_status", ...status }));
+    try {
+      pairing.open();
+    } catch (error) {
+      this.options.logger.error("pair_open_failed", { reason: errorCode(error) });
+      this.write(connection, { type: "pair_status", state: "ABORTED", reason: "storage" });
+    }
+    return undefined;
+  }
+
   private onClose(connection: Connection): void {
     if (connection.closed) {
       return;
     }
     connection.closed = true;
+    connection.pairingWatch?.();
+    connection.pairingWatch = undefined;
     clearTimeout(connection.helloTimer);
     this.connections.delete(connection);
     if (connection.hello && this.byLauncherId.get(connection.hello.launcherId) === connection) {

@@ -22,19 +22,17 @@ export function bestHostGuess(interfaces = os.networkInterfaces()): string {
 }
 
 /**
- * `fp` is agentd's certificate fingerprint; the phone pins it before it trusts
- * wss. `steer` is the secret that makes a wss hello a steering one. It travels
- * only in this payload (line, QR): agentd never sends it on a socket.
+ * The pairing line and QR, v2: where to dial agentd's wss and which cert to
+ * expect there, and nothing secret. A phone that reads it still runs the SAS
+ * code check on that link; the token and the steering secret reach it only
+ * afterwards, in `pair_credentials` on the same confirmed TLS session.
  */
-export function pairingPayload(config: AgentConfig, fp: string, steer: string): string {
+export function pairingPayload(config: AgentConfig, fp: string): string {
   return JSON.stringify({
-    v: 1,
-    kind: "nexus-agentd",
-    name: config.machineName,
+    v: 2,
+    kind: "rokid-coder",
     host: bestHostGuess(),
     port: config.wsPort,
-    token: config.token,
     fp,
-    steer,
   });
 }

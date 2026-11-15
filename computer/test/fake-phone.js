@@ -327,10 +327,16 @@ function parseArgs(argv) {
 
 async function main() {
   const { flags: args, frame } = parseArgs(process.argv.slice(2));
+  const fs = require("node:fs");
+  // A cert the caller already pinned: a window no longer pins a new phone on its hello.
+  const cert = args["cert-file"] && args["key-file"]
+    ? { cert: fs.readFileSync(args["cert-file"], "utf8"), key: fs.readFileSync(args["key-file"], "utf8") }
+    : undefined;
   const phone = createFakePhone({
     transport: args.transport,
     tls: args.tls !== "false",
     pin: args.pin,
+    cert,
     steer: process.env.FAKE_PHONE_STEER
       ?? (args["steer-file"] ? require("node:fs").readFileSync(args["steer-file"], "utf8").trim() : undefined),
     onFrame: (received) => process.stdout.write(`${JSON.stringify(received)}\n`),

@@ -180,7 +180,8 @@ async function withDaemon({ transport, tls = true, attached = [], discovered = [
     const agent = await agentCert();
     const phone = createFakePhone({ transport, tls, pin: agent.fingerprint256, cert: tls ? await phoneCert("phone") : undefined });
     if (tls) {
-      pinFakePhone({ coderDir, phone }, { arm: transport === "phonelink" });
+      // A phone paired earlier, on both transports: a window no longer pins a phone on its hello (SAS does).
+      pinFakePhone({ coderDir, phone });
     }
     const base = ensureConfig(stateDir);
     let phonePort;

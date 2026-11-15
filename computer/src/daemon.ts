@@ -16,6 +16,9 @@ import { claudeSessionGone, discoverRecentSessions } from "./discovery";
 import { HookHttpServer } from "./http-server";
 import { claudeSessionsDir, liveClaudeSessionIds, readClaudeSession } from "./launcher/claude-sessions";
 import { LauncherHub } from "./launcher/launcher-hub";
+import { bestHostGuess } from "./pairing";
+import { PairingCoordinator } from "./pairing/coordinator";
+import { ProvisionalPins } from "./pairing/provisional-pins";
 import { COMPACT_LIMIT_MS, LauncherRouter, READY_WAIT_MS, SessionStates } from "./launcher/session-state";
 import { FileLogger } from "./logger";
 import { SessionStore } from "./session-store";
@@ -160,8 +163,18 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     logger,
     registry: attachRegistry,
     // The plugin's pair command arrives here, from the hook forwarder (R156).
+    // It only opens the window: the code is confirmed in a terminal and on the phone.
     armPairing: () => {
-      pins.armAllowNext(Date.now());
+      pairing.openWindow();
+    },
+    pairing: {
+      open: () => {
+        pairing.openWindow();
+      },
+      watch: (listener) => pairing.watch((status) => listener({ ...status })),
+      confirm: (attempt, ok) => {
+        pairing.confirm(attempt, ok);
+      },
     },
     // Claude's SessionStart came before the bind and was dropped as unattached;
     // an idle session at its prompt is shown to the phone now, not at the first prompt.
@@ -459,6 +472,15 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   const agentCert = await ensureAgentCert(tlsDir);
   ensureSteerSecret(tlsDir);
   const pins = new PinStore(path.join(tlsDir, "phone-pins.json"), { logger });
+  // One window, one attempt, for both transports and every entry point.
+  const pairing = new PairingCoordinator({
+    config,
+    pins,
+    provisional: new ProvisionalPins(path.join(tlsDir, "phone-pins-provisional.json")),
+    logger,
+    steer: () => readSteerSecret(tlsDir),
+    wsHost: () => bestHostGuess(),
+  });
   const phoneSettings = new PhoneSettingsStore(
     path.join(config.rokidCoder.stateDir, "settings.json"),
     config.rokidCoder.waitLimitSec,
@@ -523,6 +545,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     tls: { key: agentCert.key, cert: agentCert.cert },
     // The same set the dialled link pins into, watched: `phones forget` cuts a wss phone off live.
     pins,
+    pairing,
     pairingTtlMs,
     // Checked live, and the file watched: `pair --rotate-steer` cuts off connected phones without a restart.
     steer: () => readSteerSecret(tlsDir),
@@ -553,6 +576,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
     onApprovalDecision: (requestId, decision) => void approvals?.handleDecision(requestId, decision),
     onTerminalInput: typeIntoSession,
     pins,
+    pairing,
     pairingTtlMs,
     clientCert: { key: agentCert.key, cert: agentCert.cert },
     v2: v2Hooks,
@@ -698,6 +722,8 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
   // hubs watch it and cut off the forgotten phone's live link (link_trust false).
   const sweepPairings = (now: number = Date.now()): string[] => {
     try {
+      // A provisional pin whose phone never proved its commit in time leaves nothing behind.
+      pairing.expire();
       return pins.expire(now, pairingTtlMs());
     } catch (error) {
       logger.warn("phone_pairing_sweep_failed", {
@@ -778,6 +804,7 @@ export async function startDaemon(daemonOptions: DaemonOptions = {}): Promise<Ru
       // Stop hook is one.
       stopWait.dispose();
       questionRelay.dispose();
+      pairing.dispose();
       link.stop();
       tailManager.stopAll();
       await Promise.all([httpServer.stop(), hub.stop()]);

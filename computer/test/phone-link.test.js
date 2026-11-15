@@ -103,10 +103,14 @@ process.on("unhandledRejection", (reason) => {
   console.error("phone-link test unhandled rejection:", reason);
 });
 
-/** The pairing window `pair` opens, so the test phone is pinned on its first hello. */
+/** The test phone paired earlier (by SAS): a window no longer pins a phone on its hello. */
+let phoneFingerprint;
+test.before(async () => {
+  phoneFingerprint = (await phoneCert("phone")).fingerprint256;
+});
 function pairingPins() {
   const pins = new PinStore();
-  pins.armAllowNext(Date.now());
+  pins.add(phoneFingerprint);
   return pins;
 }
 
@@ -785,7 +789,8 @@ test("missing hello_ack closes after the handshake deadline and retries normally
     link.connectToPhone(announcement);
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(connections, 1, "normal reconnect delay was skipped");
-    now += 20;
+    // A hello only ever goes to a pinned phone now, so a stalled one is backed off like any refusal.
+    now += REFUSAL_RECONNECT_DELAY_MS;
     link.connectToPhone(announcement);
     await waitUntil(() => connections === 2, "normal retry did not dial again");
   } finally {

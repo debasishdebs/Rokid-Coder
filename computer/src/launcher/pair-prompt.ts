@@ -1,10 +1,13 @@
 import type { PinStore } from "../tls";
-import { phonePinsFile } from "./status-probe";
+import { confirmInTerminal } from "../pairing/terminal-client";
+import { launcherConfigDir, phonePinsFile } from "./status-probe";
 
 /**
- * Pairing as a step of `rk claude` and `rk codex` (U6). It only opens agentd's
- * allow-next window, the same file edit `agentd phones allow-next` makes; the
- * pairing line with its secrets stays with `agentd pair`.
+ * Pairing as a step of `rk claude` and `rk codex` (U6), before the agent
+ * starts: it opens agentd's window over the launcher socket, shows the
+ * 6-digit code when the phone has it too, and takes the `[y/N]` here; the
+ * phone confirms on its own screen. With an agentd too old to speak that,
+ * it only opens the window, as `agentd phones allow-next` does.
  */
 export const PAIR_LATER = 'Pair later: run "agentd pair" or type /rokid:pair in Claude (rokid:pair in Codex).';
 const QUESTION = "No phone paired yet. Pair now? [Y/n] ";
@@ -15,7 +18,7 @@ const CLOSED = "The pairing window closed before a phone was added.";
 const POLL_MS = 1000;
 
 /** Lines typed on stdin. The stream is paused again by close(), so the child gets the terminal. */
-class LineReader {
+export class LineReader {
   private buffer = "";
   private lines: Array<string | undefined> = [];
   private waiter?: (line: string | undefined) => void;
@@ -95,6 +98,18 @@ export async function offerPairing(): Promise<void> {
     const answer = await input.next();
     if (answer === undefined || /^\s*n/i.test(answer)) {
       err.write(`${answer === undefined ? "\n" : ""}${PAIR_LATER}\n`);
+      return;
+    }
+    const confirmed = await confirmInTerminal({
+      configDir: launcherConfigDir(),
+      write: (text) => err.write(text),
+      nextLine: () => input.next(),
+      windowMs: pairWindowMs() ?? 2 * 60 * 1000,
+    });
+    if (confirmed !== "unavailable") {
+      if (confirmed !== "paired") {
+        err.write(`${PAIR_LATER}\n`);
+      }
       return;
     }
     const { PinStore } = await import("../tls.js");

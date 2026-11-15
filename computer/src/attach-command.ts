@@ -54,14 +54,16 @@ const STATUS_ATTACHED_TEXT = "Attached to Rokid-Coder (plugin mode).";
 export const LAUNCHER_STATUS_TEXT = "Attached to Rokid-Coder (launcher mode, through rk claude).";
 const STATUS_DETACHED_TEXT = "Not attached to Rokid-Coder.";
 /**
- * U6: in a session, pairing only opens the allow-next window. The pairing line
- * and its secrets never go into a reply: a reply is model context and lands in
- * the transcript. R156: this hook only words the reply. The hook forwarder
- * opens the window over the same-user launcher socket, and replaces this text
- * with PAIR_UNAVAILABLE_TEXT when it could not.
+ * U6: in a session, pairing only opens agentd's window. The reply never holds
+ * a secret or the code (a reply is model context and lands in the transcript),
+ * and nothing in a session ever confirms (6a-R1): the user compares the code
+ * in a terminal and confirms on the phone, which no model can reach. R156:
+ * this hook only words the reply. The hook forwarder opens the window over the
+ * same-user launcher socket, and replaces this text with PAIR_UNAVAILABLE_TEXT
+ * when it could not.
  */
 export const PAIR_TEXT =
-  "Pairing window open: Open Agents on your phone → Add a computer within 2 minutes. The phone and this computer must be on the same Wi-Fi or on Tailscale.";
+  "Compare the 6-digit code on your phone with the one in a terminal (run agentd pair) — confirm on the phone";
 export const PAIR_UNAVAILABLE_TEXT = 'Run "agentd phones allow-next" in a terminal';
 const NO_SESSION_TEXT = "Rokid-Coder could not tell which session this is, so nothing was changed.";
 const ATTACH_FAILED_TEXT = "Rokid-Coder could not save the attach list, so this session was not attached.";

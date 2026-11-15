@@ -1,0 +1,61 @@
+{
+  "description": "Shared SAS test vectors (R1'). commit = SHA-256(\"rokid-sas-v1\" || Nc || agentdFp || phoneFp); code = first 20 bits of SHA-256(\"rokid-sas-v1\" || Nc || Np || agentdFp || phoneFp) mod 10^6, as 6 digits; proof = HMAC-SHA256(key = steer, \"rokid-commit-v1\" || attempt || agentdFp || phoneFp). Nonces are raw bytes (hex here); every string enters as its UTF-8 bytes. Test-only values, no real secrets.",
+  "version": 1,
+  "sas": [
+    {
+      "agentdFp": "F8:C6:B2:37:A8:22:C9:DE:FB:EF:67:40:B6:33:4E:16:C5:A9:F3:E9:30:E9:C9:3A:8C:6D:11:C7:07:DC:DB:B6",
+      "phoneFp": "53:2E:EB:A8:8F:66:C8:34:FD:0C:16:CF:6E:1D:1B:42:C2:D9:3E:56:1F:CD:FB:0B:67:C3:D7:AD:C2:6C:4E:50",
+      "nc": "9c36dd639927b6cb4338cc8cbcb9de7f00adc7f6b5f7da52c152edc6ba8d9e72",
+      "np": "0d623afd9a5bad59f3b3c0f26aa72a4eaa22c4e754794c2c8b5046e980b6bbe2",
+      "commit": "b285954f392aca47a3839de9a568c040cd0968f9a27db9836a6c17560c2f5c04",
+      "code": "456034"
+    },
+    {
+      "agentdFp": "F8:C6:B2:37:A8:22:C9:DE:FB:EF:67:40:B6:33:4E:16:C5:A9:F3:E9:30:E9:C9:3A:8C:6D:11:C7:07:DC:DB:B6",
+      "phoneFp": "2F:64:72:FE:68:A2:1D:4B:6A:5E:65:49:03:F7:47:54:44:74:6A:2E:6D:D1:D6:EE:FD:DC:ED:97:F4:9D:EB:7A",
+      "nc": "9c36dd639927b6cb4338cc8cbcb9de7f00adc7f6b5f7da52c152edc6ba8d9e72",
+      "np": "0d623afd9a5bad59f3b3c0f26aa72a4eaa22c4e754794c2c8b5046e980b6bbe2",
+      "commit": "fd23b0df35e37a052ccbb659769ffebb254fdbda10b66f15fa605866c503de35",
+      "code": "298331"
+    },
+    {
+      "agentdFp": "AC:88:8E:B0:1F:A4:69:2D:A1:0E:C6:A4:09:EA:58:2A:DB:24:71:E6:93:2A:4B:65:D1:C7:05:96:60:AE:4C:A0",
+      "phoneFp": "53:2E:EB:A8:8F:66:C8:34:FD:0C:16:CF:6E:1D:1B:42:C2:D9:3E:56:1F:CD:FB:0B:67:C3:D7:AD:C2:6C:4E:50",
+      "nc": "92df3d926afeb24eba03623cdfaf499b39d8172eb5d910a521ef15d01fbb4633",
+      "np": "c8a3e6936fbe356210ff39421c20283dd24e6eeeafacc1d2f1669923fc525afa",
+      "commit": "4e03f7b7bac3c1a6ee5e9416c699be180f49e16979fbe02fbfbf5a5f467845c0",
+      "code": "991396"
+    },
+    {
+      "agentdFp": "35:DA:28:47:CB:24:04:73:B4:59:AF:C4:A0:5F:3B:24:31:C6:DA:D6:20:DD:EB:8C:53:7C:F6:CA:D6:24:DE:F0",
+      "phoneFp": "D2:E4:FB:AB:50:1C:E5:B7:63:D9:49:64:58:82:A2:35:BB:76:AA:3E:9D:2E:74:3F:73:07:4E:6A:3A:24:F3:D2",
+      "nc": "0000000000000000000000000000000000000000000000000000000000000000",
+      "np": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "commit": "5461c86de9992c175751fe13c012c1d7a3e1c979f15e6a627710293c53c3d80d",
+      "code": "776115"
+    }
+  ],
+  "proofs": [
+    {
+      "steer": "steer-secret-0123456789abcdefghijklmn",
+      "attempt": "0123456789abcdef",
+      "agentdFp": "F8:C6:B2:37:A8:22:C9:DE:FB:EF:67:40:B6:33:4E:16:C5:A9:F3:E9:30:E9:C9:3A:8C:6D:11:C7:07:DC:DB:B6",
+      "phoneFp": "53:2E:EB:A8:8F:66:C8:34:FD:0C:16:CF:6E:1D:1B:42:C2:D9:3E:56:1F:CD:FB:0B:67:C3:D7:AD:C2:6C:4E:50",
+      "proof": "97286c40b349cb8772498dcd9e5d5d2ef920e60dd457d97589c1da109db6ab50"
+    },
+    {
+      "steer": "steer-secret-0123456789abcdefghijklmn",
+      "attempt": "fedcba9876543210",
+      "agentdFp": "F8:C6:B2:37:A8:22:C9:DE:FB:EF:67:40:B6:33:4E:16:C5:A9:F3:E9:30:E9:C9:3A:8C:6D:11:C7:07:DC:DB:B6",
+      "phoneFp": "53:2E:EB:A8:8F:66:C8:34:FD:0C:16:CF:6E:1D:1B:42:C2:D9:3E:56:1F:CD:FB:0B:67:C3:D7:AD:C2:6C:4E:50",
+      "proof": "cc955e994fe92963ecb674c190f96275f0a890c7c6c9b144b29b7f055b28b41a"
+    },
+    {
+      "steer": "another-steer-secret-ABCDEFGHIJKLMNOP",
+      "attempt": "0123456789abcdef",
+      "agentdFp": "AC:88:8E:B0:1F:A4:69:2D:A1:0E:C6:A4:09:EA:58:2A:DB:24:71:E6:93:2A:4B:65:D1:C7:05:96:60:AE:4C:A0",
+      "phoneFp": "53:2E:EB:A8:8F:66:C8:34:FD:0C:16:CF:6E:1D:1B:42:C2:D9:3E:56:1F:CD:FB:0B:67:C3:D7:AD:C2:6C:4E:50",
+      "proof": "7fe7a9f412f2e610c6f259dfb33aa21708b1cdb3156f8cf0b4a15d521c13f610"
+    }
+  ]
+}

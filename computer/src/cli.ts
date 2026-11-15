@@ -9,7 +9,10 @@ import {
   saveConfig,
 } from "./config";
 import { startDaemon } from "./daemon";
+import { LineReader } from "./launcher/pair-prompt";
 import { pairingPayload } from "./pairing";
+import { ProvisionalPins } from "./pairing/provisional-pins";
+import { confirmInTerminal } from "./pairing/terminal-client";
 import { PhoneSettingsStore } from "./phone-settings";
 import {
   ALLOW_NEXT_WINDOW_MS,
@@ -123,21 +126,40 @@ async function main(): Promise<void> {
       const config = ensureConfig(defaultStateDir());
       const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
       const cert = await ensureAgentCert(tlsDir);
-      const rotate = process.argv.slice(3).includes("--rotate-steer");
-      const steer = rotate ? rotateSteerSecret(tlsDir) : ensureSteerSecret(tlsDir);
-      if (rotate) {
+      if (process.argv.slice(3).includes("--rotate-steer")) {
+        rotateSteerSecret(tlsDir);
+        // PhoneLink checks the pin, not the secret: a rotation that kept the pins would revoke nothing there.
+        new PinStore(path.join(tlsDir, "phone-pins.json")).forgetAll();
+        new ProvisionalPins(path.join(tlsDir, "phone-pins-provisional.json")).forgetAll();
         process.stderr.write(
-          "Steering secret rotated. A running agentd now disconnects every phone that was steering with the old secret and refuses its steering frames; they must pair again with this new pairing payload.\n",
+          "Steering secret rotated and every phone forgotten. A running agentd disconnects them on both links now; each must pair again with a code.\n",
         );
+      } else {
+        ensureSteerSecret(tlsDir);
       }
-      const payload = pairingPayload(config, cert.fingerprint256, steer);
+      // Where to dial and which cert to expect, nothing secret: the phone still runs the code check.
+      const payload = pairingPayload(config, cert.fingerprint256);
       process.stdout.write(`${payload}\n`);
       qrcode.generate(payload, { small: true }, (code) => process.stdout.write(`${code}\n`));
-      // A fresh install trusts no phone: pairing is what lets the next one in.
-      new PinStore(path.join(tlsDir, "phone-pins.json")).armAllowNext(Date.now());
-      process.stdout.write(
-        `Phone pairing window open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes. When your phone connects, agentd logs its fingerprint; compare it with the one shown on the phone.\n`,
-      );
+      process.stdout.write(`Pairing window open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes.\n`);
+      const input = new LineReader(process.stdin);
+      let outcome;
+      try {
+        outcome = await confirmInTerminal({
+          configDir: config.rokidCoder.stateDir,
+          write: (text) => process.stdout.write(text),
+          nextLine: () => input.next(),
+          windowMs: ALLOW_NEXT_WINDOW_MS,
+        });
+      } finally {
+        input.close();
+      }
+      if (outcome === "unavailable") {
+        throw new Error('agentd isn\'t running — run "agentd run" in a terminal, then "agentd pair" again.');
+      }
+      if (outcome !== "paired") {
+        process.exitCode = 1;
+      }
       break;
     }
     case "link-phone": {
@@ -164,6 +186,7 @@ async function main(): Promise<void> {
       const config = ensureConfig(defaultStateDir());
       const tlsDir = path.join(config.rokidCoder.stateDir, "tls");
       const pins = new PinStore(path.join(tlsDir, "phone-pins.json"));
+      const provisional = new ProvisionalPins(path.join(tlsDir, "phone-pins-provisional.json"));
       const action = process.argv[3];
       if (action === "list") {
         const entries = pins.entries();
@@ -184,7 +207,7 @@ async function main(): Promise<void> {
             : "No trusted phones.\n",
         );
         if (pins.allowNextOpen(Date.now())) {
-          process.stdout.write("allow-next is open: the next new phone to authenticate will be trusted.\n");
+          process.stdout.write("A pairing window is open: a new phone can pair once both screens confirm its code.\n");
         }
       } else if (action === "forget") {
         const which = process.argv[4];
@@ -193,12 +216,14 @@ async function main(): Promise<void> {
           // Forgetting everything revokes both transports: a phone that dials in
           // over wss is trusted by the steering secret, not by a pin.
           pins.forgetAll();
+          provisional.forgetAll();
           rotateSteerSecret(tlsDir);
           process.stdout.write(
             `Forgot all phones. A running agentd drops its dialled link.\nThe steering secret was rotated too, so a running agentd also cuts off every phone steering over the paired WebSocket link; to steer again, a phone must pair again with "pair".\n${none}`,
           );
         } else if (which) {
-          const removed = pins.forget(which);
+          // One phone is one pairing: a half-finished one (provisional) goes with it.
+          const removed = [...pins.forget(which), ...provisional.forget(which)];
           process.stdout.write(
             removed.length > 0
               ? `Forgotten. That phone's links close now; it must pair again to reconnect.\n${pins.isEmpty() ? none : ""}`
@@ -210,7 +235,7 @@ async function main(): Promise<void> {
       } else if (action === "allow-next") {
         pins.armAllowNext(Date.now());
         process.stdout.write(
-          `Open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes: the first new phone to connect and authenticate in that time is trusted, then the window closes. Any other phone is still refused. Connect the phone you mean to add now.\n`,
+          `Open for ${ALLOW_NEXT_WINDOW_MS / 60_000} minutes, for one phone. It pairs only once you compare its 6-digit code: run "agentd pair" to see it, and confirm on the phone.\n`,
         );
       } else {
         throw new Error(
@@ -237,7 +262,7 @@ async function main(): Promise<void> {
     }
     default:
       throw new Error(
-        `Unknown command '${command}'. Use run, install-hooks, uninstall-hooks, pair (prints the pairing line and opens a 2-minute window for one new phone), phones, link-phone, unlink-phone, or status.`,
+        `Unknown command '${command}'. Use run, install-hooks, uninstall-hooks, pair (opens a 2-minute window for one new phone and shows its code to confirm), phones, link-phone, unlink-phone, or status.`,
       );
   }
 }
