@@ -161,6 +161,8 @@ jobs:
   android:
     name: SDK, hub and app unit tests
     runs-on: ubuntu-latest
+    # A hung suite ends here, not at the 6-hour default.
+    timeout-minutes: 45
     outputs:
       sha: ${{ steps.tested.outputs.sha }}
       cxrglobal: ${{ steps.tested.outputs.cxrglobal }}

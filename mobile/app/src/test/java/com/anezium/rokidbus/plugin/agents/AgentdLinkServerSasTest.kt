@@ -189,6 +189,7 @@ class AgentdLinkServerSasTest {
 
     private fun listen(block: (SSLServerSocket) -> Unit) {
         tlsServerSocket(identity, 0).use { listener ->
+            listener.soTimeout = 10_000
             val acceptor = thread(isDaemon = true) {
                 while (true) {
                     val socket = runCatching { listener.accept() }.getOrNull() ?: break
@@ -217,7 +218,8 @@ class AgentdLinkServerSasTest {
         val context = SSLContext.getInstance("TLS").apply { init(keyManagers, arrayOf(acceptAny), null) }
         val socket = context.socketFactory.createSocket(InetAddress.getLoopbackAddress(), listener.localPort) as SSLSocket
         socket.soTimeout = 5_000
-        socket.startHandshake()
+        // A failed handshake closes the socket, so the phone's side sees the end and nothing is left open.
+        runCatching { socket.startHandshake() }.onFailure { socket.close() }.getOrThrow()
         return Agentd(socket)
     }
 

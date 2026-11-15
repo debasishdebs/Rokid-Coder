@@ -456,6 +456,7 @@ class AgentdWireTest {
             onEvent = { events += it },
         ).also { it.besideDialled = besideDialled }
         val dialer: Socket = agentdContext().socketFactory.createSocket(InetAddress.getLoopbackAddress(), listener.localPort)
+            .apply { soTimeout = 10_000 }
         private val connection = LinkConnection(listener.accept())
         private val serving = thread { server.serve(connection) }
         val fromPhone = BufferedReader(InputStreamReader(dialer.getInputStream(), Charsets.UTF_8))
@@ -495,6 +496,7 @@ class AgentdWireTest {
         block: (LanLink) -> Unit,
     ) {
         tlsServerSocket(FixturePhoneTlsIdentity(), 0).use { listener ->
+            listener.soTimeout = 10_000
             val lan = LanLink(listener, store, linkEnds, besideDialled, onLinkEnded, onSecureConnected)
             try {
                 block(lan)
@@ -739,6 +741,7 @@ class AgentdWireTest {
     @Test
     fun plaintext_lan_link_is_refused_not_bound() {
         ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { listener ->
+            listener.soTimeout = 10_000
             val events = CopyOnWriteArrayList<AgentdEvent>()
             val server = AgentdLinkServer(
                 store = AgentSessionStore(),
@@ -751,6 +754,7 @@ class AgentdWireTest {
                 onEvent = { events += it },
             )
             Socket(listener.inetAddress, listener.localPort).use { dialer ->
+                dialer.soTimeout = 10_000
                 val serving = thread { server.serve(LinkConnection(listener.accept())) }
                 val hello = """{"type":"hello","v":1,"machineId":"pc-1","machineName":"Desk","token":"secret"}"""
                 dialer.getOutputStream().write("$hello\n".toByteArray(Charsets.UTF_8))
