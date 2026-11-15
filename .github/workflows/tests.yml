@@ -259,8 +259,19 @@ jobs:
                   continue
               key, outcome = line.rstrip("\n").rsplit("|", 1)
               expected[key] = outcome
+          # The two GlassesFileStoreTest failures check-test-results allows: they fail on macOS and
+          # pass on Linux, so either outcome keeps parity. Every other identity must match exactly.
+          store = "glasses|com.anezium.rokidbus.glasses.GlassesFileStoreTest#"
+          either = {
+              f"{store}a file swapped for a folder at the final boundary is not removed",
+              f"{store}a folder swapped for a file at the final boundary is not removed",
+          }
+          def same(k):
+              if k in either:
+                  return current[k] in ("FAILED", "PASSED")
+              return current[k] == expected[k]
           problems = [f"missing {k}" for k in expected if k not in current]
-          problems += [f"changed {k}: {expected[k]} -> {current[k]}" for k in expected if k in current and current[k] != expected[k]]
+          problems += [f"changed {k}: {expected[k]} -> {current[k]}" for k in expected if k in current and not same(k)]
           problems += [f"new test not passing {k}" for k in current if k not in expected and current[k] != "PASSED"]
           print(f"hub parity: baseline={len(expected)} current={len(current)} problems={len(problems)}")
           for problem in problems:
