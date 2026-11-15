@@ -2647,40 +2647,18 @@ class BusHubService : Service(), HubForegroundHost {
         )
         val state = core.linkState()
         lastNotifiedStatus = statusText(state)
-        val requestMicrophone = microphone
-        val result = runCatching {
+        return foregroundPromotion.promote(microphone) { includeMicrophone ->
             startForeground(
                 NOTIFICATION_ID,
                 buildStatusNotification(state),
-                ServiceInfoCompat.hubTypes(includeMicrophone = requestMicrophone),
+                ServiceInfoCompat.hubTypes(includeMicrophone = includeMicrophone),
             )
         }
-        if (result.isSuccess) return null
+    }
 
-        val failure = result.exceptionOrNull()
-        Log.w(
-            TAG,
-            "Hub foreground promotion failed microphone=$requestMicrophone " +
-                "type=${failure?.javaClass?.simpleName.orEmpty()}",
-            failure,
-        )
-        if (requestMicrophone) {
-            runCatching {
-                startForeground(
-                    NOTIFICATION_ID,
-                    buildStatusNotification(state),
-                    ServiceInfoCompat.hubTypes(),
-                )
-            }.onFailure { fallbackFailure ->
-                Log.w(
-                    TAG,
-                    "Connected-device foreground fallback failed " +
-                        "type=${fallbackFailure.javaClass.simpleName}",
-                    fallbackFailure,
-                )
-            }
-        }
-        return failure ?: IllegalStateException("ForegroundServiceException")
+    // Upstream's policy: a session's release drops the microphone type again.
+    private val foregroundPromotion = ForegroundPromotion(holdMicrophoneUntilStop = false) { message, failure ->
+        Log.w(TAG, message, failure)
     }
 
     override fun onLinkStateChanged(linkState: Int) = updateStatusNotification(linkState)
