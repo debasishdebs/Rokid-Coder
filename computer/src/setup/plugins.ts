@@ -10,9 +10,9 @@ import type { PluginRecord, PriorRegistration, Tool } from "./manifest";
  * run by absolute path with an argv array and no shell. The source is the
  * versioned bundle's read-only `plugins/` dir, never a copy [6b-R11].
  *
- * The verbs are pinned from the recorded help in
- * test/fixtures/plugin-cli/<tool>-<version>/. Which of them a CLI has is read
- * from its own `plugin --help` at run time, so a CLI without a
+ * The verbs are pinned per CLI from the recorded help in
+ * test/fixtures/plugin-cli/recorded/ (ADAPTERS). Which of them a CLI has is
+ * read from its own `plugin --help` at run time, so a CLI without a
  * non-interactive install verb gets its marketplace registered and a manual
  * step, rather than a guessed command.
  */
@@ -28,6 +28,22 @@ const LAYOUT: Record<Tool, { marketplace: string[]; manifest: string[] }> = {
 const MANUAL_STEP: Record<Tool, string> = {
   claude: 'In Claude Code, run /plugin and install "rokid" from the rokid-coder marketplace',
   codex: "In Codex, open /plugins and install Rokid-Coder",
+};
+
+/**
+ * Each CLI's own plugin verbs. claude 2.1.285: `plugin install|list|uninstall|update`;
+ * codex-cli 0.169.0: `plugin add|list|remove`, with no update. Both have
+ * `plugin marketplace add|list|remove`.
+ */
+interface CliAdapter {
+  install: string;
+  uninstall: string;
+  update?: string;
+}
+
+const ADAPTERS: Record<Tool, CliAdapter> = {
+  claude: { install: "install", uninstall: "uninstall", update: "update" },
+  codex: { install: "add", uninstall: "remove" },
 };
 
 export interface CliVerbs {
@@ -125,8 +141,11 @@ function marketplaceSource(entry: Record<string, unknown>): string | undefined {
 
 class CliPluginDriver implements PluginDriver {
   private verbs?: CliVerbs;
+  private readonly adapter: CliAdapter;
 
-  constructor(readonly tool: Tool, private readonly cli: string, private readonly options: DriverOptions) {}
+  constructor(readonly tool: Tool, private readonly cli: string, private readonly options: DriverOptions) {
+    this.adapter = ADAPTERS[tool];
+  }
 
   private run(args: string[]): Promise<string> {
     return runCli(this.cli, ["plugin", ...args], this.options);
@@ -138,7 +157,8 @@ class CliPluginDriver implements PluginDriver {
       if (!commands.has("marketplace") || !commands.has("list")) {
         throw new Error(`${this.tool} has no plugin marketplace or list command`);
       }
-      this.verbs = { install: commands.has("install"), update: commands.has("update"), uninstall: commands.has("uninstall") };
+      const { install, uninstall, update } = this.adapter;
+      this.verbs = { install: commands.has(install), update: update !== undefined && commands.has(update), uninstall: commands.has(uninstall) };
     }
     return this.verbs;
   }
@@ -153,8 +173,10 @@ class CliPluginDriver implements PluginDriver {
     if (source) {
       status.marketplace = { source };
     }
+    // Codex lists what its marketplaces offer: only an entry not marked installed:false is installed.
     const plugin = plugins.find(
-      (entry) => entry.id === PLUGIN_ID || (entry.name === PLUGIN_NAME && entry.marketplace === MARKETPLACE),
+      (entry) =>
+        (entry.id === PLUGIN_ID || (entry.name === PLUGIN_NAME && entry.marketplace === MARKETPLACE)) && entry.installed !== false,
     );
     if (plugin) {
       status.plugin = {
@@ -175,15 +197,18 @@ class CliPluginDriver implements PluginDriver {
   }
 
   async installPlugin(): Promise<void> {
-    await this.run(["install", PLUGIN_ID]);
+    await this.run([this.adapter.install, PLUGIN_ID]);
   }
 
   async updatePlugin(): Promise<void> {
-    await this.run(["update", PLUGIN_ID]);
+    if (!this.adapter.update) {
+      throw new Error(`${this.tool} has no plugin update command`);
+    }
+    await this.run([this.adapter.update, PLUGIN_ID]);
   }
 
   async removePlugin(): Promise<void> {
-    await this.run(["uninstall", PLUGIN_ID]);
+    await this.run([this.adapter.uninstall, PLUGIN_ID]);
   }
 }
 

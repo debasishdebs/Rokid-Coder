@@ -1,0 +1,14 @@
+Add, list, upgrade, or remove configured plugin marketplaces
+
+Usage: codex plugin marketplace [OPTIONS] <COMMAND>
+
+Commands:
+  add      Add a configured plugin marketplace
+  list     List configured plugin marketplaces
+  upgrade  Upgrade configured plugin marketplaces
+  remove   Remove a configured plugin marketplace
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')

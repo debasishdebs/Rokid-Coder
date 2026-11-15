@@ -1,8 +1,0 @@
-{
-  "tool": "claude",
-  "version": "2.1.0",
-  "versionOutput": "2.1.0 (Claude Code)",
-  "listFormat": "array",
-  "recorded": false,
-  "note": "Authored from the Claude Code CLI reference, not captured from a binary: 6b T7p forbids running the real claude. Re-record plugin --help, plugin marketplace --help and both list --json outputs in a temp HOME at the spike gate, and diff them against these files."
-}

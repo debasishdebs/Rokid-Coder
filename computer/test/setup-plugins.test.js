@@ -74,14 +74,14 @@ test("plugins_sync_repoints_foreign_marketplace_and_records_old_source", async (
 
 test("plugins_sync_manual_step_when_cli_has_no_install_verb", async (t) => {
   const world = makeWorld(t);
-  assert.ok(!helpCommands(fs.readFileSync(path.join(__dirname, "fixtures", "plugin-cli", "codex-0.130.0-noinstall", "plugin-help.txt"), "utf8")).has("install"));
+  assert.ok(!helpCommands(fs.readFileSync(path.join(__dirname, "fixtures", "plugin-cli", "codex-0.169.0-noinstall", "plugin-help.txt"), "utf8")).has("add"));
   const bundle = world.bundle("1.0.0-test.1");
   const codex = world.cli("codex", { fixture: "codex-noinstall" });
   const outcome = await syncPlugin(createDriver("codex", codex, options(world)), path.join(bundle, "plugins"));
   assert.equal(outcome.result, "manual_step_required");
   assert.equal(outcome.record.detail, "In Codex, open /plugins and install Rokid-Coder");
   assert.equal(world.cliState("codex").marketplaces["rokid-coder"].path, path.join(bundle, "plugins"), "the marketplace is registered");
-  assert.ok(!world.cliCalls("codex").some((args) => args[1] === "install"), "no install verb is guessed");
+  assert.ok(!world.cliCalls("codex").some((args) => args[1] === "install" || args[1] === "add"), "no install verb is guessed");
 });
 
 test("plugins_remove_only_removes_our_marketplace", async (t) => {
@@ -99,5 +99,34 @@ test("plugins_remove_only_removes_our_marketplace", async (t) => {
   assert.equal(await removePlugin(createDriver("codex", codex, options(world)), roots), true);
   assert.deepEqual(world.cliState("codex"), { marketplaces: {}, plugins: {} });
   const order = world.mutatingCalls("codex").slice(-2).map((args) => args.slice(1, 3).join(" "));
-  assert.deepEqual(order, ["uninstall rokid@rokid-coder", "marketplace remove"], "the plugin first, then its marketplace");
+  assert.deepEqual(order, ["remove rokid@rokid-coder", "marketplace remove"], "the plugin first, then its marketplace");
+});
+
+test("plugin_cli_fixtures_are_the_recorded_help", () => {
+  const fixture = (dir, file) => fs.readFileSync(path.join(__dirname, "fixtures", "plugin-cli", dir, file), "utf8");
+  const meta = (dir) => JSON.parse(fixture(dir, "meta.json"));
+  assert.equal(fixture("claude-2.1.285", "plugin-help.txt"), recordedHelp("claude-plugin-help.txt", "Usage: claude plugin|plugins", "Usage: claude plugin install"));
+  assert.equal(fixture("claude-2.1.285", "marketplace-help.txt"), recordedHelp("claude-plugin-help.txt", "Usage: claude plugin marketplace"));
+  assert.equal(fixture("codex-0.169.0", "plugin-help.txt"), recordedHelp("codex-help.txt", "Manage Codex plugins\n\nUsage"));
+  for (const [dir, file] of [["claude-2.1.285", "claude-plugin-help.txt"], ["codex-0.169.0", "codex-help.txt"]]) {
+    assert.equal(meta(dir).versionOutput, fs.readFileSync(path.join(RECORDED, file), "utf8").split("\n")[0]);
+    assert.equal(meta(dir).recorded, true, dir);
+    assert.equal(meta(dir).listJsonRecorded, false, `${dir}: the list --json shape waits for the device gate`);
+  }
+  assert.equal(meta("codex-0.169.0").marketplaceHelpRecorded, false);
+});
+
+test("plugins_each_cli_runs_its_own_verbs", async (t) => {
+  const world = makeWorld(t);
+  const bundle = world.bundle("1.0.0-test.1");
+  const roots = [bundle, path.dirname(bundle)];
+  const verbs = {};
+  for (const tool of ["claude", "codex"]) {
+    const cli = world.cli(tool);
+    assert.equal((await syncPlugin(createDriver(tool, cli, options(world)), path.join(bundle, "plugins"))).result, "ok", tool);
+    assert.equal(await removePlugin(createDriver(tool, cli, options(world)), roots), true, tool);
+    verbs[tool] = world.mutatingCalls(tool).filter((args) => args[1] !== "marketplace").map((args) => args.slice(1).join(" "));
+  }
+  assert.deepEqual(verbs.claude, ["install rokid@rokid-coder", "uninstall rokid@rokid-coder"]);
+  assert.deepEqual(verbs.codex, ["add rokid@rokid-coder", "remove rokid@rokid-coder"]);
 });

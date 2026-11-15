@@ -1,9 +1,0 @@
-{
-  "tool": "codex",
-  "version": "0.130.0",
-  "versionOutput": "codex-cli 0.130.0",
-  "listFormat": "object",
-  "recorded": false,
-  "inherits": "codex-0.130.0",
-  "note": "A Codex whose plugin command registers a marketplace but has no non-interactive install verb: the plugin is then installed from the TUI's /plugins. The marketplace help and list formats are codex-0.130.0's."
-}

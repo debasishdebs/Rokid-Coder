@@ -1,8 +1,0 @@
-{
-  "tool": "codex",
-  "version": "0.130.0",
-  "versionOutput": "codex-cli 0.130.0",
-  "listFormat": "object",
-  "recorded": false,
-  "note": "Authored from the Codex plugin docs and Plan 1's T-codex spike (codex plugin marketplace add <dir>), not captured from a binary: 6b T7p forbids running the real codex. Re-record at the spike gate. If the real CLI has no install verb, the driver already falls back to manual_step_required (codex-0.130.0-noinstall)."
-}

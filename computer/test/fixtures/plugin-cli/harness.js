@@ -15,9 +15,9 @@ const SETUP_MAIN = path.join(DIST, "setup", "main.js");
 const FAKE_CLI = path.join(__dirname, "fake-plugin-cli.js");
 const STATE_FIXTURE = path.join(__dirname, "..", "state-0.8.0", "home");
 const FIXTURES = {
-  claude: path.join(__dirname, "claude-2.1.0"),
-  codex: path.join(__dirname, "codex-0.130.0"),
-  "codex-noinstall": path.join(__dirname, "codex-0.130.0-noinstall"),
+  claude: path.join(__dirname, "claude-2.1.285"),
+  codex: path.join(__dirname, "codex-0.169.0"),
+  "codex-noinstall": path.join(__dirname, "codex-0.169.0-noinstall"),
 };
 const NODE = fs.realpathSync(process.execPath);
 const MUTATING = new Set(["add", "remove", "rm", "install", "i", "update", "uninstall"]);

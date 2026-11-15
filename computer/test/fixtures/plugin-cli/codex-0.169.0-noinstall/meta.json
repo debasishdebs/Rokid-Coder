@@ -1,0 +1,9 @@
+{
+  "tool": "codex",
+  "version": "0.169.0",
+  "versionOutput": "codex-cli 0.169.0",
+  "listFormat": "object",
+  "recorded": false,
+  "inherits": "codex-0.169.0",
+  "note": "A hypothetical Codex: the recorded codex-cli 0.169.0 plugin help with its add row removed, so the plugin has to be installed from the TUI's /plugins. It keeps the manual-step path tested; everything else is codex-0.169.0's."
+}

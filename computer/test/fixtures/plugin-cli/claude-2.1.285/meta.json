@@ -1,0 +1,9 @@
+{
+  "tool": "claude",
+  "version": "2.1.285",
+  "versionOutput": "2.1.285 (Claude Code)",
+  "listFormat": "array",
+  "recorded": true,
+  "listJsonRecorded": false,
+  "note": "plugin-help.txt and marketplace-help.txt are screens of recorded/claude-plugin-help.txt, the read-only --help of the real claude 2.1.285. The verbs are plugin install|list|uninstall|update and plugin marketplace add|list|remove. The `plugin list --json` and `plugin marketplace list --json` shapes (listFormat, plugin-list.json, marketplace-list.json) are NOT recorded: verify them at the device gate."
+}

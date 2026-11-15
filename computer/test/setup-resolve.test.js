@@ -21,7 +21,7 @@ test("resolver_finds_cli_outside_login_path_and_records_absolute_path", async (t
   const found = await resolveTool("claude", options(world));
   assert.equal(found.path, claude);
   assert.ok(path.isAbsolute(found.path));
-  assert.equal(found.version, "2.1.0 (Claude Code)");
+  assert.equal(found.version, "2.1.285 (Claude Code)");
   assert.equal(found.interpreter, "/bin/sh");
 
   // On the login PATH, past the rc file's noise; then only on the interactive one (-lic).

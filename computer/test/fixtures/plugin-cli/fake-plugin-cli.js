@@ -1,7 +1,7 @@
 // A stand-in for `claude` / `codex`, enough of their plugin commands for
-// rokid-setup's drivers: the help and list output come from a recorded
-// fixture dir, and the verbs a fixture's help lacks are refused, as the real
-// CLI would. Its own state (marketplaces, installed copies, an argv log) lives
+// rokid-setup's drivers: the help comes from a recorded fixture dir (the list
+// JSON shape from its meta.json listFormat), and the verbs a fixture's help
+// lacks are refused, as the real CLI would. Its own state (marketplaces, installed copies, an argv log) lives
 // in $HOME/.fake-plugin-cli/<tool>/, never in ~/.claude or ~/.codex, so a test
 // can tell what setup itself wrote there.
 //
@@ -123,7 +123,8 @@ function main(argv) {
     return;
   }
   const id = rest.find((arg) => !arg.startsWith("-"));
-  if (verb === "install" || verb === "i") {
+  // claude: install|i and uninstall|remove; codex: add and remove. The help gate above refuses the others.
+  if (verb === "install" || verb === "i" || verb === "add") {
     if (state.plugins[id]) {
       out(`Plugin '${id}' is already installed\n`);
       return;
@@ -155,8 +156,19 @@ function main(argv) {
     const list = Object.entries(state.plugins).map(([pluginId, p]) =>
       meta.listFormat === "array"
         ? { id: pluginId, version: p.version, scope: "user", enabled: true, installPath: p.installPath }
-        : { name: p.name, marketplace: p.marketplace, version: p.version, path: p.installPath },
+        : { name: p.name, marketplace: p.marketplace, version: p.version, path: p.installPath, installed: true },
     );
+    // Codex lists what its marketplaces offer, installed or not.
+    if (tool === "codex") {
+      for (const [marketplace, m] of Object.entries(state.marketplaces)) {
+        const manifest = JSON.parse(fs.readFileSync(marketplaceManifest(m.path), "utf8"));
+        for (const entry of manifest.plugins) {
+          if (state.plugins[`${entry.name}@${marketplace}`]) continue;
+          const source = pluginSourceDir(m.path, entry.name);
+          list.push({ name: entry.name, marketplace, version: pluginVersion(source), installed: false });
+        }
+      }
+    }
     out(`${JSON.stringify(meta.listFormat === "array" ? list : { plugins: list }, null, 2)}\n`);
   } else {
     fail(`fake ${tool}: plugin ${verb} is not implemented`, 2);
