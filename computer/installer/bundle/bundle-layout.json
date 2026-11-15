@@ -1,0 +1,66 @@
+{
+  "required": [
+    "bundle.json",
+    "bin/rokid-node",
+    "bin/agentd",
+    "bin/rk",
+    "bin/rokid-setup",
+    "node/bin/node",
+    "app/package.json",
+    "app/runtime/node-version.txt",
+    "app/dist/cli.js",
+    "app/dist/rk.js",
+    "app/dist/hook-forward.js",
+    "app/dist/selfcheck.js",
+    "app/dist/version.js",
+    "app/dist/wrappers.js",
+    "app/node_modules/node-pty/package.json",
+    "app/node_modules/qrcode-terminal/package.json",
+    "app/node_modules/selfsigned/package.json",
+    "app/node_modules/ws/package.json",
+    "plugins/.claude-plugin/marketplace.json",
+    "plugins/.agents/plugins/marketplace.json",
+    "plugins/claude-code/.claude-plugin/plugin.json",
+    "plugins/claude-code/hooks/hooks.json",
+    "plugins/claude-code/bin/hook-forward.js",
+    "plugins/codex/.codex-plugin/plugin.json",
+    "plugins/codex/hooks/hooks.json",
+    "plugins/codex/bin/hook-forward.js"
+  ],
+  "mode0755": [
+    "bin/rokid-node",
+    "bin/agentd",
+    "bin/rk",
+    "bin/rokid-setup",
+    "node/bin/node"
+  ],
+  "forbidden": [
+    "app/node_modules/typescript",
+    "app/node_modules/@types",
+    "app/src",
+    "app/test"
+  ],
+  "targets": {
+    "darwin-arm64": {
+      "nodePtyMode": "napi-prebuild",
+      "required": [
+        "app/node_modules/node-pty/prebuilds/darwin-arm64/pty.node",
+        "app/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper"
+      ],
+      "mode0755": ["app/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper"]
+    },
+    "darwin-x64": {
+      "nodePtyMode": "napi-prebuild",
+      "required": [
+        "app/node_modules/node-pty/prebuilds/darwin-x64/pty.node",
+        "app/node_modules/node-pty/prebuilds/darwin-x64/spawn-helper"
+      ],
+      "mode0755": ["app/node_modules/node-pty/prebuilds/darwin-x64/spawn-helper"]
+    },
+    "linux-x64": {
+      "nodePtyMode": "source-built",
+      "required": ["app/node_modules/node-pty/build/Release/pty.node"],
+      "mode0755": []
+    }
+  }
+}

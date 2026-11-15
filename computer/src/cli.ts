@@ -23,6 +23,7 @@ import {
   rotateSteerSecret,
 } from "./tls";
 import { installHooks, uninstallHooks } from "./settings";
+import { runSelfcheck, selfcheckText } from "./selfcheck";
 import { versionInfo, versionText } from "./version";
 
 interface Health {
@@ -112,6 +113,13 @@ async function main(): Promise<void> {
     case "version": {
       const info = versionInfo();
       process.stdout.write(process.argv.slice(3).includes("--json") ? `${JSON.stringify(info)}\n` : versionText(info));
+      break;
+    }
+    case "selfcheck": {
+      const args = process.argv.slice(3);
+      const report = await runSelfcheck({ requireBundle: args.includes("--require-bundle") });
+      process.stdout.write(args.includes("--json") ? `${JSON.stringify(report.result)}\n` : selfcheckText(report));
+      process.exitCode = report.result.ok ? 0 : 1;
       break;
     }
     case "run":
