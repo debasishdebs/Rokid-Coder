@@ -1,0 +1,134 @@
+name: Windows installer
+
+# Builds rokid-coder-<v>-windows-x64.exe from the validated linux-x64 bundle
+# (bundles.yml), after the Pester suite. Hosted runners cannot run WSL2, so
+# the real WSL work is the recorded gate W1-W8
+# (docs/coding-agent/releases/1.0.0-windows-gate.md). The suite never skips:
+# a Skipped or NotRun test, or fewer than test/expected-count.txt, fails it.
+
+on:
+  push:
+    paths:
+      - "computer/**"
+      - "plugin/**"
+      - ".github/workflows/windows-installer.yml"
+      - ".github/workflows/bundles.yml"
+  pull_request:
+    paths:
+      - "computer/**"
+      - "plugin/**"
+      - ".github/workflows/windows-installer.yml"
+      - ".github/workflows/bundles.yml"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      skip-bundles:
+        description: "The caller already ran bundles.yml in this run (its bundle-linux-x64 artifact is used)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  bundles:
+    if: ${{ !inputs.skip-bundles }}
+    uses: ./.github/workflows/bundles.yml
+
+  windows-installer:
+    name: Windows installer (Pester, NSIS)
+    needs: bundles
+    if: ${{ !cancelled() && (needs.bundles.result == 'success' || needs.bundles.result == 'skipped') }}
+    # Pinned: its NetSecurity module carries the Hyper-V firewall cmdlets the metadata test binds against.
+    runs-on: windows-2025
+    env:
+      PESTER_VERSION: "5.7.1"
+      NSIS_VERSION: "3.10"
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check out the revision
+        uses: actions/checkout@v4
+
+      - name: Set up the pinned Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: computer/runtime/node-version.txt
+
+      - name: Build computer (the interop scripts the real-Windows tests run)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          npx tsc -p computer
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Download the validated linux-x64 bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-linux-x64
+          path: bundle
+
+      - name: Check the digest, the validation and the archive's layout
+        id: bundle
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = node -p "require('./computer/package.json').version"
+          $archive = "rokid-coder-bundle-$version-linux-x64.tar.gz"
+          $path = Join-Path 'bundle' $archive
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+          $recorded = ((Get-Content -LiteralPath "$path.sha256" -Raw) -split '\s+')[0].ToLowerInvariant()
+          $validated = Get-Content -LiteralPath "$path.validated.json" -Raw | ConvertFrom-Json
+          if ($actual -ne $recorded) { throw "$archive does not match its .sha256" }
+          if ($validated.sha256.ToLowerInvariant() -ne $actual) { throw "$archive is not the archive bundles.yml validated" }
+          if ($validated.target -ne 'linux-x64') { throw "validated.json is for $($validated.target)" }
+          # Static checks against the tar headers: the Windows job never runs the Linux bundle.
+          node computer/installer/bundle/verify-bundle.mjs --archive $path
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install Pester
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module Pester -RequiredVersion $env:PESTER_VERSION -Force -SkipPublisherCheck -Scope CurrentUser
+
+      - name: Run the Pester suite
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -RequiredVersion $env:PESTER_VERSION
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'computer/installer/windows/test'
+          $config.Run.PassThru = $true
+          $config.Output.Verbosity = 'Detailed'
+          $result = Invoke-Pester -Configuration $config
+          $expected = [int](Get-Content -LiteralPath 'computer/installer/windows/test/expected-count.txt' -Raw).Trim()
+          "passed $($result.PassedCount), failed $($result.FailedCount), skipped $($result.SkippedCount), not run $($result.NotRunCount), expected $expected"
+          if ($result.FailedCount -gt 0 -or $result.SkippedCount -gt 0 -or $result.NotRunCount -gt 0 -or $result.PassedCount -lt $expected) { exit 1 }
+
+      - name: Run the node tests of the Windows installer
+        shell: bash
+        working-directory: computer
+        run: node --test installer/windows/test/netprobe.test.js
+
+      - name: Install the pinned NSIS
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install nsis --version $env:NSIS_VERSION -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build the installer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+          & $makensis /V3 "/DVERSION=${{ steps.bundle.outputs.version }}" "/DBUNDLE_DIR=$PWD\bundle" "/DOUTDIR=$PWD\out" computer\installer\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-FileHash -Algorithm SHA256 "out\rokid-coder-${{ steps.bundle.outputs.version }}-windows-x64.exe"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: out/rokid-coder-${{ steps.bundle.outputs.version }}-windows-x64.exe
+          if-no-files-found: error

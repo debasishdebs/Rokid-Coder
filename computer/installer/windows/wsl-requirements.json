@@ -1,0 +1,9 @@
+{
+  "windowsMinBuild": 22621,
+  "mirroredMin": "2.0.9",
+  "natMin": "0.0.0",
+  "glibcMin": "2.35",
+  "minFreeMB": 300,
+  "docs": "https://learn.microsoft.com/en-us/windows/wsl/networking#mirrored-mode-networking",
+  "verified": "mirroredMin 2.0.9 is the plan's value (mirrored networking plus the Hyper-V firewall); it was not re-checked against the docs page from the build machine, so gate W3 records the WSL version that passed"
+}

@@ -14,7 +14,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Binding
 )
 $ErrorActionPreference = 'Stop'
-Set-StrictMode -Version 3
+Set-StrictMode -Version 2.0
 
 $b = Get-Content -LiteralPath $Binding -Raw -Encoding UTF8 | ConvertFrom-Json
 foreach ($field in 'distroName', 'linuxUser', 'agentdPath', 'bundleDir', 'wslExe', 'networkMode', 'advertisePort') {

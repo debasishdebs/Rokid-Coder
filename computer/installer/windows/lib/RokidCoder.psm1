@@ -1,0 +1,916 @@
+<#
+  The Windows half of Rokid Coder's installer (6b T8): preflight, the per-user
+  staging into WSL, and the machine-scope firewall/port-proxy plan. Windows
+  PowerShell 5.1. Every native call goes through Invoke-Native, so the Pester
+  suite can mock wsl.exe, schtasks.exe and netsh.exe in one place.
+
+  Rules this module keeps:
+  - Every WSL call is `wsl.exe -d <distro> [-u <user>] --exec <absolute path> <argv...>`:
+    no shell, no ~, arguments never joined into a `bash -c` string.
+  - Staging writes only NEW, versioned files and never overwrites [6b-R10, 6b-R21].
+  - Only the machine plan (machine.ps1, elevated) touches firewall and port proxy,
+    and it reads or writes no user profile, registry hive or distro.
+#>
+Set-StrictMode -Version 2.0
+
+$script:WslVmCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
+$script:TaskPath = '\RokidCoder\'
+$script:TaskName = 'agentd'
+$script:FirewallGroup = 'Rokid Coder'
+$script:NatPort = 8794
+$script:WssPort = 8792
+$script:HttpPort = 8791
+$script:DiscoveryPort = 8793
+$script:Tailnet = '100.64.0.0/10'
+# Whether New-NetFirewallHyperVRule takes the LocalSubnet keyword in -RemoteAddresses. Until the
+# metadata test and gate W3 show it does, the Hyper-V rules carry the concrete Private/Domain prefixes.
+$script:HyperVTakesLocalSubnet = $false
+$script:RelayImages = @('wslrelay.exe', 'wslhost.exe', 'vmmem', 'vmmemwsl', 'vmwp.exe')
+$script:Root = Split-Path -Parent $PSScriptRoot
+
+# ---------------------------------------------------------------- the native boundary
+
+function Invoke-Native {
+  <# Runs an executable with argv (no shell). Returns its exit code and stdout lines. #>
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [string[]]$ArgumentList = @()
+  )
+  $previous = [Console]::OutputEncoding
+  # Windows PowerShell turns a native command's stderr into errors: never terminating ones here.
+  $ErrorActionPreference = 'Continue'
+  try {
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    $env:WSL_UTF8 = '1'
+    $output = @(& $FilePath @ArgumentList 2>$null)
+    [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = @($output | ForEach-Object { "$_" }) }
+  } finally {
+    [Console]::OutputEncoding = $previous
+  }
+}
+
+function Get-WslExe { Join-Path $env:SystemRoot 'System32\wsl.exe' }
+
+function Invoke-WslExec {
+  <# wsl.exe -d <distro> [-u <user>] --exec <absolute path> <args>: the only way this module runs anything in WSL. #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Distro,
+    [string]$User,
+    [Parameter(Mandatory = $true)][string]$Path,
+    [string[]]$Arguments = @()
+  )
+  if (-not $Path.StartsWith('/') -or $Path.Contains('~')) { throw "A WSL call needs an absolute Linux path, not '$Path'" }
+  $argv = @('-d', $Distro)
+  if ($User) { $argv += @('-u', $User) }
+  $argv += @('--exec', $Path) + $Arguments
+  Invoke-Native -FilePath (Get-WslExe) -ArgumentList $argv
+}
+
+function ConvertTo-CommandLine {
+  <# One Windows command line from argv, quoted the way CommandLineToArgvW splits it back. #>
+  param([string[]]$Arguments)
+  $quoted = foreach ($arg in $Arguments) {
+    if ($arg -ne '' -and $arg -notmatch '[\s"]') { $arg; continue }
+    $out = '"'
+    $slashes = 0
+    foreach ($c in $arg.ToCharArray()) {
+      if ($c -eq '\') { $slashes++; continue }
+      if ($c -eq '"') { $out += ('\' * (2 * $slashes + 1)) + '"' } else { $out += ('\' * $slashes) + $c }
+      $slashes = 0
+    }
+    $out + ('\' * (2 * $slashes)) + '"'
+  }
+  $quoted -join ' '
+}
+
+# ---------------------------------------------------------------- paths and records
+
+function Get-RokidPaths {
+  param([string]$LocalAppData = $env:LOCALAPPDATA, [string]$ProgramData = $env:ProgramData)
+  [pscustomobject]@{
+    InstallRoot  = Join-Path $LocalAppData 'Programs\RokidCoder'
+    DataRoot     = Join-Path $LocalAppData 'RokidCoder'
+    Journal      = Join-Path $LocalAppData 'RokidCoder\journal'
+    WslConfigLog = Join-Path $LocalAppData 'RokidCoder\wslconfig-change.json'
+    MachineState = Join-Path $ProgramData 'RokidCoder\machine-state.json'
+  }
+}
+
+function Get-WslRequirements {
+  param([string]$Path = (Join-Path $script:Root 'wsl-requirements.json'))
+  Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+
+function Write-Utf8File {
+  <# UTF-8 without a BOM: node's JSON.parse refuses a BOM. #>
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Content)
+  [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UTF8Encoding $false))
+}
+
+function Write-Utf16File {
+  <# UTF-16LE with a BOM, as schtasks /XML expects for encoding="UTF-16". #>
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Content)
+  [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UnicodeEncoding $false, $true))
+}
+
+# ---------------------------------------------------------------- versions, distros
+
+function ConvertTo-WslVersion {
+  param([string]$Text)
+  if ($Text -match '(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?') {
+    return [version]('{0}.{1}.{2}.{3}' -f $Matches[1], $Matches[2], $Matches[3], $(if ($Matches[4]) { $Matches[4] } else { 0 }))
+  }
+  $null
+}
+
+function Get-FileProductVersion {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  (Get-Item -LiteralPath $Path).VersionInfo.ProductVersion
+}
+
+function Get-WslExePaths {
+  $store = Join-Path $env:ProgramFiles 'WSL\wsl.exe'
+  $inbox = Join-Path $env:SystemRoot 'System32\wsl.exe'
+  [pscustomobject]@{
+    Store = $(if (Test-Path -LiteralPath $store) { $store } else { $null })
+    Inbox = $(if (Test-Path -LiteralPath $inbox) { $inbox } else { $null })
+  }
+}
+
+function Get-WslVersionInfo {
+  <#
+    The Store/MSI WSL's file ProductVersion, never localized console text. Only
+    when that cannot be read, `wsl.exe --version` (WSL_UTF8=1) is parsed for the
+    first version-shaped token. The inbox WSL alone has no version.
+  #>
+  $paths = Get-WslExePaths
+  if (-not $paths.Store) {
+    return [pscustomobject]@{ Version = $null; Source = $(if ($paths.Inbox) { 'inbox' } else { 'none' }) }
+  }
+  $version = ConvertTo-WslVersion (Get-FileProductVersion -Path $paths.Store)
+  if ($version) { return [pscustomobject]@{ Version = $version; Source = 'file' } }
+  $run = Invoke-Native -FilePath $paths.Store -ArgumentList @('--version')
+  [pscustomobject]@{ Version = $(if ($run.ExitCode -eq 0 -and $run.Output.Count -gt 0) { ConvertTo-WslVersion $run.Output[0] } else { $null }); Source = 'console' }
+}
+
+function Select-NetworkMode {
+  <# Chosen FIRST [6b-R1]: mirrored only with a new enough WSL AND the user's consent to the .wslconfig change. #>
+  param([version]$WslVersion, [Parameter(Mandatory = $true)][string]$MirroredMin, [bool]$ConsentMirrored)
+  if ($WslVersion -and $WslVersion -ge (ConvertTo-WslVersion $MirroredMin) -and $ConsentMirrored) { 'mirrored' } else { 'nat' }
+}
+
+function Get-LxssDistros {
+  <# THIS user's distros, from HKCU\...\Lxss: never parsed from localized `wsl -l` output. #>
+  param([string]$Root = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss')
+  if (-not (Test-Path -LiteralPath $Root)) { return @() }
+  $default = Get-PropertyValue (Get-ItemProperty -LiteralPath $Root -ErrorAction SilentlyContinue) 'DefaultDistribution'
+  @(Get-ChildItem -LiteralPath $Root | ForEach-Object {
+      $p = Get-ItemProperty -LiteralPath $_.PSPath
+      [pscustomobject]@{
+        Guid    = $_.PSChildName
+        Name    = [string](Get-PropertyValue $p 'DistributionName')
+        Version = [int](Get-PropertyValue $p 'Version')
+        Default = ($_.PSChildName -eq $default)
+      }
+    })
+}
+
+function Get-PropertyValue {
+  <# A property that may be absent (a registry value, a JSON field), without StrictMode throwing. #>
+  param($Object, [Parameter(Mandatory = $true)][string]$Name)
+  if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { $Object.$Name } else { $null }
+}
+
+function Select-Distro {
+  <# The requested distro; else the default when it is Ubuntu; else nothing (the installer asks). #>
+  param([object[]]$Distros, [string]$Requested)
+  if ($Requested) { return $Distros | Where-Object { $_.Name -eq $Requested } | Select-Object -First 1 }
+  $Distros | Where-Object { $_.Default -and $_.Name -like 'Ubuntu*' } | Select-Object -First 1
+}
+
+function Get-DistroFacts {
+  <# glibc, the default Linux user, uid and home, and free space in that home: each one --exec call. #>
+  param([Parameter(Mandatory = $true)][string]$Distro)
+  $glibc = Invoke-WslExec -Distro $Distro -Path '/usr/bin/getconf' -Arguments @('GNU_LIBC_VERSION')
+  $user = Invoke-WslExec -Distro $Distro -Path '/usr/bin/id' -Arguments @('-un')
+  $uid = Invoke-WslExec -Distro $Distro -Path '/usr/bin/id' -Arguments @('-u')
+  $name = $(if ($user.ExitCode -eq 0) { "$($user.Output[0])".Trim() } else { '' })
+  $linuxHome = ''
+  $freeMB = $null
+  if ($name) {
+    $entry = Invoke-WslExec -Distro $Distro -User $name -Path '/usr/bin/getent' -Arguments @('passwd', $name)
+    if ($entry.ExitCode -eq 0) { $linuxHome = ("$($entry.Output[0])" -split ':')[5] }
+    if ($linuxHome) {
+      $df = Invoke-WslExec -Distro $Distro -User $name -Path '/usr/bin/df' -Arguments @('-Pk', $linuxHome)
+      if ($df.ExitCode -eq 0 -and $df.Output.Count -ge 2) { $freeMB = [math]::Floor([double](($df.Output[1] -split '\s+')[3]) / 1024) }
+    }
+  }
+  [pscustomobject]@{
+    Glibc  = $(if ($glibc.ExitCode -eq 0) { ConvertTo-WslVersion ("$($glibc.Output[0])" -replace '^glibc\s+', '') } else { $null })
+    User   = $name
+    Uid    = $(if ($uid.ExitCode -eq 0) { [int]"$($uid.Output[0])".Trim() } else { $null })
+    Home   = $linuxHome
+    FreeMB = $freeMB
+  }
+}
+
+# ---------------------------------------------------------------- .wslconfig
+
+function Get-WslConfigPath { Join-Path $env:USERPROFILE '.wslconfig' }
+
+function Get-WslConfigValue {
+  param([string]$Path = (Get-WslConfigPath), [string]$Section = 'wsl2', [Parameter(Mandatory = $true)][string]$Key)
+  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  $current = ''
+  foreach ($line in Get-Content -LiteralPath $Path) {
+    if ($line -match '^\s*\[([^\]]+)\]\s*$') { $current = $Matches[1].Trim(); continue }
+    if ($current -ieq $Section -and $line -match "^\s*$([regex]::Escape($Key))\s*=\s*(.*?)\s*$") { return $Matches[1] }
+  }
+  $null
+}
+
+function Set-WslConfigValue {
+  <#
+    Sets one key, with consent already given, keeping every other line as it was.
+    The first change backs the file up as .wslconfig.rokid-backup, and each change
+    is recorded (key, value, previous) so uninstall can tell whether it is still ours.
+  #>
+  param(
+    [string]$Path = (Get-WslConfigPath),
+    [string]$Section = 'wsl2',
+    [Parameter(Mandatory = $true)][string]$Key,
+    [Parameter(Mandatory = $true)][string]$Value,
+    [string]$LogPath = (Get-RokidPaths).WslConfigLog
+  )
+  $previous = Get-WslConfigValue -Path $Path -Section $Section -Key $Key
+  $lines = New-Object System.Collections.Generic.List[string]
+  if (Test-Path -LiteralPath $Path) {
+    $backup = "$Path.rokid-backup"
+    if (-not (Test-Path -LiteralPath $backup)) { Copy-Item -LiteralPath $Path -Destination $backup }
+    foreach ($line in Get-Content -LiteralPath $Path) { $lines.Add($line) }
+  }
+  $current = ''
+  $sectionAt = -1
+  $done = $false
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match '^\s*\[([^\]]+)\]\s*$') { $current = $Matches[1].Trim(); if ($current -ieq $Section) { $sectionAt = $i }; continue }
+    if ($current -ieq $Section -and $lines[$i] -match "^\s*$([regex]::Escape($Key))\s*=") { $lines[$i] = "$Key=$Value"; $done = $true; break }
+  }
+  if (-not $done) {
+    if ($sectionAt -ge 0) { $lines.Insert($sectionAt + 1, "$Key=$Value") } else { $lines.Add("[$Section]"); $lines.Add("$Key=$Value") }
+  }
+  Write-Utf8File -Path $Path -Content (($lines -join "`r`n") + "`r`n")
+  $log = @()
+  if (Test-Path -LiteralPath $LogPath) { $log = @(Get-Content -LiteralPath $LogPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+  if (-not ($log | Where-Object { $_.section -ieq $Section -and $_.key -ieq $Key })) {
+    $log += [pscustomobject]@{ section = $Section; key = $Key; value = $Value; previous = $previous }
+  }
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null
+  Write-Utf8File -Path $LogPath -Content (ConvertTo-Json -InputObject @($log) -Depth 3)
+}
+
+function Remove-WslConfigValue {
+  param([string]$Path = (Get-WslConfigPath), [string]$Section = 'wsl2', [Parameter(Mandatory = $true)][string]$Key)
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $current = ''
+  $kept = foreach ($line in Get-Content -LiteralPath $Path) {
+    if ($line -match '^\s*\[([^\]]+)\]\s*$') { $current = $Matches[1].Trim() }
+    elseif ($current -ieq $Section -and $line -match "^\s*$([regex]::Escape($Key))\s*=") { continue }
+    $line
+  }
+  Write-Utf8File -Path $Path -Content ((@($kept) -join "`r`n") + "`r`n")
+}
+
+function Restore-WslConfigChange {
+  <#
+    Uninstall step 4: only when networkingMode still holds the value setup set,
+    and only when the person answers n to "Keep mirrored networking?", the
+    earlier value is put back. No other key is touched.
+  #>
+  param(
+    [string]$Path = (Get-WslConfigPath),
+    [string]$LogPath = (Get-RokidPaths).WslConfigLog,
+    [Parameter(Mandatory = $true)][scriptblock]$Ask
+  )
+  if (-not (Test-Path -LiteralPath $LogPath)) { return 'unchanged' }
+  $change = @(Get-Content -LiteralPath $LogPath -Raw -Encoding UTF8 | ConvertFrom-Json) | Where-Object { $_.key -ieq 'networkingMode' } | Select-Object -First 1
+  if (-not $change) { return 'unchanged' }
+  if ((Get-WslConfigValue -Path $Path -Section $change.section -Key 'networkingMode') -ne $change.value) { return 'not-ours' }
+  $answer = & $Ask 'Keep mirrored networking? [Y/n]'
+  if ("$answer".Trim() -notmatch '^(n|no)$') { return 'kept' }
+  if ($null -eq $change.previous) { Remove-WslConfigValue -Path $Path -Section $change.section -Key 'networkingMode' }
+  else { Set-WslConfigValue -Path $Path -Section $change.section -Key 'networkingMode' -Value $change.previous -LogPath "$LogPath.restore" }
+  'restored'
+}
+
+function Get-EffectiveNetworkingMode {
+  <#
+    What WSL actually runs, after the change and a restart: `wslinfo --networking-mode`.
+    Mirrored can fall back to NAT silently, so it is checked, never assumed. Without
+    wslinfo, mirrored means the distro's non-loopback IPv4 set equals the host's.
+  #>
+  param([Parameter(Mandatory = $true)][string]$Distro)
+  $info = Invoke-WslExec -Distro $Distro -Path '/usr/bin/wslinfo' -Arguments @('--networking-mode')
+  if ($info.ExitCode -eq 0 -and $info.Output.Count -gt 0) { return "$($info.Output[0])".Trim().ToLowerInvariant() }
+  $inside = Invoke-WslExec -Distro $Distro -Path '/usr/bin/hostname' -Arguments @('-I')
+  $distroIps = @(("$($inside.Output -join ' ')" -split '\s+') | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' -and $_ -notlike '127.*' } | Sort-Object -Unique)
+  $hostIps = @(Get-HostIPv4 | Sort-Object -Unique)
+  if ($distroIps.Count -gt 0 -and -not (Compare-Object $distroIps $hostIps)) { 'mirrored' } else { 'nat' }
+}
+
+function Get-HostIPv4 {
+  @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.InterfaceAlias -notlike 'vEthernet (WSL*' } | ForEach-Object { $_.IPAddress })
+}
+
+# ---------------------------------------------------------------- the machine plan (machine.ps1 only)
+
+function ConvertTo-NetworkPrefix {
+  param([Parameter(Mandatory = $true)][string]$Address, [Parameter(Mandatory = $true)][int]$PrefixLength)
+  $bytes = ([Net.IPAddress]::Parse($Address)).GetAddressBytes()
+  [Array]::Reverse($bytes)
+  $value = [BitConverter]::ToUInt32($bytes, 0)
+  $mask = $(if ($PrefixLength -eq 0) { [uint32]0 } else { [uint32]([math]::Pow(2, 32) - [math]::Pow(2, 32 - $PrefixLength)) })
+  $network = [BitConverter]::GetBytes([uint32]($value -band $mask))
+  [Array]::Reverse($network)
+  "$(([Net.IPAddress]$network).ToString())/$PrefixLength"
+}
+
+function Get-HostPrivatePrefixes {
+  <# The IPv4 prefixes of the Private and Domain networks: the Hyper-V rules' scope, recomputed by every Repair. #>
+  $profiles = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object { $_.NetworkCategory -in @('Private', 'DomainAuthenticated') })
+  @(foreach ($p in $profiles) {
+      Get-NetIPAddress -InterfaceIndex $p.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -notlike '169.254.*' } |
+        ForEach-Object { ConvertTo-NetworkPrefix -Address $_.IPAddress -PrefixLength $_.PrefixLength }
+    }) | Sort-Object -Unique
+}
+
+function Get-HyperVScope {
+  if ($script:HyperVTakesLocalSubnet) { return @('LocalSubnet', $script:Tailnet) }
+  @(Get-HostPrivatePrefixes) + @($script:Tailnet)
+}
+
+function Get-MachinePlan {
+  <#
+    Every machine-scope object for a mode, complete, with the mandatory -Name AND
+    -DisplayName [6b-R7]. Data, not actions: machine.ps1 applies it, and the
+    metadata test binds each entry against the real cmdlet.
+  #>
+  param([Parameter(Mandatory = $true)][ValidateSet('mirrored', 'nat')][string]$Mode, [string[]]$HyperVScope)
+  $hostScope = @('LocalSubnet', $script:Tailnet)
+  if ($Mode -eq 'mirrored') {
+    if (-not $HyperVScope) { $HyperVScope = Get-HyperVScope }
+    return @(
+      [pscustomobject]@{ Kind = 'hyperv'; Name = 'RokidCoder-wss'; Cmdlet = 'New-NetFirewallHyperVRule'; Parameters = @{
+          Name = 'RokidCoder-wss'; DisplayName = 'Rokid Coder (WSL) wss'; Direction = 'Inbound'; Action = 'Allow'; VMCreatorId = $script:WslVmCreatorId
+          Protocol = 'TCP'; LocalPorts = @("$script:WssPort"); RemoteAddresses = $HyperVScope; Profiles = @('Private', 'Domain') } }
+      [pscustomobject]@{ Kind = 'hyperv'; Name = 'RokidCoder-discovery'; Cmdlet = 'New-NetFirewallHyperVRule'; Parameters = @{
+          Name = 'RokidCoder-discovery'; DisplayName = 'Rokid Coder (WSL) discovery replies'; Direction = 'Inbound'; Action = 'Allow'; VMCreatorId = $script:WslVmCreatorId
+          Protocol = 'UDP'; RemotePorts = @("$script:DiscoveryPort"); RemoteAddresses = $HyperVScope; Profiles = @('Private', 'Domain') } }
+      [pscustomobject]@{ Kind = 'firewall'; Name = 'RokidCoder-wss-host'; Cmdlet = 'New-NetFirewallRule'; Parameters = @{
+          Name = 'RokidCoder-wss-host'; DisplayName = 'Rokid Coder wss'; Group = $script:FirewallGroup; Direction = 'Inbound'; Action = 'Allow'
+          Protocol = 'TCP'; LocalPort = @("$script:WssPort"); RemoteAddress = $hostScope; Profile = @('Private', 'Domain') } }
+      [pscustomobject]@{ Kind = 'firewall'; Name = 'RokidCoder-discovery-host'; Cmdlet = 'New-NetFirewallRule'; Parameters = @{
+          Name = 'RokidCoder-discovery-host'; DisplayName = 'Rokid Coder discovery replies'; Group = $script:FirewallGroup; Direction = 'Inbound'; Action = 'Allow'
+          Protocol = 'UDP'; RemotePort = @("$script:DiscoveryPort"); RemoteAddress = $hostScope; Profile = @('Private', 'Domain') } }
+    )
+  }
+  @(
+    [pscustomobject]@{ Kind = 'portproxy'; Name = "v4tov4 0.0.0.0:$script:NatPort"; Cmdlet = 'netsh.exe'; Parameters = @{
+        ListenAddress = '0.0.0.0'; ListenPort = $script:NatPort; ConnectAddress = '127.0.0.1'; ConnectPort = $script:WssPort } }
+    [pscustomobject]@{ Kind = 'firewall'; Name = 'RokidCoder-proxy'; Cmdlet = 'New-NetFirewallRule'; Parameters = @{
+        Name = 'RokidCoder-proxy'; DisplayName = 'Rokid Coder proxy'; Group = $script:FirewallGroup; Direction = 'Inbound'; Action = 'Allow'
+        Protocol = 'TCP'; LocalPort = @("$script:NatPort"); RemoteAddress = $hostScope; Profile = @('Private', 'Domain') } }
+  )
+}
+
+function Get-Netsh { Join-Path $env:SystemRoot 'System32\netsh.exe' }
+
+function Get-PortProxyEntries {
+  <# The v4tov4 table, as numbers only: netsh's headers are localized, its rows are not. #>
+  $run = Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'show', 'v4tov4')
+  @(foreach ($line in $run.Output) {
+      if ($line -match '^\s*(\S+)\s+(\d+)\s+(\S+)\s+(\d+)\s*$') {
+        [pscustomobject]@{ ListenAddress = $Matches[1]; ListenPort = [int]$Matches[2]; ConnectAddress = $Matches[3]; ConnectPort = [int]$Matches[4] }
+      }
+    })
+}
+
+function Test-PlanItemPresent {
+  param([Parameter(Mandatory = $true)]$Item)
+  switch ($Item.Kind) {
+    'firewall' { [bool](Get-NetFirewallRule -Name $Item.Name -ErrorAction SilentlyContinue) }
+    'hyperv' { [bool](Get-NetFirewallHyperVRule -Name $Item.Name -ErrorAction SilentlyContinue) }
+    'portproxy' {
+      $p = $Item.Parameters
+      [bool](Get-PortProxyEntries | Where-Object { $_.ListenAddress -eq $p.ListenAddress -and $_.ListenPort -eq $p.ListenPort -and $_.ConnectAddress -eq $p.ConnectAddress -and $_.ConnectPort -eq $p.ConnectPort })
+    }
+  }
+}
+
+function Test-MachineRuleSet {
+  <# Preflight's firewall_rules: is the mode's whole set present? Returns the missing names. #>
+  param([Parameter(Mandatory = $true)][ValidateSet('mirrored', 'nat')][string]$Mode)
+  @(Get-MachinePlan -Mode $Mode | Where-Object { -not (Test-PlanItemPresent -Item $_) } | ForEach-Object { $_.Name })
+}
+
+function Read-MachineState {
+  param([Parameter(Mandatory = $true)][string]$StatePath)
+  if (-not (Test-Path -LiteralPath $StatePath)) { return [pscustomobject]@{ schema = 1; objects = @() } }
+  $state = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+  [pscustomobject]@{ schema = 1; objects = @($state.objects) }
+}
+
+function Write-MachineState {
+  param([Parameter(Mandatory = $true)][string]$StatePath, [Parameter(Mandatory = $true)]$State)
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $StatePath) | Out-Null
+  Write-Utf8File -Path $StatePath -Content (ConvertTo-Json -InputObject $State -Depth 6)
+}
+
+function Assert-MachineStatePath {
+  param([Parameter(Mandatory = $true)][string]$StatePath)
+  $root = [IO.Path]::GetFullPath((Join-Path $env:ProgramData 'RokidCoder'))
+  if (-not [IO.Path]::GetFullPath($StatePath).StartsWith("$root\", [StringComparison]::OrdinalIgnoreCase)) {
+    throw "The machine state belongs under $root, not $StatePath"
+  }
+}
+
+function Invoke-MachineApply {
+  <#
+    Creates each missing object of the mode's plan and records it in machine-state.json
+    with this run's id, so a failed install reverts exactly what this run created.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet('mirrored', 'nat')][string]$Mode,
+    [Parameter(Mandatory = $true)][string]$StatePath,
+    [Parameter(Mandatory = $true)][string]$RunId
+  )
+  Assert-MachineStatePath -StatePath $StatePath
+  $state = Read-MachineState -StatePath $StatePath
+  foreach ($item in Get-MachinePlan -Mode $Mode) {
+    if (Test-PlanItemPresent -Item $item) { continue }
+    $p = $item.Parameters
+    switch ($item.Kind) {
+      'firewall' { $created = New-NetFirewallRule @p; $ids = @([string]$created.Name) }
+      'hyperv' { $created = New-NetFirewallHyperVRule @p; $ids = @([string]$created.Name) }
+      'portproxy' {
+        $run = Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'add', 'v4tov4', "listenaddress=$($p.ListenAddress)", "listenport=$($p.ListenPort)", "connectaddress=$($p.ConnectAddress)", "connectport=$($p.ConnectPort)")
+        if ($run.ExitCode -ne 0) { throw "netsh portproxy add failed ($($run.ExitCode))" }
+        $ids = @("$($p.ListenAddress):$($p.ListenPort)->$($p.ConnectAddress):$($p.ConnectPort)")
+      }
+    }
+    $state.objects = @($state.objects) + [pscustomobject]@{ kind = $item.Kind; name = $item.Name; ids = $ids; runId = $RunId; mode = $Mode; parameters = $p }
+    Write-MachineState -StatePath $StatePath -State $state
+  }
+}
+
+function Invoke-MachineRevert {
+  <# Removes what machine-state.json records (one run's, or -All), and nothing it does not. #>
+  param(
+    [Parameter(Mandatory = $true)][string]$StatePath,
+    [string]$RunId,
+    [switch]$All
+  )
+  Assert-MachineStatePath -StatePath $StatePath
+  if (-not $All -and -not $RunId) { throw 'Revert needs -RunId or -All' }
+  $state = Read-MachineState -StatePath $StatePath
+  $kept = @()
+  foreach ($object in @($state.objects)) {
+    if (-not $All -and $object.runId -ne $RunId) { $kept += $object; continue }
+    switch ($object.kind) {
+      'firewall' { Remove-NetFirewallRule -Name $object.name -ErrorAction SilentlyContinue }
+      'hyperv' { Remove-NetFirewallHyperVRule -Name $object.name -ErrorAction SilentlyContinue }
+      'portproxy' {
+        $p = $object.parameters
+        $present = Get-PortProxyEntries | Where-Object { $_.ListenAddress -eq $p.ListenAddress -and $_.ListenPort -eq [int]$p.ListenPort -and $_.ConnectAddress -eq $p.ConnectAddress -and $_.ConnectPort -eq [int]$p.ConnectPort }
+        if ($present) { Invoke-Native -FilePath (Get-Netsh) -ArgumentList @('interface', 'portproxy', 'delete', 'v4tov4', "listenaddress=$($p.ListenAddress)", "listenport=$($p.ListenPort)") | Out-Null }
+      }
+    }
+  }
+  $state.objects = $kept
+  Write-MachineState -StatePath $StatePath -State $state
+}
+
+function Invoke-MachineHelper {
+  <# The ONE elevation: machine.ps1 through UAC, waited for. Returns its exit code. #>
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet('Apply', 'Revert')][string]$Action,
+    [string]$Mode,
+    [string]$RunId,
+    [switch]$All,
+    [string]$Script = (Join-Path $script:Root 'machine.ps1')
+  )
+  $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script, "-$Action", '-StatePath', (Get-RokidPaths).MachineState)
+  if ($Mode) { $argv += @('-Mode', $Mode) }
+  if ($RunId) { $argv += @('-RunId', $RunId) }
+  if ($All) { $argv += '-All' }
+  $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  (Start-Process -FilePath $powershell -ArgumentList (ConvertTo-CommandLine $argv) -Verb RunAs -Wait -PassThru).ExitCode
+}
+
+# ---------------------------------------------------------------- who is installing
+
+function Get-ProcessUserSid { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+
+function Get-SessionOwnerSid {
+  <# The owner of this session's explorer.exe: the person at the screen. #>
+  $session = (Get-Process -Id $PID).SessionId
+  $explorer = Get-CimInstance Win32_Process -Filter "Name='explorer.exe' AND SessionId=$session" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $explorer) { return $null }
+  (Invoke-CimMethod -InputObject $explorer -MethodName GetOwnerSid).Sid
+}
+
+function Test-SessionUser {
+  <# The installer binds the user it runs as; a different account than the session's would bind the wrong one. #>
+  $owner = Get-SessionOwnerSid
+  -not $owner -or $owner -eq (Get-ProcessUserSid)
+}
+
+function Assert-SessionUser {
+  if (-not (Test-SessionUser)) { throw 'Run the installer from your own Windows account, not as another user' }
+}
+
+# ---------------------------------------------------------------- ports
+
+function Get-HostListeners {
+  param([int[]]$Ports)
+  @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $Ports -contains [int]$_.LocalPort } | ForEach-Object {
+      $p = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$_.OwningProcess)" -ErrorAction SilentlyContinue
+      [pscustomobject]@{ Side = 'host'; Port = [int]$_.LocalPort; Pid = [int]$_.OwningProcess; Name = [string]$(if ($p) { $p.Name } else { '' }); Path = [string]$(if ($p) { $p.ExecutablePath } else { '' }); CommandLine = [string]$(if ($p) { $p.CommandLine } else { '' }) }
+    })
+}
+
+function Get-DistroListeners {
+  <# `ss -Hltnp` in the distro, then each pid's exe link: who listens on the ports inside WSL. #>
+  param([Parameter(Mandatory = $true)][string]$Distro, [Parameter(Mandatory = $true)][string]$User, [int[]]$Ports)
+  $ss = Invoke-WslExec -Distro $Distro -User $User -Path '/usr/bin/ss' -Arguments @('-Hltnp')
+  @(foreach ($line in $ss.Output) {
+      if ($line -notmatch ':(\d+)\s') { continue }
+      $port = [int]$Matches[1]
+      if ($Ports -notcontains $port) { continue }
+      $procId = $(if ($line -match 'pid=(\d+)') { [int]$Matches[1] } else { 0 })
+      $exe = ''
+      if ($procId) { $link = Invoke-WslExec -Distro $Distro -User $User -Path '/usr/bin/readlink' -Arguments @("/proc/$procId/exe"); if ($link.ExitCode -eq 0) { $exe = "$($link.Output[0])".Trim() } }
+      [pscustomobject]@{ Side = 'wsl'; Port = $port; Pid = $procId; Name = ''; Path = $exe; CommandLine = '' }
+    })
+}
+
+function Test-LegacyDaemon {
+  param($Owner)
+  $Owner.Side -eq 'host' -and $Owner.Name -ieq 'node.exe' -and $Owner.CommandLine -match '\\dist\\cli\.js"?\s+run(\s|$)'
+}
+
+function Get-PortOwnerClass {
+  <#
+    current: our recorded install (a node under the bundles root in WSL; the port proxy we recorded);
+    legacy: 0.8.0's node.exe running ...\dist\cli.js run; relay: WSL's own forwarder; other: anyone else.
+  #>
+  param([Parameter(Mandatory = $true)]$Owner, [Parameter(Mandatory = $true)][string]$BundleRoot, [bool]$ProxyRecorded)
+  if ($Owner.Side -eq 'wsl') { if ($Owner.Path -and $Owner.Path.StartsWith($BundleRoot)) { return 'current' } return 'other' }
+  if ($script:RelayImages -contains $Owner.Name.ToLowerInvariant()) { return 'relay' }
+  if (Test-LegacyDaemon -Owner $Owner) { return 'legacy' }
+  if ($Owner.Port -eq $script:NatPort -and $Owner.Name -ieq 'svchost.exe' -and $ProxyRecorded) { return 'current' }
+  'other'
+}
+
+# ---------------------------------------------------------------- preflight
+
+function New-PreflightItem {
+  param([string]$Id, [bool]$Ok, [string]$Detail, [string]$Fix = '', [bool]$Optional = $false, [string]$Action = '')
+  [pscustomobject]@{ id = $Id; ok = $Ok; detail = $Detail; fix = $Fix; optional = $Optional; action = $Action }
+}
+
+function Get-WindowsBuild { [Environment]::OSVersion.Version.Build }
+
+function Get-FreeSpaceMB {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $drive = (Get-Item -LiteralPath $Path).PSDrive
+  [math]::Floor($drive.Free / 1MB)
+}
+
+function Invoke-Preflight {
+  <#
+    Every item that applies to the chosen mode, each {id, ok, detail, fix, optional, action}.
+    The mode is chosen first; switching it runs this again.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet('mirrored', 'nat')][string]$Mode,
+    [string]$DistroName,
+    [switch]$RetireLegacy,
+    $Requirements = (Get-WslRequirements)
+  )
+  $items = New-Object System.Collections.Generic.List[object]
+  $build = Get-WindowsBuild
+  $items.Add((New-PreflightItem 'windows_version' ($build -ge $Requirements.windowsMinBuild) "Windows build $build" 'Update to Windows 11 22H2 or later'))
+  $paths = Get-WslExePaths
+  $installed = [bool]($paths.Store -or $paths.Inbox)
+  $items.Add((New-PreflightItem 'wsl_installed' $installed $(if ($paths.Store) { $paths.Store } elseif ($paths.Inbox) { $paths.Inbox } else { 'WSL is not installed' }) 'Run: wsl --install'))
+  $wsl = Get-WslVersionInfo
+  if ($Mode -eq 'mirrored') {
+    $ok = [bool]($wsl.Version -and $wsl.Version -ge (ConvertTo-WslVersion $Requirements.mirroredMin))
+    $detail = $(if ($wsl.Version) { "WSL $($wsl.Version) ($($wsl.Source))" } elseif ($wsl.Source -eq 'inbox') { 'the WSL built into Windows (no version)' } else { 'no WSL version' })
+    $items.Add((New-PreflightItem 'wsl_version' $ok $detail "Run: wsl --update, or choose NAT networking (mirrored needs WSL $($Requirements.mirroredMin))"))
+  } else {
+    $items.Add((New-PreflightItem 'wsl_version' $installed $(if ($wsl.Version) { "WSL $($wsl.Version)" } else { "WSL ($($wsl.Source))" }) 'Run: wsl --install'))
+  }
+  $distros = @(Get-LxssDistros)
+  $distro = Select-Distro -Distros $distros -Requested $DistroName
+  if (-not $distro) {
+    $names = ($distros | ForEach-Object { $_.Name }) -join ', '
+    $items.Add((New-PreflightItem 'wsl_distro' $false $(if ($names) { "Choose a distro: $names" } else { 'No WSL distro' }) 'Run: wsl --install -d Ubuntu-24.04, or choose one'))
+    return [pscustomobject]@{ mode = $Mode; distro = $null; items = @($items) }
+  }
+  $items.Add((New-PreflightItem 'wsl_distro' ($distro.Version -eq 2) "$($distro.Name) (WSL $($distro.Version))" "Convert it: wsl --set-version $($distro.Name) 2"))
+  $facts = Get-DistroFacts -Distro $distro.Name
+  $items.Add((New-PreflightItem 'distro_glibc' ([bool]($facts.Glibc -and $facts.Glibc -ge (ConvertTo-WslVersion $Requirements.glibcMin))) "glibc $($facts.Glibc)" 'Use Ubuntu 22.04 or later'))
+  $items.Add((New-PreflightItem 'distro_user' ([bool]($facts.User -and $facts.Uid -ne 0)) "default user $($facts.User) (uid $($facts.Uid))" "In the distro: sudo adduser <name>; sudo usermod -aG sudo <name>; then in Windows: $($distro.Name) config --default-user <name>"))
+  $public = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object { $_.NetworkCategory -eq 'Public' })
+  $items.Add((New-PreflightItem 'network_profile' ($public.Count -eq 0) $(if ($public.Count) { "Public: $(($public | ForEach-Object { $_.Name }) -join ', ')" } else { 'Private or Domain' }) 'Settings > Network & internet > (your network) > Private network'))
+  if ($Mode -eq 'mirrored') {
+    $effective = Get-EffectiveNetworkingMode -Distro $distro.Name
+    $items.Add((New-PreflightItem 'wsl_mirrored_networking' ($effective -eq 'mirrored') "WSL runs $effective networking" 'Let the installer set networkingMode=mirrored in .wslconfig (WSL restarts)' -Action 'wslconfig'))
+  } else {
+    $forwarding = Get-WslConfigValue -Key 'localhostForwarding'
+    $items.Add((New-PreflightItem 'wsl_localhost_forwarding' ("$forwarding" -ine 'false') "localhostForwarding=$(if ($null -eq $forwarding) { '(default true)' } else { $forwarding })" 'Let the installer set localhostForwarding=true in .wslconfig (WSL restarts)' -Action 'wslconfig'))
+  }
+  $missing = @(Test-MachineRuleSet -Mode $Mode)
+  $items.Add((New-PreflightItem 'firewall_rules' ($missing.Count -eq 0) $(if ($missing.Count) { "missing: $($missing -join ', ')" } else { 'present' }) 'Apply them (administrator)' -Action 'machine'))
+  $ports = @($script:HttpPort, $script:WssPort) + $(if ($Mode -eq 'nat') { @($script:NatPort) } else { @() })
+  $bundleRoot = "$($facts.Home)/.local/share/rokid-coder/"
+  $proxyRecorded = [bool](@((Read-MachineState -StatePath (Get-RokidPaths).MachineState).objects) | Where-Object { $_.kind -eq 'portproxy' })
+  $owners = @(Get-HostListeners -Ports $ports) + $(if ($facts.User) { @(Get-DistroListeners -Distro $distro.Name -User $facts.User -Ports $ports) } else { @() })
+  $blocking = @()
+  $legacy = @()
+  foreach ($owner in $owners) {
+    switch (Get-PortOwnerClass -Owner $owner -BundleRoot $bundleRoot -ProxyRecorded $proxyRecorded) {
+      'other' { $blocking += $owner }
+      'legacy' { $legacy += $owner }
+    }
+  }
+  $portsOk = $blocking.Count -eq 0 -and ($legacy.Count -eq 0 -or $RetireLegacy)
+  $portsDetail = $(if ($blocking.Count) { ($blocking | ForEach-Object { "port $($_.Port): pid $($_.Pid) $(if ($_.Name) { $_.Name } else { $_.Path })" }) -join '; ' } elseif ($legacy.Count) { "the old agentd (pid $($legacy[0].Pid)) holds port $($legacy[0].Port)" } else { 'free, or held by this install' })
+  $items.Add((New-PreflightItem 'ports' $portsOk $portsDetail $(if ($blocking.Count) { 'Stop that program, then re-check' } else { 'Agree to replace the old agentd' })))
+  $hostFree = Get-FreeSpaceMB -Path $env:LOCALAPPDATA
+  $diskOk = $hostFree -ge $Requirements.minFreeMB -and $null -ne $facts.FreeMB -and $facts.FreeMB -ge $Requirements.minFreeMB
+  $items.Add((New-PreflightItem 'disk_space' $diskOk "$hostFree MB free on Windows, $($facts.FreeMB) MB in $($facts.Home)" "Free $($Requirements.minFreeMB) MB on both"))
+  [pscustomobject]@{ mode = $Mode; distro = $distro.Name; items = @($items) }
+}
+
+function Test-PreflightPassed {
+  param([Parameter(Mandatory = $true)]$Result)
+  -not (@($Result.items) | Where-Object { -not $_.ok -and -not $_.optional })
+}
+
+function Format-PreflightText {
+  param([Parameter(Mandatory = $true)]$Result)
+  $lines = foreach ($item in $Result.items) {
+    $mark = $(if ($item.ok) { 'OK  ' } elseif ($item.optional) { 'NOTE' } else { 'FIX ' })
+    "$mark $($item.id): $($item.detail)"
+    if (-not $item.ok) { "       -> $($item.fix)" }
+  }
+  ($lines -join "`r`n")
+}
+
+# ---------------------------------------------------------------- staging [6b-R10, 6b-R21]
+
+function New-Generation {
+  param([Parameter(Mandatory = $true)][string]$Version, [datetime]$Now = (Get-Date))
+  "$Version-$($Now.ToUniversalTime().ToString('yyyyMMddHHmmss'))"
+}
+
+function ConvertTo-XmlText { param([string]$Value) [Security.SecurityElement]::Escape($Value) }
+
+function New-TaskXml {
+  <#
+    The \RokidCoder\agentd definition in the Task Scheduler schema's own values
+    [6b-R17]: the SID as principal and logon trigger, InteractiveToken,
+    LeastPrivilege, IgnoreNew, never stopped for battery, no time limit [6b-R22].
+    Its action names this generation's launcher and binding, absolute and quoted.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Sid,
+    [Parameter(Mandatory = $true)][string]$Distro,
+    [Parameter(Mandatory = $true)][string]$Generation,
+    [Parameter(Mandatory = $true)][string]$Launcher,
+    [Parameter(Mandatory = $true)][string]$Binding,
+    [string]$SystemRoot = $env:SystemRoot,
+    [string]$Template = (Join-Path $script:Root 'task.xml.template'),
+    [string]$Command,
+    [string]$Arguments
+  )
+  foreach ($path in $Launcher, $Binding) {
+    if ($path -notmatch '^[A-Za-z]:\\' -or $path.Contains('~')) { throw "The task needs absolute Windows paths, not '$path'" }
+  }
+  if (-not $Command) { $Command = Join-Path $SystemRoot 'System32\conhost.exe' }
+  if (-not $PSBoundParameters.ContainsKey('Arguments')) {
+    $powershell = Join-Path $SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $Arguments = "--headless `"$powershell`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Launcher`" -Binding `"$Binding`""
+  }
+  $xml = Get-Content -LiteralPath $Template -Raw -Encoding UTF8
+  $xml = $xml.Replace('{{SID}}', (ConvertTo-XmlText $Sid))
+  $xml = $xml.Replace('{{DISTRO}}', (ConvertTo-XmlText $Distro))
+  $xml = $xml.Replace('{{GENERATION}}', (ConvertTo-XmlText $Generation))
+  $xml = $xml.Replace('{{COMMAND}}', (ConvertTo-XmlText $Command))
+  $xml.Replace('{{ARGUMENTS}}', (ConvertTo-XmlText $Arguments))
+}
+
+function Resolve-Binding {
+  <# Who and where, resolved once per installer run (Repair re-resolves; logon never does). #>
+  param(
+    [Parameter(Mandatory = $true)]$Distro,
+    [Parameter(Mandatory = $true)][ValidateSet('mirrored', 'nat')][string]$Mode,
+    [Parameter(Mandatory = $true)][string]$Version
+  )
+  $user = Invoke-WslExec -Distro $Distro.Name -Path '/usr/bin/id' -Arguments @('-un')
+  $uid = Invoke-WslExec -Distro $Distro.Name -Path '/usr/bin/id' -Arguments @('-u')
+  if ($user.ExitCode -ne 0 -or $uid.ExitCode -ne 0) { throw "Could not read the default user of $($Distro.Name)" }
+  $linuxUser = "$($user.Output[0])".Trim()
+  $linuxUid = [int]"$($uid.Output[0])".Trim()
+  if ($linuxUid -eq 0) { throw "The default user of $($Distro.Name) is root; add your own user first" }
+  $entry = Invoke-WslExec -Distro $Distro.Name -User $linuxUser -Path '/usr/bin/getent' -Arguments @('passwd', $linuxUser)
+  $linuxHome = ("$($entry.Output[0])" -split ':')[5]
+  if ($entry.ExitCode -ne 0 -or -not $linuxHome -or -not $linuxHome.StartsWith('/')) { throw "Could not read the home of $linuxUser" }
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  [ordered]@{
+    windowsSid    = Get-ProcessUserSid
+    windowsUser   = $identity.Name
+    distroName    = $Distro.Name
+    distroGuid    = $Distro.Guid
+    linuxUser     = $linuxUser
+    linuxUid      = $linuxUid
+    linuxHome     = $linuxHome
+    bundleDir     = "$linuxHome/.local/share/rokid-coder/$Version"
+    agentdPath    = "$linuxHome/.rokid-coder/bin/agentd"
+    wslExe        = Get-WslExe
+    networkMode   = $Mode
+    advertisePort = $(if ($Mode -eq 'nat') { $script:NatPort } else { $script:WssPort })
+  }
+}
+
+function New-StagedGeneration {
+  <#
+    binding-<gen>.json, <gen>\start-agentd.ps1 and <gen>\task.xml: new files only.
+    An existing file of the same name is never overwritten. Nothing is registered here:
+    the task is registered only by rokid-setup's journaled step 9.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Generation,
+    [Parameter(Mandatory = $true)]$Binding,
+    $Paths = (Get-RokidPaths),
+    [string]$LauncherSource = (Join-Path $script:Root 'start-agentd.ps1')
+  )
+  $genDir = Join-Path $Paths.InstallRoot $Generation
+  $files = [pscustomobject]@{
+    Generation = $Generation
+    Binding    = Join-Path $Paths.DataRoot "binding-$Generation.json"
+    Launcher   = Join-Path $genDir 'start-agentd.ps1'
+    TaskXml    = Join-Path $genDir 'task.xml'
+  }
+  foreach ($file in $files.Binding, $files.Launcher, $files.TaskXml) {
+    if (Test-Path -LiteralPath $file) { throw "$file already exists; a generation is never staged twice" }
+  }
+  New-Item -ItemType Directory -Force -Path $Paths.DataRoot, $genDir | Out-Null
+  Write-Utf8File -Path $files.Binding -Content (ConvertTo-Json -InputObject $Binding -Depth 3)
+  Copy-Item -LiteralPath $LauncherSource -Destination $files.Launcher
+  $xml = New-TaskXml -Sid $Binding.windowsSid -Distro $Binding.distroName -Generation $Generation -Launcher $files.Launcher -Binding $files.Binding
+  Write-Utf16File -Path $files.TaskXml -Content $xml
+  $files
+}
+
+function Get-GenerationOf {
+  param([string]$BindingPath)
+  if ($BindingPath -match 'binding-(.+)\.json$') { $Matches[1] } else { $null }
+}
+
+function Remove-OldGenerations {
+  <# After the commit point only: everything but the committed generation and its previous. #>
+  param([Parameter(Mandatory = $true)][string[]]$Keep, $Paths = (Get-RokidPaths))
+  foreach ($dir in @(Get-ChildItem -LiteralPath $Paths.InstallRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '-\d{14}$' })) {
+    if ($Keep -notcontains $dir.Name) { Remove-Item -LiteralPath $dir.FullName -Recurse -Force }
+  }
+  foreach ($file in @(Get-ChildItem -LiteralPath $Paths.DataRoot -Filter 'binding-*.json' -ErrorAction SilentlyContinue)) {
+    if ($Keep -notcontains (Get-GenerationOf $file.Name)) { Remove-Item -LiteralPath $file.FullName -Force }
+  }
+}
+
+# ---------------------------------------------------------------- the bundle and setup inside WSL
+
+function Get-WslPath {
+  param([Parameter(Mandatory = $true)]$Binding, [Parameter(Mandatory = $true)][string]$WindowsPath)
+  $run = Invoke-WslExec -Distro $Binding.distroName -User $Binding.linuxUser -Path '/usr/bin/wslpath' -Arguments @('-u', $WindowsPath)
+  if ($run.ExitCode -ne 0) { throw "wslpath -u failed for $WindowsPath" }
+  "$($run.Output[0])".Trim()
+}
+
+function Install-BundleIntoDistro {
+  <#
+    The archive, unmodified, checked by sha256sum and unpacked by tar INSIDE the
+    distro, into <linuxHome>/.local/share/rokid-coder/<v>/. An existing <v>/ whose
+    bundle.json matches is reused (a Repair never extracts over a running install).
+  #>
+  param(
+    [Parameter(Mandatory = $true)]$Binding,
+    [Parameter(Mandatory = $true)][string]$Archive,
+    [Parameter(Mandatory = $true)][string]$Sha256,
+    [Parameter(Mandatory = $true)][string]$Generation
+  )
+  $run = { param($path, [string[]]$argv) Invoke-WslExec -Distro $Binding.distroName -User $Binding.linuxUser -Path $path -Arguments $argv }
+  $tar = Get-WslPath -Binding $Binding -WindowsPath $Archive
+  $sum = & $run '/usr/bin/sha256sum' @($tar)
+  if ($sum.ExitCode -ne 0 -or ("$($sum.Output[0])" -split '\s+')[0] -ne $Sha256.ToLowerInvariant()) { throw 'The bundle archive does not match its digest' }
+  $target = $Binding.bundleDir
+  $partial = "$($target.Substring(0, $target.LastIndexOf('/')))/.partial-$Generation"
+  if ((& $run '/usr/bin/mkdir' @('-p', $partial)).ExitCode -ne 0) { throw "Could not create $partial" }
+  if ((& $run '/usr/bin/tar' @('-xzf', $tar, '-C', $partial)).ExitCode -ne 0) { throw 'The bundle could not be unpacked in WSL' }
+  if ((& $run '/usr/bin/test' @('-d', $target)).ExitCode -eq 0) {
+    $both = & $run '/usr/bin/sha256sum' @("$target/bundle.json", "$partial/bundle.json")
+    $digests = @($both.Output | ForEach-Object { ("$_" -split '\s+')[0] })
+    & $run '/usr/bin/rm' @('-rf', $partial) | Out-Null
+    if ($both.ExitCode -ne 0 -or $digests.Count -ne 2 -or $digests[0] -ne $digests[1]) { throw "A different build of this version is installed in $target; uninstall it first" }
+    return 'reused'
+  }
+  if ((& $run '/usr/bin/mv' @('-T', $partial, $target)).ExitCode -ne 0) { throw "Could not move the bundle into $target" }
+  'extracted'
+}
+
+function Get-AdvertiseHosts {
+  <# NAT mode's advertised hosts: Tailscale's IPv4 first, then each adapter with a default gateway. #>
+  $hosts = New-Object System.Collections.Generic.List[string]
+  $tailscale = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+  if (Test-Path -LiteralPath $tailscale) {
+    foreach ($line in (Invoke-Native -FilePath $tailscale -ArgumentList @('ip', '-4')).Output) { if ($line.Trim() -match '^\d{1,3}(\.\d{1,3}){3}$') { $hosts.Add($line.Trim()) } }
+  }
+  foreach ($config in @(Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' })) {
+    foreach ($address in @($config.IPv4Address)) { if ($address.IPAddress -and -not $hosts.Contains($address.IPAddress)) { $hosts.Add($address.IPAddress) } }
+  }
+  @($hosts)
+}
+
+function Set-AdvertisedEndpoint {
+  <# rokid-setup advertise set (NAT) or clear (mirrored): the one record every pairing client reads [6b-R3]. #>
+  param([Parameter(Mandatory = $true)]$Binding)
+  $setup = "$($Binding.bundleDir)/bin/rokid-setup"
+  if ($Binding.networkMode -eq 'nat') {
+    $hosts = @(Get-AdvertiseHosts)
+    if ($hosts.Count -eq 0) { throw 'This computer has no network with a default gateway to advertise' }
+    $argv = @('advertise', 'set', '--hosts', ($hosts -join ','), '--port', "$($Binding.advertisePort)")
+  } else {
+    $argv = @('advertise', 'clear')
+  }
+  $run = Invoke-WslExec -Distro $Binding.distroName -User $Binding.linuxUser -Path $setup -Arguments $argv
+  if ($run.ExitCode -ne 0) { throw "rokid-setup advertise failed ($($run.ExitCode))" }
+}
+
+function Start-SetupWindow {
+  <# rokid-setup install in a console window of its own: the CLI step and the pairing are interactive. #>
+  param([Parameter(Mandatory = $true)]$Binding, [Parameter(Mandatory = $true)]$Staged)
+  if ($env:ROKID_SETUP_TEST) {
+    $env:WSLENV = (@($env:WSLENV, 'ROKID_SETUP_TEST/u', 'ROKID_SETUP_FAIL_AT/u') | Where-Object { $_ }) -join ':'
+  }
+  $argv = @('-d', $Binding.distroName, '-u', $Binding.linuxUser, '--exec', "$($Binding.bundleDir)/bin/rokid-setup", 'install', '--platform', 'wsl',
+    '--bundle', $Binding.bundleDir, '--binding', (Get-WslPath -Binding $Binding -WindowsPath $Staged.Binding), '--task-xml', (Get-WslPath -Binding $Binding -WindowsPath $Staged.TaskXml))
+  (Start-Process -FilePath $Binding.wslExe -ArgumentList (ConvertTo-CommandLine $argv) -Wait -PassThru).ExitCode
+}
+
+function Get-CommittedGenerations {
+  <# The committed generation and its previous, from install.json inside the distro. #>
+  param([Parameter(Mandatory = $true)]$Binding)
+  $run = Invoke-WslExec -Distro $Binding.distroName -User $Binding.linuxUser -Path '/usr/bin/cat' -Arguments @("$($Binding.linuxHome)/.rokid-coder/install.json")
+  if ($run.ExitCode -ne 0) { return @() }
+  $manifest = ($run.Output -join "`n") | ConvertFrom-Json
+  $previous = Get-PropertyValue (Get-PropertyValue (Get-PropertyValue $manifest 'previous') 'manifest') 'binding'
+  @(
+    Get-GenerationOf (Get-PropertyValue (Get-PropertyValue (Get-PropertyValue $manifest 'binding') 'bindingPath') 'win')
+    Get-GenerationOf (Get-PropertyValue (Get-PropertyValue $previous 'bindingPath') 'win')
+  ) | Where-Object { $_ }
+}
+
+function Invoke-UserInstall {
+  <#
+    The per-user install after preflight: resolve, stage a NEW generation, put the
+    bundle into WSL, write the advertised endpoint, then run rokid-setup install.
+    Old generations are pruned only after it committed.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Version,
+    [Parameter(Mandatory = $true)][ValidateSet('mirrored', 'nat')][string]$Mode,
+    [Parameter(Mandatory = $true)]$Distro,
+    [Parameter(Mandatory = $true)][string]$Archive,
+    [Parameter(Mandatory = $true)][string]$Sha256,
+    $Paths = (Get-RokidPaths),
+    [datetime]$Now = (Get-Date)
+  )
+  Assert-SessionUser
+  $binding = Resolve-Binding -Distro $Distro -Mode $Mode -Version $Version
+  $generation = New-Generation -Version $Version -Now $Now
+  $staged = New-StagedGeneration -Generation $generation -Binding $binding -Paths $Paths
+  Install-BundleIntoDistro -Binding $binding -Archive $Archive -Sha256 $Sha256 -Generation $generation | Out-Null
+  Set-AdvertisedEndpoint -Binding $binding
+  $code = Start-SetupWindow -Binding $binding -Staged $staged
+  if ($code -ne 0) { return [pscustomobject]@{ ExitCode = $code; Generation = $generation; Staged = $staged } }
+  $keep = @(Get-CommittedGenerations -Binding $binding)
+  if ($keep -contains $generation) { Remove-OldGenerations -Keep $keep -Paths $Paths }
+  [pscustomobject]@{ ExitCode = 0; Generation = $generation; Staged = $staged }
+}
+
+Export-ModuleMember -Function * -Variable @()
