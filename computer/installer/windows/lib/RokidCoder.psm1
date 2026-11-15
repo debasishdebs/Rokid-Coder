@@ -440,12 +440,18 @@ function ConvertTo-FilterValue {
     One filter as a comparable string: the sorted, lowercased set, 'any' when empty.
     -Address puts each IPv4 in its network/length form, whether Windows shows it as
     a mask (100.64.0.0/255.192.0.0), a length or a bare host; keywords stay as words.
+    -Flags reads a profile set as names or as CIM's number (Domain 1, Private 2, Public 4).
   #>
   param($Values, [switch]$Address, [switch]$Flags)
   $list = @(foreach ($value in @($Values)) {
       foreach ($part in $(if ($Flags) { "$value" -split '\s*,\s*' } else { @("$value") })) {
         $text = $part.Trim()
         if ($text -eq '') { continue }
+        if ($Flags -and $text -match '^\d+$') {
+          $bits = [int]$text
+          if ($bits -eq 0) { 'any' } else { foreach ($flag in @(@(1, 'domain'), @(2, 'private'), @(4, 'public'))) { if ($bits -band $flag[0]) { $flag[1] } } }
+          continue
+        }
         if ($Address -and $text -match '^(\d{1,3}(?:\.\d{1,3}){3})(?:/(\d{1,3}(?:\.\d{1,3}){3}|\d{1,2}))?$') {
           $length = 32
           if ($Matches[2] -and $Matches[2].Contains('.')) {
@@ -486,6 +492,7 @@ function Get-ExpectedRuleFilter {
     $filter.RemotePorts = ConvertTo-FilterValue (Get-ParameterValue $p 'RemotePorts')
     $filter.RemoteAddresses = ConvertTo-FilterValue (Get-ParameterValue $p 'RemoteAddresses') -Address
     $filter.VMCreatorId = ConvertTo-FilterValue (Get-ParameterValue $p 'VMCreatorId')
+    $filter.Profiles = ConvertTo-FilterValue (Get-ParameterValue $p 'Profiles') -Flags
   } else {
     $filter.LocalPorts = ConvertTo-FilterValue (Get-ParameterValue $p 'LocalPort')
     $filter.RemotePorts = ConvertTo-FilterValue (Get-ParameterValue $p 'RemotePort')
@@ -510,6 +517,7 @@ function Get-EffectiveRuleFilter {
       RemotePorts     = ConvertTo-FilterValue (Get-PropertyValue $rule 'RemotePorts')
       RemoteAddresses = ConvertTo-FilterValue (Get-PropertyValue $rule 'RemoteAddresses') -Address
       VMCreatorId     = ConvertTo-FilterValue (Get-PropertyValue $rule 'VMCreatorId')
+      Profiles        = ConvertTo-FilterValue (Get-PropertyValue $rule 'Profiles') -Flags
     }
   }
   $rule = Get-NetFirewallRule -Name $Item.Name -ErrorAction SilentlyContinue | Select-Object -First 1

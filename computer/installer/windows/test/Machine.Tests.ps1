@@ -154,12 +154,19 @@ Describe 'the machine plan' {
       $script:hostRule = $saved.rule; $script:portFilter = $saved.port; $script:addressFilter = $saved.address
     }
     # A Hyper-V rule still scoped to a network the host has left: its scope is stale.
-    Mock -ModuleName RokidCoder Get-NetFirewallHyperVRule {
-      [pscustomobject]@{ Name = $Name; Enabled = 'True'; Direction = 'Inbound'; Action = 'Allow'; Protocol = 'TCP'; LocalPorts = @('8792'); RemotePorts = @('Any'); RemoteAddresses = @('192.168.1.0/255.255.255.0', '100.64.0.0/255.192.0.0'); VMCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' }
-    }
+    $script:hyperVRule = @{ Enabled = 'True'; Direction = 'Inbound'; Action = 'Allow'; Protocol = 'TCP'; LocalPorts = @('8792'); RemotePorts = @('Any'); RemoteAddresses = @('192.168.1.0/255.255.255.0', '100.64.0.0/255.192.0.0'); VMCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'; Profiles = 'Domain, Private' }
+    Mock -ModuleName RokidCoder Get-NetFirewallHyperVRule { [pscustomobject](@{ Name = $Name } + $script:hyperVRule) }
     $wss = { param($scope) Get-MachinePlan -Mode mirrored -HyperVScope $scope | Where-Object Name -eq 'RokidCoder-wss' }
     @(Get-PlanItemDrift -Item (& $wss @('192.168.1.0/24', '100.64.0.0/10'))) | Should -BeNullOrEmpty
     @(Get-PlanItemDrift -Item (& $wss @('10.20.0.0/16', '100.64.0.0/10'))) | Should -Be @('RemoteAddresses')
+    # Its profiles are enforced too: a Hyper-V rule widened to Public, or to Any, has drifted.
+    foreach ($wider in 'Any', 'Domain, Private, Public', 'Public') {
+      $script:hyperVRule.Profiles = $wider
+      @(Get-PlanItemDrift -Item (& $wss @('192.168.1.0/24', '100.64.0.0/10'))) | Should -Be @('Profiles') -Because $wider
+    }
+    # The same set as CIM's flags value (Domain = 1, Private = 2) matches.
+    $script:hyperVRule.Profiles = 3
+    @(Get-PlanItemDrift -Item (& $wss @('192.168.1.0/24', '100.64.0.0/10'))) | Should -BeNullOrEmpty
     # Absent stays absent.
     Mock -ModuleName RokidCoder Get-NetFirewallRule { $null }
     @(Get-PlanItemDrift -Item $proxy) | Should -Be @('absent')
