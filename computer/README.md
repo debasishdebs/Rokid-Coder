@@ -7,7 +7,7 @@ Download the installer from <https://github.com/debasishdebs/Rokid-Coder/release
 ## Requirements
 
 - **macOS 13 or later**, Apple silicon or Intel. Pick the `arm64` or `x64` file to match your Mac.
-- **Windows 11 22H2 or later with WSL 2** and an Ubuntu distro (22.04 or 24.04). The installer checks WSL for you and says how to fix what is missing.
+- **Windows 11 22H2 (build 22621) or later with WSL 2** and a distro with glibc 2.35 or newer, such as Ubuntu 22.04 or 24.04. The installer checks WSL for you and says how to fix what is missing.
 - Your phone and computer on the same Wi-Fi, or both on Tailscale.
 - Claude Code or Codex. You do not need them first: setup offers to install a missing one, and you can skip that step.
 
@@ -17,8 +17,8 @@ Nothing else is needed. The installer carries its own Node runtime, so it does n
 
 1. Download `rokid-coder-1.0.0-macos-arm64.dmg` (Apple silicon) or `rokid-coder-1.0.0-macos-x64.dmg` (Intel) and open it. The `.pkg` inside is the same installer.
 2. The installer is not signed by Apple yet, so macOS stops the first launch. **Right-click the `.pkg` and choose Open, then Open again.** You only do this once.
-3. Follow the installer. It checks your macOS version and architecture first and tells you what to fix.
-4. When it finishes, a Terminal window opens and runs Rokid Coder setup as you. If it did not open (for example after `sudo installer`), open **Rokid Coder Setup** from the disk image, or run the `rokid-setup` command the installer printed.
+3. Follow the installer. Before it installs anything it checks your macOS version, that the package matches your Mac's architecture, that no newer Rokid Coder is already installed and that 300 MB is free, and it says how to fix what fails.
+4. When it finishes, a Terminal window opens and runs Rokid Coder setup as you. If it did not open (for example after `sudo installer`, or when you were not the logged-in user), double-click **Rokid Coder Setup** on the disk image, or run the `rokid-setup install` command the installer printed. If macOS refuses **Rokid Coder Setup**, right-click it and choose Open, then Open again.
 5. Setup walks through the CLI step and pairing, below.
 
 Upgrading from 0.8.0 is the same install. Setup keeps your pairing and retires the old background job.
@@ -27,8 +27,9 @@ Upgrading from 0.8.0 is the same install. Setup keeps your pairing and retires t
 
 1. Download `rokid-coder-1.0.0-windows-x64.exe` and run it as yourself, not as another account.
 2. The installer is not signed yet, so Windows SmartScreen warns. **Click More info, then Run anyway.**
-3. The installer checks Windows, WSL 2, your distro, the network profile and the firewall, shows each result with its fix, and continues when everything it needs passes. It may ask to switch WSL to mirrored networking; if you decline, it uses a port proxy instead and tells you automatic discovery is not available, so you pair with the QR code or Tailscale.
-4. A console window then runs Rokid Coder setup inside your WSL distro: the CLI step and pairing, below.
+3. Choose the network mode. **Mirrored** (recommended, needs WSL 2.0.9 or later) asks your OK to set `networkingMode=mirrored` in `%UserProfile%\.wslconfig` and restart WSL, which closes every running Linux distro; a backup is kept. **NAT with a port proxy** works with any WSL, but automatic discovery does not, so you pair with the QR code or Tailscale. You can also name the WSL distro, or leave it empty for your default Ubuntu.
+4. The installer then checks Windows, WSL 2, your distro, the network profile and the firewall, and shows each result with its fix. Press **Re-check** after fixing one. **Apply firewall rules (admin)** asks an administrator to approve the rules; cancelling the installer takes back what it added.
+5. A console window then runs Rokid Coder setup inside your WSL distro: the CLI step and pairing, below.
 
 On Windows the launcher commands `rk claude` and `rk codex` print a hint to use plugin mode (`/rokid:on`) until the launcher is verified on Windows.
 
@@ -40,11 +41,11 @@ If Claude Code or Codex is missing, setup offers to install it with that tool's 
 
 Pairing is the last step of setup, and it is confirmed on the phone.
 
-1. On the phone, open Rokid Coder and follow the setup until it waits for your computer.
-2. In setup, the computer shows a short code. Check that the phone shows the same code, then confirm on the phone.
-3. If the phone cannot find the computer on its own, setup offers the QR code or a pairing line to scan or paste, and Tailscale.
+1. On the phone, open Rokid Coder and follow the setup to **Finish on your computer**, then tap **Ready to pair** to open the two-minute window.
+2. In setup, the computer shows a 6-digit code and asks whether your phone shows the same one. Compare the codes, type `y` on the computer, and tap **Codes match** on the phone too. Nothing pairs until both sides confirm.
+3. If the phone cannot find the computer on its own, setup offers [R]etry, [T]ailscale, [Q]R code or [L]ater: the QR code or a pairing line to scan or paste, and Tailscale.
 
-Pair later with `agentd pair` in a terminal, or `/rokid:pair` inside Claude Code. Every new pairing needs the same code check on the phone.
+Pair later with `~/.rokid-coder/bin/agentd pair` in a terminal, or `/rokid:pair` inside Claude Code (`rokid:pair` in Codex). Every new pairing needs the same code check on both screens.
 
 ## Tailscale (optional)
 
@@ -52,12 +53,10 @@ Tailscale lets your phone reach the computer away from home. Install it on both,
 
 ## Uninstall
 
-- **macOS:** run `rokid-setup uninstall` as yourself, then `uninstall.sh --system` from the disk image to remove the program files.
-- **Windows:** uninstall Rokid Coder from Apps, Installed apps.
+- **macOS:** in Terminal, as yourself, run `uninstall.sh` from the disk image. It runs `rokid-setup uninstall` for you: the service, the plugins and your program files go. Add `--system` to also remove the package under `/Library/Application Support/RokidCoder` (it asks for your password with sudo, and refuses while another user still has Rokid Coder set up unless you add `--force`).
+- **Windows:** uninstall Rokid Coder from Apps, Installed apps. It asks whether to also delete your pairings and settings (No keeps them for a later install), and may ask whether to keep mirrored networking.
 
-Your pairing state is kept unless you purge it (`rokid-setup uninstall --purge`).
-
-<!-- RECHECK-6B: the install and uninstall steps above follow the 6b plan text. Re-check the file names, prompts, setup hand-off and uninstall commands against the merged macOS (T7b) and Windows (T8) installers. -->
+Your pairing state is kept unless you purge it: on macOS add `--purge` to `uninstall.sh` (or run `rokid-setup uninstall --purge`, which needs a typed `purge` or `--yes`).
 
 
 # Reference: running from source

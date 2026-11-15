@@ -4,17 +4,17 @@ The Claude Code and Codex plugins that opt a session into Rokid Coder. In a sess
 
 ## You normally install nothing here
 
-The computer installer sets the plugins up for you, for every CLI it finds: it registers the `rokid-coder` marketplace from its own versioned bundle and installs the `rokid` plugin from it. If you install Claude Code or Codex later, `rk claude` or `rk codex` offers to do the same, or run:
+The computer installer sets the plugins up for you, for every CLI it finds: it registers the `rokid-coder` marketplace from its own versioned bundle and installs the `rokid` plugin from it. If `rk claude` or `rk codex` installs the CLI for you later, it sets the plugin up right after. If you installed the CLI yourself, run:
 
 ```bash
-rokid-setup plugins sync
+rokid-setup plugins sync [--tool claude|codex]
 ```
 
-`rokid-setup plugins status --json` shows what is installed, and `rokid-setup plugins remove` takes the plugins out again. Setup never edits your Claude or Codex config files itself; it only runs those tools' own plugin commands.
+`rokid-setup plugins status --json` shows what is installed, and `rokid-setup plugins remove [--tool claude|codex]` takes the plugins out again. Setup never edits your Claude or Codex config files itself; it only runs those tools' own plugin commands.
 
 ## Manual install
 
-Only if setup could not do it (it says so, with the exact step). Point each CLI at the plugin folder of the installed bundle:
+Only if setup could not do it (it says so, with the exact step: for Claude Code, run `/plugin` and install `rokid` from the `rokid-coder` marketplace; for Codex, open `/plugins` and install Rokid-Coder). A CLI whose plugin command has no non-interactive install verb gets its marketplace registered and this one step left to you. Point each CLI at the plugin folder of the installed bundle:
 
 | | macOS | Windows (inside WSL) |
 |---|---|---|
@@ -27,12 +27,10 @@ claude plugin install rokid@rokid-coder
 
 # Codex
 codex plugin marketplace add "<plugins folder>"
-# then open /plugins inside Codex and install Rokid Coder
+# then open /plugins inside Codex and install Rokid-Coder
 ```
 
 From a source checkout, use the repository root instead of the bundle folder: `claude plugin marketplace add .` and `claude plugin install rokid@rokid-coder`.
-
-<!-- RECHECK-6B: the bundle paths and `rokid-setup plugins` verbs follow the 6b plan text. Re-check them, and Codex's install verb (setup reports manual_step_required when there is none), against the merged installers. -->
 
 ## Use
 

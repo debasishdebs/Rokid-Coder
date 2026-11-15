@@ -15,7 +15,7 @@ import java.security.MessageDigest
 
 /**
  * `rokid.release-signing`: signs the release build type with the key named by the three
- * `NEXUS_RELEASE_*` variables, under upstream's rules (gradle/plugin-release-signing.gradle: all
+ * `NEXUS_RELEASE_*` variables, under upstream's rules (vendor/nexus/gradle/plugin-release-signing.gradle: all
  * three or none, PKCS12, key password = store password). Unlike upstream, a release assembly
  * without them fails instead of producing an unsigned APK, and the key must be the pinned one:
  * [VerifyReleaseSignerPin] runs before anything of the release is built.
