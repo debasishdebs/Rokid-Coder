@@ -9,6 +9,7 @@ import android.widget.LinearLayout
 import androidx.activity.ComponentActivity
 import com.anezium.rokidbus.client.ui.BusTheme
 import com.anezium.rokidbus.client.ui.NexusUi
+import com.anezium.rokidbus.plugin.agents.AgentsPalette
 import com.anezium.rokidbus.plugin.agents.BuildConfig
 import com.anezium.rokidbus.plugin.agents.R
 
@@ -16,8 +17,7 @@ import com.anezium.rokidbus.plugin.agents.R
 class AboutActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = NexusUi.BG
-        window.navigationBarColor = NexusUi.BG
+        AgentsPalette.styleWindow(window)
         val content = NexusUi.contentColumn(this).apply {
             addView(NexusUi.sectionLabel(this@AboutActivity, getString(R.string.about_title)), NexusUi.block())
             addView(BusTheme.gap(this@AboutActivity, 10))

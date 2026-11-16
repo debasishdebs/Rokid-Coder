@@ -9,6 +9,8 @@ import com.anezium.rokidbus.plugin.agents.service.CoderAppLifecycle
 class RokidCoderApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        // Before any screen builds a view: a view keeps the color it was built with.
+        AgentsPalette.apply()
         // Nothing starts in the background before onboarding asked for the permissions it runs under.
         CoderAppLifecycle.autoStartAllowed = { OnboardingStore(this).serviceAllowed() }
         ProcessLifecycleOwner.get().lifecycle.addObserver(CoderAppLifecycle.observer(this))

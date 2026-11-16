@@ -56,8 +56,7 @@ class ComputerActivity : Activity() {
     }
 
     private fun buildUi() {
-        window.statusBarColor = NexusUi.BG
-        window.navigationBarColor = NexusUi.BG
+        AgentsPalette.styleWindow(window)
         statusDot = NexusUi.dot(this)
         statusLine = NexusUi.statusLine(this)
         projectsList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }

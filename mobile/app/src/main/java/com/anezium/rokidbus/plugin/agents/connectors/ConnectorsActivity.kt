@@ -11,6 +11,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.anezium.rokidbus.client.ui.BusTheme
 import com.anezium.rokidbus.client.ui.NexusUi
+import com.anezium.rokidbus.plugin.agents.AgentsPalette
 import com.anezium.rokidbus.plugin.agents.AgentsRuntime
 import kotlinx.coroutines.launch
 
@@ -20,8 +21,7 @@ class ConnectorsActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = NexusUi.BG
-        window.navigationBarColor = NexusUi.BG
+        AgentsPalette.styleWindow(window)
         status = NexusUi.statusLine(this)
         val content = NexusUi.contentColumn(this).apply {
             addView(NexusUi.sectionLabel(this@ConnectorsActivity, "Connectors"), NexusUi.block())

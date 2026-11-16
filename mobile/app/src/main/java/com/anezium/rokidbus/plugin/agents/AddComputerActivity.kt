@@ -106,8 +106,7 @@ class AddComputerActivity : Activity() {
     }
 
     private fun buildUi() {
-        window.statusBarColor = NexusUi.BG
-        window.navigationBarColor = NexusUi.BG
+        AgentsPalette.styleWindow(window)
         doorDot = NexusUi.dot(this)
         doorStatus = NexusUi.statusLine(this)
         guidedStatus = NexusUi.cardBody(this, "").apply { visibility = View.GONE }

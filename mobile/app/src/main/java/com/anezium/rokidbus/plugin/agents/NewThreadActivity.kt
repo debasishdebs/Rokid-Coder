@@ -69,8 +69,7 @@ class NewThreadActivity : Activity() {
     }
 
     private fun buildUi() {
-        window.statusBarColor = NexusUi.BG
-        window.navigationBarColor = NexusUi.BG
+        AgentsPalette.styleWindow(window)
         promptField = NexusUi.field(this, "What should it work on?").apply {
             setSingleLine(false)
             minLines = 4
