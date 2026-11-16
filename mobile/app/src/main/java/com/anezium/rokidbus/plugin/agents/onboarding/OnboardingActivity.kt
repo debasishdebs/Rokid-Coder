@@ -26,6 +26,7 @@ import com.anezium.rokidbus.phone.CxrLAuth
 import com.anezium.rokidbus.phone.GlassesAppInstaller
 import com.anezium.rokidbus.plugin.agents.AddComputerActivity
 import com.anezium.rokidbus.plugin.agents.AgentsConfigStore
+import com.anezium.rokidbus.plugin.agents.AgentsPalette
 import com.anezium.rokidbus.plugin.agents.AgentsRuntime
 import com.anezium.rokidbus.plugin.agents.AgentsSettingsActivity
 import com.anezium.rokidbus.plugin.agents.BuildConfig
@@ -88,8 +89,7 @@ class OnboardingActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = NexusUi.BG
-        window.navigationBarColor = NexusUi.BG
+        AgentsPalette.styleWindow(window)
         // The pairing code is on this screen while a computer pairs.
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         content = NexusUi.contentColumn(this)

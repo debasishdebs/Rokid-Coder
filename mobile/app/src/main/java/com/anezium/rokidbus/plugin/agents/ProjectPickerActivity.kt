@@ -96,8 +96,7 @@ class ProjectPickerActivity : Activity() {
     }
 
     private fun buildUi() {
-        window.statusBarColor = NexusUi.BG
-        window.navigationBarColor = NexusUi.BG
+        AgentsPalette.styleWindow(window)
         breadcrumb = NexusUi.statusLine(this).apply { text = "…" }
         hint = NexusUi.rowSub(this, "").apply { visibility = View.GONE }
         folderList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
