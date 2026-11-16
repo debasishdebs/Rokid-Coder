@@ -526,3 +526,36 @@ test("setup_output_never_contains_secrets", async (t) => {
     assert.ok(!captured.includes(secret), "a secret reached setup output");
   }
 });
+
+test("install_says_what_it_is_doing_and_how_to_reach_rk", async (t) => {
+  const world = makeWorld(t);
+  world.cli("claude");
+  world.cli("codex");
+  const run = world.install(world.bundle("1.0.0-test.1"));
+  assert.equal(run.status, 0, run.output);
+  const lines = run.stdout.split("\n");
+  const at = (text) => {
+    const index = lines.indexOf(text);
+    assert.ok(index >= 0, `${text} is printed:\n${run.stdout}`);
+    return index;
+  };
+  const order = [
+    "Installing the rk and agentd commands…",
+    "Finding Claude Code and Codex…",
+    "Setting up the Claude Code plugin…",
+    "Setting up the Codex plugin…",
+    "Starting agentd…",
+    "Checking it answers…",
+  ].map(at);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), "in the order the steps run");
+  assert.equal(lines.filter(Boolean).at(-1), "Open a new terminal tab to use rk (or run ~/.rokid-coder/bin/rk now).");
+});
+
+test("install_does_not_tell_a_terminal_that_already_has_rk_to_open_a_new_one", async (t) => {
+  const world = makeWorld(t);
+  world.cli("claude");
+  world.env.PATH = `${path.join(world.home, ".rokid-coder", "bin")}:/usr/bin:/bin`;
+  const run = world.install(world.bundle("1.0.0-test.1"));
+  assert.equal(run.status, 0, run.output);
+  assert.doesNotMatch(run.stdout, /Open a new terminal tab/);
+});
