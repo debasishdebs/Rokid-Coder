@@ -17,183 +17,119 @@ function store() {
 
 const pre = (id, tool = "Task") => ({ tool_name: tool, tool_use_id: id, tool_input: { description: "look around" } });
 
-test("a_subagent_runs_from_its_task_call_to_its_post_tool_use", () => {
+const start = (id, extra = {}) => ({ agent_id: id, agent_type: "general-purpose", ...extra });
+
+test("a_subagent_runs_from_its_start_to_its_stop", () => {
   const { clock, hook, subagents } = store();
   assert.equal(subagents(), undefined, "absent when none");
-  hook("PreToolUse", pre("t1"));
+  hook("SubagentStart", start("a1"));
   assert.deepEqual(subagents(), { running: 1, since: clock.now });
   clock.now += 5000;
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1" });
-  assert.equal(subagents(), undefined);
-});
-
-test("the_agent_tool_name_counts_too_and_other_tools_do_not", () => {
-  const { hook, subagents } = store();
-  hook("PreToolUse", pre("a1", "Agent"));
-  hook("PreToolUse", pre("b1", "Bash"));
-  hook("PreToolUse", pre("r1", "Read"));
-  assert.equal(subagents().running, 1);
-  hook("PostToolUseFailure", { tool_name: "Bash", tool_use_id: "b1" });
-  assert.equal(subagents().running, 1, "another tool's end ends nothing");
-  hook("PostToolUseFailure", { tool_name: "Agent", tool_use_id: "a1" });
-  assert.equal(subagents(), undefined);
-});
-
-test("parallel_subagents_count_and_since_is_the_oldest_running", () => {
-  const { clock, hook, subagents } = store();
-  const first = clock.now;
-  hook("PreToolUse", pre("t1"));
-  clock.now += 1000;
-  hook("PreToolUse", pre("t2"));
-  clock.now += 1000;
-  hook("PreToolUse", pre("t3"));
-  assert.deepEqual(subagents(), { running: 3, since: first });
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1" });
-  assert.deepEqual(subagents(), { running: 2, since: first + 1000 });
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t3" });
-  assert.deepEqual(subagents(), { running: 1, since: first + 1000 });
-});
-
-test("subagent_start_and_stop_pair_without_double_counting_the_task_call", () => {
-  const { hook, subagents } = store();
-  hook("PreToolUse", pre("t1"));
-  hook("PreToolUse", pre("t2"));
-  hook("SubagentStart", { agent_id: "ag1" });
-  hook("SubagentStart", { agent_id: "ag2" });
-  hook("SubagentStart", { agent_id: "ag1" });
-  assert.equal(subagents().running, 2, "a start joins a task call; a repeat is nothing");
-  hook("SubagentStop", { agent_id: "ag1" });
-  assert.equal(subagents().running, 1);
-  // The return of the call whose subagent already stopped finds nothing to end.
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "completed", agentId: "ag1" } });
-  assert.equal(subagents().running, 1, "never counted off twice");
-  hook("SubagentStop", { agent_id: "unknown" });
-  assert.equal(subagents().running, 1, "a stop that names nothing known ends nothing");
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2", tool_response: { status: "completed", agentId: "ag2" } });
-  assert.equal(subagents(), undefined);
-  hook("SubagentStop", { agent_id: "ag2" });
-  assert.equal(subagents(), undefined);
-});
-
-test("parallel_starts_in_the_other_order_never_end_the_wrong_subagent", () => {
-  const { hook, subagents } = store();
-  hook("PreToolUse", pre("t1"));
-  hook("PreToolUse", pre("t2"));
-  hook("SubagentStart", { agent_id: "a2" });
-  hook("SubagentStart", { agent_id: "a1" });
-  hook("SubagentStop", { agent_id: "a2" });
-  assert.equal(subagents().running, 1);
-  // t2 launched a2, which is over; a1 (t1's) is still running. With or without the result naming its agent.
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2" });
-  assert.equal(subagents().running, 1, "a guessed id is not ended by a result that names none");
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2", tool_response: { status: "completed", agentId: "a2" } });
-  assert.equal(subagents().running, 1, "the result names a2, which already ended");
   hook("SubagentStop", { agent_id: "a1" });
   assert.equal(subagents(), undefined);
 });
 
-test("a_start_naming_its_tool_call_binds_exactly", () => {
+test("the_task_and_agent_tool_calls_count_for_nothing", () => {
   const { hook, subagents } = store();
-  hook("PreToolUse", pre("t1"));
-  hook("PreToolUse", pre("t2"));
-  hook("SubagentStart", { agent_id: "a2", tool_use_id: "t2" });
-  hook("SubagentStart", { agent_id: "a1", tool_use_id: "t1" });
-  hook("SubagentStop", { agent_id: "a2" });
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2" });
-  assert.equal(subagents().running, 1, "t2 was a2's: a1 goes on");
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1" });
-  assert.equal(subagents(), undefined, "t1 was a1's, and its call returned");
+  for (const tool of ["Task", "Agent"]) {
+    hook("PreToolUse", { tool_name: tool, tool_use_id: `t-${tool}`, tool_input: { description: "x" } });
+    assert.equal(subagents(), undefined);
+    hook("PostToolUse", { tool_name: tool, tool_use_id: `t-${tool}`, tool_response: { status: "async_launched", agentId: "zz" } });
+  }
+  assert.equal(subagents(), undefined);
 });
 
-test("a_background_launch_keeps_running_until_its_subagent_stop", () => {
+test("parallel_subagents_count_and_since_is_the_oldest_live_one", () => {
   const { clock, hook, subagents } = store();
   const first = clock.now;
-  hook("PreToolUse", { ...pre("t1"), tool_input: { run_in_background: true } });
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "async_launched", agentId: "bg1" } });
-  assert.deepEqual(subagents(), { running: 1, since: first }, "the launch returning is not the end");
+  hook("SubagentStart", start("a1"));
+  clock.now += 1000;
+  hook("SubagentStart", start("a2"));
+  clock.now += 1000;
+  hook("SubagentStart", start("a3"));
+  assert.deepEqual(subagents(), { running: 3, since: first });
+  hook("SubagentStop", { agent_id: "a1" });
+  assert.deepEqual(subagents(), { running: 2, since: first + 1000 });
+  hook("SubagentStop", { agent_id: "a3" });
+  assert.deepEqual(subagents(), { running: 1, since: first + 1000 });
+});
+
+test("a_duplicate_start_is_idempotent_an_unknown_stop_is_ignored_and_a_stopped_id_stays_stopped", () => {
+  const { clock, hook, subagents } = store();
+  const first = clock.now;
+  hook("SubagentStart", start("a1"));
+  clock.now += 1000;
+  hook("SubagentStart", start("a1"));
+  assert.deepEqual(subagents(), { running: 1, since: first });
+  hook("SubagentStop", { agent_id: "nobody" });
+  hook("SubagentStop", {});
+  assert.equal(subagents().running, 1);
+  hook("SubagentStop", { agent_id: "a1" });
+  hook("SubagentStart", start("a1"));
+  assert.equal(subagents(), undefined, "a late duplicate start does not bring it back");
+});
+
+test("the_stopped_set_is_bounded", () => {
+  const { hook, subagents } = store();
+  for (let n = 0; n < 300; n += 1) {
+    hook("SubagentStart", start(`b${n}`));
+    hook("SubagentStop", { agent_id: `b${n}` });
+  }
+  hook("SubagentStart", start("b0"));
+  assert.equal(subagents().running, 1, "the oldest stopped ids are forgotten");
+  hook("SubagentStart", start("b299"));
+  assert.equal(subagents().running, 1, "a recent one is not");
+});
+
+test("a_background_subagent_outlives_the_parents_stop", () => {
+  const { hook, subagents } = store();
+  hook("UserPromptSubmit", { prompt: "go" });
+  hook("SubagentStart", start("bg1"));
   hook("Stop");
-  assert.equal(subagents().running, 1, "it outlives the turn that launched it");
+  assert.equal(subagents().running, 1);
   hook("SubagentStop", { agent_id: "bg1" });
   assert.equal(subagents(), undefined);
 });
 
-test("a_launch_result_names_the_agent_a_swapped_start_got_wrong", () => {
+test("session_start_and_session_end_clear_every_subagent", () => {
   const { hook, subagents } = store();
-  hook("PreToolUse", pre("t1"));
-  hook("PreToolUse", pre("t2"));
-  hook("SubagentStart", { agent_id: "a2" });
-  hook("SubagentStart", { agent_id: "a1" });
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2", tool_response: { status: "async_launched", agentId: "a2" } });
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "async_launched", agentId: "a1" } });
-  hook("SubagentStop", { agent_id: "a2" });
-  assert.equal(subagents().running, 1);
-  hook("SubagentStop", { agent_id: "a1" });
+  hook("SubagentStart", start("a1"));
+  hook("SessionStart");
   assert.equal(subagents(), undefined);
-});
-
-test("session_end_clears_background_subagents_too", () => {
-  const { hook, subagents } = store();
-  hook("PreToolUse", pre("t1"));
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "async_launched", agentId: "bg1" } });
+  hook("SubagentStart", start("a2"));
   hook("SessionEnd");
   assert.equal(subagents(), undefined);
 });
 
-test("a_subagent_start_with_no_task_call_is_ended_by_its_stop", () => {
-  const { hook, subagents } = store();
-  hook("SubagentStart", { agent_id: "solo" });
-  assert.equal(subagents().running, 1);
-  hook("SubagentStop", { agent_id: "solo" });
-  assert.equal(subagents(), undefined);
+test("codex_repros_now_via_start_and_stop_only", () => {
+  // Pre(t1), Pre(t2), Start(a2), Start(a1), Stop(a1), then the tool results: a2 is still live.
+  const first = store();
+  first.hook("PreToolUse", { tool_name: "Task", tool_use_id: "t1" });
+  first.hook("PreToolUse", { tool_name: "Task", tool_use_id: "t2" });
+  first.hook("SubagentStart", start("a2"));
+  first.hook("SubagentStart", start("a1"));
+  first.hook("SubagentStop", { agent_id: "a1" });
+  first.hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2", tool_response: { status: "async_launched", agentId: "a2" } });
+  first.hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "completed" } });
+  assert.equal(first.subagents().running, 1, "a2 is live");
+  first.hook("SubagentStop", { agent_id: "a2" });
+  assert.equal(first.subagents(), undefined);
+
+  // Three parallel agents, a2 stopping early, results arriving in any order, then the parent's Stop.
+  const second = store();
+  for (const n of [1, 2, 3]) second.hook("PreToolUse", { tool_name: "Task", tool_use_id: `t${n}` });
+  for (const n of [2, 3, 1]) second.hook("SubagentStart", start(`a${n}`));
+  second.hook("SubagentStop", { agent_id: "a2" });
+  for (const [t, a] of [["t2", "a2"], ["t1", "a1"], ["t3", "a3"]]) {
+    second.hook("PostToolUse", { tool_name: "Task", tool_use_id: t, tool_response: { status: "async_launched", agentId: a } });
+  }
+  second.hook("Stop");
+  assert.equal(second.subagents().running, 2, "a1 and a3 are live");
+  second.hook("SubagentStop", { agent_id: "a1" });
+  second.hook("SubagentStop", { agent_id: "a3" });
+  assert.equal(second.subagents(), undefined);
 });
 
-test("stop_and_session_end_clear_every_subagent", () => {
-  const { hook, subagents } = store();
-  hook("PreToolUse", pre("t1"));
-  hook("PreToolUse", pre("t2"));
-  hook("Stop");
-  assert.equal(subagents(), undefined);
-  hook("PreToolUse", pre("t3"));
-  assert.equal(subagents().running, 1);
-  hook("SessionEnd");
-  assert.equal(subagents(), undefined);
-});
-
-test("the_phone_gets_subagents_in_session_upsert_and_snapshot_only_while_some_run", async () => {
-  await withDaemon({ transport: "wshub", tls: true, stopHold: false, attached: [{ provider: "claude", id: ID }] }, async ({ phone, httpPort }) => {
-    await postHook(httpPort, { hook_event_name: "SessionStart", session_id: ID, cwd: "/work/demo" });
-    const idle = await phone.waitFor("session_upsert", (f) => f.session.id === ID);
-    assert.equal("subagents" in idle.session, false, "an older phone sees exactly the frame it always saw");
-    await postHook(httpPort, { hook_event_name: "PreToolUse", session_id: ID, ...pre("t1") });
-    await postHook(httpPort, { hook_event_name: "PreToolUse", session_id: ID, ...pre("t2") });
-    const busy = await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.subagents?.running === 2);
-    assert.deepEqual(Object.keys(busy.session.subagents).sort(), ["running", "since"]);
-    assert.equal(typeof busy.session.subagents.since, "number");
-    // A parser that reads only the fields it knows is untouched by the new key.
-    const known = ({ id, status, heading, mode, capabilities }) => ({ id, status, heading, mode, capabilities });
-    assert.deepEqual(known(JSON.parse(JSON.stringify(busy.session))), known(idle.session));
-    await postHook(httpPort, { hook_event_name: "Stop", session_id: ID });
-    const done = await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.status === "idle" && !("subagents" in f.session) && f.seq > busy.seq);
-    assert.ok(done);
-  });
-});
-
-test("codex_review_repro_ends_at_zero", () => {
-  const { hook, subagents } = store();
-  hook("PreToolUse", pre("t1"));
-  hook("PreToolUse", pre("t2"));
-  hook("SubagentStart", { agent_id: "a2" });
-  hook("SubagentStart", { agent_id: "a1" });
-  hook("SubagentStop", { agent_id: "a2" });
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2", tool_response: { status: "async_launched", agentId: "a2" } });
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "async_launched", agentId: "a1" } });
-  assert.equal(subagents().running, 1, "a1 is still running");
-  hook("SubagentStop", { agent_id: "a1" });
-  hook("Stop");
-  assert.equal(subagents(), undefined);
-});
-
-/** Every ordering of `items` in which each item comes after the ones it needs. */
 function* orderings(items, needs, chosen = []) {
   if (chosen.length === items.length) {
     yield chosen;
@@ -206,56 +142,46 @@ function* orderings(items, needs, chosen = []) {
   }
 }
 
-test("any_order_of_two_parallel_subagents_ends_at_zero_and_never_loses_a_live_one", () => {
-  const events = ["pre1", "pre2", "start1", "start2", "stop1", "stop2", "post1", "post2"];
-  const needs = {
-    start1: ["pre1"], start2: ["pre2"], stop1: ["start1"], stop2: ["start2"],
-    post1: ["pre1"], post2: ["pre2"],
-  };
-  const variants = {
-    // The launch returns at once, before or after the subagent's own hooks.
-    async: { needsMore: {}, result: (n) => ({ status: "async_launched", agentId: `a${n}` }), endsAgent: false },
-    // The call returns when its subagent is done, naming it.
-    sync_named: { needsMore: (n) => [`start${n}`], result: (n) => ({ status: "completed", agentId: `a${n}` }), endsAgent: true },
-    // Returns naming nobody.
-    sync_anonymous: { needsMore: (n) => [`start${n}`], result: () => ({ status: "completed" }), endsAgent: false },
-  };
+test("any_order_of_three_agents_starts_and_stops_counts_exactly_the_live_ones", () => {
+  const events = ["start1", "start2", "start3", "stop1", "stop2", "stop3"];
+  const needs = { stop1: ["start1"], stop2: ["start2"], stop3: ["start3"] };
   let checked = 0;
-  for (const [name, variant] of Object.entries(variants)) {
-    const rules = { ...needs };
-    if (typeof variant.needsMore === "function") {
-      for (const n of [1, 2]) rules[`post${n}`] = [...needs[`post${n}`], ...variant.needsMore(n)];
-    }
-    for (const order of orderings(events, rules)) {
-      const { hook, subagents } = store();
-      const alive = new Set();
-      const preAndNotStarted = new Set();
-      const running = () => subagents()?.running ?? 0;
-      for (const event of order) {
-        const n = event.slice(-1);
-        if (event.startsWith("pre")) {
-          hook("PreToolUse", pre(`t${n}`));
-          preAndNotStarted.add(n);
-        } else if (event.startsWith("start")) {
-          hook("SubagentStart", { agent_id: `a${n}` });
-          alive.add(n);
-          preAndNotStarted.delete(n);
-        } else if (event.startsWith("stop")) {
-          hook("SubagentStop", { agent_id: `a${n}` });
-          alive.delete(n);
-        } else {
-          hook("PostToolUse", { tool_name: "Task", tool_use_id: `t${n}`, tool_response: variant.result(n) });
-          if (variant.endsAgent) alive.delete(n);
-        }
-        const where = `${name}: ${order.join(" ")} at ${event}`;
-        assert.ok(running() >= alive.size, `a live subagent was dropped (${where})`);
-        assert.ok(running() <= alive.size + preAndNotStarted.size, `a finished subagent was resurrected (${where})`);
+  for (const order of orderings(events, needs)) {
+    const { hook, subagents } = store();
+    const live = new Set();
+    for (const event of order) {
+      const n = event.slice(-1);
+      if (event.startsWith("start")) {
+        hook("SubagentStart", start(`a${n}`));
+        live.add(n);
+      } else {
+        hook("SubagentStop", { agent_id: `a${n}` });
+        live.delete(n);
       }
-      assert.equal(running(), 0, `${name}: ${order.join(" ")} ends at zero`);
-      hook("Stop");
-      assert.equal(subagents(), undefined);
-      checked += 1;
+      assert.equal(subagents()?.running ?? 0, live.size, `${order.join(" ")} at ${event}`);
     }
+    assert.equal(subagents(), undefined, order.join(" "));
+    checked += 1;
   }
-  assert.ok(checked > 1000, `${checked} orderings checked`);
+  assert.equal(checked, 90);
+});
+
+test("the_phone_gets_subagents_in_session_upsert_and_snapshot_only_while_some_run", async () => {
+  await withDaemon({ transport: "wshub", tls: true, stopHold: false, attached: [{ provider: "claude", id: ID }] }, async ({ phone, httpPort }) => {
+    await postHook(httpPort, { hook_event_name: "SessionStart", session_id: ID, cwd: "/work/demo" });
+    const idle = await phone.waitFor("session_upsert", (f) => f.session.id === ID);
+    assert.equal("subagents" in idle.session, false, "an older phone sees exactly the frame it always saw");
+    await postHook(httpPort, { hook_event_name: "SubagentStart", session_id: ID, agent_id: "a1" });
+    await postHook(httpPort, { hook_event_name: "SubagentStart", session_id: ID, agent_id: "a2" });
+    const busy = await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.subagents?.running === 2);
+    assert.deepEqual(Object.keys(busy.session.subagents).sort(), ["running", "since"]);
+    assert.equal(typeof busy.session.subagents.since, "number");
+    // A parser that reads only the fields it knows is untouched by the new key.
+    const known = ({ id, status, heading, mode, capabilities }) => ({ id, status, heading, mode, capabilities });
+    assert.deepEqual(known(JSON.parse(JSON.stringify(busy.session))), known(idle.session));
+    await postHook(httpPort, { hook_event_name: "SubagentStop", session_id: ID, agent_id: "a1" });
+    await postHook(httpPort, { hook_event_name: "SubagentStop", session_id: ID, agent_id: "a2" });
+    const done = await phone.waitFor("session_upsert", (f) => f.session.id === ID && !("subagents" in f.session) && f.seq > busy.seq);
+    assert.ok(done);
+  });
 });

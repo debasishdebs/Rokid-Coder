@@ -17,32 +17,13 @@ interface SessionRecord {
   firstUserPrompt?: string;
   aiTitle?: string;
   transcriptPath?: string;
-  /** Subagents running now, oldest first. */
-  subagents?: SubagentRun[];
-  /** Agent ids that stopped, so a late start or tool result naming one never brings it back. Cleared with the session. */
+  /** Subagents that started and have not stopped: agent_id -> epoch ms it started. */
+  subagents?: Map<string, number>;
+  /** Agent ids that stopped, so a late duplicate start never brings one back. Newest last. */
   stoppedAgents?: Set<string>;
 }
 
-interface SubagentRun {
-  /** The Task/Agent tool call that started it, when a PreToolUse said so. */
-  toolUseId?: string;
-  /** The id a SubagentStart, SubagentStop or the tool's own result names it by. */
-  agentId?: string;
-  /**
-   * The agent id came from the tool result or from the SubagentStart naming this tool call. Without
-   * it the id was only guessed from arrival order (parallel starts can swap), so a tool result that
-   * names no agent does not end it: its SubagentStop does.
-   */
-  confirmed?: boolean;
-  /** The tool call returned `async_launched`: the subagent outlives it and ends only at its SubagentStop. */
-  background?: boolean;
-  startedAt: number;
-}
-
-/** The tool Claude Code starts a subagent with: "Task", and "Agent" in newer versions. */
-const MAX_STOPPED_AGENTS = 500;
-
-const SUBAGENT_TOOLS = new Set(["Task", "Agent"]);
+const MAX_STOPPED_AGENTS = 256;
 
 const HEADING_PROMPT_CHARS = 48;
 
@@ -248,8 +229,7 @@ export class SessionStore {
         break;
       }
       case "Stop": {
-        // A background subagent goes on after the turn that launched it.
-        record.subagents = record.subagents?.filter((run) => run.background);
+        // Subagents are not cleared here: a background one outlives the turn that launched it.
         record.session.currentFile = undefined;
         record.session.step = undefined;
         // Stop fires before the transcript holds the final message, so the tail
@@ -272,15 +252,12 @@ export class SessionStore {
         break;
       }
       case "SubagentStart":
-        this.subagentStarted(record, asString(payload.agent_id), asString(payload.tool_use_id), now);
+        this.subagentStarted(record, asString(payload.agent_id), now);
         break;
       case "SubagentStop":
-        this.subagentEnded(record, { agentId: asString(payload.agent_id) });
+        this.subagentEnded(record, asString(payload.agent_id));
         break;
       case "PreToolUse": {
-        if (SUBAGENT_TOOLS.has(asString(payload.tool_name) ?? "")) {
-          (record.subagents ??= []).push({ toolUseId: asString(payload.tool_use_id), startedAt: now });
-        }
         const input = payload.tool_input;
         const fields = input && typeof input === "object" && !Array.isArray(input)
           ? input as Record<string, unknown>
@@ -296,9 +273,6 @@ export class SessionStore {
       case "PostToolUse":
       case "PostToolUseFailure":
       case "PermissionDenied":
-        if (SUBAGENT_TOOLS.has(asString(payload.tool_name) ?? "")) {
-          this.subagentToolReturned(record, asString(payload.tool_use_id), payload.tool_response, eventName === "PostToolUse");
-        }
         break;
       case "UserPromptExpansion":
         break;
@@ -326,47 +300,23 @@ export class SessionStore {
     this.emitUpsert(record.session);
   }
 
-  /** The agent id a subagent tool's result names, and whether it only launched the subagent in the background. */
-  private subagentResult(response: unknown): { agentId?: string; async: boolean } {
-    const fields = response && typeof response === "object" && !Array.isArray(response) ? response as Record<string, unknown> : {};
-    return { agentId: asString(fields.agentId) ?? asString(fields.agent_id), async: fields.status === "async_launched" };
-  }
-
   /**
-   * Makes `agentId` the identity of `own`, a run for one Task/Agent call, as a tool result or a
-   * SubagentStart naming the call says. The set of agent ids and of calls still unmatched stays what
-   * it was: an id some other run only held by guess trades places with `own`'s guess, and a guess
-   * with nowhere to go becomes a run of its own.
+   * The subagents running are exactly the agent ids a SubagentStart reported and no SubagentStop
+   * has ended. The Task/Agent tool calls are not looked at: they cannot say which agent is which.
+   * A repeated start of a live id changes nothing, and one that already stopped is not brought back.
    */
-  private assignAgent(runs: SubagentRun[], own: SubagentRun, agentId: string): void {
-    if (own.agentId === agentId) {
-      own.confirmed = true;
+  private subagentStarted(record: SessionRecord, agentId: string | undefined, now: number): void {
+    if (!agentId || record.stoppedAgents?.has(agentId) || record.subagents?.has(agentId)) {
       return;
     }
-    const holder = runs.find((run) => run !== own && run.agentId === agentId);
-    const guess = own.agentId;
-    if (holder) {
-      if (guess !== undefined || holder.toolUseId !== undefined) {
-        holder.agentId = guess;
-        holder.confirmed = false;
-      } else {
-        // `own` was a call no agent had joined and the holder a start no call had: one subagent.
-        runs.splice(runs.indexOf(holder), 1);
-        own.startedAt = Math.min(own.startedAt, holder.startedAt);
-      }
-    } else if (guess !== undefined) {
-      const free = runs.find((run) => run !== own && run.agentId === undefined && run.toolUseId !== undefined);
-      if (free) {
-        free.agentId = guess;
-      } else {
-        runs.push({ agentId: guess, startedAt: own.startedAt });
-      }
-    }
-    own.agentId = agentId;
-    own.confirmed = true;
+    (record.subagents ??= new Map()).set(agentId, now);
   }
 
-  private noteStopped(record: SessionRecord, agentId: string): void {
+  /** A SubagentStop ends the live id it names, for good; an id that is not live ends nothing. */
+  private subagentEnded(record: SessionRecord, agentId: string | undefined): void {
+    if (!agentId || !record.subagents?.delete(agentId)) {
+      return;
+    }
     const stopped = (record.stoppedAgents ??= new Set());
     if (stopped.size >= MAX_STOPPED_AGENTS) {
       stopped.delete(stopped.values().next().value as string);
@@ -374,108 +324,13 @@ export class SessionStore {
     stopped.add(agentId);
   }
 
-  /**
-   * A SubagentStart is a subagent a Task/Agent call launched, or, with no such call, a new one. When
-   * the hook names its tool call it is bound exactly; otherwise it takes the oldest call with no
-   * agent yet, which is a guess that a tool result's agent id later corrects. One that already
-   * ended is never brought back.
-   */
-  private subagentStarted(record: SessionRecord, agentId: string | undefined, toolUseId: string | undefined, now: number): void {
-    const runs = (record.subagents ??= []);
-    if (agentId && record.stoppedAgents?.has(agentId)) {
-      return;
-    }
-    const named = toolUseId === undefined ? undefined : runs.find((run) => run.toolUseId === toolUseId);
-    if (named && agentId) {
-      this.assignAgent(runs, named, agentId);
-      return;
-    }
-    if (agentId && runs.some((run) => run.agentId === agentId)) {
-      return;
-    }
-    const unbound = runs.find((run) => run.agentId === undefined && run.toolUseId !== undefined);
-    if (unbound) {
-      unbound.agentId = agentId;
-    } else {
-      runs.push({ agentId, startedAt: now });
-    }
-  }
-
-  /**
-   * The Task/Agent tool call returned. A background launch (`async_launched`) only started the
-   * subagent: it keeps running, known by the id the result names, until its SubagentStop. Any other
-   * return ended the subagent the result names. A result naming an agent that already stopped ends
-   * nothing but the call itself; one naming no agent ends the call's run unless that run's agent was
-   * only guessed (its SubagentStop will end it).
-   */
-  private subagentToolReturned(record: SessionRecord, toolUseId: string | undefined, response: unknown, succeeded: boolean): void {
-    const runs = record.subagents;
-    if (!runs) {
-      return;
-    }
-    const own = toolUseId === undefined ? undefined : runs.find((run) => run.toolUseId === toolUseId);
-    const { agentId, async } = this.subagentResult(response);
-    const background = succeeded && async;
-    const drop = (run: SubagentRun | undefined): void => {
-      if (run && runs.includes(run)) {
-        runs.splice(runs.indexOf(run), 1);
-      }
-    };
-    if (agentId === undefined) {
-      if (background) {
-        if (own) own.background = true;
-      } else if (own && (own.agentId === undefined || own.confirmed)) {
-        drop(own);
-      }
-      return;
-    }
-    if (record.stoppedAgents?.has(agentId)) {
-      if (own && own.agentId === undefined) drop(own);
-      return;
-    }
-    if (own) {
-      this.assignAgent(runs, own, agentId);
-      if (background) {
-        own.background = true;
-      } else {
-        drop(own);
-        this.noteStopped(record, agentId);
-      }
-      return;
-    }
-    const holder = runs.find((run) => run.agentId === agentId);
-    if (background) {
-      if (holder) {
-        holder.background = true;
-        holder.confirmed = true;
-      }
-    } else {
-      drop(holder);
-      this.noteStopped(record, agentId);
-    }
-  }
-
-  /** A SubagentStop ends the run that id names, for good: an id no run has ends nothing, and is remembered. */
-  private subagentEnded(record: SessionRecord, ended: { agentId?: string }): void {
-    if (ended.agentId === undefined) {
-      return;
-    }
-    this.noteStopped(record, ended.agentId);
-    const runs = record.subagents;
-    const at = runs ? runs.findIndex((run) => run.agentId === ended.agentId) : -1;
-    if (runs && at >= 0) {
-      runs.splice(at, 1);
-    }
-  }
-
   /** The phone's view of them: absent when none run, so an idle session's frame is what it always was. */
   private applySubagents(record: SessionRecord): void {
-    const runs = record.subagents;
-    if (runs && runs.length === 0) {
+    if (record.subagents?.size === 0) {
       record.subagents = undefined;
     }
     record.session.subagents = record.subagents
-      ? { running: record.subagents.length, since: Math.min(...record.subagents.map((run) => run.startedAt)) }
+      ? { running: record.subagents.size, since: Math.min(...record.subagents.values()) }
       : undefined;
   }
 
