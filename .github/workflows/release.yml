@@ -128,7 +128,10 @@ jobs:
         run: |
           set -euo pipefail
           pin=$(sed -n 's/^rokid.releaseSignerSha256=//p' gradle.properties | tr 'A-F' 'a-f')
-          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          # A fixed build-tools: the check reads apksigner's printed format, so it is not whatever is newest.
+          build_tools="$ANDROID_HOME/build-tools/36.0.0"
+          [ -x "$build_tools/apksigner" ] || yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;36.0.0" > /dev/null
+          "$build_tools/apksigner" version
           one() {
             mapfile -t found < <(find "$1" -maxdepth 1 -type f -name "$2")
             [ "${#found[@]}" -eq 1 ] || { echo "::error::expected one $2 in $1, found ${#found[@]}" >&2; exit 1; }
@@ -142,7 +145,11 @@ jobs:
           for apk in "$out/rokid-coder-$VERSION.apk" "$out/rokid-coder-glasses-$VERSION.apk"; do
             "$build_tools/apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/certs.txt"
             digests=$(sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")
-            [ "$(printf '%s\n' "$digests" | grep -c .)" = 1 ] || { echo "::error::$apk does not have exactly one signer"; exit 1; }
+            if [ "$(printf '%s\n' "$digests" | grep -c .)" != 1 ]; then
+              # Only the shape of the output: no certificate name, no digest.
+              sed -E 's/:.*/: …/' "$RUNNER_TEMP/certs.txt"
+              echo "::error::$apk does not have exactly one signer"; exit 1
+            fi
             [ "$digests" = "$pin" ] || { echo "::error::$apk is not signed by rokid.releaseSignerSha256"; exit 1; }
           done
           sha256sum "$out"/*

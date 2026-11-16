@@ -133,5 +133,11 @@ Rokid Coder $version for macOS ($arch)
 To remove Rokid Coder for yourself, run uninstall.sh in Terminal. Add --purge
 to delete your pairings and settings too, and --system to remove the package.
 EOF
-/usr/bin/hdiutil create -quiet -volname "Rokid Coder $version" -srcfolder "$stage/dmg" -format UDZO -ov "$out/$name.dmg"
+# hdiutil create fails now and then with "Resource busy" on a busy machine, and succeeds when retried.
+tries=1
+until /usr/bin/hdiutil create -volname "Rokid Coder $version" -srcfolder "$stage/dmg" -format UDZO -ov "$out/$name.dmg" > /dev/null; do
+  [ "$tries" -lt 5 ] || { echo "build-pkg: hdiutil create failed $tries times" >&2; exit 1; }
+  tries=$((tries + 1))
+  sleep 10
+done
 echo "Built $out/$name.pkg and $out/$name.dmg"
