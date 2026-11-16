@@ -184,7 +184,7 @@ Describe 'uninstall' {
       & $untouched
     }
     # Absent from a registered distro is no committed install; an unregistered distro is never asked.
-    $global:RokidTestManifests = @{}; $global:RokidTestUnreadable = @{}; $global:RokidTestWslBroken = $false
+    $global:RokidTestManifests = @{}; $global:RokidTestUnreadable = @{}; $global:RokidTestUnsearchable = @{}; $global:RokidTestWslBroken = $false
     Resolve-CommittedBinding | Should -BeNullOrEmpty
     # (Were it asked, the broken wsl.exe would make that an error.)
     Mock -ModuleName RokidCoder Get-LxssDistros { @() }
