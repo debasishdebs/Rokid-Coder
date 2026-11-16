@@ -65,6 +65,10 @@ object ControlMenu {
     /** R152: agentd already has this command, so it is not typed again. */
     const val ALREADY_SENT = "Already sent — check laptop"
 
+    /** agentd's refusal of a prompt for a session no `rk claude` launcher holds. */
+    const val NOT_LAUNCHER = "not_launcher"
+    const val NOT_LAUNCHER_FOLLOWUP = "Start the session with rk claude to send prompts from the glasses."
+
     /** R152: typed into the session, then the launcher failed; the id stays spent. */
     const val SENT_MAYBE_UNFINISHED = "Sent, but may not have finished — check laptop"
 
@@ -572,13 +576,21 @@ object ControlMenu {
      * A duplicate says it was already sent, a consumed rejection says it may not have finished (R152),
      * any other `rejected` names its error; an applied ack says nothing.
      */
-    fun ackNotice(ack: AgentdAction.Ack): String? {
+    fun ackNotice(ack: AgentdAction.Ack, followup: Boolean = false): String? {
         if (ack.result == "duplicate") return ALREADY_SENT
         if (ack.result != "rejected") return null
         if (ack.consumed) return SENT_MAYBE_UNFINISHED
+        if (followup && ack.error == NOT_LAUNCHER) return NOT_LAUNCHER_FOLLOWUP
         val error = ack.error?.singleLine(NOTICE_CHARS)?.takeIf(String::isNotBlank)
         return error?.let { "Not applied: $it" } ?: "Not applied"
     }
+
+    /**
+     * Why a follow-up was refused, for the menu row and the alert history: agentd's `not_launcher`
+     * says a plugin-only session cannot take a prompt, and this says what to do about it.
+     */
+    fun followupRejection(error: String?, limit: Int): String =
+        if (error == NOT_LAUNCHER) NOT_LAUNCHER_FOLLOWUP else error?.singleLine(limit)?.takeIf(String::isNotBlank) ?: "rejected"
 
     /** `delivered` is the happy ending and gets no notice. */
     fun followupClosedNotice(reason: String): String? = when (reason) {

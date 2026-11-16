@@ -155,7 +155,12 @@ class AlertDirector(
     private fun onFollowupAck(ack: AgentdAction.Ack) {
         val alertId = followupAlerts.remove(ack.msgId) ?: return
         if (ack.result != "rejected") return
-        history.onActionRejected(alertId, ack.error?.singleLine(ERROR_CHARS)?.takeIf(String::isNotBlank) ?: "refused")
+        val why = if (ack.error == ControlMenu.NOT_LAUNCHER) {
+            ControlMenu.NOT_LAUNCHER_FOLLOWUP
+        } else {
+            ack.error?.singleLine(ERROR_CHARS)?.takeIf(String::isNotBlank) ?: "refused"
+        }
+        history.onActionRejected(alertId, why)
     }
 
     /**
