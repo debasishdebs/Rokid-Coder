@@ -177,3 +177,85 @@ test("the_phone_gets_subagents_in_session_upsert_and_snapshot_only_while_some_ru
     assert.ok(done);
   });
 });
+
+test("codex_review_repro_ends_at_zero", () => {
+  const { hook, subagents } = store();
+  hook("PreToolUse", pre("t1"));
+  hook("PreToolUse", pre("t2"));
+  hook("SubagentStart", { agent_id: "a2" });
+  hook("SubagentStart", { agent_id: "a1" });
+  hook("SubagentStop", { agent_id: "a2" });
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2", tool_response: { status: "async_launched", agentId: "a2" } });
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "async_launched", agentId: "a1" } });
+  assert.equal(subagents().running, 1, "a1 is still running");
+  hook("SubagentStop", { agent_id: "a1" });
+  hook("Stop");
+  assert.equal(subagents(), undefined);
+});
+
+/** Every ordering of `items` in which each item comes after the ones it needs. */
+function* orderings(items, needs, chosen = []) {
+  if (chosen.length === items.length) {
+    yield chosen;
+    return;
+  }
+  for (const item of items) {
+    if (!chosen.includes(item) && (needs[item] ?? []).every((before) => chosen.includes(before))) {
+      yield* orderings(items, needs, [...chosen, item]);
+    }
+  }
+}
+
+test("any_order_of_two_parallel_subagents_ends_at_zero_and_never_loses_a_live_one", () => {
+  const events = ["pre1", "pre2", "start1", "start2", "stop1", "stop2", "post1", "post2"];
+  const needs = {
+    start1: ["pre1"], start2: ["pre2"], stop1: ["start1"], stop2: ["start2"],
+    post1: ["pre1"], post2: ["pre2"],
+  };
+  const variants = {
+    // The launch returns at once, before or after the subagent's own hooks.
+    async: { needsMore: {}, result: (n) => ({ status: "async_launched", agentId: `a${n}` }), endsAgent: false },
+    // The call returns when its subagent is done, naming it.
+    sync_named: { needsMore: (n) => [`start${n}`], result: (n) => ({ status: "completed", agentId: `a${n}` }), endsAgent: true },
+    // Returns naming nobody.
+    sync_anonymous: { needsMore: (n) => [`start${n}`], result: () => ({ status: "completed" }), endsAgent: false },
+  };
+  let checked = 0;
+  for (const [name, variant] of Object.entries(variants)) {
+    const rules = { ...needs };
+    if (typeof variant.needsMore === "function") {
+      for (const n of [1, 2]) rules[`post${n}`] = [...needs[`post${n}`], ...variant.needsMore(n)];
+    }
+    for (const order of orderings(events, rules)) {
+      const { hook, subagents } = store();
+      const alive = new Set();
+      const preAndNotStarted = new Set();
+      const running = () => subagents()?.running ?? 0;
+      for (const event of order) {
+        const n = event.slice(-1);
+        if (event.startsWith("pre")) {
+          hook("PreToolUse", pre(`t${n}`));
+          preAndNotStarted.add(n);
+        } else if (event.startsWith("start")) {
+          hook("SubagentStart", { agent_id: `a${n}` });
+          alive.add(n);
+          preAndNotStarted.delete(n);
+        } else if (event.startsWith("stop")) {
+          hook("SubagentStop", { agent_id: `a${n}` });
+          alive.delete(n);
+        } else {
+          hook("PostToolUse", { tool_name: "Task", tool_use_id: `t${n}`, tool_response: variant.result(n) });
+          if (variant.endsAgent) alive.delete(n);
+        }
+        const where = `${name}: ${order.join(" ")} at ${event}`;
+        assert.ok(running() >= alive.size, `a live subagent was dropped (${where})`);
+        assert.ok(running() <= alive.size + preAndNotStarted.size, `a finished subagent was resurrected (${where})`);
+      }
+      assert.equal(running(), 0, `${name}: ${order.join(" ")} ends at zero`);
+      hook("Stop");
+      assert.equal(subagents(), undefined);
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 1000, `${checked} orderings checked`);
+});

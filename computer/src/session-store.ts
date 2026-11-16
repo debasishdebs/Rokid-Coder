@@ -19,6 +19,8 @@ interface SessionRecord {
   transcriptPath?: string;
   /** Subagents running now, oldest first. */
   subagents?: SubagentRun[];
+  /** Agent ids that stopped, so a late start or tool result naming one never brings it back. Cleared with the session. */
+  stoppedAgents?: Set<string>;
 }
 
 interface SubagentRun {
@@ -38,6 +40,8 @@ interface SubagentRun {
 }
 
 /** The tool Claude Code starts a subagent with: "Task", and "Agent" in newer versions. */
+const MAX_STOPPED_AGENTS = 500;
+
 const SUBAGENT_TOOLS = new Set(["Task", "Agent"]);
 
 const HEADING_PROMPT_CHARS = 48;
@@ -221,6 +225,7 @@ export class SessionStore {
     switch (eventName) {
       case "SessionStart":
         record.subagents = undefined;
+        record.stoppedAgents = undefined;
         record.session.status = "idle";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
@@ -302,6 +307,7 @@ export class SessionStore {
         break;
       case "SessionEnd":
         record.subagents = undefined;
+        record.stoppedAgents = undefined;
         record.session.status = "done";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
@@ -326,31 +332,65 @@ export class SessionStore {
     return { agentId: asString(fields.agentId) ?? asString(fields.agent_id), async: fields.status === "async_launched" };
   }
 
-  /** Gives `run` the identity `agentId`, taking it from any run that only had it by guess. */
-  private bindAgent(runs: SubagentRun[], run: SubagentRun, agentId: string): void {
-    for (const other of runs) {
-      if (other !== run && other.agentId === agentId) {
-        other.agentId = undefined;
-        other.confirmed = false;
+  /**
+   * Makes `agentId` the identity of `own`, a run for one Task/Agent call, as a tool result or a
+   * SubagentStart naming the call says. The set of agent ids and of calls still unmatched stays what
+   * it was: an id some other run only held by guess trades places with `own`'s guess, and a guess
+   * with nowhere to go becomes a run of its own.
+   */
+  private assignAgent(runs: SubagentRun[], own: SubagentRun, agentId: string): void {
+    if (own.agentId === agentId) {
+      own.confirmed = true;
+      return;
+    }
+    const holder = runs.find((run) => run !== own && run.agentId === agentId);
+    const guess = own.agentId;
+    if (holder) {
+      if (guess !== undefined || holder.toolUseId !== undefined) {
+        holder.agentId = guess;
+        holder.confirmed = false;
+      } else {
+        // `own` was a call no agent had joined and the holder a start no call had: one subagent.
+        runs.splice(runs.indexOf(holder), 1);
+        own.startedAt = Math.min(own.startedAt, holder.startedAt);
+      }
+    } else if (guess !== undefined) {
+      const free = runs.find((run) => run !== own && run.agentId === undefined && run.toolUseId !== undefined);
+      if (free) {
+        free.agentId = guess;
+      } else {
+        runs.push({ agentId: guess, startedAt: own.startedAt });
       }
     }
-    run.agentId = agentId;
-    run.confirmed = true;
+    own.agentId = agentId;
+    own.confirmed = true;
+  }
+
+  private noteStopped(record: SessionRecord, agentId: string): void {
+    const stopped = (record.stoppedAgents ??= new Set());
+    if (stopped.size >= MAX_STOPPED_AGENTS) {
+      stopped.delete(stopped.values().next().value as string);
+    }
+    stopped.add(agentId);
   }
 
   /**
    * A SubagentStart is a subagent a Task/Agent call launched, or, with no such call, a new one. When
    * the hook names its tool call it is bound exactly; otherwise it takes the oldest call with no
-   * agent yet, which is a guess that a tool result's agent id later corrects.
+   * agent yet, which is a guess that a tool result's agent id later corrects. One that already
+   * ended is never brought back.
    */
   private subagentStarted(record: SessionRecord, agentId: string | undefined, toolUseId: string | undefined, now: number): void {
     const runs = (record.subagents ??= []);
-    if (agentId && runs.some((run) => run.agentId === agentId && (run.confirmed || toolUseId === undefined))) {
+    if (agentId && record.stoppedAgents?.has(agentId)) {
       return;
     }
     const named = toolUseId === undefined ? undefined : runs.find((run) => run.toolUseId === toolUseId);
     if (named && agentId) {
-      this.bindAgent(runs, named, agentId);
+      this.assignAgent(runs, named, agentId);
+      return;
+    }
+    if (agentId && runs.some((run) => run.agentId === agentId)) {
       return;
     }
     const unbound = runs.find((run) => run.agentId === undefined && run.toolUseId !== undefined);
@@ -363,41 +403,66 @@ export class SessionStore {
 
   /**
    * The Task/Agent tool call returned. A background launch (`async_launched`) only started the
-   * subagent: it keeps running, now known by the id the result names, until its SubagentStop. Any
-   * other return ended it: the run the result names is removed, else the call's own run, unless
-   * that run's id was only guessed and the result names none (its SubagentStop will end it).
+   * subagent: it keeps running, known by the id the result names, until its SubagentStop. Any other
+   * return ended the subagent the result names. A result naming an agent that already stopped ends
+   * nothing but the call itself; one naming no agent ends the call's run unless that run's agent was
+   * only guessed (its SubagentStop will end it).
    */
   private subagentToolReturned(record: SessionRecord, toolUseId: string | undefined, response: unknown, succeeded: boolean): void {
     const runs = record.subagents;
-    const own = toolUseId === undefined ? undefined : runs?.find((run) => run.toolUseId === toolUseId);
     if (!runs) {
       return;
     }
+    const own = toolUseId === undefined ? undefined : runs.find((run) => run.toolUseId === toolUseId);
     const { agentId, async } = this.subagentResult(response);
-    if (succeeded && async) {
-      if (own) {
-        own.background = true;
-        if (agentId) {
-          this.bindAgent(runs, own, agentId);
-        }
+    const background = succeeded && async;
+    const drop = (run: SubagentRun | undefined): void => {
+      if (run && runs.includes(run)) {
+        runs.splice(runs.indexOf(run), 1);
+      }
+    };
+    if (agentId === undefined) {
+      if (background) {
+        if (own) own.background = true;
+      } else if (own && (own.agentId === undefined || own.confirmed)) {
+        drop(own);
       }
       return;
     }
-    const named = agentId === undefined ? undefined : runs.find((run) => run.agentId === agentId);
-    let ended = named;
-    if (!ended && own) {
-      // Its own run, unless the id on it was a guess and nothing here confirms or contradicts it.
-      ended = (agentId === undefined ? own.agentId === undefined || own.confirmed : own.agentId === undefined) ? own : undefined;
+    if (record.stoppedAgents?.has(agentId)) {
+      if (own && own.agentId === undefined) drop(own);
+      return;
     }
-    if (ended) {
-      runs.splice(runs.indexOf(ended), 1);
+    if (own) {
+      this.assignAgent(runs, own, agentId);
+      if (background) {
+        own.background = true;
+      } else {
+        drop(own);
+        this.noteStopped(record, agentId);
+      }
+      return;
+    }
+    const holder = runs.find((run) => run.agentId === agentId);
+    if (background) {
+      if (holder) {
+        holder.background = true;
+        holder.confirmed = true;
+      }
+    } else {
+      drop(holder);
+      this.noteStopped(record, agentId);
     }
   }
 
-  /** A SubagentStop ends the run that id names, and nothing else: an id no run has ends nothing. */
+  /** A SubagentStop ends the run that id names, for good: an id no run has ends nothing, and is remembered. */
   private subagentEnded(record: SessionRecord, ended: { agentId?: string }): void {
+    if (ended.agentId === undefined) {
+      return;
+    }
+    this.noteStopped(record, ended.agentId);
     const runs = record.subagents;
-    const at = runs && ended.agentId !== undefined ? runs.findIndex((run) => run.agentId === ended.agentId) : -1;
+    const at = runs ? runs.findIndex((run) => run.agentId === ended.agentId) : -1;
     if (runs && at >= 0) {
       runs.splice(at, 1);
     }
