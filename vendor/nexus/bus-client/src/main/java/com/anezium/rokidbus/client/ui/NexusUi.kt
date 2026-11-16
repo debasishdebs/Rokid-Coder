@@ -33,31 +33,80 @@ import android.widget.TextView
  * names/body, and monospace for caps/meta UI.
  */
 object NexusUi {
-    const val BG = 0xFF070A08.toInt()
-    const val PANEL = 0xFF0D150F.toInt()
-    const val CARD = 0xFF0E150F.toInt()
-    const val LINE = 0xFF182619.toInt()
-    const val LINE2 = 0xFF16241A.toInt()
-    const val INK = 0xFFDCF3E4.toInt()
-    const val INK2 = 0xFF8BA896.toInt()
-    const val INK3 = 0xFF5F7A68.toInt()
-    const val INK4 = 0xFF42574A.toInt()
-    const val GREEN = 0xFF4DFF8C.toInt()
-    const val GREEN_DIM = 0xFF2F9D5C.toInt()
-    const val AMBER = 0xFFFFB84D.toInt()
-    const val ON_ACCENT = 0xFF04180D.toInt()
-    const val DANGER = 0xFFFF8A8A.toInt()
+    /**
+     * One complete set of the palette's colors. [DARK] is Phosphor and the default; an app that wants
+     * another look (Rokid Coder's phone app is light) installs its own with [usePalette] before it
+     * builds its first view, since a view keeps the color it was built with.
+     */
+    class Palette(
+        val bg: Int,
+        val panel: Int,
+        val card: Int,
+        val line: Int,
+        val line2: Int,
+        val ink: Int,
+        val ink2: Int,
+        val ink3: Int,
+        val ink4: Int,
+        val green: Int,
+        val greenDim: Int,
+        val amber: Int,
+        val onAccent: Int,
+        val danger: Int,
+        /** Dark status and navigation bar icons, for a light [bg]. */
+        val lightSystemBars: Boolean = false,
+    )
+
+    val DARK = Palette(
+        bg = 0xFF070A08.toInt(),
+        panel = 0xFF0D150F.toInt(),
+        card = 0xFF0E150F.toInt(),
+        line = 0xFF182619.toInt(),
+        line2 = 0xFF16241A.toInt(),
+        ink = 0xFFDCF3E4.toInt(),
+        ink2 = 0xFF8BA896.toInt(),
+        ink3 = 0xFF5F7A68.toInt(),
+        ink4 = 0xFF42574A.toInt(),
+        green = 0xFF4DFF8C.toInt(),
+        greenDim = 0xFF2F9D5C.toInt(),
+        amber = 0xFFFFB84D.toInt(),
+        onAccent = 0xFF04180D.toInt(),
+        danger = 0xFFFF8A8A.toInt(),
+    )
+
+    @Volatile
+    var palette: Palette = DARK
+        private set
+
+    fun usePalette(palette: Palette) {
+        this.palette = palette
+    }
+
+    val BG: Int get() = palette.bg
+    val PANEL: Int get() = palette.panel
+    val CARD: Int get() = palette.card
+    val LINE: Int get() = palette.line
+    val LINE2: Int get() = palette.line2
+    val INK: Int get() = palette.ink
+    val INK2: Int get() = palette.ink2
+    val INK3: Int get() = palette.ink3
+    val INK4: Int get() = palette.ink4
+    val GREEN: Int get() = palette.green
+    val GREEN_DIM: Int get() = palette.greenDim
+    val AMBER: Int get() = palette.amber
+    val ON_ACCENT: Int get() = palette.onAccent
+    val DANGER: Int get() = palette.danger
 
     // Backward-compatible aliases used by existing phone-hub screens.
-    const val TEXT = INK
-    const val MUTED = INK2
-    const val DIM = INK3
-    const val ACCENT = GREEN
-    const val ACCENT_PRESSED = GREEN_DIM
-    const val WELL = PANEL
-    const val HAIRLINE = LINE
-    const val CARD_PRESSED = LINE2
-    const val CONSOLE_INK = INK2
+    val TEXT: Int get() = INK
+    val MUTED: Int get() = INK2
+    val DIM: Int get() = INK3
+    val ACCENT: Int get() = GREEN
+    val ACCENT_PRESSED: Int get() = GREEN_DIM
+    val WELL: Int get() = PANEL
+    val HAIRLINE: Int get() = LINE
+    val CARD_PRESSED: Int get() = LINE2
+    val CONSOLE_INK: Int get() = INK2
 
     private val sansLight: Typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
     private val sans: Typeface = Typeface.create("sans-serif", Typeface.NORMAL)
