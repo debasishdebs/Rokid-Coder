@@ -297,7 +297,9 @@ jobs:
           version=$(prop rokid.versionName)
           pin=$(prop rokid.releaseSignerSha256 | tr 'A-F' 'a-f')
           [ -n "$pin" ] || { echo "rokid.releaseSignerSha256 is not set"; exit 1; }
-          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          # A fixed build-tools: signer.sh reads apksigner's printed format, so it is not whatever is newest.
+          build_tools="$ANDROID_HOME/build-tools/36.0.0"
+          [ -x "$build_tools/apksigner" ] || yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;36.0.0" > /dev/null
           {
             echo "PHONE_ID=$(prop rokid.phoneApplicationId)"
             echo "GLASSES_ID=$(prop rokid.glassesApplicationId)"
@@ -317,7 +319,10 @@ jobs:
           set -euo pipefail
           "$BUILD_TOOLS/apksigner" verify --print-certs "$1" > "$RUNNER_TEMP/certs.txt"
           digests=$(sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")
-          [ "$(printf '%s\n' "$digests" | grep -c .)" = 1 ] || { echo "$1 does not have exactly one signer"; exit 1; }
+          if [ "$(printf '%s\n' "$digests" | grep -c .)" != 1 ]; then
+            sed -E 's/:.*/: …/' "$RUNNER_TEMP/certs.txt"
+            echo "$1 does not have exactly one signer"; exit 1
+          fi
           [ "$digests" = "$PIN" ] || { echo "$1 is not signed by the pinned release key"; exit 1; }
           echo "$1: signed by the pinned release key"
           SH
