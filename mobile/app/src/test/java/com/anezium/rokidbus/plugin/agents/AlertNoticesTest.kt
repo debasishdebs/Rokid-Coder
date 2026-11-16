@@ -173,36 +173,44 @@ class AlertNoticesTest {
     }
 
     @Test
-    fun summary_first_reader_segments() {
+    fun output_reader_opens_at_the_newest_message_and_older_ones_are_above() {
         val done = alert(kind = AlertKind.DONE, body = "Fixed the flaky test")
         val full = "First paragraph. ".repeat(500)
         val session = session(AgentStatus.DONE).copy(lastAssistantText = full)
 
-        val reader = AlertNotices.outputReader(done, session, emptyList())
-
-        assertEquals(NexusReaderAnchor.TOP, reader.anchor)
-        assertEquals(NexusReaderSegmentKind.HEADER, reader.segments.first().kind)
-        assertEquals("Fixed the flaky test", reader.segments.first().text)
-        val rest = reader.segments.drop(1)
-        assertTrue(rest.isNotEmpty())
+        // Until the conversation arrives, the summary and the last text stand in, already stream-shaped.
+        val loading = AlertNotices.outputReader(done, session, emptyList())
+        assertEquals("the glasses open a bottom reader at its end", NexusReaderAnchor.BOTTOM, loading.anchor)
+        assertEquals(NexusReaderSegmentKind.HEADER, loading.segments.first().kind)
+        assertEquals("Fixed the flaky test", loading.segments.first().text)
+        val rest = loading.segments.drop(1)
         assertTrue(rest.all { it.kind == NexusReaderSegmentKind.PROSE })
         assertEquals(full.trim(), rest.joinToString("") { it.text })
 
-        // A loaded conversation replaces the last text, still under the summary.
+        // The conversation, oldest first with the newest last: the reader opens on the last one.
         val turns = listOf(
             NexusReaderSegment(NexusReaderSegmentKind.HEADER, "YOU · 1m"),
             NexusReaderSegment(NexusReaderSegmentKind.PROSE, "fix it"),
+            NexusReaderSegment(NexusReaderSegmentKind.HEADER, "CL · now"),
+            NexusReaderSegment(NexusReaderSegmentKind.PROSE, "done"),
         )
         val withTurns = AlertNotices.outputReader(done, session, turns)
-        assertEquals(listOf("Fixed the flaky test", "YOU · 1m", "fix it"), withTurns.segments.map { it.text })
+        assertEquals(NexusReaderAnchor.BOTTOM, withTurns.anchor)
+        assertEquals(listOf("YOU · 1m", "fix it", "CL · now", "done"), withTurns.segments.map { it.text })
 
-        // Too much conversation keeps the newest turns under the summary.
+        // Too much conversation keeps the newest turns, the newest still last.
         val many = (1..400).map { NexusReaderSegment(NexusReaderSegmentKind.PROSE, "$it".padEnd(4_000, '.')) }
         val capped = AlertNotices.outputReader(done, session, many)
-        assertEquals("Fixed the flaky test", capped.segments.first().text)
         assertTrue(capped.segments.size <= 240)
         assertTrue(capped.segments.sumOf { it.text.length } <= 40_000)
         assertTrue(capped.segments.last().text.startsWith("400"))
+        assertFalse("the oldest turns are the ones dropped", capped.segments.first().text.startsWith("1."))
+    }
+
+    @Test
+    fun a_decision_reader_is_a_document_and_still_opens_at_its_start() {
+        val reader = AlertNotices.approvalReader(alert(), session(AgentStatus.NEEDS_YOU), null)
+        assertEquals(NexusReaderAnchor.TOP, reader.anchor)
     }
 
     @Test

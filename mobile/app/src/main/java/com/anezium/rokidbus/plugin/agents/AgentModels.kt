@@ -62,6 +62,8 @@ data class AgentSession(
     val pendingRequest: AgentPendingRequest? = null,
     /** The protocol v2 fields; null for a daemon (or provider) that sends none. */
     val v2: SessionV2? = null,
+    /** Claude subagents running now; null when agentd says none do. */
+    val subagents: Subagents? = null,
 ) {
     val key: String
         get() = "${provider.wireValue}:$id"
@@ -72,6 +74,9 @@ data class AgentSession(
             ?: cwd?.substringAfterLast('/')?.substringAfterLast('\\')?.takeIf(String::isNotBlank)
             ?: id
 }
+
+/** [since] is when the oldest running subagent started (epoch ms); null when agentd sent no usable time. */
+data class Subagents(val running: Int, val since: Long?)
 
 /** The temporary approval mode agentd applies to one session; `wire` is the frame's value. */
 enum class TempMode(val wire: String) {

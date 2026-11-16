@@ -72,4 +72,22 @@ class RokidCoderGlassesAppTest {
         val (major, minor, patch) = BuildConfig.VERSION_NAME.split('.').map(String::toInt)
         assertEquals(major * 10000 + minor * 100 + patch, BuildConfig.VERSION_CODE)
     }
+
+    /** The core spells the product out in some strings; each one must be overridden here. */
+    @Test
+    fun no_core_string_names_nexus_for_the_wearer() {
+        fun strings(file: File) = Regex("<string name=\"([^\"]+)\"[^>]*>([^<]*)</string>")
+            .findAll(file.readText()).associate { it.groupValues[1] to it.groupValues[2] }
+        val core = strings(File("../../vendor/nexus/glasses-core/src/main/res/values/strings.xml"))
+        val ours = strings(File("src/main/res/values/strings.xml"))
+        val missed = core.filter { (name, text) -> text.contains("Nexus") && ours[name]?.contains("Nexus") != false }.keys
+        assertEquals(emptySet<String>(), missed)
+        assertTrue(ours.values.none { it.contains("Nexus") })
+        assertEquals("Rokid Coder", app.getString(com.anezium.rokidbus.glasses.R.string.product_name))
+        assertEquals("Rokid Coder", app.getString(com.anezium.rokidbus.glasses.R.string.accessibility_service_label))
+        assertEquals(
+            "Rokid Coder is setting itself up. Please keep the glasses on.",
+            app.getString(com.anezium.rokidbus.glasses.R.string.setup_status_line, app.getString(com.anezium.rokidbus.glasses.R.string.product_name)),
+        )
+    }
 }

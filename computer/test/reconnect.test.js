@@ -741,7 +741,8 @@ test("codex_socket_reconnect_resubscribes_attached", async () => {
       "attached threads were not resumed again on the new connection",
     );
     assert.deepEqual(resumesOf(requests, "a")[1].params, { threadId: "a", excludeTurns: true });
-    assert.ok(monitor.availability().available);
+    // The resumes happen inside the synchronize step; the monitor reports itself available only once that has finished.
+    await waitUntil(() => monitor.availability().available, "monitor did not report itself available after reconnecting");
   } finally {
     await dispose();
     await daemon.close();

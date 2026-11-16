@@ -2,9 +2,10 @@
   "tool": "codex",
   "version": "0.169.0",
   "versionOutput": "codex-cli 0.169.0",
-  "listFormat": "object",
+  "listFormat": "installed",
   "recorded": true,
   "listJsonRecorded": false,
+  "pluginListJsonRecorded": true,
   "marketplaceHelpRecorded": false,
-  "note": "plugin-help.txt is a screen of recorded/codex-help.txt, the read-only --help of the real codex-cli 0.169.0: plugin add|list|remove and plugin marketplace, with no install, uninstall or update verb. marketplace-help.txt is NOT recorded: its add|list|upgrade|remove come from the recorded one-line summary of `plugin marketplace`. Also unrecorded, to verify at the device gate: the `plugin add|remove <name>@<marketplace>` argument form, and the `plugin list --json` / `plugin marketplace list --json` shapes (listFormat, plugin-list.json, marketplace-list.json). The recorded help says plugin list lists the plugins AVAILABLE from the marketplaces, so an entry with installed:false is not installed."
+  "note": "plugin-help.txt is a screen of recorded/codex-help.txt, the read-only --help of the real codex-cli 0.169.0: plugin add|list|remove and plugin marketplace, with no install, uninstall or update verb. marketplace-help.txt is NOT recorded: its add|list|upgrade|remove come from the recorded one-line summary of `plugin marketplace`. Also unrecorded, to verify at the device gate: the `plugin add|remove <name>@<marketplace>` argument form, and the `plugin marketplace list --json` shape (marketplace-list.json). `plugin list --json` IS recorded from a real codex-cli 0.169.0 (plugin-list.json, paths anonymized, cut off after its installed array): an object whose installed array holds {pluginId, name, marketplaceName, version, installed, enabled, source, marketplaceSource, installPolicy, authPolicy} entries. The recorded help says plugin list lists the plugins AVAILABLE from the marketplaces, so an entry with installed:false is not installed."
 }

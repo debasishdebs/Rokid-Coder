@@ -2,6 +2,7 @@ package com.anezium.rokidbus.plugin.agents.ui
 
 import com.anezium.rokidbus.plugin.agents.AgentProvider
 import com.anezium.rokidbus.plugin.agents.AgentSession
+import com.anezium.rokidbus.plugin.agents.Subagents
 import com.anezium.rokidbus.plugin.agents.AlertKind
 import com.anezium.rokidbus.plugin.agents.HistoryEntry
 import com.anezium.rokidbus.plugin.agents.Outcome
@@ -138,5 +139,14 @@ class SettingsScreenTest {
         assertEquals("Not sent: monitor_only · just now", historyRow(entry(error = "monitor_only"), now = 0L).sub)
         assertEquals("Read · just now", historyRow(entry(Outcome.DISMISSED, "Read"), now = 0L).sub)
         assertEquals("Dismissed · just now", historyRow(entry(Outcome.DISMISSED), now = 0L).sub)
+    }
+
+    @Test
+    fun link_line_adds_the_subagents_running_across_sessions() {
+        val connected = ProviderConnectionState(ConnectionState.CONNECTED)
+        val one = session("a", AgentStatus.WORKING).copy(subagents = Subagents(1, 5L))
+        assertEquals("WATCHING · 1 RUNNING · 0 IDLE · 1 SUBAGENT", linkLine(connected, listOf(one)).text)
+        val two = session("b", AgentStatus.WORKING).copy(subagents = Subagents(3, null))
+        assertEquals("WATCHING · 2 RUNNING · 0 IDLE · 4 SUBAGENTS", linkLine(connected, listOf(one, two)).text)
     }
 }

@@ -364,8 +364,9 @@ class AgentsCore(
         ageTicker?.cancel()
         ageTicker = serviceScope.launch {
             while (isActive) {
-                delay(AGE_TICK_MS)
-                // The minute tick also keeps a non-v2 row's age honest, which the gate would otherwise hold.
+                // Running subagents show a clock to the second, so the tick quickens while any run.
+                delay(if (AgentsRuntime.store.sessions.value.any { it.subagents != null }) SUBAGENT_TICK_MS else AGE_TICK_MS)
+                // The tick also keeps a non-v2 row's age and a subagent clock honest, which the gate would otherwise hold.
                 if (surfaceShown) {
                     render(
                         show = false,
@@ -923,7 +924,7 @@ class AgentsCore(
                 val followupSession = followupMsgIds.remove(action.msgId)
                 if (followupSession != null && action.result == "rejected") {
                     // Durable on the menu until the next follow-up or followup_closed; the brief is an extra.
-                    AgentsRuntime.store.noteReplyNotSent(followupSession, notApplied(action))
+                    AgentsRuntime.store.noteReplyNotSent(followupSession, ControlMenu.followupRejection(action.error, NOT_APPLIED_CHARS))
                     if (surfaceShown && screen.menu?.sessionKey == followupSession) render(show = false)
                 }
                 val modeSession = modeSetMsgIds.remove(action.msgId)
@@ -932,7 +933,7 @@ class AgentsCore(
                     AgentsRuntime.store.noteNotApplied(modeSession, notApplied(action))
                     if (surfaceShown && screen.menu?.sessionKey == modeSession) render(show = false)
                 }
-                ControlMenu.ackNotice(action)?.let { showBriefNotice(ControlMenu.NOTICE_TITLE, it, safety = true) }
+                ControlMenu.ackNotice(action, followup = followupSession != null)?.let { showBriefNotice(ControlMenu.NOTICE_TITLE, it, safety = true) }
             }
             is AgentdAction.FollowupClosed -> {
                 // A closed window ends any rejection shown for it, and a reply for it would send into nothing.
@@ -1463,6 +1464,7 @@ class AgentsCore(
     ): String {
         val parts = listOfNotNull(
             session?.let { statusPhrase(it) },
+            session?.subagents?.let { BoardModel.subagentsLine(it, System.currentTimeMillis()) },
             session?.project?.takeIf(String::isNotBlank),
             session?.machineName?.takeIf(String::isNotBlank),
             conversation.messages.size.takeIf { it > 0 }?.let { "$it messages" },
@@ -1503,6 +1505,7 @@ class AgentsCore(
         private const val READER_TOTAL_CHARS = 24_000
         private const val READER_MAX_SEGMENTS = 236
         private const val AGE_TICK_MS = 60_000L
+        private const val SUBAGENT_TICK_MS = 5_000L
         private const val PAIRING_TICK_MS = 1_000L
 
         /** Long enough to swallow a double tap, short enough to never be felt. */

@@ -482,4 +482,17 @@ class ControlMenuTest {
         val ask = ControlMenu.pick(old, session, secure = true, now = 5L) as ControlMenu.Step.Send
         assertNull(ask.state.models)
     }
+
+    @Test
+    fun a_followup_refused_for_want_of_a_launcher_says_how_to_start_one() {
+        val hint = "Start the session with rk claude to send prompts from the glasses."
+        val ack = AgentdAction.Ack("m", "rejected", "not_launcher")
+        assertEquals(hint, ControlMenu.ackNotice(ack, followup = true))
+        assertEquals(hint, ControlMenu.followupRejection("not_launcher", 120))
+        // Other refusals, and a command that is not a follow-up, keep their own words.
+        assertEquals("Not applied: not_launcher", ControlMenu.ackNotice(ack))
+        assertEquals("no_followup_window", ControlMenu.followupRejection("no_followup_window", 120))
+        assertEquals("rejected", ControlMenu.followupRejection(null, 120))
+        assertEquals("Not applied: bad_text", ControlMenu.ackNotice(AgentdAction.Ack("m", "rejected", "bad_text"), followup = true))
+    }
 }

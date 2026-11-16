@@ -43,7 +43,7 @@ internal data class PairingView(
     /** The exact attempt whose code this view shows: what its Confirm and Cancel answer. */
     val attempt: AttemptView? = null,
     val pairedName: String? = null,
-    /** The Tailscale connector and the scan-the-code fallback are on offer. */
+    /** The Tailscale connector is on offer. */
     val offerFallback: Boolean = false,
     /** The wearer said the codes differ. */
     val mismatch: Boolean = false,
@@ -119,7 +119,7 @@ internal class PairingStepController(
         publish(PairingView(PairingPhase.WINDOW_OPEN, door.remainingMs(), offerFallback = fallback))
     }
 
-    /** "Use it away from home": the Tailscale connector and the scan fallback. */
+    /** "Use it away from home": the Tailscale connector. */
     fun awayFromHome() {
         fallback = true
         publish(_view.value.copy(offerFallback = true))

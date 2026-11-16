@@ -978,4 +978,15 @@ class AlertDirectorTest {
         assertEquals(null, entry("D").lastError)
         assertEquals("Replied", entry("D").actionLabel)
     }
+
+    @Test
+    fun a_followup_refused_without_a_launcher_tells_the_phone_how_to_start_one() {
+        up()
+        feed(alert(id = "D", kind = "done"))
+        director.onFollowupWritten("claude:s1", "m1")
+        director.onEvent(AgentdEvent.Action(AgentdAction.Ack("m1", "rejected", "not_launcher")))
+
+        assertEquals("Start the session with rk claude to send prompts from the glasses.", entry("D").lastError)
+        assertEquals("Not sent: Start the session with rk claude to send prompts from the glasses.", outcomeText(entry("D")))
+    }
 }

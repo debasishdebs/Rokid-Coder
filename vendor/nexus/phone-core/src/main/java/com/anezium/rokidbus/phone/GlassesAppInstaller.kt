@@ -6,11 +6,15 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.UUID
 
 /** Installs the glasses app over CXR. The APK is verified on every call, before anything is pushed. */
 interface GlassesAppInstaller {
-    suspend fun install(apk: File, expected: GlassesApkMetadata, onProgress: (Int) -> Unit): InstallResult
+    /**
+     * [force] pushes over an app of the same version code (a build that changed without a version
+     * bump), which unforced is [InstallResult.AlreadyCurrent]. It never overwrites a newer one:
+     * that is [InstallResult.NewerOnGlasses], forced or not, and nothing is pushed.
+     */
+    suspend fun install(apk: File, expected: GlassesApkMetadata, force: Boolean = false, onProgress: (Int) -> Unit): InstallResult
 
     /** The glasses app's version code, or null when CXR is down, it is absent, or it has not announced. */
     suspend fun installedVersion(): Long?
@@ -63,6 +67,7 @@ internal class CxrGlassesAppInstaller(
     override suspend fun install(
         apk: File,
         expected: GlassesApkMetadata,
+        force: Boolean,
         onProgress: (Int) -> Unit,
     ): InstallResult {
         onProgress(0)
@@ -70,7 +75,10 @@ internal class CxrGlassesAppInstaller(
         val op = slot.acquire(GlassesAppSlot.Kind.INSTALL)
         val attempt = Attempt().also { current = it }
         try {
-            val copy = File(workDirectory(), "${UUID.randomUUID()}.apk")
+            // CXR hands the file's name to Hi Rokid's installer on the glasses. Upstream always sent
+            // `nexus-glasses-<version>.apk`; a random UUID name is the one input of this push that
+            // upstream never produced. The slot holds one install at a time, so a fixed name is safe.
+            val copy = File(workDirectory(), "glasses-app-${expected.versionCode}.apk")
             op.onComplete { copy.delete() }
             val copied = withContext(io) {
                 runCatching {
@@ -90,7 +98,8 @@ internal class CxrGlassesAppInstaller(
             onProgress(25)
 
             val installed = installedVersionOn(op)
-            if (installed != null && installed == expected.versionCode) return InstallResult.AlreadyCurrent
+            if (!force && installed != null && installed == expected.versionCode) return InstallResult.AlreadyCurrent
+            // Never a downgrade, forced or not: the glasses may have changed since the screen looked.
             if (installed != null && installed > expected.versionCode) return InstallResult.NewerOnGlasses
 
             if (!wifiEnabled()) return InstallResult.Failed(WIFI_OFF)
@@ -109,6 +118,9 @@ internal class CxrGlassesAppInstaller(
                 is GlassesAppSlot.DispatchResult.Answered -> if (pushed.value) {
                     onProgress(100)
                     InstallResult.Installed
+                } else if (!linkUp()) {
+                    // CXR answers only true or false; a link that is gone by then is the best hint it gives.
+                    InstallResult.Failed(REFUSED_LINK_DROPPED)
                 } else {
                     InstallResult.Failed(REFUSED)
                 }
@@ -156,6 +168,7 @@ internal class CxrGlassesAppInstaller(
         const val WIFI_OFF = "Turn on Wi-Fi first — the update travels to the glasses over Wi-Fi."
         const val NOT_CONNECTED = "Glasses aren't connected — reconnect them first, then retry."
         const val REFUSED = "The glasses did not install the app."
+        const val REFUSED_LINK_DROPPED = "The glasses did not install the app and the connection dropped during the upload. Keep the glasses close to the phone and retry."
         const val LINK_LOST = "Connection to the glasses was lost."
         const val NOT_SENT = "Could not send the glasses APK over CXR."
     }

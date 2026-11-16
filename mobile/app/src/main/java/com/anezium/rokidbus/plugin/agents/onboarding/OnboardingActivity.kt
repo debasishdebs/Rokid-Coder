@@ -15,6 +15,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -30,6 +31,7 @@ import com.anezium.rokidbus.plugin.agents.AgentsSettingsActivity
 import com.anezium.rokidbus.plugin.agents.BuildConfig
 import com.anezium.rokidbus.plugin.agents.PairingAttempts
 import com.anezium.rokidbus.plugin.agents.SoundChoice
+import com.anezium.rokidbus.plugin.agents.SoundPreview
 import com.anezium.rokidbus.plugin.agents.SoundSlot
 import com.anezium.rokidbus.plugin.agents.batteryExemptionGranted
 import com.anezium.rokidbus.plugin.agents.connectors.ConnectorsActivity
@@ -76,6 +78,7 @@ class OnboardingActivity : ComponentActivity() {
     private var pairing: PairingStepController? = null
     private var os = ComputerOs.MAC_OS
     private var testAlertMissed = false
+    private val preview by lazy { SoundPreview(this) { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() } }
 
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         asking?.let { permissions?.answered(it) }
@@ -113,6 +116,7 @@ class OnboardingActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        preview.close()
         glasses?.leave()
         pairing?.onScreenStopped()
         super.onDestroy()
@@ -201,6 +205,12 @@ class OnboardingActivity : ComponentActivity() {
         }
     }
 
+    /** Once the glasses app is running: the same alert again, and the question asked afresh. */
+    private fun sendTestAlertAgain() {
+        raiseTestAlert()
+        render()
+    }
+
     private fun raiseTestAlert() {
         testAlertMissed = false
         val provider = (store.computerChoice ?: ComputerChoice.CLAUDE_CODE).testAlertProvider
@@ -239,9 +249,11 @@ class OnboardingActivity : ComponentActivity() {
                 if (testAlertMissed) {
                     body(OnboardingCopy.TEST_ALERT_MISSED)
                     primary(OnboardingCopy.CONTINUE) { finishTestAlert() }
+                    secondary(OnboardingCopy.SEND_AGAIN) { sendTestAlertAgain() }
                 } else {
                     body(OnboardingCopy.TEST_ALERT_BODY)
                     primary(OnboardingCopy.SAW_IT) { finishTestAlert() }
+                    secondary(OnboardingCopy.SEND_AGAIN) { sendTestAlertAgain() }
                     secondary(OnboardingCopy.DIDNT_SEE_IT) {
                         testAlertMissed = true
                         render()
@@ -344,6 +356,8 @@ class OnboardingActivity : ComponentActivity() {
                 if (view.install.completesStep) {
                     primary(OnboardingCopy.CONTINUE) { if (glassesOnly) finish() else next(OnboardingStep.GLASSES) }
                 }
+                // A build can change without its version: this pushes the bundled app over the same version.
+                if (view.install == GlassesInstallState.UpToDate) secondary(OnboardingCopy.REINSTALL) { glasses?.reinstallApp() }
             }
         }
         if (!view.install.completesStep) {
@@ -384,7 +398,7 @@ class OnboardingActivity : ComponentActivity() {
                 when (link) {
                     OnboardingCopy.AWAY_FROM_HOME -> pairing?.awayFromHome()
                     OnboardingCopy.TAILSCALE_LINK -> startActivity(Intent(this, ConnectorsActivity::class.java))
-                    OnboardingCopy.SCAN_INSTEAD -> startActivity(Intent(this, AddComputerActivity::class.java))
+                    OnboardingCopy.SCAN_QR -> startActivity(Intent(this, AddComputerActivity::class.java).putExtra(AddComputerActivity.EXTRA_SCAN, true))
                 }
             }
         }
@@ -396,6 +410,7 @@ class OnboardingActivity : ComponentActivity() {
     private fun renderSounds() {
         title(OnboardingCopy.SOUNDS_TITLE)
         body(OnboardingCopy.SOUNDS_BODY)
+        body(OnboardingCopy.SOUNDS_PREVIEW)
         val alerts = configStore.alertSettings()
         SoundSlot.values().forEach { slot ->
             body("${slot.label}: ${choiceLabel(alerts.sounds[slot])}")
@@ -403,6 +418,7 @@ class OnboardingActivity : ComponentActivity() {
                 *SoundChoice.values().map { choice ->
                     choiceLabel(choice) to {
                         configStore.saveAlertSettings(configStore.alertSettings().let { it.copy(sounds = it.sounds.with(slot, choice)) })
+                        preview.play(slot, choice)
                         // Told to agentd now when a link is up, as the settings screen does.
                         CoderRuntime.pushSettings()
                         render()

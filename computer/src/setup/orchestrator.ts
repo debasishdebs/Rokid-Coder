@@ -21,7 +21,8 @@ import {
   writeManifest,
   writePrivateFile,
 } from "./manifest";
-import { pairStep } from "./pair-step";
+import { watchPairStatus } from "../pairing/terminal-client";
+import { type WatchPairing, pairStep } from "./pair-step";
 import { AUTOSTART, type PlatformHooks, type RetiredRecord } from "./platform/index";
 import { createDriver, restorePlugin, syncPlugin } from "./plugins";
 import { profileFiles, readBlock, renderBlock, writeBlock } from "./profile-path";
@@ -65,6 +66,8 @@ export interface SetupContext {
   /** agentd's /health on loopback, or undefined when nothing answers. */
   health(): Promise<Health | undefined>;
   runPair(bundleDir: string): Promise<number>;
+  /** Listens to agentd's pairing status while the pairing prompt waits; a test's own, or the launcher socket. */
+  watchPairing?: WatchPairing;
   now(): Date;
   /** How long to wait for the ports to free and for the new agentd to prove its identity (20 s). */
   timeoutMs: number;
@@ -376,6 +379,8 @@ export async function recover(ctx: SetupContext, journal: Journal): Promise<bool
 
 // ---- install ----
 
+const TOOL_NAMES: Record<Tool, string> = { claude: "Claude Code", codex: "Codex" };
+
 export interface InstallOptions {
   platformName: "darwin" | "wsl";
   bundleDir: string;
@@ -504,7 +509,10 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     // 3: quiesce
     journal.steps[3] = { stopCurrent: Boolean(current) };
     record();
-    if (current) await ctx.platform.stopCurrent(current);
+    if (current) {
+      ctx.io.write("Stopping the running agentd…\n");
+      await ctx.platform.stopCurrent(current);
+    }
     if (legacy.autostart && retire) {
       journal.steps[3].retiredLegacy = await ctx.platform.retireLegacyAutostart(legacy.autostart);
       record();
@@ -514,6 +522,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
 
     // 4: snapshot + check
     if (hasState(locations)) {
+      ctx.io.write("Saving a backup of your settings…\n");
       const fromVersion = current?.version ?? legacy.autostart?.version ?? "legacy";
       const dir = newSnapshotDir(locations, fromVersion, ctx.now());
       journal.steps[4] = { snapshot: dir };
@@ -527,6 +536,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     inject(ctx, 4);
 
     // 5: wrappers, PATH block (the install-hooks entries are the user's own step, after the commit point [R217])
+    ctx.io.write("Installing the rk and agentd commands…\n");
     const profiles = profileFiles(options.platformName, ctx.home, ctx.env.SHELL);
     journal.steps[5] = {
       wrappers: Object.fromEntries(wrapperFiles(ctx.home).map((file) => [file, readText(file)])),
@@ -550,6 +560,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     inject(ctx, 6);
 
     // 7: resolve again, so a CLI step 6 just installed is found, and only now write the env [6b-R13]
+    ctx.io.write("Finding Claude Code and Codex…\n");
     journal.steps[7] = { env: readText(envFilePath(ctx.home)) };
     record();
     const daemonEnv = await writeDaemonEnv({ home: ctx.home, env: ctx.env });
@@ -565,6 +576,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     for (const tool of TOOLS) {
       const cli = newManifest.clis[tool];
       if (!cli) continue;
+      ctx.io.write(`Setting up the ${TOOL_NAMES[tool]} plugin…\n`);
       const driver = createDriver(tool, cli.path, { home: ctx.home, env: pluginEnv });
       let prior: PriorRegistration = {};
       try {
@@ -589,8 +601,10 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     // 9: autostart, then prove the new agentd is the one answering
     journal.steps[9] = { started: true };
     record();
+    ctx.io.write("Starting agentd…\n");
     autostart = await ctx.platform.installAutostart(newManifest);
     if (autostart === "running") {
+      ctx.io.write("Checking it answers…\n");
       await verifyIdentity(ctx, newManifest);
     }
     inject(ctx, 9);
@@ -641,11 +655,17 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     ctx.io.write("Your phone is already paired.\n");
   } else {
     ctx.io.note("awaiting: pairing");
-    await pairStep(() => ctx.runPair(bundleDir), ctx.io);
+    await pairStep(() => ctx.runPair(bundleDir), ctx.io, ctx.watchPairing ?? ((onStatus) => watchPairStatus(locations.stateDir, onStatus)));
   }
   // 12
   if (!(await ctx.platform.tailscalePresent())) {
     ctx.io.write("Optional: Tailscale lets the phone reach this computer away from home: https://tailscale.com/download\n");
+  }
+  // Last, so it is what stays on screen: a terminal opened before setup has no rk on its PATH yet.
+  const binDir = path.join(programDir(ctx.home), "bin");
+  if (!(ctx.env.PATH ?? "").split(path.delimiter).includes(binDir)) {
+    const shown = binDir.startsWith(ctx.home + path.sep) ? `~${binDir.slice(ctx.home.length)}` : binDir;
+    ctx.io.write(`Open a new terminal tab to use rk (or run ${shown}/rk now).\n`);
   }
   return 0;
 }

@@ -155,7 +155,10 @@ function parseConfig(raw: string, filePath: string): {
       !isNonEmptyString(rokidCoderRecord.stateDir)) ||
     (rokidCoderRecord &&
       rokidCoderRecord.waitLimitSec !== undefined &&
-      !isWaitLimitSec(rokidCoderRecord.waitLimitSec))
+      !isWaitLimitSec(rokidCoderRecord.waitLimitSec)) ||
+    (rokidCoderRecord &&
+      rokidCoderRecord.stopHold !== undefined &&
+      typeof rokidCoderRecord.stopHold !== "boolean")
   ) {
     throw new Error(`Invalid nexus-agentd config at ${filePath}`);
   }
@@ -208,6 +211,9 @@ function parseConfig(raw: string, filePath: string): {
             : defaultRokidCoderStateDir(),
         ...(rokidCoderRecord?.waitLimitSec !== undefined
           ? { waitLimitSec: rokidCoderRecord.waitLimitSec as number }
+          : {}),
+        ...(rokidCoderRecord?.stopHold !== undefined
+          ? { stopHold: rokidCoderRecord.stopHold as boolean }
           : {}),
       },
     },

@@ -12,6 +12,11 @@ export interface TerminalPairingOptions {
   nextLine: () => Promise<string | undefined>;
   /** How long to wait for a phone before giving the window up. */
   windowMs: number;
+  /**
+   * How many times an attempt that ended for no fault of the person's (a second device, the phone
+   * going away, a timeout) opens the window again by itself, after saying why. Default 0.
+   */
+  reopens?: number;
 }
 
 const WAITING = "Waiting for your phone: open Rokid Coder → Add a computer. The phone and this computer must be on the same Wi-Fi or on Tailscale.";
@@ -20,7 +25,7 @@ const CONFIRM_ON_PHONE = "Now confirm on the phone.";
 const PAIRED = "Paired ✓";
 const CLOSED = "The pairing window closed before a phone was added.";
 
-const ABORTED: Record<string, string> = {
+export const ABORTED: Record<string, string> = {
   mismatch: "The codes did not match, so nothing was paired.",
   cancel: "Pairing cancelled.",
   timeout: "Pairing timed out.",
@@ -29,8 +34,69 @@ const ABORTED: Record<string, string> = {
   storage: "The phone could not save the pairing — try again.",
 };
 
-function formatCode(code: string): string {
+/** The reasons that say nothing about the codes: trying once more is the right thing to do. */
+const TRANSIENT = new Set(["second_peer", "disconnect", "timeout"]);
+
+export function formatCode(code: string): string {
   return `${code.slice(0, 3)} ${code.slice(3)}`;
+}
+
+/** What the person is asked once the code is up; the answer goes to `pair_confirm`. */
+export const CODE_QUESTION = QUESTION;
+export const CONFIRM_ON_PHONE_LINE = CONFIRM_ON_PHONE;
+export const PAIRED_LINE = PAIRED;
+
+export interface PairStatusEvent {
+  attempt?: string;
+  state: string;
+  code?: string;
+  reason?: string;
+}
+
+export interface PairingWatch {
+  /** The computer-side half of the confirmation for `attempt`. */
+  confirm(attempt: string, ok: boolean): void;
+  stop(): void;
+}
+
+/**
+ * Listens to agentd's pairing status without opening the window (`pair_watch`), so a code from an
+ * attempt somebody else opened is not missed. agentd not running is not an error here: nothing is heard.
+ */
+export function watchPairStatus(configDir: string, onStatus: (status: PairStatusEvent) => void): PairingWatch {
+  const socket = net.createConnection(path.join(configDir, LAUNCHER_SOCKET_NAME));
+  let buffer = "";
+  socket.setEncoding("utf8");
+  socket.once("connect", () => socket.write(`${JSON.stringify({ type: "pair_watch" })}\n`));
+  socket.on("data", (chunk: string) => {
+    buffer += chunk;
+    for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      try {
+        const frame = JSON.parse(line) as Record<string, unknown>;
+        if (frame.type === "pair_status" && typeof frame.state === "string") {
+          onStatus({
+            state: frame.state,
+            ...(typeof frame.attempt === "string" ? { attempt: frame.attempt } : {}),
+            ...(typeof frame.code === "string" ? { code: frame.code } : {}),
+            ...(typeof frame.reason === "string" ? { reason: frame.reason } : {}),
+          });
+        }
+      } catch {
+        // Not ours to read.
+      }
+    }
+  });
+  socket.on("error", () => undefined);
+  return {
+    confirm: (attempt, ok) => {
+      if (!socket.destroyed) {
+        socket.write(`${JSON.stringify({ type: "pair_confirm", attempt, ok })}\n`);
+      }
+    },
+    stop: () => socket.destroy(),
+  };
 }
 
 /**
@@ -50,6 +116,8 @@ export function confirmInTerminal(options: TerminalPairingOptions): Promise<Term
     let answered = false;
     let done = false;
     let opened = false;
+    let readPending = false;
+    let reopensLeft = options.reopens ?? 0;
     const finish = (outcome: TerminalPairingOutcome, text?: string): void => {
       if (done) {
         return;
@@ -67,19 +135,25 @@ export function confirmInTerminal(options: TerminalPairingOptions): Promise<Term
         socket.write(`${JSON.stringify(frame)}\n`);
       }
     };
-    const windowTimer = setTimeout(() => {
+    const onWindowEnd = (): void => {
       if (!asked) {
         if (attempt) {
           send({ type: "pair_confirm", attempt, ok: false });
         }
         finish("closed", CLOSED);
       }
-    }, options.windowMs);
+    };
+    let windowTimer = setTimeout(onWindowEnd, options.windowMs);
     windowTimer.unref();
 
     // One read is pending at a time: before the code it is a skip, after it the answer.
     // Started only once agentd answered, so an agentd without this IPC leaves input untouched.
-    const read = (): void => void options.nextLine().then((answer) => {
+    const read = (): void => {
+      readPending = true;
+      void options.nextLine().then(onLine);
+    };
+    const onLine = (answer: string | undefined): void => {
+      readPending = false;
       if (done) {
         return;
       }
@@ -99,7 +173,24 @@ export function confirmInTerminal(options: TerminalPairingOptions): Promise<Term
       if (yes) {
         options.write(`${CONFIRM_ON_PHONE}\n`);
       }
-    });
+    };
+
+    // The attempt ended for no fault of the person's: say why, and ask for the window again.
+    const reopen = (reason: string): void => {
+      reopensLeft -= 1;
+      options.write(`${ABORTED[reason] ?? "Pairing failed."} Opening the pairing window again.\n`);
+      asked = false;
+      answered = false;
+      shownWaiting = false;
+      attempt = undefined;
+      clearTimeout(windowTimer);
+      windowTimer = setTimeout(onWindowEnd, options.windowMs);
+      windowTimer.unref();
+      if (!readPending) {
+        read();
+      }
+      send({ type: "pair_open" });
+    };
 
     const onStatus = (status: Record<string, unknown>): void => {
       const state = typeof status.state === "string" ? status.state : "";
@@ -129,6 +220,10 @@ export function confirmInTerminal(options: TerminalPairingOptions): Promise<Term
       }
       if (state === "ABORTED") {
         const reason = typeof status.reason === "string" ? status.reason : "cancel";
+        if (reopensLeft > 0 && TRANSIENT.has(reason)) {
+          reopen(reason);
+          return;
+        }
         finish(answered || asked || reason !== "cancel" ? "aborted" : "skipped", ABORTED[reason] ?? "Pairing failed.");
       }
     };

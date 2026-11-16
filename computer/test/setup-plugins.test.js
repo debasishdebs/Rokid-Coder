@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { makeWorld } = require("./fixtures/plugin-cli/harness");
+const os = require("node:os");
 const { createDriver, syncPlugin, removePlugin, helpCommands } = require("../dist/setup/plugins.js");
 
 const options = (world) => ({ home: world.home, env: world.env });
@@ -111,8 +112,10 @@ test("plugin_cli_fixtures_are_the_recorded_help", () => {
   for (const [dir, file] of [["claude-2.1.285", "claude-plugin-help.txt"], ["codex-0.169.0", "codex-help.txt"]]) {
     assert.equal(meta(dir).versionOutput, fs.readFileSync(path.join(RECORDED, file), "utf8").split("\n")[0]);
     assert.equal(meta(dir).recorded, true, dir);
-    assert.equal(meta(dir).listJsonRecorded, false, `${dir}: the list --json shape waits for the device gate`);
+    assert.equal(meta(dir).listJsonRecorded, false, `${dir}: the marketplace list --json shape waits for the device gate`);
   }
+  assert.equal(meta("codex-0.169.0").pluginListJsonRecorded, true);
+  assert.equal(meta("claude-2.1.285").pluginListJsonRecorded, undefined);
   assert.equal(meta("codex-0.169.0").marketplaceHelpRecorded, false);
 });
 
@@ -129,4 +132,83 @@ test("plugins_each_cli_runs_its_own_verbs", async (t) => {
   }
   assert.deepEqual(verbs.claude, ["install rokid@rokid-coder", "uninstall rokid@rokid-coder"]);
   assert.deepEqual(verbs.codex, ["add rokid@rokid-coder", "remove rokid@rokid-coder"]);
+});
+
+// What `plugin list --json` and `plugin marketplace list --json` may look like: each shape reads, garbage does not.
+
+const SHAPES = path.join(__dirname, "fixtures", "plugin-cli", "list-shapes");
+const CODEX_FIXTURE = path.join(__dirname, "fixtures", "plugin-cli", "codex-0.169.0");
+
+/** A `codex` that answers the three read-only calls with the given raw outputs. */
+function fixedCli(t, { plugins, marketplaces = '{"marketplaces":[]}' }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rokid-shape-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, "plugins.out"), plugins);
+  fs.writeFileSync(path.join(dir, "marketplaces.out"), marketplaces);
+  const cli = path.join(dir, "codex");
+  fs.writeFileSync(
+    cli,
+    `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2).join(" ");
+const out = (file) => process.stdout.write(fs.readFileSync(${JSON.stringify(dir)} + "/" + file, "utf8"));
+if (args === "plugin --help") process.stdout.write(fs.readFileSync(${JSON.stringify(path.join(CODEX_FIXTURE, "plugin-help.txt"))}, "utf8"));
+else if (args === "plugin marketplace list --json") out("marketplaces.out");
+else if (args === "plugin list --json") out("plugins.out");
+else { process.stderr.write("unexpected " + args); process.exit(2); }
+`,
+    { mode: 0o755 },
+  );
+  return cli;
+}
+
+const shape = (name) => fs.readFileSync(path.join(SHAPES, `${name}.json`), "utf8");
+const statusOf = (t, outputs) => createDriver("codex", fixedCli(t, outputs), { home: os.tmpdir(), env: process.env }).status();
+
+test("plugin_list_shapes_each_read_as_installed_or_not", async (t) => {
+  const installed = (status) => status.plugin?.version;
+  assert.equal(installed(await statusOf(t, { plugins: shape("top-level-array") })), "1.0.0");
+  assert.equal(installed(await statusOf(t, { plugins: shape("plugins-key") })), "1.0.0");
+  assert.equal(installed(await statusOf(t, { plugins: shape("marketplaces-nested") })), "1.0.0");
+  assert.equal(installed(await statusOf(t, { plugins: shape("keyed-by-id") })), "1.0.0");
+  assert.equal(installed(await statusOf(t, { plugins: shape("available-entry-marked-installed") })), "1.0.0");
+  // Offered by a marketplace, not installed.
+  assert.equal(installed(await statusOf(t, { plugins: shape("installed-and-available") })), undefined);
+  assert.equal(installed(await statusOf(t, { plugins: '{"installed":[]}' })), undefined);
+  assert.equal(installed(await statusOf(t, { plugins: "[]" })), undefined);
+});
+
+test("the_real_codex_0_169_0_plugin_list_reads_our_plugin_and_its_marketplace", async (t) => {
+  const real = fs.readFileSync(path.join(CODEX_FIXTURE, "plugin-list.json"), "utf8");
+  const status = await statusOf(t, { plugins: real });
+  assert.equal(status.plugin.version, "1.0.0");
+  assert.equal(status.plugin.installPath, undefined, "source.path is the marketplace's copy, not the installed one");
+  assert.equal(status.marketplace.source, "/Users/alex/Library/Application Support/RokidCoder/1.0.0/plugins");
+  // Another marketplace's plugin of the same name is not ours.
+  const other = JSON.parse(real);
+  other.installed[1].marketplaceName = "someone-else";
+  other.installed[1].pluginId = "rokid@someone-else";
+  assert.equal((await statusOf(t, { plugins: JSON.stringify(other) })).plugin, undefined);
+});
+
+test("marketplace_list_shapes_give_the_source_of_ours", async (t) => {
+  const source = "/Users/alex/market";
+  const plugins = "[]";
+  for (const marketplaces of [
+    JSON.stringify([{ name: "rokid-coder", path: source }]),
+    JSON.stringify({ marketplaces: [{ name: "rokid-coder", source: { source: "local", path: source } }] }),
+    JSON.stringify({ marketplaces: [{ name: "rokid-coder", marketplaceSource: { sourceType: "local", source } }] }),
+    JSON.stringify({ installed: [{ marketplaceName: "rokid-coder", source }] }),
+    JSON.stringify({ marketplaces: { "rokid-coder": { source } } }),
+  ]) {
+    assert.equal((await statusOf(t, { plugins, marketplaces })).marketplace?.source, source, marketplaces);
+  }
+  assert.equal((await statusOf(t, { plugins, marketplaces: JSON.stringify({ marketplaces: [{ name: "other", path: source }] }) })).marketplace, undefined);
+});
+
+test("plugin_list_garbage_is_refused", async (t) => {
+  for (const plugins of ["not json", "null", '"text"', "{}", '{"error":"boom"}', '{"installed":"x"}', "[1,2]", '{"plugins":{"error":"boom"}}']) {
+    await assert.rejects(() => statusOf(t, { plugins }), /unexpected|JSON/, plugins);
+  }
+  await assert.rejects(() => statusOf(t, { plugins: "[]", marketplaces: '{"error":"boom"}' }), /unexpected/);
 });

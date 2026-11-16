@@ -248,6 +248,23 @@ test("second_peer_aborts_both (wshub)", async () => {
   assert.equal(ctx.pins.isEmpty(), true);
 });
 
+test("the_same_phone_on_a_second_connection_does_not_abort (wshub)", async () => {
+  const ctx = newPairing();
+  const { hub } = await newHub(ctx);
+  ctx.pairing.openWindow();
+  const cert = await phoneCert("twice");
+  const phone = await wssSasPhone({ port: hub.port(), cert });
+  track(() => phone.close());
+  await phone.waitForFrame("sas_commit");
+  // The same phone again, as when agentd dials it while it dials agentd: only the duplicate closes.
+  const duplicate = await wssSasPhone({ port: hub.port(), cert });
+  track(() => duplicate.close());
+  await duplicate.closed;
+  assert.notEqual(ctx.pairing.status().state, "ABORTED");
+  assert.equal(phone.state.aborted, undefined);
+  assert.equal(duplicate.state.frames.some((f) => f.type === "sas_commit"), false);
+});
+
 test("out_of_order_frame_aborts (wshub)", async () => {
   const ctx = newPairing();
   const { hub } = await newHub(ctx);

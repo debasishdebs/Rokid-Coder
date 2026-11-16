@@ -684,6 +684,10 @@ export class PhoneV2 {
     if (target.provider === "claude") {
       const wait = this.deps.stopWait.state(target.id);
       if (!wait.waiting) {
+        // Nothing holds a Stop, so only a launcher can take a prompt: say so, not "not waiting".
+        if (!this.deps.stopWait.enabled) {
+          return fail("not_launcher");
+        }
         return fail(wait.continuationsLeft === 0 ? "cap_reached" : "not_waiting");
       }
       record();

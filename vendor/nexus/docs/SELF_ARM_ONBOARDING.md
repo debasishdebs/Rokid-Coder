@@ -51,7 +51,21 @@ For photo-based support, the retry card also shows a compact support code:
 `PAIR-NOPORT` when the pairing port was unavailable, `PAIR-NOTLS` when the TLS
 connect port was unavailable, `PAIR-FAIL` for a local KADB pairing error,
 `PAIR-STALL` when pairing did not complete, or `TMO` with the last reported setup
-phase after an overall timeout. The six-digit pairing code itself is never shown
+phase after an overall timeout. A pairing dialog that was asked for but never read ends the run 30 seconds after the tap on
+**Pair device with pairing code** (state `pairing_code_expired`, support code `TMO` with the last
+phase, normally `TMO: waiting_for_pairing_code`), whatever is left of the 110-second run deadline:
+the page under the dialog stays on screen, so it cannot be told apart from a dialog that is still
+coming. After 6 seconds without a read the automator logs every window's type, package, bounds and
+node ids (never text) under `pairingStall WINDOWS`, which is what a device test needs when a ROM's
+dialog differs. The read does not depend on AOSP's exact ids or on the dialog being rated visible,
+and it looks at the windows of every display.
+
+While the automator runs, a one-line overlay on the lens says the app is setting itself up, so a
+wearer watching Settings move by itself does not take it for a fault. It takes no touch or focus
+and shows no digits. The product name in it, in the onboarding cards and on the HUD comes from the
+shell's `product_name` / `product_short_name` strings.
+
+The six-digit pairing code itself is never shown
 or logged; diagnostics redact it before they can reach logs, preferences, or the
 HUD.
 

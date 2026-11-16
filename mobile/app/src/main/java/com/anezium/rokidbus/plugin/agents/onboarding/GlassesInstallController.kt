@@ -79,17 +79,41 @@ internal class GlassesInstallController(
     val state: StateFlow<GlassesInstallState> = _state.asStateFlow()
 
     suspend fun refresh() {
-        val installed = installer.installedVersion()
-        _state.value = when {
-            installed == null -> GlassesInstallState.NotInstalled
-            installed < expected.versionCode -> GlassesInstallState.UpdateAvailable
-            installed == expected.versionCode -> GlassesInstallState.UpToDate
-            else -> GlassesInstallState.NewerOnGlasses
-        }
+        _state.value = stateFor(installer.installedVersion())
     }
 
-    suspend fun install() {
+    /**
+     * A quiet look at the glasses again, for an app that arrived another way (adb from a computer).
+     * It never touches an install under way, and it leaves a failure's reason on screen unless the
+     * app turned out to be there: only then does the step finish.
+     */
+    suspend fun recheck() {
         if (_state.value is GlassesInstallState.Installing) return
+        val found = stateFor(installer.installedVersion())
+        // An install may have started while the glasses were being asked.
+        if (_state.value is GlassesInstallState.Installing) return
+        if (found.completesStep || _state.value !is GlassesInstallState.Failed) _state.value = found
+    }
+
+    private fun stateFor(installed: Long?): GlassesInstallState = when {
+        installed == null -> GlassesInstallState.NotInstalled
+        installed < expected.versionCode -> GlassesInstallState.UpdateAvailable
+        installed == expected.versionCode -> GlassesInstallState.UpToDate
+        else -> GlassesInstallState.NewerOnGlasses
+    }
+
+    /** Whether the last attempt that failed was a reinstall: its Retry is one too. */
+    private var lastForced = false
+
+    /**
+     * [force] pushes the bundled app over one of the same version: the build can change without a
+     * version bump, and the core would call the glasses current. A Retry after a failed forced
+     * attempt stays forced.
+     */
+    suspend fun install(force: Boolean = false) {
+        if (_state.value is GlassesInstallState.Installing) return
+        val forced = force || _state.value is GlassesInstallState.Failed && lastForced
+        lastForced = forced
         val before = _state.value.takeIf { it !is GlassesInstallState.Failed } ?: GlassesInstallState.Checking
         _state.value = GlassesInstallState.Installing(0)
         val copy = File(copyDir, "glasses.apk")
@@ -104,7 +128,7 @@ internal class GlassesInstallController(
                 _state.value = GlassesInstallState.Failed("Could not read the bundled glasses app.")
                 return
             }
-            val result = installer.install(copy, expected) { progress -> _state.value = GlassesInstallState.Installing(progress) }
+            val result = installer.install(copy, expected, forced) { progress -> _state.value = GlassesInstallState.Installing(progress) }
             _state.value = when (result) {
                 InstallResult.Installed, InstallResult.AlreadyCurrent -> GlassesInstallState.UpToDate
                 InstallResult.NewerOnGlasses -> GlassesInstallState.NewerOnGlasses

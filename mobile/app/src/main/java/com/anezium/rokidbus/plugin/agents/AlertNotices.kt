@@ -85,9 +85,9 @@ object AlertNotices {
     )
 
     /**
-     * The output a Done or error tap opens: the alert's summary first, then the
-     * full text. [conversation] is the readable conversation when it has loaded;
-     * until then the session's last assistant text stands in for it.
+     * The output a Done or error tap opens, at its newest message. [conversation] is the
+     * readable conversation when it has loaded; until then the alert's summary and the
+     * session's last assistant text stand in for it.
      */
     fun outputReader(
         alert: AgentdAction.Alert,
@@ -96,14 +96,15 @@ object AlertNotices {
     ): NexusReader {
         val summary = alert.body.trim().ifEmpty { alert.title.trim() }.ifEmpty { providerLabel(alert) }
         val header = NexusReaderSegment(NexusReaderSegmentKind.HEADER, cut(summary, READER_SEGMENT_CHARS))
-        val room = READER_TOTAL_CHARS - header.text.length
-        // A conversation keeps its newest turns; one message read from the top keeps its start.
-        val rest = if (conversation.isNotEmpty()) {
-            fitNewest(conversation, room)
+        // A conversation is a chat: oldest first, the newest turn last, and the reader opens there.
+        // Its last turn is what the alert summarized, so the summary header only stands in until
+        // the conversation arrives (then the newest turn would sit under an older summary).
+        val segments = if (conversation.isNotEmpty()) {
+            fitNewest(conversation, READER_TOTAL_CHARS)
         } else {
-            fitOldest(session?.lastAssistantText?.let(::proseSegments).orEmpty(), room)
+            val room = READER_TOTAL_CHARS - header.text.length
+            listOf(header) + fitOldest(session?.lastAssistantText?.let(::proseSegments).orEmpty(), room)
         }
-        val segments = listOf(header) + rest
         return NexusReader(
             title = (session?.displayTitle ?: alert.title).line(READER_TITLE_CHARS).ifEmpty { "Agents" },
             subtitle = "${providerLabel(alert)} · ${alert.kind.wire}".take(READER_LINE_CHARS),
@@ -111,7 +112,9 @@ object AlertNotices {
             contentKey = digest(alert.id + segments.joinToString("\u0000") { it.text }),
             handlesBack = true,
             segments = segments,
-            anchor = NexusReaderAnchor.TOP,
+            // Stream-shaped: the glasses open it at the newest message, swiping back reaches older ones,
+            // and a new message keeps a reader at the end there and leaves one scrolled up where it is.
+            anchor = NexusReaderAnchor.BOTTOM,
         )
     }
 

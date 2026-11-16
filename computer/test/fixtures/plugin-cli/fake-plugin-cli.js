@@ -153,6 +153,34 @@ function main(argv) {
     save();
     out(`Successfully uninstalled plugin: ${id}\n`);
   } else if (verb === "list") {
+    if (meta.listFormat === "installed") {
+      // codex-cli 0.169.0's `plugin list --json`, as recorded from a real install: an object whose
+      // "installed" array holds one entry per installed plugin. "available" is this fake's own guess
+      // at what the marketplaces offer beyond that (the recorded output was cut off before any other key).
+      const entry = (name, marketplace, version, installed) => ({
+        pluginId: `${name}@${marketplace}`,
+        name,
+        marketplaceName: marketplace,
+        version,
+        installed,
+        enabled: installed,
+        source: { source: "local", path: pluginSourceDir(state.marketplaces[marketplace].path, name) },
+        marketplaceSource: { sourceType: "local", source: state.marketplaces[marketplace].path },
+        installPolicy: "AVAILABLE",
+        authPolicy: "ON_USE",
+      });
+      const installed = Object.values(state.plugins).map((p) => entry(p.name, p.marketplace, p.version, true));
+      const available = [];
+      for (const [marketplace, m] of Object.entries(state.marketplaces)) {
+        const manifest = JSON.parse(fs.readFileSync(marketplaceManifest(m.path), "utf8"));
+        for (const offered of manifest.plugins) {
+          if (state.plugins[`${offered.name}@${marketplace}`]) continue;
+          available.push(entry(offered.name, marketplace, pluginVersion(pluginSourceDir(m.path, offered.name)), false));
+        }
+      }
+      out(`${JSON.stringify({ installed, available }, null, 2)}\n`);
+      return;
+    }
     const list = Object.entries(state.plugins).map(([pluginId, p]) =>
       meta.listFormat === "array"
         ? { id: pluginId, version: p.version, scope: "user", enabled: true, installPath: p.installPath }

@@ -93,6 +93,16 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROKID_CODER_PROVIDER=claude ROKID_CODER_HOOK_DEADLINE_MS=3605000 \"$HOME/.rokid-coder/bin/rokid-node\" \"${CLAUDE_PLUGIN_ROOT}/bin/hook-forward.js\""
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "hooks": [

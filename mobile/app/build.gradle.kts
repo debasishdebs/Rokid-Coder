@@ -68,6 +68,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.5")
     // The app-foreground signal that starts or promotes the one service (R9′).
     implementation("androidx.lifecycle:lifecycle-process:2.8.5")
+    // The pairing QR code, read on the phone by zxing's own scanner screen: no Play services, no network, nothing sent.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    implementation("com.google.zxing:core:3.5.3")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")

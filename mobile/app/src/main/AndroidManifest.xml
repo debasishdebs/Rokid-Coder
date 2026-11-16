@@ -53,8 +53,9 @@
     <application
         android:name=".RokidCoderApp"
         android:allowBackup="false"
-        android:icon="@drawable/ic_agents"
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.Agents"
         android:usesCleartextTraffic="false">
@@ -107,6 +108,16 @@
             android:name=".NewThreadActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+
+        <!--
+            zxing's scan screen for the pairing QR code: portrait, and only this app can start it. The
+            library's own entry is landscape, and the app asks for the camera itself, when Scan is tapped.
+        -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            tools:replace="android:screenOrientation" />
 
         <!--
             The app's only service: the glasses link, the Agents code and the agentd links. Nothing

@@ -394,3 +394,24 @@ test("daemon_another_plugins_slash_command_releases_the_hold_as_laptop", async (
     },
   );
 });
+
+test("a_disabled_stop_wait_never_holds", async () => {
+  const wait = new StopWait({ waitLimitMs: 60_000, continuationCap: 8, enabled: false });
+  assert.equal(wait.enabled, false);
+  assert.deepEqual(await wait.hold("s", new AbortController().signal), {});
+  assert.equal(wait.state("s").waiting, false);
+});
+
+test("daemon_without_stop_hold_returns_stop_at_once_and_a_plugin_session_follow_up_says_not_launcher", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, stopHold: false, attached: [{ provider: "claude", id: "held" }] },
+    async ({ daemon, httpPort, phone }) => {
+      assert.deepEqual(await postHook(httpPort, { hook_event_name: "Stop", session_id: "held" }), {});
+      assert.equal(daemon.stopWait.state("held").waiting, false);
+      phone.send({ type: "followup", v: 2, sessionKey: "claude:held", text: "hello", msgId: "np1" });
+      const ack = await phone.waitFor("ack", (f) => f.msgId === "np1");
+      assert.equal(ack.result, "rejected");
+      assert.equal(ack.error, "not_launcher");
+    },
+  );
+});

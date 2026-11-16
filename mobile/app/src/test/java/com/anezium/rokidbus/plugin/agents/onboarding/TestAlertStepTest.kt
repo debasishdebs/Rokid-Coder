@@ -68,7 +68,12 @@ class TestAlertStepTest {
         val show = effects.single() as AlertCoordinator.Effect.Show
         assertEquals(AlertKind.DONE, show.alert.kind)
         assertTrue(show.sound)
-        assertEquals(listOf("I saw it", "I didn't see it"), OnboardingCopy.TEST_ALERT_ACTIONS)
-        assertTrue(OnboardingCopy.TEST_ALERT_MISSED.isNotBlank())
+        assertEquals(listOf("I saw it", "Send again", "I didn't see it"), OnboardingCopy.TEST_ALERT_ACTIONS)
+        assertTrue("Send again" in OnboardingCopy.TEST_ALERT_MISSED)
+
+        // Send again raises the same alert once more, with the sound for Done.
+        val before = bands.size
+        director.raiseLocalTestAlert(AgentProvider.CLAUDE)
+        assertEquals(before + 1, bands.size)
     }
 }

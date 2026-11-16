@@ -10,10 +10,10 @@ The phone app is the middle of Rokid Coder: it links your computer to your glass
    - **Permissions.** Nearby devices, Microphone, Notifications and Battery, each explained before Android asks. Setup continues if you say no ("Some features are off. You can grant them now or later in Settings.").
    - **Connect your glasses.** Rokid Coder links to your glasses through the Hi Rokid app and asks you to allow that once. Then it checks the glasses app, which is inside this phone app, and installs or updates it on your glasses over the Rokid link, with no computer and no adb. See [`../glasses/README.md`](../glasses/README.md).
    - **Which do you use?** Claude Code, Codex, Both or Neither. It picks the wording of the next screen and the provider of the test alert.
-   - **Finish on your computer.** The download link (Copy or Share it), a macOS or Windows switch with that installer's first-run hint, and **Ready to pair**, which opens a two-minute window while you run the installer.
+   - **Finish on your computer.** The download link (Copy or Share it), a macOS or Windows switch with that installer's first-run hint, and **Ready to pair**, which opens a two-minute window while you run the installer. Below it, it also offers **Scan the QR code on your computer**. The phone asks for the camera only when you tap it, and only to read that code; if you say no, paste the pairing line instead.
    - **Pairing.** Setup asks "Does your computer show 123 456?" with a code. If the same code is on your computer, tap **Codes match**. Nothing pairs without that confirmation.
-   - **Test alert.** You see and hear a test alert on the glasses, then answer "I saw it" or "I didn't see it".
-   - **Sounds.** Pick what the glasses do for each kind of alert, then Finish.
+   - **Test alert.** You see and hear a test alert on the glasses, then answer "I saw it" or "I didn't see it". "Send again" sends it once more.
+   - **Sounds.** Pick what the glasses do for each kind of alert, then Finish. Tapping Speak or Chime plays a preview on this phone.
 3. Tailscale is optional, for using Rokid Coder away from home. Settings, Connectors, Tailscale has the two steps.
 
 ## If Rokid Nexus is installed

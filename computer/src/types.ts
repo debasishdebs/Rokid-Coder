@@ -47,6 +47,8 @@ export interface Session {
   nativeMode?: string;
   pendingSettings?: { model?: string; effort?: string };
   sandbox?: string;
+  /** Claude subagents running now; absent when none. `since` is the epoch ms the oldest one started. */
+  subagents?: { running: number; since: number };
 }
 
 export interface ContextFill {
@@ -72,6 +74,11 @@ export interface RokidCoderConfig {
    * override it while the daemon runs.
    */
   waitLimitSec?: number;
+  /**
+   * Opt in to a Stop hook that holds for a glasses follow-up. Absent means off: Stop
+   * returns at once, and the glasses prompt a launcher-bound session on demand.
+   */
+  stopHold?: boolean;
 }
 
 export interface AgentConfig {

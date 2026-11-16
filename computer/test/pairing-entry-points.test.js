@@ -193,6 +193,51 @@ test("agentd_pair_shows_the_code_and_confirms_on_y", async () => {
   });
 });
 
+test("agentd_pair_reopens_once_after_the_phone_went_away_and_shows_the_next_code", async () => {
+  await withDaemon({ transport: "wshub" }, async ({ wsPort, coderDir }) => {
+    const run = runCli(coderDir, ["pair"]);
+    await run.until("Pairing window open");
+    const first = await sasPhone(wsPort, "reopen-1");
+    await run.until("[y/N]");
+    first.close();
+    await run.until("The phone went away before the pairing finished. Opening the pairing window again.");
+    const second = await sasPhone(wsPort, "reopen-2");
+    await run.until(`Pairing code: ${second.state.code.slice(0, 3)} ${second.state.code.slice(3)}`);
+    second.confirm(true);
+    run.child.stdin.write("y\n");
+    await run.until("Paired ✓");
+    assert.equal(await run.exited, 0);
+    await waitUntil(async () => pinsOf(coderDir).has((await phoneCert("reopen-2")).fingerprint256), "the second phone is not pinned");
+  });
+});
+
+test("agentd_pair_gives_up_when_the_second_attempt_also_ends_the_same_way", async () => {
+  await withDaemon({ transport: "wshub" }, async ({ wsPort, coderDir }) => {
+    const run = runCli(coderDir, ["pair"]);
+    await run.until("Pairing window open");
+    (await sasPhone(wsPort, "giveup-1")).close();
+    await run.until("Opening the pairing window again.");
+    (await sasPhone(wsPort, "giveup-2")).close();
+    assert.notEqual(await run.exited, 0);
+    assert.equal(run.out.split("Opening the pairing window again.").length, 2, "reopened exactly once");
+  });
+});
+
+test("pair_watch_hears_every_status_and_opens_no_window", async () => {
+  await withDaemon({ transport: "wshub" }, async ({ wsPort, coderDir }) => {
+    const watcher = pairClient(coderDir);
+    watcher.send({ type: "pair_watch" });
+    await settle(150);
+    assert.equal(pinsOf(coderDir).allowNextOpen(Date.now()), false, "watching opens nothing");
+    assert.deepEqual(watcher.statuses, []);
+    const opener = pairClient(coderDir);
+    opener.send({ type: "pair_open" });
+    await watcher.waitForState("WINDOW_OPEN");
+    const phone = await sasPhone(wsPort, "watched");
+    assert.equal((await watcher.waitForState("AWAITING_CONFIRM")).code, phone.state.code);
+  });
+});
+
 test("agentd_pair_answered_n_aborts_as_mismatch", async () => {
   await withDaemon({ transport: "wshub" }, async ({ wsPort, coderDir }) => {
     const run = runCli(coderDir, ["pair"]);

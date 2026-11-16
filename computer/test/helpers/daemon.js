@@ -73,7 +73,7 @@ function releaseEnv() {
  * Starts the daemon on fresh ports, retrying up to 5 times when a port turns
  * out to be taken after all (another process drew it between probe and bind).
  */
-async function startOnFreePorts({ base, stateDir, coderDir, claudeDir, phoneHosts, fixedHttpPort }) {
+async function startOnFreePorts({ base, stateDir, coderDir, claudeDir, phoneHosts, fixedHttpPort, stopHold }) {
   const previous = startTurn;
   let done;
   startTurn = new Promise((resolve) => { done = resolve; });
@@ -89,7 +89,7 @@ async function startOnFreePorts({ base, stateDir, coderDir, claudeDir, phoneHost
         wsPort,
         phoneHosts,
         tailnetDiscovery: false,
-        rokidCoder: { stateDir: coderDir },
+        rokidCoder: { stateDir: coderDir, stopHold },
       }, stateDir);
       process.env.NEXUS_AGENTD_STATE_DIR = stateDir;
       process.env.NEXUS_AGENTD_CLAUDE_DIR = claudeDir;
@@ -146,9 +146,10 @@ function transcriptLine(sessionId) {
  * `pinFakePhone`), and the fake pins agentd's cert. `tls: false` is a
  * plaintext phone, which agentd refuses, so no snapshot is waited for.
  * The daemon's agentd cert is the one shared test cert, copied into its tls dir. `coderFiles` pre-seeds files in
- * the Rokid-Coder state dir (name -> JSON value), such as settings.json.
+ * the Rokid-Coder state dir (name -> JSON value), such as settings.json. `stopHold` defaults to on here, so the
+ * hold behaviour is what most tests exercise; production's default is off, and `stopHold: false` tests that.
  */
-async function withDaemon({ transport, tls = true, attached = [], discovered = [], coderFiles = {}, paired = false, httpPort: fixedHttpPort, beforeStart }, body) {
+async function withDaemon({ transport, tls = true, attached = [], discovered = [], coderFiles = {}, paired = false, httpPort: fixedHttpPort, beforeStart, stopHold = true }, body) {
   await withTempDir(async (dir) => {
     const stateDir = path.join(dir, "nexus-agentd");
     const coderDir = path.join(dir, "rokid-coder");
@@ -201,6 +202,7 @@ async function withDaemon({ transport, tls = true, attached = [], discovered = [
         claudeDir,
         phoneHosts: transport === "phonelink" ? [`127.0.0.1:${phonePort}`] : [],
         fixedHttpPort,
+        stopHold,
       });
       daemon = started.daemon;
       const { httpPort, wsPort } = started;

@@ -17,6 +17,8 @@ interface SessionRecord {
   firstUserPrompt?: string;
   aiTitle?: string;
   transcriptPath?: string;
+  /** Subagents that started and have not stopped: agent_id -> epoch ms it started. */
+  subagents?: Map<string, number>;
 }
 
 const HEADING_PROMPT_CHARS = 48;
@@ -72,6 +74,7 @@ function cloneSession(session: Session): Session {
   return {
     ...session,
     turn: session.turn ? { ...session.turn } : undefined,
+    ...(session.subagents ? { subagents: { ...session.subagents } } : {}),
     pendingRequest: session.pendingRequest ? { ...session.pendingRequest } : undefined,
   };
 }
@@ -198,6 +201,7 @@ export class SessionStore {
     let refreshTitle = true;
     switch (eventName) {
       case "SessionStart":
+        record.subagents = undefined;
         record.session.status = "idle";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
@@ -220,6 +224,7 @@ export class SessionStore {
         break;
       }
       case "Stop": {
+        // Subagents are not cleared here: a background one outlives the turn that launched it.
         record.session.currentFile = undefined;
         record.session.step = undefined;
         // Stop fires before the transcript holds the final message, so the tail
@@ -241,7 +246,11 @@ export class SessionStore {
         }
         break;
       }
+      case "SubagentStart":
+        this.subagentStarted(record, asString(payload.agent_id), now);
+        break;
       case "SubagentStop":
+        this.subagentEnded(record, asString(payload.agent_id));
         break;
       case "PreToolUse": {
         const input = payload.tool_input;
@@ -259,12 +268,14 @@ export class SessionStore {
       case "PostToolUse":
       case "PostToolUseFailure":
       case "PermissionDenied":
+        break;
       case "UserPromptExpansion":
         break;
       case "Notification":
         this.applyNotification(record, asString(payload.message), now);
         break;
       case "SessionEnd":
+        record.subagents = undefined;
         record.session.status = "done";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
@@ -279,7 +290,36 @@ export class SessionStore {
       this.refreshDerivedTitle(record);
     }
     this.refreshHeading(record);
+    this.applySubagents(record);
     this.emitUpsert(record.session);
+  }
+
+  /**
+   * The subagents running are exactly the agent ids a SubagentStart reported and no SubagentStop
+   * has ended. The Task/Agent tool calls are not looked at: they cannot say which agent is which.
+   * A repeated start of a live id changes nothing. A start of one that stopped is a resume, which
+   * Claude runs under the same agent id, so it counts again.
+   */
+  private subagentStarted(record: SessionRecord, agentId: string | undefined, now: number): void {
+    if (!agentId || record.subagents?.has(agentId)) {
+      return;
+    }
+    (record.subagents ??= new Map()).set(agentId, now);
+  }
+
+  /** A SubagentStop ends the live id it names; an id that is not live ends nothing. */
+  private subagentEnded(record: SessionRecord, agentId: string | undefined): void {
+    if (agentId) record.subagents?.delete(agentId);
+  }
+
+  /** The phone's view of them: absent when none run, so an idle session's frame is what it always was. */
+  private applySubagents(record: SessionRecord): void {
+    if (record.subagents?.size === 0) {
+      record.subagents = undefined;
+    }
+    record.session.subagents = record.subagents
+      ? { running: record.subagents.size, since: Math.min(...record.subagents.values()) }
+      : undefined;
   }
 
   applyTranscriptUpdate(sessionId: string, update: TranscriptUpdate): void {

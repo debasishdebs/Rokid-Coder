@@ -693,7 +693,15 @@ private fun JSONObject.toAgentSession(): AgentSession? {
             null
         },
         v2 = toSessionV2(fallbackHeading = nullableString("title", MAX_HUD_LABEL_CHARS) ?: id),
+        subagents = toSubagents(),
     )
+}
+
+/** Absent, malformed or a count under one all mean no subagents: the field only ever adds a line. */
+private fun JSONObject.toSubagents(): Subagents? {
+    val json = optJSONObject("subagents") ?: return null
+    val running = json.intOrNull("running")?.takeIf { it >= 1 } ?: return null
+    return Subagents(running.coerceAtMost(MAX_SUBAGENTS), json.longOrNull("since")?.takeIf { it > 0 })
 }
 
 /**
@@ -879,6 +887,7 @@ object FrameClass {
 private val ACK_RESULTS = setOf("applied", "duplicate", "rejected")
 
 internal const val MAX_SESSIONS_PER_PROVIDER = 200
+private const val MAX_SUBAGENTS = 999
 internal const val MAX_PENDING_APPROVALS = 200
 internal const val MAX_DETAIL_MESSAGES = 200
 internal const val MAX_TRACKED_DETAIL_SESSIONS = 200

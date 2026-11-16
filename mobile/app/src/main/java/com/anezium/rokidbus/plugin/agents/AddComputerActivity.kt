@@ -1,6 +1,10 @@
 package com.anezium.rokidbus.plugin.agents
 
+import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.SystemClock
@@ -32,7 +36,7 @@ import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
  * The roads to a linked computer. A phone with no computer, or with one signed out or
  * refused, opens on a guided section: run one command on the computer, open the door, watch
  * it say Paired. Below it, as equals under "Other ways": automatic on the home Wi-Fi,
- * Tailscale for everywhere else, and a pasted pairing line for whoever wants neither.
+ * Tailscale for everywhere else, and the pairing line, scanned or pasted, for whoever wants neither.
  */
 class AddComputerActivity : Activity() {
     private val configStore by lazy { AgentsConfigStore(applicationContext) }
@@ -65,6 +69,8 @@ class AddComputerActivity : Activity() {
         // A finished attempt from before is not news on a screen opened now; an open one is.
         pairing.acknowledge()
         buildUi()
+        // Only on the first creation: a rotation must not reopen a scan the user already left.
+        if (savedInstanceState == null && intent.getBooleanExtra(EXTRA_SCAN, false)) scanPairingCode()
         uiScope.launch { pairing.state.collect(::renderDoorState) }
         uiScope.launch { PairingAttempts.state.collect(::renderAttempt) }
         uiScope.launch {
@@ -298,12 +304,14 @@ class AddComputerActivity : Activity() {
     }
 
     private fun pairingCard() = NexusUi.card(this).apply {
-        addView(NexusUi.rowTitle(this@AddComputerActivity, "By hand — pairing line"), NexusUi.block())
-        addView(BusTheme.gap(this@AddComputerActivity, 6))
+        addView(NexusUi.rowTitle(this@AddComputerActivity, "QR code or pairing line"), NexusUi.block())
+        addView(BusTheme.gap(this@AddComputerActivity, 10))
+        addView(NexusUi.pillButton(this@AddComputerActivity, SCAN_QR).apply { setOnClickListener { scanPairingCode() } }, NexusUi.block())
+        addView(BusTheme.gap(this@AddComputerActivity, 10))
         addView(
             NexusUi.cardBody(
                 this@AddComputerActivity,
-                "If you would rather use neither, paste the pairing line that " +
+                "Scan the QR code the computer's setup shows, or paste the pairing line that " +
                     "“agentd pair” prints: this phone dials the computer, and both show a code to compare.",
             ),
             NexusUi.block(),
@@ -367,9 +375,50 @@ class AddComputerActivity : Activity() {
         }
     }
 
+    /**
+     * The QR code holds the same pairing line, so a scan goes the pasted line's way. The camera is
+     * asked for here, on the user's tap, with a line of why before Android's own question.
+     */
+    private fun scanPairingCode() {
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) return openScanner()
+        AlertDialog.Builder(this)
+            .setMessage(PairingScan.WHY_CAMERA)
+            .setPositiveButton(PairingScan.ALLOW) { _, _ -> requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA) }
+            .setNegativeButton(PairingScan.NOT_NOW) { _, _ -> cameraOff() }
+            .setOnCancelListener { cameraOff() }
+            .show()
+    }
+
+    private fun openScanner() {
+        startActivityForResult(PairingScan.intent(this), REQUEST_SCAN)
+    }
+
+    private fun cameraOff() {
+        pairingSummary.text = PairingScan.CAMERA_OFF
+        toast(PairingScan.CAMERA_OFF)
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_CAMERA) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) openScanner() else cameraOff()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_SCAN) return
+        when (val outcome = PairingScan.outcome(resultCode, data)) {
+            is ScanOutcome.Code -> pairWithLine(outcome.text, PairingScan.NOT_OURS)
+            ScanOutcome.NoCamera -> cameraOff()
+            ScanOutcome.Cancelled -> Unit
+        }
+    }
+
     /** The line only says where to dial: the pairing itself is the code check that follows. */
-    private fun pairWithLine() {
-        when (val parsed = AgentdPairingParser.parse(pairingField.text.toString())) {
+    private fun pairWithLine(raw: String = pairingField.text.toString(), invalid: String = "Fix the pairing line first.") {
+        when (val parsed = AgentdPairingParser.parse(raw)) {
             is AgentdPairingParseResult.Valid -> {
                 pairingField.text.clear()
                 pairingSummary.text = "Connecting to ${parsed.target.host}:${parsed.target.port}…"
@@ -377,7 +426,7 @@ class AddComputerActivity : Activity() {
             }
             is AgentdPairingParseResult.Invalid -> {
                 pairingSummary.text = parsed.reason
-                toast("Fix the pairing line first.")
+                toast(invalid)
             }
         }
     }
@@ -401,5 +450,12 @@ class AddComputerActivity : Activity() {
     companion object {
         /** Open on the guided section even when a computer is already paired (Settings' Add your first computer). */
         const val EXTRA_GUIDED = "guided"
+
+        /** Open straight into the QR scanner (onboarding's Scan the QR code). */
+        const val EXTRA_SCAN = "scan"
+
+        const val SCAN_QR = "Scan QR code"
+        private const val REQUEST_SCAN = 4101
+        private const val REQUEST_CAMERA = 4102
     }
 }

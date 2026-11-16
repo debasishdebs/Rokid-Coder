@@ -1,4 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- The core names the product in these strings; this app overrides each one that does
+         (RokidCoderGlassesAppTest checks none is missed). The service label is what the wearer
+         hunts for in the Settings accessibility list, so it matches the app name. -->
     <string name="app_name" translatable="false">Rokid Coder</string>
+    <string name="product_name" translatable="false">Rokid Coder</string>
+    <string name="product_short_name" translatable="false">Rokid Coder</string>
+    <string name="accessibility_service_label" translatable="false">Rokid Coder</string>
+    <string name="accessibility_service_description">Runs Rokid Coder controls and guides secure Wireless Debugging pairing during first-run setup.</string>
+    <string name="accessibility_service_summary">Rokid Coder controls and secure first-run setup</string>
+    <string name="remote_input_method_label" translatable="false">Rokid Coder Remote Keyboard</string>
+    <string name="remote_input_method_description">Type on the glasses from your paired phone. Text is never saved by Rokid Coder.</string>
+
+    <string name="onb_accessibility_title">Turn on Rokid Coder</string>
+    <string name="onb_accessibility_body">Find “Rokid Coder” in the Settings list and switch it on.\n\nRokid Coder comes straight back here and finishes the rest on its own.</string>
+    <string name="onb_running_title">Rokid Coder is finishing up</string>
+    <string name="onb_wifi_body">Connect the glasses to Wi-Fi from the Hi Rokid app on your phone.\n\nRokid Coder picks up where it left off the moment they are online.</string>
+    <string name="onb_manual_title">Rokid Coder needs a hand</string>
+    <string name="onb_manual_body">Automatic setup could not finish here. Open Rokid Coder on your phone and use Manual setup.</string>
+    <string name="onb_failed_body">%1$s\n\nTap retry — Rokid Coder reopens the secure setup and finishes arming.</string>
+    <string name="onb_done_body">Rokid Coder is armed and ready.</string>
+    <string name="onb_phase_waiting_for_accessibility">Waiting for Rokid Coder to be switched on.</string>
+    <string name="onb_phase_arming">Arming Rokid Coder…</string>
 </resources>

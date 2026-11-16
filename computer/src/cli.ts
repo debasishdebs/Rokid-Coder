@@ -174,6 +174,8 @@ async function main(): Promise<void> {
           write: (text) => process.stdout.write(text),
           nextLine: () => input.next(),
           windowMs: ALLOW_NEXT_WINDOW_MS,
+          // One attempt can end through no fault of anyone's (a second connection, a dropped link): ask again once.
+          reopens: 1,
         });
       } finally {
         input.close();
