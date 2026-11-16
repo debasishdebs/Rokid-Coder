@@ -103,3 +103,17 @@ test("Codex configuration uses the existing config file and validates its loopba
     await fsp.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("stopHold is off unless the config opts in, and must be a boolean", async () => {
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "nexus-agentd-config-"));
+  try {
+    const config = ensureConfig(tempDir);
+    assert.equal(config.rokidCoder.stopHold, undefined);
+    saveConfig({ ...config, rokidCoder: { ...config.rokidCoder, stopHold: true } }, tempDir);
+    assert.equal(ensureConfig(tempDir).rokidCoder.stopHold, true);
+    saveConfig({ ...config, rokidCoder: { ...config.rokidCoder, stopHold: "yes" } }, tempDir);
+    assert.throws(() => ensureConfig(tempDir), /Invalid nexus-agentd config/);
+  } finally {
+    await fsp.rm(tempDir, { recursive: true, force: true });
+  }
+});

@@ -87,9 +87,9 @@ const SHORT_WINDOWS = {
  * The daemon, with session ls1 bound to a launcher this test plays. Claude's
  * sessions file starts idle a minute ago, as for a session sitting at its prompt.
  */
-async function withBound(body, { attached = [], sessionStart = true, sessionCwd } = {}) {
+async function withBound(body, { attached = [], sessionStart = true, sessionCwd, stopHold } = {}) {
   await withEnv(SHORT_WINDOWS, () =>
-    withDaemon({ transport: "wshub", tls: true, attached, paired: true }, async (ctx) => {
+    withDaemon({ transport: "wshub", tls: true, attached, paired: true, ...(stopHold === undefined ? {} : { stopHold }) }, async (ctx) => {
       const sessionsDir = path.join(ctx.claudeDir, "sessions");
       await fsp.mkdir(sessionsDir, { recursive: true });
       const child = spawn("sleep", ["60"], { stdio: "ignore" });
@@ -323,6 +323,31 @@ test("followup_after_y_types_when_idle", async () => {
     answer(launcher, frame);
     assert.equal((await ack("fy")).result, "applied");
   });
+});
+
+test("without_stop_hold_a_launcher_stop_returns_at_once_and_the_follow_up_types", async () => {
+  await withBound(async ({ httpPort, daemon, launcher, claude, followup, ack, phone }) => {
+    // The shipped default: the laptop is never left "running Stop hook".
+    assert.deepEqual(await postHook(httpPort, { hook_event_name: "Stop", session_id: ID }), {});
+    assert.equal(daemon.stopWait.state(ID).waiting, false);
+    claude.write("idle");
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.capabilities.followup === "ready");
+    followup("from the glasses, on demand", "od1");
+    const frame = await launcher.waitFor("type_command");
+    assert.deepEqual({ command: frame.command, text: frame.text }, { command: "text", text: "from the glasses, on demand" });
+    answer(launcher, frame);
+    assert.equal((await ack("od1")).result, "applied");
+  }, { stopHold: false });
+});
+
+test("without_stop_hold_an_idle_launcher_session_takes_a_prompt_with_no_stop_pending", async () => {
+  await withBound(async ({ launcher, followup, ack }) => {
+    followup("hello from the glasses", "od2");
+    const frame = await launcher.waitFor("type_command");
+    assert.equal(frame.text, "hello from the glasses");
+    answer(launcher, frame);
+    assert.equal((await ack("od2")).result, "applied");
+  }, { stopHold: false });
 });
 
 test("cap_reached_unheld_stop_then_late_reply_types", async () => {

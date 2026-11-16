@@ -25,6 +25,12 @@ export interface StopWaitOptions {
    * laptop, so Stop returns at once. Defaults to always.
    */
   canAsk?: () => boolean;
+  /**
+   * Off, a Stop never holds: it returns `{}` at once and the session goes idle. The wearer
+   * then prompts through the launcher on demand instead of the laptop waiting for a reply.
+   * Defaults to on; the daemon turns it on only when `rokidCoder.stopHold` asks for it.
+   */
+  enabled?: boolean;
 }
 
 interface Hold {
@@ -47,12 +53,14 @@ export class StopWait {
   private readonly cap: number;
   private readonly setTimer: typeof setTimeout;
   private readonly canAsk: () => boolean;
+  readonly enabled: boolean;
 
   constructor(options: StopWaitOptions) {
     this.waitLimitMs = clampWaitLimit(options.waitLimitMs, MAX_WAIT_LIMIT_MS);
     this.cap = options.continuationCap;
     this.setTimer = options.setTimer ?? setTimeout;
     this.canAsk = options.canAsk ?? (() => true);
+    this.enabled = options.enabled ?? true;
   }
 
   /** Applies to the holds that start after this call, not to one already waiting. */
@@ -81,7 +89,7 @@ export class StopWait {
 
   hold(sessionId: string, closed: AbortSignal): Promise<HookResponse> {
     // Claude would not honour another block, so waiting for one only stalls it.
-    if (closed.aborted || !this.canAsk() || this.continuationsUsed(sessionId) >= this.cap) {
+    if (!this.enabled || closed.aborted || !this.canAsk() || this.continuationsUsed(sessionId) >= this.cap) {
       return Promise.resolve({});
     }
     // One hook process per session; a second Stop means the first is gone.

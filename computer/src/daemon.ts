@@ -177,6 +177,7 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
     waitLimitMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
     continuationCap: DEFAULT_STOP_CONTINUATION_CAP,
     canAsk: trustedPhoneConnected,
+    enabled: config.rokidCoder.stopHold === true,
   });
   // No phone frame carries a release yet; until followup_closed exists the log
   // is the only trace of how a wait ended.

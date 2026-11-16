@@ -72,6 +72,11 @@ export interface RokidCoderConfig {
    * override it while the daemon runs.
    */
   waitLimitSec?: number;
+  /**
+   * Opt in to a Stop hook that holds for a glasses follow-up. Absent means off: Stop
+   * returns at once, and the glasses prompt a launcher-bound session on demand.
+   */
+  stopHold?: boolean;
 }
 
 export interface AgentConfig {
