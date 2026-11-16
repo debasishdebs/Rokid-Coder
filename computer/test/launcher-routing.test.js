@@ -164,7 +164,7 @@ test("bundled_hooks_json_registers_pre_and_post_compact", () => {
   // R131: the new ones, and every hook that was there before (R62's among them).
   for (const event of [
     "PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PreToolUse",
-    "PermissionRequest", "PostToolUse", "PostToolUseFailure", "PermissionDenied", "Stop", "SubagentStop",
+    "PermissionRequest", "PostToolUse", "PostToolUseFailure", "PermissionDenied", "Stop", "SubagentStart", "SubagentStop",
     "Notification", "SessionEnd",
   ]) {
     const handlers = hooks[event]?.flatMap((group) => group.hooks) ?? [];

@@ -80,7 +80,7 @@ test("wrappers_and_hooks_work_from_a_path_with_spaces_and_non_ascii", async (t) 
   // forwarder must run, and give its offline status answer.
   const port = await refusedPort();
   const hooks = run.bundledHookCommands(bundle);
-  assert.equal(hooks.length, 15);
+  assert.equal(hooks.length, 16);
   for (const hook of hooks) {
     const payload = hook.plugin.provider === "codex"
       ? { hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "rokid:status" }
@@ -102,7 +102,7 @@ test("bundled_hooks_reach_daemon_with_controlled_env", async (t) => {
   const identity = run.daemonCheck(dir, daemon.health);
   assert.equal(identity.ok, true, JSON.stringify(identity.detail));
   const hooks = await run.hooksCheck(dir, home, daemon.httpPort);
-  assert.equal(hooks.detail.length, 15);
+  assert.equal(hooks.detail.length, 16);
   for (const result of hooks.detail) {
     assert.ok(result.ok, `${result.plugin} ${result.event}: ${result.stdout} ${result.stderr}`);
   }

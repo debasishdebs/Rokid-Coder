@@ -18,6 +18,7 @@ export const HOOK_EVENTS = [
   "PreToolUse",
   "PermissionRequest",
   "Stop",
+  "SubagentStart",
   "SubagentStop",
   "Notification",
   "SessionEnd",

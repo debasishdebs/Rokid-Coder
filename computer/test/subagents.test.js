@@ -61,17 +61,81 @@ test("subagent_start_and_stop_pair_without_double_counting_the_task_call", () =>
   hook("SubagentStart", { agent_id: "ag1" });
   hook("SubagentStart", { agent_id: "ag2" });
   hook("SubagentStart", { agent_id: "ag1" });
-  assert.equal(subagents().running, 2, "a start binds to its task call; a repeat is nothing");
+  assert.equal(subagents().running, 2, "a start joins a task call; a repeat is nothing");
   hook("SubagentStop", { agent_id: "ag1" });
   assert.equal(subagents().running, 1);
-  // The Post of the one SubagentStop already ended finds nothing.
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1" });
+  // The return of the call whose subagent already stopped finds nothing to end.
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "completed", agentId: "ag1" } });
   assert.equal(subagents().running, 1, "never counted off twice");
   hook("SubagentStop", { agent_id: "unknown" });
   assert.equal(subagents().running, 1, "a stop that names nothing known ends nothing");
-  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2" });
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2", tool_response: { status: "completed", agentId: "ag2" } });
   assert.equal(subagents(), undefined);
   hook("SubagentStop", { agent_id: "ag2" });
+  assert.equal(subagents(), undefined);
+});
+
+test("parallel_starts_in_the_other_order_never_end_the_wrong_subagent", () => {
+  const { hook, subagents } = store();
+  hook("PreToolUse", pre("t1"));
+  hook("PreToolUse", pre("t2"));
+  hook("SubagentStart", { agent_id: "a2" });
+  hook("SubagentStart", { agent_id: "a1" });
+  hook("SubagentStop", { agent_id: "a2" });
+  assert.equal(subagents().running, 1);
+  // t2 launched a2, which is over; a1 (t1's) is still running. With or without the result naming its agent.
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2" });
+  assert.equal(subagents().running, 1, "a guessed id is not ended by a result that names none");
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2", tool_response: { status: "completed", agentId: "a2" } });
+  assert.equal(subagents().running, 1, "the result names a2, which already ended");
+  hook("SubagentStop", { agent_id: "a1" });
+  assert.equal(subagents(), undefined);
+});
+
+test("a_start_naming_its_tool_call_binds_exactly", () => {
+  const { hook, subagents } = store();
+  hook("PreToolUse", pre("t1"));
+  hook("PreToolUse", pre("t2"));
+  hook("SubagentStart", { agent_id: "a2", tool_use_id: "t2" });
+  hook("SubagentStart", { agent_id: "a1", tool_use_id: "t1" });
+  hook("SubagentStop", { agent_id: "a2" });
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2" });
+  assert.equal(subagents().running, 1, "t2 was a2's: a1 goes on");
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1" });
+  assert.equal(subagents(), undefined, "t1 was a1's, and its call returned");
+});
+
+test("a_background_launch_keeps_running_until_its_subagent_stop", () => {
+  const { clock, hook, subagents } = store();
+  const first = clock.now;
+  hook("PreToolUse", { ...pre("t1"), tool_input: { run_in_background: true } });
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "async_launched", agentId: "bg1" } });
+  assert.deepEqual(subagents(), { running: 1, since: first }, "the launch returning is not the end");
+  hook("Stop");
+  assert.equal(subagents().running, 1, "it outlives the turn that launched it");
+  hook("SubagentStop", { agent_id: "bg1" });
+  assert.equal(subagents(), undefined);
+});
+
+test("a_launch_result_names_the_agent_a_swapped_start_got_wrong", () => {
+  const { hook, subagents } = store();
+  hook("PreToolUse", pre("t1"));
+  hook("PreToolUse", pre("t2"));
+  hook("SubagentStart", { agent_id: "a2" });
+  hook("SubagentStart", { agent_id: "a1" });
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t2", tool_response: { status: "async_launched", agentId: "a2" } });
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "async_launched", agentId: "a1" } });
+  hook("SubagentStop", { agent_id: "a2" });
+  assert.equal(subagents().running, 1);
+  hook("SubagentStop", { agent_id: "a1" });
+  assert.equal(subagents(), undefined);
+});
+
+test("session_end_clears_background_subagents_too", () => {
+  const { hook, subagents } = store();
+  hook("PreToolUse", pre("t1"));
+  hook("PostToolUse", { tool_name: "Task", tool_use_id: "t1", tool_response: { status: "async_launched", agentId: "bg1" } });
+  hook("SessionEnd");
   assert.equal(subagents(), undefined);
 });
 
