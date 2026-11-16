@@ -19,11 +19,7 @@ interface SessionRecord {
   transcriptPath?: string;
   /** Subagents that started and have not stopped: agent_id -> epoch ms it started. */
   subagents?: Map<string, number>;
-  /** Agent ids that stopped, so a late duplicate start never brings one back. Newest last. */
-  stoppedAgents?: Set<string>;
 }
-
-const MAX_STOPPED_AGENTS = 256;
 
 const HEADING_PROMPT_CHARS = 48;
 
@@ -206,7 +202,6 @@ export class SessionStore {
     switch (eventName) {
       case "SessionStart":
         record.subagents = undefined;
-        record.stoppedAgents = undefined;
         record.session.status = "idle";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
@@ -281,7 +276,6 @@ export class SessionStore {
         break;
       case "SessionEnd":
         record.subagents = undefined;
-        record.stoppedAgents = undefined;
         record.session.status = "done";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
@@ -303,25 +297,19 @@ export class SessionStore {
   /**
    * The subagents running are exactly the agent ids a SubagentStart reported and no SubagentStop
    * has ended. The Task/Agent tool calls are not looked at: they cannot say which agent is which.
-   * A repeated start of a live id changes nothing, and one that already stopped is not brought back.
+   * A repeated start of a live id changes nothing. A start of one that stopped is a resume, which
+   * Claude runs under the same agent id, so it counts again.
    */
   private subagentStarted(record: SessionRecord, agentId: string | undefined, now: number): void {
-    if (!agentId || record.stoppedAgents?.has(agentId) || record.subagents?.has(agentId)) {
+    if (!agentId || record.subagents?.has(agentId)) {
       return;
     }
     (record.subagents ??= new Map()).set(agentId, now);
   }
 
-  /** A SubagentStop ends the live id it names, for good; an id that is not live ends nothing. */
+  /** A SubagentStop ends the live id it names; an id that is not live ends nothing. */
   private subagentEnded(record: SessionRecord, agentId: string | undefined): void {
-    if (!agentId || !record.subagents?.delete(agentId)) {
-      return;
-    }
-    const stopped = (record.stoppedAgents ??= new Set());
-    if (stopped.size >= MAX_STOPPED_AGENTS) {
-      stopped.delete(stopped.values().next().value as string);
-    }
-    stopped.add(agentId);
+    if (agentId) record.subagents?.delete(agentId);
   }
 
   /** The phone's view of them: absent when none run, so an idle session's frame is what it always was. */

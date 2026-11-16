@@ -54,7 +54,7 @@ test("parallel_subagents_count_and_since_is_the_oldest_live_one", () => {
   assert.deepEqual(subagents(), { running: 1, since: first + 1000 });
 });
 
-test("a_duplicate_start_is_idempotent_an_unknown_stop_is_ignored_and_a_stopped_id_stays_stopped", () => {
+test("a_duplicate_start_is_idempotent_an_unknown_stop_is_ignored_and_a_resume_counts_again", () => {
   const { clock, hook, subagents } = store();
   const first = clock.now;
   hook("SubagentStart", start("a1"));
@@ -65,20 +65,12 @@ test("a_duplicate_start_is_idempotent_an_unknown_stop_is_ignored_and_a_stopped_i
   hook("SubagentStop", {});
   assert.equal(subagents().running, 1);
   hook("SubagentStop", { agent_id: "a1" });
+  assert.equal(subagents(), undefined);
+  // Claude resumes a subagent under the same agent id, and SubagentStart fires again.
   hook("SubagentStart", start("a1"));
-  assert.equal(subagents(), undefined, "a late duplicate start does not bring it back");
-});
-
-test("the_stopped_set_is_bounded", () => {
-  const { hook, subagents } = store();
-  for (let n = 0; n < 300; n += 1) {
-    hook("SubagentStart", start(`b${n}`));
-    hook("SubagentStop", { agent_id: `b${n}` });
-  }
-  hook("SubagentStart", start("b0"));
-  assert.equal(subagents().running, 1, "the oldest stopped ids are forgotten");
-  hook("SubagentStart", start("b299"));
-  assert.equal(subagents().running, 1, "a recent one is not");
+  assert.equal(subagents().running, 1, "a resumed subagent runs again");
+  hook("SubagentStop", { agent_id: "a1" });
+  assert.equal(subagents(), undefined);
 });
 
 test("a_background_subagent_outlives_the_parents_stop", () => {
