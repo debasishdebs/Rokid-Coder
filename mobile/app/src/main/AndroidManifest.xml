@@ -110,6 +110,16 @@
             android:windowSoftInputMode="adjustResize" />
 
         <!--
+            zxing's scan screen for the pairing QR code: portrait, and only this app can start it. The
+            library's own entry is landscape, and the app asks for the camera itself, when Scan is tapped.
+        -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            tools:replace="android:screenOrientation" />
+
+        <!--
             The app's only service: the glasses link, the Agents code and the agentd links. Nothing
             outside the app starts or binds it; the microphone type is held only where Android allows.
         -->

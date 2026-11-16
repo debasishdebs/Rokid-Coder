@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.plugin.agents.service
 
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import org.junit.Assert.assertEquals
@@ -24,10 +25,7 @@ class CoderManifestTest {
             app.packageName,
             PackageManager.GET_SERVICES or PackageManager.GET_RECEIVERS or PackageManager.GET_PERMISSIONS,
         )
-        // The QR scanner's ML Kit and its log transport bring their own services, never exported.
-        val (scanner, ours) = info.services.orEmpty().partition { it.name.startsWith(SCANNER_PACKAGES) }
-        assertEquals(scanner.map { it.name }, scanner.filterNot { it.exported }.map { it.name })
-        val service = ours.single()
+        val service = info.services.orEmpty().single()
         assertEquals(CoderService::class.java.name, service.name)
         assertFalse(service.exported)
         assertEquals(
@@ -54,9 +52,22 @@ class CoderManifestTest {
         assertTrue(app.applicationInfo.className.endsWith(".RokidCoderApp"))
     }
 
-    private fun String.startsWith(prefixes: List<String>) = prefixes.any { startsWith(it) }
+    @Test
+    fun the_qr_scanner_is_zxings_screen_alone_and_only_this_app_starts_it() {
+        @Suppress("DEPRECATION")
+        val info = app.packageManager.getPackageInfo(
+            app.packageName,
+            PackageManager.GET_ACTIVITIES or PackageManager.GET_PERMISSIONS,
+        )
+        val scanner = info.activities.orEmpty().single { it.name == "com.journeyapps.barcodescanner.CaptureActivity" }
+        assertFalse(scanner.exported)
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, scanner.screenOrientation)
 
-    private companion object {
-        val SCANNER_PACKAGES = listOf("com.google.mlkit.", "com.google.android.datatransport.")
+        // The camera is the one thing it adds, and nothing that reports usage: no network-state check, no log transport.
+        val permissions = info.requestedPermissions.orEmpty().toSet()
+        assertTrue("android.permission.CAMERA" in permissions)
+        assertFalse("android.permission.ACCESS_NETWORK_STATE" in permissions)
+        val components = info.activities.orEmpty().map { it.name }
+        assertTrue(components.none { it.startsWith("com.google.mlkit.") || it.startsWith("com.google.android.gms.") })
     }
 }

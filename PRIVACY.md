@@ -24,6 +24,7 @@ In more detail:
 
 - Pairing keys, the pinned certificates of your computers, your settings and the alert history stay on the phone and the computer they belong to. The application sessions between your computer and your phone use pinned, mutually authenticated TLS, and every new pairing is confirmed with a code you compare on the phone.
 - Rokid Coder asks the phone for the microphone (push-to-talk), notifications (the one status notification), and a battery exemption (so Android keeps the monitor running).
+- The camera is asked for only when you tap Scan QR code, and is used only to read the pairing code on your computer's screen. The picture is read on the phone itself: it is not recorded, saved or sent anywhere, and the scanner is a local one that does no reporting.
 - Removing the app, or running the computer uninstaller, removes what Rokid Coder stored. The uninstaller keeps your pairing state unless you ask it to purge.
 
 ## Questions

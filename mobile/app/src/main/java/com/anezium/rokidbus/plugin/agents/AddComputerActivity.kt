@@ -1,6 +1,10 @@
 package com.anezium.rokidbus.plugin.agents
 
+import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.SystemClock
@@ -18,12 +22,6 @@ import android.widget.TextView
 import android.widget.Toast
 import com.anezium.rokidbus.client.ui.BusTheme
 import com.anezium.rokidbus.client.ui.NexusUi
-import com.google.android.gms.common.ConnectionResult
-import com.google.android.gms.common.GoogleApiAvailability
-import com.google.mlkit.common.MlKitException
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -378,35 +376,44 @@ class AddComputerActivity : Activity() {
     }
 
     /**
-     * The QR code holds the same pairing line, so a scan goes the pasted line's way. Google Play
-     * services draws the camera screen and hands back only the text: this app asks for no camera.
+     * The QR code holds the same pairing line, so a scan goes the pasted line's way. The camera is
+     * asked for here, on the user's tap, with a line of why before Android's own question.
      */
     private fun scanPairingCode() {
-        if (GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this) != ConnectionResult.SUCCESS) {
-            pairingSummary.text = SCAN_NEEDS_PLAY_SERVICES
-            toast(SCAN_NEEDS_PLAY_SERVICES)
-            return
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) return openScanner()
+        AlertDialog.Builder(this)
+            .setMessage(PairingScan.WHY_CAMERA)
+            .setPositiveButton(PairingScan.ALLOW) { _, _ -> requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA) }
+            .setNegativeButton(PairingScan.NOT_NOW) { _, _ -> cameraOff() }
+            .setOnCancelListener { cameraOff() }
+            .show()
+    }
+
+    private fun openScanner() {
+        startActivityForResult(PairingScan.intent(this), REQUEST_SCAN)
+    }
+
+    private fun cameraOff() {
+        pairingSummary.text = PairingScan.CAMERA_OFF
+        toast(PairingScan.CAMERA_OFF)
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_CAMERA) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) openScanner() else cameraOff()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_SCAN) return
+        when (val outcome = PairingScan.outcome(resultCode, data)) {
+            is ScanOutcome.Code -> pairWithLine(outcome.text, PairingScan.NOT_OURS)
+            ScanOutcome.NoCamera -> cameraOff()
+            ScanOutcome.Cancelled -> Unit
         }
-        val options = GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
-        GmsBarcodeScanning.getClient(this, options).startScan()
-            .addOnSuccessListener { barcode ->
-                if (!isFinishing && !isDestroyed) pairWithLine(barcode.rawValue.orEmpty(), "That QR code is not a Rokid Coder pairing code.")
-            }
-            .addOnFailureListener { error ->
-                if (isFinishing || isDestroyed) return@addOnFailureListener
-                val message = when ((error as? MlKitException)?.errorCode) {
-                    // Backed out, or a second tap while the scanner is already up.
-                    MlKitException.CODE_SCANNER_CANCELLED,
-                    MlKitException.CODE_SCANNER_TASK_IN_PROGRESS,
-                    -> return@addOnFailureListener
-                    MlKitException.CODE_SCANNER_UNAVAILABLE,
-                    MlKitException.CODE_SCANNER_GOOGLE_PLAY_SERVICES_VERSION_TOO_OLD,
-                    -> SCAN_NEEDS_PLAY_SERVICES
-                    else -> "Couldn't scan — paste the pairing line instead."
-                }
-                pairingSummary.text = message
-                toast(message)
-            }
     }
 
     /** The line only says where to dial: the pairing itself is the code check that follows. */
@@ -448,6 +455,7 @@ class AddComputerActivity : Activity() {
         const val EXTRA_SCAN = "scan"
 
         const val SCAN_QR = "Scan QR code"
-        const val SCAN_NEEDS_PLAY_SERVICES = "Scanning needs Google Play services — paste the pairing line instead."
+        private const val REQUEST_SCAN = 4101
+        private const val REQUEST_CAMERA = 4102
     }
 }
