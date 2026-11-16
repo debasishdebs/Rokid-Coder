@@ -240,7 +240,7 @@ object SurfaceController {
             seq = System.currentTimeMillis(),
             kind = NexusSurface.KIND_CARD,
             contentKey = "demo-${path.prefValue}",
-            title = "Rokid Nexus",
+            title = context.getString(R.string.product_name),
             subtitle = "surface renderer demo",
             footer = path.prefValue,
             // Width/height ruler: count the last digit that fits before the wrap

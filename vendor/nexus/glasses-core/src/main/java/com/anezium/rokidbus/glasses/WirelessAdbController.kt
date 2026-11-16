@@ -91,7 +91,7 @@ internal object WirelessAdbController {
                 context,
                 action,
                 "PRIVILEGED_BRIDGE_UNAVAILABLE",
-                "Nexus could not enable wireless debugging. Repair the glasses helper and try again.",
+                "${context.getString(R.string.product_short_name)} could not enable wireless debugging. Repair the glasses helper and try again.",
             )
         }
     }
@@ -104,7 +104,7 @@ internal object WirelessAdbController {
                 context,
                 action,
                 "PRIVILEGED_BRIDGE_UNAVAILABLE",
-                "Nexus could not enable wireless debugging. Repair the glasses helper and try again.",
+                "${context.getString(R.string.product_short_name)} could not enable wireless debugging. Repair the glasses helper and try again.",
             )
         }
         val host = localIpv4Address(context) ?: return failure(
@@ -311,7 +311,7 @@ internal object WirelessAdbController {
                 context,
                 action,
                 "WIFI_ENABLE_FAILED",
-                "Nexus could not enable Wi-Fi on the glasses. Repair the glasses helper and try again.",
+                "${context.getString(R.string.product_short_name)} could not enable Wi-Fi on the glasses. Repair the glasses helper and try again.",
             )
             WirelessAdbWifiPreparationResult.NETWORK_UNAVAILABLE -> failure(
                 context,
