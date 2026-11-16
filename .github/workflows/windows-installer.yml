@@ -142,7 +142,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path out | Out-Null
           $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
-          & $makensis /V3 "/DVERSION=${{ steps.bundle.outputs.version }}" "/DBUNDLE_DIR=$PWD\bundle" "/DOUTDIR=$PWD\out" computer\installer\windows\installer.nsi
+          & $makensis /V3 "/DVERSION=${{ steps.bundle.outputs.version }}" "/DBUNDLE_DIR=$PWD\bundle" "/DOUTDIR=$PWD\out" "$PWD\computer\installer\windows\installer.nsi"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-FileHash -Algorithm SHA256 "out\rokid-coder-${{ steps.bundle.outputs.version }}-windows-x64.exe"
 

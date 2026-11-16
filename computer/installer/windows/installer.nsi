@@ -1,6 +1,7 @@
 ; Rokid Coder for Windows: installs into WSL2, per user, unelevated [FR 13].
 ;
-;   makensis /DVERSION=<v> /DBUNDLE_DIR=<dir> [/DOUTDIR=<dir>] installer.nsi
+;   makensis /DVERSION=<v> /DBUNDLE_DIR=<dir> [/DOUTDIR=<dir>] <absolute path>\installer.nsi
+; The absolute path: makensis works from the script's directory, and SRCDIR is the path as given.
 ;
 ; BUNDLE_DIR holds T7a's rokid-coder-bundle-<v>-linux-x64.tar.gz and its .sha256,
 ; carried unmodified (windows-installer.yml checks the digest first). The only
