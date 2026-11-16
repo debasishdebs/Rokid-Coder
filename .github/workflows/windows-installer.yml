@@ -76,7 +76,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           npm ci --ignore-scripts
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          npx tsc -p computer
+          # computer's own TypeScript: the lockfile keeps it under computer/node_modules, and a bare
+          # npx tsc at the root fetches an unrelated "tsc" package.
+          node computer/node_modules/typescript/bin/tsc -p computer
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Download the validated linux-x64 bundle
