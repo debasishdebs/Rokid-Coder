@@ -89,6 +89,8 @@ export function watchPairStatus(configDir: string, onStatus: (status: PairStatus
     }
   });
   socket.on("error", () => undefined);
+  // A listener never keeps the process alive: whoever is waiting on something else may leave.
+  socket.unref();
   return {
     confirm: (attempt, ok) => {
       if (!socket.destroyed) {

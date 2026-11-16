@@ -85,6 +85,9 @@ function runCli(coderDir, args) {
   child.stdout.on("data", (chunk) => (run.out += chunk));
   child.stderr.on("data", (chunk) => (run.out += chunk));
   run.exited = new Promise((resolve) => child.once("exit", (code) => resolve(code)));
+  run.exitedWithin = (ms = 15_000) => Promise.race([run.exited, new Promise((resolve) => setTimeout(() => resolve(`still running after ${ms} ms`), ms))]);
+  run.count = (text) => run.out.split(text).length - 1;
+  run.untilCount = (text, times, timeoutMs = 5000) => waitUntil(() => run.count(text) >= times, `CLI never said ${text} ${times} times\n${run.out}`, timeoutMs);
   run.until = (text, timeoutMs = 5000) => waitUntil(() => run.out.includes(text), `CLI never said: ${text}\n${run.out}`, timeoutMs);
   return run;
 }
@@ -201,12 +204,14 @@ test("agentd_pair_reopens_once_after_the_phone_went_away_and_shows_the_next_code
     await run.until("[y/N]");
     first.close();
     await run.until("The phone went away before the pairing finished. Opening the pairing window again.");
+    // The message goes out before the daemon has opened the window again; a phone dialling in between is refused.
+    await run.untilCount("Waiting for your phone", 2);
     const second = await sasPhone(wsPort, "reopen-2");
     await run.until(`Pairing code: ${second.state.code.slice(0, 3)} ${second.state.code.slice(3)}`);
     second.confirm(true);
     run.child.stdin.write("y\n");
     await run.until("Paired ✓");
-    assert.equal(await run.exited, 0);
+    assert.equal(await run.exitedWithin(), 0);
     await waitUntil(async () => pinsOf(coderDir).has((await phoneCert("reopen-2")).fingerprint256), "the second phone is not pinned");
   });
 });
@@ -217,8 +222,11 @@ test("agentd_pair_gives_up_when_the_second_attempt_also_ends_the_same_way", asyn
     await run.until("Pairing window open");
     (await sasPhone(wsPort, "giveup-1")).close();
     await run.until("Opening the pairing window again.");
+    await run.untilCount("Waiting for your phone", 2);
     (await sasPhone(wsPort, "giveup-2")).close();
-    assert.notEqual(await run.exited, 0);
+    const code = await run.exitedWithin();
+    assert.equal(typeof code, "number", `the CLI ended: ${code}`);
+    assert.notEqual(code, 0);
     assert.equal(run.out.split("Opening the pairing window again.").length, 2, "reopened exactly once");
   });
 });
