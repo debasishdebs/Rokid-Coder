@@ -58,6 +58,7 @@ internal class SelfArmWirelessDebuggingAutomator(
     private var pairingRequested = false
     private var pairingRequestedAt = 0L
     private var pairingDialogDumped = false
+    private var pairingStallDumped = false
     private var pairingReadyReported = false
     private var pairingReadyReportedAt = 0L
     private var pairingCodeOnlySeenAt = 0L
@@ -78,6 +79,7 @@ internal class SelfArmWirelessDebuggingAutomator(
     private var lastPhoneAssistedConnectPortReport = 0
     private var lastReportedProgressState = ""
     private val phonePairingOffer = SelfArmPhonePairingOfferTracker()
+    private val statusOverlay = SelfArmSetupStatusOverlay(service)
     private val displayHold = SetupDisplayHoldLifecycle(
         isInteractive = {
             service.getSystemService(PowerManager::class.java)?.isInteractive != false
@@ -143,6 +145,7 @@ internal class SelfArmWirelessDebuggingAutomator(
         pairingRequested = false
         pairingRequestedAt = 0L
         pairingDialogDumped = false
+        pairingStallDumped = false
         pairingReadyReported = false
         pairingReadyReportedAt = 0L
         pairingCodeOnlySeenAt = 0L
@@ -192,6 +195,7 @@ internal class SelfArmWirelessDebuggingAutomator(
             service.onSetupWaitingForWifi(sessionId)
             return
         }
+        if (operationMode == OperationMode.FULL_BOOTSTRAP) statusOverlay.show()
         if (!wifiEnabled()) {
             if (sessionId.isNotBlank()) {
                 SelfArmSetupWifiOwnershipStore.recordBeforeEnable(
@@ -340,6 +344,30 @@ internal class SelfArmWirelessDebuggingAutomator(
             finish("pairing_code_expired", false, diagnostic)
             return
         }
+        // The page under the pairing dialog stays visible, so "still on the Wireless Debugging page"
+        // is no sign the dialog is coming. A dialog that was asked for and never read ends the run
+        // here: PAIRING_CODE_READ_MAX_MS after the tap, whatever the 110 s run deadline has left.
+        if (
+            operationMode == OperationMode.FULL_BOOTSTRAP &&
+            !pairingInFlight &&
+            !pairingReadyReported &&
+            pairingRequested &&
+            pairingRequestedAt > 0L
+        ) {
+            val waited = now - pairingRequestedAt
+            if (waited > PAIRING_CODE_READ_MAX_MS) {
+                finish(
+                    "pairing_code_expired",
+                    false,
+                    sanitizeSupportDiagnostic("TMO: $lastReportedProgressState"),
+                )
+                return
+            }
+            if (waited > PAIRING_STALL_DUMP_AFTER_MS && !pairingStallDumped) {
+                pairingStallDumped = true
+                dumpWindowsForStall()
+            }
+        }
         renewDisplayHold(now, pairingInFlight)
 
         if (!wifiConfirmed) {
@@ -358,6 +386,8 @@ internal class SelfArmWirelessDebuggingAutomator(
             return
         }
         if (root == null) {
+            // A pairing dialog can be the only window the ROM lets us read: try it before waiting.
+            if (pairingRequested && readPairingDialogFromAnyRoot(null)) return
             if (fallbackFromUnverifiedDirectRouteIfDue()) return
             report("waiting_for_settings")
             schedule(STEP_DELAY_MS)
@@ -763,9 +793,13 @@ internal class SelfArmWirelessDebuggingAutomator(
     }
 
     private fun readPairingDialog(root: AccessibilityNodeInfo): Boolean {
+        // The ids are AOSP's; a ROM that renames them keeps the suffix, and a dialog window the
+        // accessibility layer rates not visible still holds the code, so neither gates the read.
         val codeNode = firstVisibleByViewId(root, "com.android.settings:id/pairing_code")
-        var code = codeNode?.let { firstCodeInText(rawText(it)) }.orEmpty()
+            ?: firstByViewIdSuffix(root, "pairing_code")
+        var code = codeNode?.let { firstCodeInNode(it) }.orEmpty()
         val endpoint = textByViewId(root, "com.android.settings:id/ip_addr")
+            .ifBlank { firstByViewIdSuffix(root, "ip_addr")?.let { rawText(it) }.orEmpty() }
         val hasPairingContext = codeNode != null || endpoint.isNotBlank() || hasPairingDialogText(root)
         if (!hasPairingContext) return false
         if (code.isBlank()) code = firstCode(root)
@@ -812,6 +846,24 @@ internal class SelfArmWirelessDebuggingAutomator(
             return reportPairingReadyAndHold(code, host, 0, connectPort, "ADB pairing code ready")
         }
         return reportPairingReadyAndHold(code, host, pairPort, connectPort, "ADB pairing ready")
+    }
+
+    private fun firstByViewIdSuffix(root: AccessibilityNodeInfo, suffix: String): AccessibilityNodeInfo? =
+        findFirst(root) { it.viewIdResourceName?.endsWith(suffix) == true }
+
+    /** The code in the node's text or description; a code split by spaces or dashes counts when it is the whole text. */
+    private fun firstCodeInNode(node: AccessibilityNodeInfo): String {
+        val candidates = listOf(
+            node.text?.toString().orEmpty(),
+            node.contentDescription?.toString().orEmpty(),
+            node.stateDescription?.toString().orEmpty(),
+        )
+        candidates.forEach { text ->
+            firstCodeInText(text).takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return candidates.firstNotNullOfOrNull { text ->
+            text.filter(Char::isDigit).takeIf { it.length == 6 && text.length <= 10 }
+        }.orEmpty()
     }
 
     private fun hasPairingDialogText(root: AccessibilityNodeInfo): Boolean =
@@ -1087,6 +1139,34 @@ internal class SelfArmWirelessDebuggingAutomator(
             "selfarm-wireless pairing_ready codeLen=${lastPairingCode.length} " +
                 "endpointComplete=${lastPairingHost.isNotBlank() && lastPairingPort > 0 && lastPairingConnectPort > 0}",
         )
+    }
+
+    /**
+     * What the next device test needs to see when the dialog is not read: every window's type,
+     * package and bounds, and its nodes' ids and text lengths. Never any text, so no code.
+     */
+    private fun dumpWindowsForStall() {
+        val builder = StringBuilder("pairingStall WINDOWS:")
+        AccessibilityWindowRoots.allWindows(service).forEach { window ->
+            val bounds = Rect()
+            runCatching { window.getBoundsInScreen(bounds) }
+            val windowRoot = window.root
+            builder.append("\n window type=").append(window.type)
+                .append(" layer=").append(window.layer)
+                .append(" display=").append(runCatching { window.displayId }.getOrDefault(-1))
+                .append(" active=").append(window.isActive)
+                .append(" focused=").append(window.isFocused)
+                .append(" bounds=").append(bounds.toShortString())
+                .append(" package=").append(windowRoot?.packageName ?: "(no root)")
+            if (windowRoot != null) {
+                try {
+                    collectNodeStrings(windowRoot, builder, 1)
+                } finally {
+                    windowRoot.recycle()
+                }
+            }
+        }
+        Log.i(TAG, builder.toString().take(MAX_STALL_DUMP_CHARS))
     }
 
     private fun dumpPairingDialogNodes(root: AccessibilityNodeInfo) {
@@ -1707,6 +1787,7 @@ internal class SelfArmWirelessDebuggingAutomator(
 
     private fun finish(setupState: String, success: Boolean, diagnostic: String = "") {
         if (!isLiveRun()) return
+        statusOverlay.hide()
         releaseDisplayHold(SetupDisplayHoldEnd.forFinish(setupState, success))
         val finishingMode = operationMode
         val finishingSessionId = sessionId
@@ -1841,6 +1922,7 @@ internal class SelfArmWirelessDebuggingAutomator(
     }
 
     private fun cancelLiveWork() {
+        statusOverlay.hide()
         active = false
         runToken++
         handler.removeCallbacksAndMessages(callbackToken)
@@ -1928,6 +2010,11 @@ internal class SelfArmWirelessDebuggingAutomator(
         private const val PAIRING_DIALOG_POLL_MS = 600L
         private const val PAIRING_DIALOG_MAX_WAIT_MS = 9_000L
         private const val PAIRING_DIALOG_HOLD_MS = 60_000L
+
+        /** From the tap on "Pair device with pairing code" to a dialog that must have been read. */
+        private const val PAIRING_CODE_READ_MAX_MS = 30_000L
+        private const val PAIRING_STALL_DUMP_AFTER_MS = 6_000L
+        private const val MAX_STALL_DUMP_CHARS = 3_500
         /** Hard bound on a suspended run: comfortably past the 60–110 s a real bootstrap takes. */
         private const val SELF_PAIRING_GRACE_MS = 150_000L
         private const val MANUAL_TIMEOUT_MS = 5 * 60_000L

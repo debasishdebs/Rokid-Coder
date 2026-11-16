@@ -25,6 +25,8 @@
     <string name="onb_running_title">Nexus is finishing up</string>
     <string name="onb_running_body">%1$s\n\nKeep the glasses on. This usually takes 1–2 minutes.</string>
     <string name="onb_running_status">Working…</string>
+    <!-- The line on the lens while the app drives Settings itself. Keep it free of digits. -->
+    <string name="setup_status_line">%1$s is setting itself up. Please keep the glasses on.</string>
     <string name="onb_running_recovery_action">FINISH SETUP</string>
 
     <string name="onb_wifi_eyebrow">SETUP PAUSED</string>

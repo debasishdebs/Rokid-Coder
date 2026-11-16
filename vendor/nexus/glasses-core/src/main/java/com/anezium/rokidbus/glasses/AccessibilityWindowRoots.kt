@@ -69,9 +69,11 @@ internal object AccessibilityWindowRoots {
     ): Boolean {
         val activeRoot = service.rootInActiveWindow
         if (activeRoot != null && !isTinyRoot(activeRoot) && visitor(activeRoot)) return true
-        val windows = service.windows ?: return false
-        windows.forEach { window ->
-            if (window == null) return@forEach
+        // A dialog can be its own window, and a ROM can host it on a display other than the default
+        // one, which `windows` does not list; every display's windows are visited, each once.
+        val seen = HashSet<Int>()
+        allWindows(service).forEach { window ->
+            if (!seen.add(window.id)) return@forEach
             val root = window.root ?: return@forEach
             try {
                 if (!isTinyRoot(root) && visitor(root)) return true
@@ -80,6 +82,17 @@ internal object AccessibilityWindowRoots {
             }
         }
         return false
+    }
+
+    /** Every interactive window the service may read, on every display. */
+    fun allWindows(service: AccessibilityService): List<AccessibilityWindowInfo> {
+        val result = ArrayList<AccessibilityWindowInfo>()
+        service.windows?.let { result.addAll(it.filterNotNull()) }
+        val perDisplay = runCatching { service.windowsOnAllDisplays }.getOrNull() ?: return result
+        for (index in 0 until perDisplay.size()) {
+            perDisplay.valueAt(index)?.let { list -> result.addAll(list.filterNotNull()) }
+        }
+        return result
     }
 
     private fun shouldUseWindowFallback(
