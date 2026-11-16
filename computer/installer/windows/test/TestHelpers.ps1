@@ -9,11 +9,13 @@ Import-Module $script:ModulePath -Force
 $script:UserName = "Zo$([char]0xEB) M$([char]0xFC)ller"
 
 function Use-TestProfile {
-  <# Points LOCALAPPDATA, ProgramData and USERPROFILE into TestDrive; returns what to restore. #>
+  <# Points LOCALAPPDATA, ProgramData and USERPROFILE into a fresh dir in TestDrive; returns what to restore. #>
+  # Fresh per call: Pester keeps one TestDrive for a whole Describe, so its Its would share a profile.
   $saved = @{ LOCALAPPDATA = $env:LOCALAPPDATA; ProgramData = $env:ProgramData; USERPROFILE = $env:USERPROFILE }
-  $env:LOCALAPPDATA = Join-Path $TestDrive "Users\$script:UserName\AppData\Local"
-  $env:ProgramData = Join-Path $TestDrive 'ProgramData'
-  $env:USERPROFILE = Join-Path $TestDrive "Users\$script:UserName"
+  $root = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+  $env:LOCALAPPDATA = Join-Path $root "Users\$script:UserName\AppData\Local"
+  $env:ProgramData = Join-Path $root 'ProgramData'
+  $env:USERPROFILE = Join-Path $root "Users\$script:UserName"
   New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA, $env:ProgramData, $env:USERPROFILE | Out-Null
   $saved
 }
@@ -63,6 +65,8 @@ function Invoke-WslScript {
   param([Parameter(Mandatory = $true)][string]$Script, $InputObject)
   $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   $json = $(if ($null -ne $InputObject) { ConvertTo-Json -InputObject $InputObject -Compress } else { '' })
+  # Every non-ASCII character escaped, as wsl.ts's asciiJson does: a native pipe carries ASCII only.
+  $json = [regex]::Replace($json, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
   $out = $json | & $powershell -NoProfile -NonInteractive -Command $Script
   (@($out) -join "`n").Trim()
 }

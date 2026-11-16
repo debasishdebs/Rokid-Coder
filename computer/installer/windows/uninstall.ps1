@@ -29,15 +29,17 @@ if (-not (Get-Module RokidCoder)) { Import-Module (Join-Path $PSScriptRoot 'lib\
 $paths = Get-RokidPaths
 
 function Stop-Uninstall {
-  param([Parameter(Mandatory = $true)][string]$Problem)
+  param([Parameter(Mandatory = $true)][string]$Problem, [string]$Trace)
   Write-Warning $Problem
+  # Where it failed, for a bug report: the installer log keeps stderr.
+  if ($Trace) { [Console]::Error.WriteLine($Trace) }
   Write-Warning 'Nothing after that step was removed: run the uninstaller again to retry.'
   exit 1
 }
 
 # 1: in the distro of the COMMITTED binding (the one install.json names), never a failed Repair's newer one
 try { $committed = Resolve-CommittedBinding -Paths $paths }
-catch { Stop-Uninstall "$($_.Exception.Message). Without it, the uninstaller cannot tell what Rokid Coder left in that distro, so it removed nothing: restore that file, then run the uninstaller again." }
+catch { Stop-Uninstall "$($_.Exception.Message). Without it, the uninstaller cannot tell what Rokid Coder left in that distro, so it removed nothing: restore that file, then run the uninstaller again." $_.ScriptStackTrace }
 if ($committed) {
   $binding = $committed.Binding
   if (-not (@(Get-LxssDistros) | Where-Object { $_.Name -eq $binding.distroName })) {

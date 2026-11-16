@@ -69,5 +69,6 @@ try {
   throw 'Nothing to do: give -CheckSession, -ApplyMachine, -RevertMachine, -ApplyWslConfig or -Install'
 } catch {
   [Console]::Error.WriteLine($_.Exception.Message)
+  [Console]::Error.WriteLine($_.ScriptStackTrace)
   exit 1
 }
