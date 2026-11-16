@@ -31,9 +31,11 @@ class GlassesStepTest {
         var installResult: InstallResult = InstallResult.Installed
         var hold: CompletableDeferred<Unit>? = null
         var installs = 0
+        val forced = mutableListOf<Boolean>()
         val installer = object : GlassesAppInstaller {
-            override suspend fun install(apk: File, expected: GlassesApkMetadata, onProgress: (Int) -> Unit): InstallResult {
+            override suspend fun install(apk: File, expected: GlassesApkMetadata, force: Boolean, onProgress: (Int) -> Unit): InstallResult {
                 installs += 1
+                forced += force
                 onProgress(50)
                 hold?.await()
                 return installResult
@@ -251,5 +253,34 @@ class GlassesStepTest {
         val looks = calls.count { it == "installedVersion" }
         advanceTimeBy(10_000L)
         assertEquals(looks, calls.count { it == "installedVersion" })
+    }
+
+    @Test
+    fun reinstall_is_offered_only_over_an_up_to_date_app_and_forces_the_push() = runTest(UnconfinedTestDispatcher()) {
+        host.ready.value = true
+        host.installed = 10000L
+        val step = controller()
+        step.enter()
+        advanceTimeBy(2_000L)
+        runCurrent()
+        assertEquals(GlassesInstallState.UpToDate, step.view.value.install)
+        assertTrue("Reinstall glasses app" == OnboardingCopy.REINSTALL)
+
+        step.reinstallApp()
+        runCurrent()
+        assertEquals(listOf(true), host.forced)
+        assertEquals(GlassesInstallState.UpToDate, step.view.value.install)
+
+        // Not up to date: there is nothing to reinstall, and a plain install is never forced.
+        host.installed = null
+        val other = controller()
+        other.enter()
+        advanceTimeBy(2_000L)
+        runCurrent()
+        other.reinstallApp()
+        assertEquals("no reinstall of what is not there", listOf(true), host.forced)
+        other.installApp()
+        runCurrent()
+        assertEquals(listOf(true, false), host.forced)
     }
 }

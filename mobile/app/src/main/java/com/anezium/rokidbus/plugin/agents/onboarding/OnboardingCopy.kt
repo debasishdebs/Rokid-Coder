@@ -32,6 +32,7 @@ internal object OnboardingCopy {
     const val CONNECTING = "Connecting to your glasses…"
     const val CONNECT_FAILED = "Couldn't connect to your glasses."
     const val RETRY = "Retry"
+    const val REINSTALL = "Reinstall glasses app"
 
     /** What the core says when the glasses answer no to the push (CxrGlassesAppInstaller). */
     const val GLASSES_REFUSED = "The glasses did not install the app."

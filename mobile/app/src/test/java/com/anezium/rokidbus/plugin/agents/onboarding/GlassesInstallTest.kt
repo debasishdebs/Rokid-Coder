@@ -41,11 +41,13 @@ class GlassesInstallTest {
         var result: InstallResult = InstallResult.Installed
         var hold: CompletableDeferred<Unit>? = null
         val calls = mutableListOf<Pair<File, GlassesApkMetadata>>()
+        val forced = mutableListOf<Boolean>()
         var copyBytes: ByteArray? = null
         var cancels = 0
 
-        override suspend fun install(apk: File, expected: GlassesApkMetadata, onProgress: (Int) -> Unit): InstallResult {
+        override suspend fun install(apk: File, expected: GlassesApkMetadata, force: Boolean, onProgress: (Int) -> Unit): InstallResult {
             calls += apk to expected
+            forced += force
             copyBytes = apk.readBytes()
             onProgress(0)
             onProgress(50)
@@ -226,5 +228,34 @@ class GlassesInstallTest {
         assertEquals("Retry", refused.action)
         val other = OnboardingCopy.glassesApp(GlassesInstallState.Failed("Connection to the glasses was lost."))
         assertTrue(other.lines.none { "adb install" in it })
+    }
+
+    @Test
+    fun reinstall_passes_force_and_a_retry_of_it_stays_forced() = runTest {
+        val installer = FakeInstaller().apply { installed = 10000L }
+        val install = controller(installer)
+        install.refresh()
+        assertEquals(GlassesInstallState.UpToDate, install.state.value)
+
+        install.install()
+        assertEquals("an ordinary install is not forced", listOf(false), installer.forced)
+
+        installer.result = InstallResult.Failed("The glasses did not install the app.")
+        install.install(force = true)
+        assertEquals(listOf(false, true), installer.forced)
+        assertTrue(install.state.value is GlassesInstallState.Failed)
+
+        // Retry on the failure screen calls install() plain: it must still replace the same version.
+        installer.result = InstallResult.Installed
+        install.install()
+        assertEquals(listOf(false, true, true), installer.forced)
+        assertEquals(GlassesInstallState.UpToDate, install.state.value)
+
+        // A failed ordinary install does not turn its retry into a reinstall.
+        installer.result = InstallResult.Failed("x")
+        install.install()
+        installer.result = InstallResult.Installed
+        install.install()
+        assertEquals(listOf(false, true, true, false, false), installer.forced)
     }
 }

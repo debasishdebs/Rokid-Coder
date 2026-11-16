@@ -100,7 +100,14 @@ internal class GlassesStepController(
     }
 
     /** One tap starts the install, and the screen says so at once: a second tap while it runs does nothing. */
-    fun installApp() {
+    fun installApp() = startInstall(force = false)
+
+    /** Pushes the bundled app over one that is already up to date; offered only while it says so. */
+    fun reinstallApp() {
+        if (install?.state?.value == GlassesInstallState.UpToDate) startInstall(force = true)
+    }
+
+    private fun startInstall(force: Boolean) {
         val controller = install ?: return
         if (controller.state.value is GlassesInstallState.Installing) return
         watcher?.cancel()
@@ -110,7 +117,7 @@ internal class GlassesStepController(
             val shown = launch(start = CoroutineStart.UNDISPATCHED) {
                 controller.state.collect { _view.value = GlassesView(GlassesPhase.APP, install = it) }
             }
-            controller.install()
+            controller.install(force)
             shown.cancel()
             publishInstall(controller.state.value)
             watchForApp(controller)

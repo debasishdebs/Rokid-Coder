@@ -356,6 +356,8 @@ class OnboardingActivity : ComponentActivity() {
                 if (view.install.completesStep) {
                     primary(OnboardingCopy.CONTINUE) { if (glassesOnly) finish() else next(OnboardingStep.GLASSES) }
                 }
+                // A build can change without its version: this pushes the bundled app over the same version.
+                if (view.install == GlassesInstallState.UpToDate) secondary(OnboardingCopy.REINSTALL) { glasses?.reinstallApp() }
             }
         }
         if (!view.install.completesStep) {
