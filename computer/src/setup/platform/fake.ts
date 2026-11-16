@@ -316,9 +316,12 @@ function serve(options: { portFile: string; version: string; execPath: string; w
   const bundleRoot = path.resolve(options.execPath, "..", "..", "..");
   // The state exists before the port file says the daemon is up, as a real agentd's config does.
   let n = 0;
-  if (options.writes) {
-    writeFileSync(options.writes, `write ${n}\n`);
-  }
+  // Whole writes only: a reader polling the file never sees it truncated.
+  const write = (file: string) => {
+    writeFileSync(`${file}.tmp`, `write ${n}\n`);
+    renameSync(`${file}.tmp`, file);
+  };
+  if (options.writes) write(options.writes);
   const server = createServer((req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(
@@ -332,7 +335,11 @@ function serve(options: { portFile: string; version: string; execPath: string; w
     renameSync(temp, options.portFile);
   });
   if (options.writes) {
-    setInterval(() => writeFileSync(options.writes!, `write ${++n}\n`), 10);
+    const file = options.writes;
+    setInterval(() => {
+      n += 1;
+      write(file);
+    }, 10);
   }
   process.on("SIGTERM", () => process.exit(0));
 }
