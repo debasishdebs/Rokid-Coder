@@ -20,6 +20,8 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.anezium.rokidbus.plugin.agents.onboarding.ComputerChoice
+import com.anezium.rokidbus.plugin.agents.onboarding.OnboardingStore
 import com.anezium.rokidbus.plugin.agents.ui.ComputerRow
 import com.anezium.rokidbus.plugin.agents.ui.SettingsActions
 import com.anezium.rokidbus.plugin.agents.ui.SettingsScreen
@@ -165,6 +167,11 @@ class AgentsSettingsActivity : ComponentActivity() {
         onUninstall = { startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName"))) },
         onConnectors = { startActivity(Intent(this, ConnectorsActivity::class.java)) },
         onGlassesApp = { startActivity(OnboardingActivity.glassesApp(this)) },
+        onTestAlert = {
+            val provider = (OnboardingStore(this).computerChoice ?: ComputerChoice.CLAUDE_CODE).testAlertProvider
+            CoderRuntime.fromActivity(this) { AgentsRuntime.alertDirector?.raiseLocalTestAlert(provider) }
+            Toast.makeText(this, "Test alert sent to your glasses", Toast.LENGTH_SHORT).show()
+        },
         onAbout = { startActivity(Intent(this, AboutActivity::class.java)) },
     )
 
