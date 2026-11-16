@@ -18,6 +18,12 @@ import android.widget.TextView
 import android.widget.Toast
 import com.anezium.rokidbus.client.ui.BusTheme
 import com.anezium.rokidbus.client.ui.NexusUi
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
+import com.google.mlkit.common.MlKitException
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,7 +38,7 @@ import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
  * The roads to a linked computer. A phone with no computer, or with one signed out or
  * refused, opens on a guided section: run one command on the computer, open the door, watch
  * it say Paired. Below it, as equals under "Other ways": automatic on the home Wi-Fi,
- * Tailscale for everywhere else, and a pasted pairing line for whoever wants neither.
+ * Tailscale for everywhere else, and the pairing line, scanned or pasted, for whoever wants neither.
  */
 class AddComputerActivity : Activity() {
     private val configStore by lazy { AgentsConfigStore(applicationContext) }
@@ -65,6 +71,8 @@ class AddComputerActivity : Activity() {
         // A finished attempt from before is not news on a screen opened now; an open one is.
         pairing.acknowledge()
         buildUi()
+        // Only on the first creation: a rotation must not reopen a scan the user already left.
+        if (savedInstanceState == null && intent.getBooleanExtra(EXTRA_SCAN, false)) scanPairingCode()
         uiScope.launch { pairing.state.collect(::renderDoorState) }
         uiScope.launch { PairingAttempts.state.collect(::renderAttempt) }
         uiScope.launch {
@@ -298,12 +306,14 @@ class AddComputerActivity : Activity() {
     }
 
     private fun pairingCard() = NexusUi.card(this).apply {
-        addView(NexusUi.rowTitle(this@AddComputerActivity, "By hand — pairing line"), NexusUi.block())
-        addView(BusTheme.gap(this@AddComputerActivity, 6))
+        addView(NexusUi.rowTitle(this@AddComputerActivity, "QR code or pairing line"), NexusUi.block())
+        addView(BusTheme.gap(this@AddComputerActivity, 10))
+        addView(NexusUi.pillButton(this@AddComputerActivity, SCAN_QR).apply { setOnClickListener { scanPairingCode() } }, NexusUi.block())
+        addView(BusTheme.gap(this@AddComputerActivity, 10))
         addView(
             NexusUi.cardBody(
                 this@AddComputerActivity,
-                "If you would rather use neither, paste the pairing line that " +
+                "Scan the QR code the computer's setup shows, or paste the pairing line that " +
                     "“agentd pair” prints: this phone dials the computer, and both show a code to compare.",
             ),
             NexusUi.block(),
@@ -367,9 +377,41 @@ class AddComputerActivity : Activity() {
         }
     }
 
+    /**
+     * The QR code holds the same pairing line, so a scan goes the pasted line's way. Google Play
+     * services draws the camera screen and hands back only the text: this app asks for no camera.
+     */
+    private fun scanPairingCode() {
+        if (GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this) != ConnectionResult.SUCCESS) {
+            pairingSummary.text = SCAN_NEEDS_PLAY_SERVICES
+            toast(SCAN_NEEDS_PLAY_SERVICES)
+            return
+        }
+        val options = GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
+        GmsBarcodeScanning.getClient(this, options).startScan()
+            .addOnSuccessListener { barcode ->
+                if (!isFinishing && !isDestroyed) pairWithLine(barcode.rawValue.orEmpty(), "That QR code is not a Rokid Coder pairing code.")
+            }
+            .addOnFailureListener { error ->
+                if (isFinishing || isDestroyed) return@addOnFailureListener
+                val message = when ((error as? MlKitException)?.errorCode) {
+                    // Backed out, or a second tap while the scanner is already up.
+                    MlKitException.CODE_SCANNER_CANCELLED,
+                    MlKitException.CODE_SCANNER_TASK_IN_PROGRESS,
+                    -> return@addOnFailureListener
+                    MlKitException.CODE_SCANNER_UNAVAILABLE,
+                    MlKitException.CODE_SCANNER_GOOGLE_PLAY_SERVICES_VERSION_TOO_OLD,
+                    -> SCAN_NEEDS_PLAY_SERVICES
+                    else -> "Couldn't scan — paste the pairing line instead."
+                }
+                pairingSummary.text = message
+                toast(message)
+            }
+    }
+
     /** The line only says where to dial: the pairing itself is the code check that follows. */
-    private fun pairWithLine() {
-        when (val parsed = AgentdPairingParser.parse(pairingField.text.toString())) {
+    private fun pairWithLine(raw: String = pairingField.text.toString(), invalid: String = "Fix the pairing line first.") {
+        when (val parsed = AgentdPairingParser.parse(raw)) {
             is AgentdPairingParseResult.Valid -> {
                 pairingField.text.clear()
                 pairingSummary.text = "Connecting to ${parsed.target.host}:${parsed.target.port}…"
@@ -377,7 +419,7 @@ class AddComputerActivity : Activity() {
             }
             is AgentdPairingParseResult.Invalid -> {
                 pairingSummary.text = parsed.reason
-                toast("Fix the pairing line first.")
+                toast(invalid)
             }
         }
     }
@@ -401,5 +443,11 @@ class AddComputerActivity : Activity() {
     companion object {
         /** Open on the guided section even when a computer is already paired (Settings' Add your first computer). */
         const val EXTRA_GUIDED = "guided"
+
+        /** Open straight into the QR scanner (onboarding's Scan the QR code). */
+        const val EXTRA_SCAN = "scan"
+
+        const val SCAN_QR = "Scan QR code"
+        const val SCAN_NEEDS_PLAY_SERVICES = "Scanning needs Google Play services — paste the pairing line instead."
     }
 }

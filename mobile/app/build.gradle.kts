@@ -68,6 +68,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.5")
     // The app-foreground signal that starts or promotes the one service (R9′).
     implementation("androidx.lifecycle:lifecycle-process:2.8.5")
+    // The pairing QR code, read by Google Play services' own scanner UI: no CAMERA permission here.
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")

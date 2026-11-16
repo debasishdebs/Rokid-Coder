@@ -24,7 +24,10 @@ class CoderManifestTest {
             app.packageName,
             PackageManager.GET_SERVICES or PackageManager.GET_RECEIVERS or PackageManager.GET_PERMISSIONS,
         )
-        val service = info.services.orEmpty().single()
+        // The QR scanner's ML Kit and its log transport bring their own services, never exported.
+        val (scanner, ours) = info.services.orEmpty().partition { it.name.startsWith(SCANNER_PACKAGES) }
+        assertEquals(scanner.map { it.name }, scanner.filterNot { it.exported }.map { it.name })
+        val service = ours.single()
         assertEquals(CoderService::class.java.name, service.name)
         assertFalse(service.exported)
         assertEquals(
@@ -49,5 +52,11 @@ class CoderManifestTest {
         assertFalse(receiver.exported)
         assertTrue(info.receivers.orEmpty().none { it.name.endsWith("AgentsMonitorService") })
         assertTrue(app.applicationInfo.className.endsWith(".RokidCoderApp"))
+    }
+
+    private fun String.startsWith(prefixes: List<String>) = prefixes.any { startsWith(it) }
+
+    private companion object {
+        val SCANNER_PACKAGES = listOf("com.google.mlkit.", "com.google.android.datatransport.")
     }
 }
