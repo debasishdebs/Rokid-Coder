@@ -114,7 +114,7 @@ Describe 'networking' {
       $file = Join-Path $TestDrive "binding-$mode.json"
       Write-Utf8File -Path $file -Content (ConvertTo-Json -InputObject $binding)
       & $script:StartAgentd -Binding $file
-      $calls = Get-FakeWslCalls $fake
+      $calls = @(Get-FakeWslCalls $fake)
       if ($mode -eq 'nat') {
         $calls.Count | Should -Be 2
         $calls[0] | Should -BeLike '*-d Ubuntu -u zoe --exec "/home/zoe smith/.local/share/rokid-coder/1.0.0/bin/rokid-setup" advertise set --hosts 192.168.1.40 --port 8794*'
@@ -154,7 +154,8 @@ Describe 'networking' {
       $at | Should -BeGreaterThan 0 -Because "every WSL call is --exec: $($argv -join ' ')"
       $argv[$at + 1] | Should -Match '^/' -Because 'with an absolute path'
       $argv[$at + 1] | Should -Not -Match '/(ba)?sh$'
-      $argv | Should -Not -Contain '-c'
+      # Case-sensitive: tar's -C is fine, a shell's -c is not.
+      $argv -ccontains '-c' | Should -BeFalse
       ($argv -join ' ') | Should -Not -Match '~'
     }
     { Invoke-WslExec -Distro 'Ubuntu' -Path 'bin/agentd' } | Should -Throw '*absolute*'

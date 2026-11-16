@@ -91,7 +91,7 @@ Describe 'the machine plan' {
     Test-InvocationBinds -Cmdlet 'New-NetFirewallHyperVRule' -Parameters $bad | Should -Not -BeNullOrEmpty
     $bad = ($plan | Where-Object Name -eq 'RokidCoder-wss').Parameters.Clone()
     $bad['NoSuchParameter'] = 1
-    Test-InvocationBinds -Cmdlet 'New-NetFirewallHyperVRule' -Parameters $bad | Should -Match 'no -NoSuchParameter'
+    (@(Test-InvocationBinds -Cmdlet 'New-NetFirewallHyperVRule' -Parameters $bad) -join "`n") | Should -Match 'no -NoSuchParameter'
     # And every rule the plan creates is removable by the name it records.
     (Get-Command Remove-NetFirewallRule -CommandType Cmdlet, Function).Parameters.ContainsKey('Name') | Should -BeTrue
     (Get-Command Remove-NetFirewallHyperVRule -CommandType Cmdlet, Function).Parameters.ContainsKey('Name') | Should -BeTrue

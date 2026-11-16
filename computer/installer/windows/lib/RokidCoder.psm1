@@ -272,7 +272,8 @@ function Set-WslConfigValue {
   }
   Write-Utf8File -Path $Path -Content (($lines -join "`r`n") + "`r`n")
   $log = @()
-  if (Test-Path -LiteralPath $LogPath) { $log = @(Get-Content -LiteralPath $LogPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+  # ForEach-Object unrolls the entries: Windows PowerShell's ConvertFrom-Json writes a JSON array as one object.
+  if (Test-Path -LiteralPath $LogPath) { $log = @(Get-Content -LiteralPath $LogPath -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ }) }
   if (-not ($log | Where-Object { $_.section -ieq $Section -and $_.key -ieq $Key })) {
     $log += [pscustomobject]@{ section = $Section; key = $Key; value = $Value; previous = $previous }
   }
@@ -304,7 +305,7 @@ function Restore-WslConfigChange {
     [Parameter(Mandatory = $true)][scriptblock]$Ask
   )
   if (-not (Test-Path -LiteralPath $LogPath)) { return 'unchanged' }
-  $change = @(Get-Content -LiteralPath $LogPath -Raw -Encoding UTF8 | ConvertFrom-Json) | Where-Object { $_.key -ieq 'networkingMode' } | Select-Object -First 1
+  $change = @(Get-Content -LiteralPath $LogPath -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ }) | Where-Object { $_.key -ieq 'networkingMode' } | Select-Object -First 1
   if (-not $change) { return 'unchanged' }
   if ((Get-WslConfigValue -Path $Path -Section $change.section -Key 'networkingMode') -ne $change.value) { return 'not-ours' }
   $answer = & $Ask 'Keep mirrored networking? [Y/n]'
@@ -859,7 +860,7 @@ function Invoke-Preflight {
   if (-not $distro) {
     $names = ($distros | ForEach-Object { $_.Name }) -join ', '
     $items.Add((New-PreflightItem 'wsl_distro' $false $(if ($names) { "Choose a distro: $names" } else { 'No WSL distro' }) 'Run: wsl --install -d Ubuntu-24.04, or choose one'))
-    return [pscustomobject]@{ mode = $Mode; distro = $null; items = @($items) }
+    return [pscustomobject]@{ mode = $Mode; distro = $null; items = $items.ToArray() }
   }
   $items.Add((New-PreflightItem 'wsl_distro' ($distro.Version -eq 2) "$($distro.Name) (WSL $($distro.Version))" "Convert it: wsl --set-version $($distro.Name) 2"))
   $facts = Get-DistroFacts -Distro $distro.Name
@@ -896,7 +897,7 @@ function Invoke-Preflight {
   $hostFree = Get-FreeSpaceMB -Path $env:LOCALAPPDATA
   $diskOk = $hostFree -ge $Requirements.minFreeMB -and $null -ne $facts.FreeMB -and $facts.FreeMB -ge $Requirements.minFreeMB
   $items.Add((New-PreflightItem 'disk_space' $diskOk "$hostFree MB free on Windows, $($facts.FreeMB) MB in $($facts.Home)" "Free $($Requirements.minFreeMB) MB on both"))
-  [pscustomobject]@{ mode = $Mode; distro = $distro.Name; items = @($items) }
+  [pscustomobject]@{ mode = $Mode; distro = $distro.Name; items = $items.ToArray() }
 }
 
 function Test-PreflightPassed {

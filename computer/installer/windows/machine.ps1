@@ -35,5 +35,6 @@ try {
   exit 0
 } catch {
   [Console]::Error.WriteLine($_.Exception.Message)
+  [Console]::Error.WriteLine($_.ScriptStackTrace)
   exit 1
 }
