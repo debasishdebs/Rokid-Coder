@@ -103,6 +103,8 @@ internal fun linkLine(state: ProviderConnectionState, sessions: List<AgentSessio
         if (needsYou > 0) add(if (needsYou == 1) "1 NEEDS YOU" else "$needsYou NEED YOU")
         add("$running RUNNING")
         add("$idle IDLE")
+        val subagents = own.sumOf { it.subagents?.running ?: 0 }
+        if (subagents > 0) add(if (subagents == 1) "1 SUBAGENT" else "$subagents SUBAGENTS")
     }
     return LinkLine("WATCHING · ${parts.joinToString(" · ")}", if (needsYou > 0) LinkTone.WARN else LinkTone.OK)
 }

@@ -361,4 +361,39 @@ class BoardModelTest {
         assertEquals("a", BoardModel.step(keys, BoardModel.QUIET_KEY, +1))
         assertEquals(BoardModel.START_KEY, BoardModel.step(keys, BoardModel.PAIR_KEY, +1))
     }
+
+    @Test
+    fun subagents_line_says_how_many_and_for_how_long() {
+        val start = 1_000_000L
+        assertEquals("1 subagent running · 0:45", BoardModel.subagentsLine(Subagents(1, start), start + 45_000L))
+        assertEquals("2 subagents running · 3:12", BoardModel.subagentsLine(Subagents(2, start), start + 192_000L))
+        assertEquals("3 subagents running", BoardModel.subagentsLine(Subagents(3, null), start))
+    }
+
+    @Test
+    fun elapsed_runs_m_ss_then_h_mm_ss() {
+        assertEquals("0:00", BoardModel.elapsed(0))
+        assertEquals("0:59", BoardModel.elapsed(59_999))
+        assertEquals("1:00", BoardModel.elapsed(60_000))
+        assertEquals("59:59", BoardModel.elapsed(3_599_000))
+        assertEquals("1:00:00", BoardModel.elapsed(3_600_000))
+        assertEquals("2:05:09", BoardModel.elapsed(7_509_000))
+        assertEquals("a start time ahead of this clock is 0:00", "0:00", BoardModel.elapsed(-5_000))
+    }
+
+    @Test
+    fun a_board_row_shows_the_subagents_and_loses_them_when_the_field_goes() {
+        val now = 500_000L
+        val running = session().copy(subagents = Subagents(2, now - 192_000L))
+        assertEquals("2 subagents running · 3:12 · src/auth/login.ts · running tests", BoardModel.row(running, false, now).sub)
+        assertTrue(BoardModel.showsAge(running))
+
+        val gone = running.copy(subagents = null)
+        assertEquals("src/auth/login.ts · running tests", BoardModel.row(gone, false, now).sub)
+        assertFalse(BoardModel.showsAge(gone))
+
+        // A session that said nothing else still gets the line alone.
+        val bare = session(v2 = null).copy(subagents = Subagents(1, now - 45_000L))
+        assertEquals("1 subagent running · 0:45", BoardModel.row(bare, false, now).sub)
+    }
 }

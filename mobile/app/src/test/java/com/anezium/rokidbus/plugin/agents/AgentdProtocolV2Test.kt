@@ -690,4 +690,47 @@ class AgentdProtocolV2Test {
     private companion object {
         const val MSG_ID = "fx-msg-test"
     }
+
+    private fun upsertWith(subagents: Any?): AgentSession {
+        val frame = JSONObject(fixture("session_upsert").toString())
+        if (subagents != null) frame.getJSONObject("session").put("subagents", subagents)
+        return (parse(syncedCodec(), frame) as AgentdAction.Upsert).session
+    }
+
+    @Test
+    fun subagents_parse_when_present_and_are_absent_otherwise() {
+        assertNull(upsertWith(null).subagents)
+        assertEquals(
+            Subagents(running = 2, since = 1_700_000_000_000L),
+            upsertWith(JSONObject("""{"running":2,"since":1700000000000}""")).subagents,
+        )
+        // Subagents never disturb the rest of the session.
+        assertEquals("fx-codex", upsertWith(JSONObject("""{"running":1,"since":5}""")).id)
+    }
+
+    @Test
+    fun invalid_subagents_are_dropped_not_guessed_at() {
+        for (bad in listOf<Any>(
+            JSONObject("""{"running":0,"since":5}"""),
+            JSONObject("""{"running":-3,"since":5}"""),
+            JSONObject("""{"running":"2","since":5}"""),
+            JSONObject("""{"since":5}"""),
+            "two",
+            3,
+        )) {
+            assertNull("$bad", upsertWith(bad).subagents)
+        }
+        // A bad time keeps the count: the line then has no clock.
+        assertEquals(Subagents(3, null), upsertWith(JSONObject("""{"running":3,"since":"soon"}""")).subagents)
+        assertEquals(Subagents(3, null), upsertWith(JSONObject("""{"running":3,"since":-1}""")).subagents)
+    }
+
+    @Test
+    fun a_snapshot_session_carries_subagents_too() {
+        val frame = JSONObject(fixture("snapshot").toString())
+        frame.getJSONArray("sessions").getJSONObject(0).put("subagents", JSONObject("""{"running":4,"since":9}"""))
+        val snapshot = parse(AgentdProtocolCodec(), frame) as AgentdAction.Snapshot
+        assertEquals(Subagents(4, 9L), snapshot.sessions[0].subagents)
+        assertTrue(snapshot.sessions.drop(1).all { it.subagents == null })
+    }
 }

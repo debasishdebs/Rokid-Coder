@@ -68,7 +68,10 @@ object BoardModel {
                 AgentProvider.CODEX -> "CODEX"
             }.take(BADGE_CHARS),
             trail = trail,
-            sub = (fileAndStep ?: fallbackSub)?.singleLine(SUB_CHARS)?.takeIf(String::isNotBlank),
+            sub = listOfNotNull(session.subagents?.let { subagentsLine(it, now) }, fileAndStep ?: fallbackSub)
+                .joinToString(FILE_STEP_SEPARATOR)
+                .singleLine(SUB_CHARS)
+                .takeIf(String::isNotBlank),
             // Approve-all is a standing permission, so it is loud whatever the session is doing.
             tone = if (approveAll) {
                 NexusRowTone.ALERT
@@ -106,7 +109,25 @@ object BoardModel {
     }
 
     /** True when the row shows an age, which only a clock can keep fresh. */
-    fun showsAge(session: AgentSession): Boolean = session.v2 == null && session.lastActivityAt != null
+    fun showsAge(session: AgentSession): Boolean =
+        session.subagents != null || session.v2 == null && session.lastActivityAt != null
+
+    /** "2 subagents running · 3:12": the clock runs on this phone from [Subagents.since]. */
+    fun subagentsLine(subagents: Subagents, now: Long): String {
+        val label = if (subagents.running == 1) "1 subagent running" else "${subagents.running} subagents running"
+        return subagents.since?.let { "$label · ${elapsed(now - it)}" } ?: label
+    }
+
+    /** `m:ss`, and `h:mm:ss` from the first hour; a start time ahead of this clock reads 0:00. */
+    fun elapsed(ms: Long): String {
+        val seconds = ms.coerceAtLeast(0L) / 1000L
+        val hours = seconds / 3600L
+        val minutes = seconds % 3600L / 60L
+        val rest = seconds % 60L
+        val mm = if (hours > 0) minutes.toString().padStart(2, '0') else minutes.toString()
+        val ss = rest.toString().padStart(2, '0')
+        return if (hours > 0) "$hours:$mm:$ss" else "$mm:$ss"
+    }
 
     /** Virtual board row: the quiet toggle, first on the board. */
     const val QUIET_KEY = "!quiet"
