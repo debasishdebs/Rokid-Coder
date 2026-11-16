@@ -161,6 +161,22 @@ class GlassesAppInstallerTest {
         assertTrue(workDirectory.listFiles().orEmpty().isEmpty())
     }
 
+    @Test
+    fun push_names_the_file_like_upstream_and_reports_a_dropped_link() {
+        val apk = signedApk()
+        val expected = metadata(apk)
+
+        val first = installAsync(apk, expected)
+        answer(0, "query", false)
+        val upload = awaitCall(1, "upload")
+        assertEquals("upload:${File(workDirectory, "glasses-app-${expected.versionCode}.apk").absolutePath}", cxr.appCalls[1])
+        linkUp = false
+        upload.onInstallAppResult(false)
+        val dropped = await(first) as InstallResult.Failed
+        assertTrue(dropped.reason, dropped.reason.startsWith("The glasses did not install the app and the connection dropped"))
+        linkUp = true
+    }
+
     // ---- installer_cancel_stops_push ----
 
     @Test

@@ -6,7 +6,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.UUID
 
 /** Installs the glasses app over CXR. The APK is verified on every call, before anything is pushed. */
 interface GlassesAppInstaller {
@@ -70,7 +69,10 @@ internal class CxrGlassesAppInstaller(
         val op = slot.acquire(GlassesAppSlot.Kind.INSTALL)
         val attempt = Attempt().also { current = it }
         try {
-            val copy = File(workDirectory(), "${UUID.randomUUID()}.apk")
+            // CXR hands the file's name to Hi Rokid's installer on the glasses. Upstream always sent
+            // `nexus-glasses-<version>.apk`; a random UUID name is the one input of this push that
+            // upstream never produced. The slot holds one install at a time, so a fixed name is safe.
+            val copy = File(workDirectory(), "glasses-app-${expected.versionCode}.apk")
             op.onComplete { copy.delete() }
             val copied = withContext(io) {
                 runCatching {
@@ -109,6 +111,9 @@ internal class CxrGlassesAppInstaller(
                 is GlassesAppSlot.DispatchResult.Answered -> if (pushed.value) {
                     onProgress(100)
                     InstallResult.Installed
+                } else if (!linkUp()) {
+                    // CXR answers only true or false; a link that is gone by then is the best hint it gives.
+                    InstallResult.Failed(REFUSED_LINK_DROPPED)
                 } else {
                     InstallResult.Failed(REFUSED)
                 }
@@ -156,6 +161,7 @@ internal class CxrGlassesAppInstaller(
         const val WIFI_OFF = "Turn on Wi-Fi first — the update travels to the glasses over Wi-Fi."
         const val NOT_CONNECTED = "Glasses aren't connected — reconnect them first, then retry."
         const val REFUSED = "The glasses did not install the app."
+        const val REFUSED_LINK_DROPPED = "The glasses did not install the app and the connection dropped during the upload. Keep the glasses close to the phone and retry."
         const val LINK_LOST = "Connection to the glasses was lost."
         const val NOT_SENT = "Could not send the glasses APK over CXR."
     }
