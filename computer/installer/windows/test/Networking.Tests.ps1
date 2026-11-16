@@ -32,9 +32,11 @@ Describe 'networking' {
   }
 
   It 'effective_mode_verified_after_shutdown_and_nat_detected' {
-    $script:calls = New-Object System.Collections.Generic.List[string]
+    # A mock body's $script: is the scope of whichever script runs it (machine.ps1, user-setup.ps1,
+    # uninstall.ps1), not this file's: what the mocks and the test share is global.
+    $global:RokidTestCalls = New-Object System.Collections.Generic.List[string]
     $native = {
-      $script:calls.Add(($ArgumentList -join ' '))
+      $global:RokidTestCalls.Add(($ArgumentList -join ' '))
       if ($ArgumentList -contains '/usr/bin/wslinfo') { return [pscustomobject]@{ ExitCode = 0; Output = @('nat') } }
       [pscustomobject]@{ ExitCode = 0; Output = @() }
     }
@@ -45,10 +47,10 @@ Describe 'networking' {
     Mock -ModuleName RokidCoder Invoke-Native $native
     & $script:UserSetup -ApplyWslConfig -Mode mirrored -Distro Ubuntu | Out-Null
     $LASTEXITCODE | Should -Be 3 -Because 'mirrored was set, but WSL fell back to NAT'
-    $shutdown = $script:calls.IndexOf('--shutdown')
+    $shutdown = $global:RokidTestCalls.IndexOf('--shutdown')
     $shutdown | Should -BeGreaterOrEqual 0
-    $check = @($script:calls) | Where-Object { $_ -like '*/usr/bin/wslinfo --networking-mode' } | Select-Object -First 1
-    $script:calls.IndexOf($check) | Should -BeGreaterThan $shutdown -Because 'the effective mode is read after the restart'
+    $check = @($global:RokidTestCalls) | Where-Object { $_ -like '*/usr/bin/wslinfo --networking-mode' } | Select-Object -First 1
+    $global:RokidTestCalls.IndexOf($check) | Should -BeGreaterThan $shutdown -Because 'the effective mode is read after the restart'
 
     # Without wslinfo: mirrored only when the distro's IPv4s are the host's.
     Mock -ModuleName RokidCoder Get-HostIPv4 { @('192.168.1.40') }

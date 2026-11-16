@@ -2,39 +2,41 @@ BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   $script:Uninstall = Join-Path $script:WindowsDir 'uninstall.ps1'
 
+  # A mock body's $script: is the scope of whichever script runs it (machine.ps1, user-setup.ps1,
+  # uninstall.ps1), not this file's: what the mocks and the test share is global.
   # install.json per distro (what `cat ~/.rokid-coder/install.json` prints), and the registered task's -Binding.
-  $script:manifests = @{}
-  $script:taskBinding = $null
-  # $script:unreadable: distros whose install.json is there but cat cannot read it; $script:wslBroken: wsl.exe runs nothing.
-  $script:unreadable = @{}; $script:unsearchable = @{}
-  $script:wslBroken = $false
+  $global:RokidTestManifests = @{}
+  $global:RokidTestTaskBinding = $null
+  # $global:RokidTestUnreadable: distros whose install.json is there but cat cannot read it; $global:RokidTestWslBroken: wsl.exe runs nothing.
+  $global:RokidTestUnreadable = @{}; $global:RokidTestUnsearchable = @{}
+  $global:RokidTestWslBroken = $false
   $script:fakeWsl = {
-    if ($script:wslBroken) { return [pscustomobject]@{ ExitCode = 1; Output = @() } }
+    if ($global:RokidTestWslBroken) { return [pscustomobject]@{ ExitCode = 1; Output = @() } }
     if ($Path -eq '/usr/bin/true') { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
     if ($Path -eq '/usr/bin/test' -and $Arguments[0] -eq '-x') {
-      return [pscustomobject]@{ ExitCode = $(if ($script:unsearchable[$Distro]) { 1 } else { 0 }); Output = @() }
+      return [pscustomobject]@{ ExitCode = $(if ($global:RokidTestUnsearchable[$Distro]) { 1 } else { 0 }); Output = @() }
     }
     if ($Path -eq '/usr/bin/test' -and $Arguments[0] -eq '-e') {
-      return [pscustomobject]@{ ExitCode = $(if ($script:manifests[$Distro] -or $script:unreadable[$Distro]) { 0 } else { 1 }); Output = @() }
+      return [pscustomobject]@{ ExitCode = $(if ($global:RokidTestManifests[$Distro] -or $global:RokidTestUnreadable[$Distro]) { 0 } else { 1 }); Output = @() }
     }
     if ($Path -eq '/usr/bin/cat') {
-      $manifest = $script:manifests[$Distro]
-      if ($manifest -and -not $script:unreadable[$Distro]) { return [pscustomobject]@{ ExitCode = 0; Output = @($manifest) } }
+      $manifest = $global:RokidTestManifests[$Distro]
+      if ($manifest -and -not $global:RokidTestUnreadable[$Distro]) { return [pscustomobject]@{ ExitCode = 0; Output = @($manifest) } }
       return [pscustomobject]@{ ExitCode = 1; Output = @() }
     }
-    $script:wsl.Add("$Distro|$User|$Path|$($Arguments -join ' ')")
-    [pscustomobject]@{ ExitCode = $script:setupExit; Output = @('Rokid Coder was removed. Your pairings and settings were kept') }
+    $global:RokidTestWsl.Add("$Distro|$User|$Path|$($Arguments -join ' ')")
+    [pscustomobject]@{ ExitCode = $global:RokidTestSetupExit; Output = @('Rokid Coder was removed. Your pairings and settings were kept') }
   }
   $script:fakeTask = {
-    if (-not $script:taskBinding) { return $null }
-    [pscustomobject]@{ TaskPath = '\RokidCoder\'; TaskName = 'agentd'; Actions = @([pscustomobject]@{ Execute = 'C:\Windows\System32\conhost.exe'; Arguments = "--headless `"powershell.exe`" -File `"C:\x\start-agentd.ps1`" -Binding `"$script:taskBinding`"" }) }
+    if (-not $global:RokidTestTaskBinding) { return $null }
+    [pscustomobject]@{ TaskPath = '\RokidCoder\'; TaskName = 'agentd'; Actions = @([pscustomobject]@{ Execute = 'C:\Windows\System32\conhost.exe'; Arguments = "--headless `"powershell.exe`" -File `"C:\x\start-agentd.ps1`" -Binding `"$global:RokidTestTaskBinding`"" }) }
   }
 
   function Set-Committed {
     <# What a committed install leaves: install.json naming the binding, and the task running it. #>
     param([Parameter(Mandatory = $true)]$Staged, [string]$Distro = 'Ubuntu', [switch]$NoTask)
-    $script:manifests[$Distro] = ConvertTo-Json -Compress -Depth 5 -InputObject @{ schema = 1; binding = @{ bindingPath = @{ win = $Staged.Binding; linux = '/mnt/c/x' } } }
-    if (-not $NoTask) { $script:taskBinding = $Staged.Binding }
+    $global:RokidTestManifests[$Distro] = ConvertTo-Json -Compress -Depth 5 -InputObject @{ schema = 1; binding = @{ bindingPath = @{ win = $Staged.Binding; linux = '/mnt/c/x' } } }
+    if (-not $NoTask) { $global:RokidTestTaskBinding = $Staged.Binding }
   }
 
   function New-InstalledLayout {
@@ -52,12 +54,12 @@ BeforeAll {
 Describe 'uninstall' {
   BeforeEach {
     $script:saved = Use-TestProfile
-    $script:wsl = New-Object System.Collections.Generic.List[string]
-    $script:setupExit = 0
-    $script:manifests = @{}
-    $script:unreadable = @{}; $script:unsearchable = @{}
-    $script:wslBroken = $false
-    $script:taskBinding = $null
+    $global:RokidTestWsl = New-Object System.Collections.Generic.List[string]
+    $global:RokidTestSetupExit = 0
+    $global:RokidTestManifests = @{}
+    $global:RokidTestUnreadable = @{}; $global:RokidTestUnsearchable = @{}
+    $global:RokidTestWslBroken = $false
+    $global:RokidTestTaskBinding = $null
     Mock Invoke-WslExec $script:fakeWsl
     Mock -ModuleName RokidCoder Invoke-WslExec $script:fakeWsl
     Mock -ModuleName RokidCoder Get-ScheduledTask $script:fakeTask
@@ -75,7 +77,7 @@ Describe 'uninstall' {
     & $script:Uninstall
     $LASTEXITCODE | Should -Be 0
     # 1: rokid-setup removes agentd, the plugins, wrappers, PATH block and bundles, and keeps state.
-    $script:wsl | Should -Be @('Ubuntu|zoe|/home/zoe smith/.rokid-coder/bin/rokid-setup|uninstall')
+    $global:RokidTestWsl | Should -Be @('Ubuntu|zoe|/home/zoe smith/.rokid-coder/bin/rokid-setup|uninstall')
     # 2, 3: the task, then every recorded rule and the proxy, elevated.
     Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskPath -eq '\RokidCoder\' -and $TaskName -eq 'agentd' }
     Should -Invoke Invoke-MachineHelper -Times 1 -Exactly -ParameterFilter { $Action -eq 'Revert' -and $All }
@@ -85,9 +87,9 @@ Describe 'uninstall' {
     Test-Path -LiteralPath $paths.Journal | Should -BeFalse
     # Purge is passed through, confirmed for rokid-setup.
     New-InstalledLayout | Out-Null
-    $script:wsl.Clear()
+    $global:RokidTestWsl.Clear()
     & $script:Uninstall -Purge
-    $script:wsl | Should -Be @('Ubuntu|zoe|/home/zoe smith/.rokid-coder/bin/rokid-setup|uninstall --purge --yes')
+    $global:RokidTestWsl | Should -Be @('Ubuntu|zoe|/home/zoe smith/.rokid-coder/bin/rokid-setup|uninstall --purge --yes')
   }
 
   It 'uninstall_resolves_the_committed_binding_not_the_newest_staged' {
@@ -103,18 +105,18 @@ Describe 'uninstall' {
     Set-Committed $committed
     (Resolve-CommittedBinding).Path | Should -Be $committed.Binding
     # No task at all: still the binding install.json names.
-    $script:taskBinding = $null
+    $global:RokidTestTaskBinding = $null
     (Resolve-CommittedBinding).Path | Should -Be $committed.Binding
     # Nothing committed anywhere: no binding, so nothing in WSL is run.
-    $script:manifests = @{}
+    $global:RokidTestManifests = @{}
     Resolve-CommittedBinding | Should -BeNullOrEmpty
     # The task was left naming the failed Repair's binding (its recovery could not re-create it): install.json decides.
     Set-Committed $committed
-    $script:taskBinding = $failed.Binding
+    $global:RokidTestTaskBinding = $failed.Binding
     (Resolve-CommittedBinding).Path | Should -Be $committed.Binding
     & $script:Uninstall
     $LASTEXITCODE | Should -Be 0
-    $script:wsl | Should -Be $expected -Because 'rokid-setup uninstall ran in the committed distro, as its user'
+    $global:RokidTestWsl | Should -Be $expected -Because 'rokid-setup uninstall ran in the committed distro, as its user'
   }
 
   It 'failed_cleanup_keeps_everything_for_a_retry' {
@@ -126,21 +128,21 @@ Describe 'uninstall' {
       @((Read-MachineState -StatePath $paths.MachineState).objects).Count | Should -Be 1 -Because 'the machine record stays'
     }
     # rokid-setup uninstall fails in the distro: nothing else is touched, not even the task.
-    $script:setupExit = 1
+    $global:RokidTestSetupExit = 1
     & $script:Uninstall 3>$null
     $LASTEXITCODE | Should -Be 1
     & $kept
     Should -Invoke Unregister-ScheduledTask -Times 0 -Exactly
     Should -Invoke Invoke-MachineHelper -Times 0 -Exactly
     # Then elevation is refused: the task is gone, but the record, bindings and journal stay.
-    $script:setupExit = 0
+    $global:RokidTestSetupExit = 0
     Mock Invoke-MachineHelper { throw 'The operation was canceled by the user.' }
     & $script:Uninstall 3>$null
     $LASTEXITCODE | Should -Be 1
     & $kept
     Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly
     # And the retry finishes the job.
-    $script:taskBinding = $null
+    $global:RokidTestTaskBinding = $null
     Mock Invoke-MachineHelper { 0 }
     & $script:Uninstall
     $LASTEXITCODE | Should -Be 0
@@ -148,31 +150,31 @@ Describe 'uninstall' {
     Test-Path -LiteralPath $paths.Journal | Should -BeFalse
     # A committed distro that was unregistered since has nothing left to remove: not a failure.
     New-InstalledLayout | Out-Null
-    $script:wsl.Clear()
+    $global:RokidTestWsl.Clear()
     Mock Get-LxssDistros { @([pscustomobject]@{ Guid = '{x}'; Name = 'Ubuntu-24.04'; Version = 2; Default = $true }) }
     & $script:Uninstall
     $LASTEXITCODE | Should -Be 0
-    $script:wsl | Should -BeNullOrEmpty
+    $global:RokidTestWsl | Should -BeNullOrEmpty
   }
 
   It 'unreadable_or_corrupt_manifest_stops_uninstall_while_the_distro_exists' {
     $paths = New-InstalledLayout
-    $good = $script:manifests['Ubuntu']
+    $good = $global:RokidTestManifests['Ubuntu']
     $untouched = {
-      $script:wsl | Should -BeNullOrEmpty -Because 'rokid-setup uninstall did not run'
+      $global:RokidTestWsl | Should -BeNullOrEmpty -Because 'rokid-setup uninstall did not run'
       Should -Invoke Unregister-ScheduledTask -Times 0 -Exactly
       Should -Invoke Invoke-MachineHelper -Times 0 -Exactly
       @(Get-ChildItem -LiteralPath $paths.DataRoot -Filter 'binding-*.json').Count | Should -Be 1 -Because 'the binding stays for a retry'
       Test-Path -LiteralPath $paths.Journal | Should -BeTrue
     }
     $cases = @(
-      @{ Why = 'corrupt'; Set = { $script:manifests['Ubuntu'] = '{"schema":1,"binding":' }; Says = '*install.json*Ubuntu*not valid JSON*' }
-      @{ Why = 'unreadable'; Set = { $script:unreadable['Ubuntu'] = $true }; Says = '*install.json*Ubuntu*could not be read*' }
-      @{ Why = 'wsl.exe runs nothing'; Set = { $script:wslBroken = $true }; Says = '*install.json*Ubuntu*could not be read*' }
-      @{ Why = 'a directory on the way cannot be searched'; Set = { $script:manifests['Ubuntu'] = $null; $script:unsearchable['Ubuntu'] = $true }; Says = '*install.json*Ubuntu*cannot be searched*' }
+      @{ Why = 'corrupt'; Set = { $global:RokidTestManifests['Ubuntu'] = '{"schema":1,"binding":' }; Says = '*install.json*Ubuntu*not valid JSON*' }
+      @{ Why = 'unreadable'; Set = { $global:RokidTestUnreadable['Ubuntu'] = $true }; Says = '*install.json*Ubuntu*could not be read*' }
+      @{ Why = 'wsl.exe runs nothing'; Set = { $global:RokidTestWslBroken = $true }; Says = '*install.json*Ubuntu*could not be read*' }
+      @{ Why = 'a directory on the way cannot be searched'; Set = { $global:RokidTestManifests['Ubuntu'] = $null; $global:RokidTestUnsearchable['Ubuntu'] = $true }; Says = '*install.json*Ubuntu*cannot be searched*' }
     )
     foreach ($case in $cases) {
-      $script:manifests['Ubuntu'] = $good; $script:unreadable = @{}; $script:unsearchable = @{}; $script:wslBroken = $false
+      $global:RokidTestManifests['Ubuntu'] = $good; $global:RokidTestUnreadable = @{}; $global:RokidTestUnsearchable = @{}; $global:RokidTestWslBroken = $false
       & $case.Set
       { Resolve-CommittedBinding } | Should -Throw $case.Says -Because $case.Why
       $warnings = @(& $script:Uninstall 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message })
@@ -182,11 +184,11 @@ Describe 'uninstall' {
       & $untouched
     }
     # Absent from a registered distro is no committed install; an unregistered distro is never asked.
-    $script:manifests = @{}; $script:unreadable = @{}; $script:wslBroken = $false
+    $global:RokidTestManifests = @{}; $global:RokidTestUnreadable = @{}; $global:RokidTestWslBroken = $false
     Resolve-CommittedBinding | Should -BeNullOrEmpty
     # (Were it asked, the broken wsl.exe would make that an error.)
     Mock -ModuleName RokidCoder Get-LxssDistros { @() }
-    $script:wslBroken = $true
+    $global:RokidTestWslBroken = $true
     Resolve-CommittedBinding | Should -BeNullOrEmpty
   }
 

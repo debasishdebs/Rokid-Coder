@@ -98,8 +98,10 @@ Describe 'the machine plan' {
   }
 
   It 'elevated_helper_changes_only_machine_scope' {
-    $script:native = New-Object System.Collections.Generic.List[string]
-    Mock -ModuleName RokidCoder Invoke-Native { $script:native.Add("$FilePath $($ArgumentList -join ' ')"); [pscustomobject]@{ ExitCode = 0; Output = @() } }
+    # A mock body's $script: is the scope of whichever script runs it (machine.ps1, user-setup.ps1,
+    # uninstall.ps1), not this file's: what the mocks and the test share is global.
+    $global:RokidTestNative = New-Object System.Collections.Generic.List[string]
+    Mock -ModuleName RokidCoder Invoke-Native { $global:RokidTestNative.Add("$FilePath $($ArgumentList -join ' ')"); [pscustomobject]@{ ExitCode = 0; Output = @() } }
     Mock -ModuleName RokidCoder Get-NetFirewallRule { $null }
     Mock -ModuleName RokidCoder Get-NetFirewallHyperVRule { $null }
     Mock -ModuleName RokidCoder New-NetFirewallRule { [pscustomobject]@{ Name = $Name } }
@@ -119,7 +121,7 @@ Describe 'the machine plan' {
     }
     $after = @(Get-ChildItem -LiteralPath $TestDrive -Recurse -File | ForEach-Object { $_.FullName })
     @($after | Where-Object { $before -notcontains $_ }) | Should -Be @($state) -Because 'the only file it writes is the machine-wide record'
-    @($script:native | Where-Object { $_ -notlike '*\netsh.exe *' }) | Should -BeNullOrEmpty -Because 'no wsl.exe, schtasks.exe or anything but netsh'
+    @($global:RokidTestNative | Where-Object { $_ -notlike '*\netsh.exe *' }) | Should -BeNullOrEmpty -Because 'no wsl.exe, schtasks.exe or anything but netsh'
     $recorded = (Read-MachineState -StatePath $state).objects
     @($recorded.name) | Should -Be @('RokidCoder-wss', 'RokidCoder-discovery', 'RokidCoder-wss-host', 'RokidCoder-discovery-host', 'v4tov4 0.0.0.0:8794', 'RokidCoder-proxy')
     { Invoke-MachineApply -Mode nat -StatePath (Join-Path $env:USERPROFILE 'state.json') -RunId 'x' } | Should -Throw '*ProgramData*'
