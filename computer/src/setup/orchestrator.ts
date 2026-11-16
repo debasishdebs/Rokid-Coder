@@ -256,6 +256,8 @@ export async function runRestore(ctx: SetupContext, plan: RestorePlan): Promise<
     const replacement = plan.stop;
     stopped = await attempt("stopping the new agentd", async () => {
       await ctx.platform.stopCurrent(replacement);
+      // Without an earlier install to start again, nothing may bring the new one back at the next login.
+      if (!(plan.start && "manifest" in plan.start)) await ctx.platform.removeAutostart(replacement);
       await waitForPortsFree(ctx, plan.ports);
     });
   }
