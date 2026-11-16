@@ -79,8 +79,8 @@ export interface LauncherHubOptions {
   armPairing?: () => void;
   /**
    * The pairing IPC for every computer-side client (`agentd pair`, `rk`'s
-   * prompt, the installer): `pair_open` subscribes to `pair_status`, and
-   * `pair_confirm` is the computer-side half of the SAS confirmation. Any
+   * prompt, the installer): `pair_open` subscribes to `pair_status` and opens the window, `pair_watch`
+   * only subscribes, and `pair_confirm` is the computer-side half of the SAS confirmation. Any
    * same-user process can send it, so it never pins on its own.
    */
   pairing?: PairingIpc;
@@ -574,6 +574,9 @@ export class LauncherHub {
       if (frame.type === "pins_change") {
         return this.onPinsChange(connection, frame);
       }
+      if (frame.type === "pair_watch") {
+        return this.onPairWatch(connection, frame);
+      }
       if (frame.type === "pair_confirm") {
         if (!hasShape(frame, ["type", "attempt", "ok"]) || !this.options.pairing) {
           return "bad_frame";
@@ -943,6 +946,20 @@ export class LauncherHub {
     this.write(connection, reply);
     connection.socket.end();
     this.onClose(connection);
+    return undefined;
+  }
+
+  /**
+   * A client that only listens: every `pair_status` from now on, the current one first, and no window
+   * opened. Setup's prompt uses it, so a code from an attempt somebody else started is not missed.
+   */
+  private onPairWatch(connection: Connection, frame: Frame): string | undefined {
+    const pairing = this.options.pairing;
+    if (!hasShape(frame, ["type"]) || !pairing) {
+      return "bad_frame";
+    }
+    clearTimeout(connection.helloTimer);
+    connection.pairingWatch ??= pairing.watch((status) => this.write(connection, { type: "pair_status", ...status }));
     return undefined;
   }
 

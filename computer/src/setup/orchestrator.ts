@@ -21,7 +21,8 @@ import {
   writeManifest,
   writePrivateFile,
 } from "./manifest";
-import { pairStep } from "./pair-step";
+import { watchPairStatus } from "../pairing/terminal-client";
+import { type WatchPairing, pairStep } from "./pair-step";
 import { AUTOSTART, type PlatformHooks, type RetiredRecord } from "./platform/index";
 import { createDriver, restorePlugin, syncPlugin } from "./plugins";
 import { profileFiles, readBlock, renderBlock, writeBlock } from "./profile-path";
@@ -65,6 +66,8 @@ export interface SetupContext {
   /** agentd's /health on loopback, or undefined when nothing answers. */
   health(): Promise<Health | undefined>;
   runPair(bundleDir: string): Promise<number>;
+  /** Listens to agentd's pairing status while the pairing prompt waits; a test's own, or the launcher socket. */
+  watchPairing?: WatchPairing;
   now(): Date;
   /** How long to wait for the ports to free and for the new agentd to prove its identity (20 s). */
   timeoutMs: number;
@@ -652,7 +655,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
     ctx.io.write("Your phone is already paired.\n");
   } else {
     ctx.io.note("awaiting: pairing");
-    await pairStep(() => ctx.runPair(bundleDir), ctx.io);
+    await pairStep(() => ctx.runPair(bundleDir), ctx.io, ctx.watchPairing ?? ((onStatus) => watchPairStatus(locations.stateDir, onStatus)));
   }
   // 12
   if (!(await ctx.platform.tailscalePresent())) {
