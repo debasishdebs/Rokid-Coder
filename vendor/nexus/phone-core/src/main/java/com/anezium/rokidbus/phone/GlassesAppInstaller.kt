@@ -10,10 +10,9 @@ import java.io.File
 /** Installs the glasses app over CXR. The APK is verified on every call, before anything is pushed. */
 interface GlassesAppInstaller {
     /**
-     * [force] pushes the APK whatever version the glasses announce: the one way to replace an app
-     * of the same version code (a build that changed without a version bump) and the only way a
-     * newer one is overwritten. Unforced, an equal version is [InstallResult.AlreadyCurrent] and a
-     * newer one [InstallResult.NewerOnGlasses], and nothing is pushed.
+     * [force] pushes over an app of the same version code (a build that changed without a version
+     * bump), which unforced is [InstallResult.AlreadyCurrent]. It never overwrites a newer one:
+     * that is [InstallResult.NewerOnGlasses], forced or not, and nothing is pushed.
      */
     suspend fun install(apk: File, expected: GlassesApkMetadata, force: Boolean = false, onProgress: (Int) -> Unit): InstallResult
 
@@ -98,11 +97,10 @@ internal class CxrGlassesAppInstaller(
             }
             onProgress(25)
 
-            if (!force) {
-                val installed = installedVersionOn(op)
-                if (installed != null && installed == expected.versionCode) return InstallResult.AlreadyCurrent
-                if (installed != null && installed > expected.versionCode) return InstallResult.NewerOnGlasses
-            }
+            val installed = installedVersionOn(op)
+            if (!force && installed != null && installed == expected.versionCode) return InstallResult.AlreadyCurrent
+            // Never a downgrade, forced or not: the glasses may have changed since the screen looked.
+            if (installed != null && installed > expected.versionCode) return InstallResult.NewerOnGlasses
 
             if (!wifiEnabled()) return InstallResult.Failed(WIFI_OFF)
             val target = link()

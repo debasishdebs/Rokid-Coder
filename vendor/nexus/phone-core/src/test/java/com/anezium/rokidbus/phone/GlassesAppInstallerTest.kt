@@ -105,7 +105,7 @@ class GlassesAppInstallerTest {
     // ---- a forced install replaces a same-version app; an unforced one never does ----
 
     @Test
-    fun forced_install_replaces_an_equal_or_newer_app_and_unforced_does_not() {
+    fun forced_install_replaces_an_equal_app_but_never_a_newer_one() {
         val apk = signedApk()
         val expected = metadata(apk)
 
@@ -116,24 +116,28 @@ class GlassesAppInstallerTest {
         assertEquals(InstallResult.AlreadyCurrent, await(unforced))
         assertEquals(0, uploads())
 
-        // Forced, equal: no version question, the APK goes up.
+        // Forced, equal: the version is still asked, then the APK goes up.
         val forced = installAsync(apk, expected, force = true)
-        answer(1, "upload", true)
+        answer(1, "query", true)
+        answer(2, "upload", true)
         assertEquals(InstallResult.Installed, await(forced))
         assertEquals(1, uploads())
 
-        // Unforced, newer on the glasses: never downgraded.
+        // Newer on the glasses: never downgraded, forced or not, and nothing is pushed.
         announced = "1.6.0"
         val newer = installAsync(apk, expected)
-        answer(2, "query", true)
+        answer(3, "query", true)
         assertEquals(InstallResult.NewerOnGlasses, await(newer))
+        val forcedNewer = installAsync(apk, expected, force = true)
+        answer(4, "query", true)
+        assertEquals(InstallResult.NewerOnGlasses, await(forcedNewer))
         assertEquals(1, uploads())
 
         // Older on the glasses needs no force: the normal update.
         announced = "1.4.0"
         val older = installAsync(apk, expected)
-        answer(3, "query", true)
-        answer(4, "upload", true)
+        answer(5, "query", true)
+        answer(6, "upload", true)
         assertEquals(InstallResult.Installed, await(older))
         assertEquals(2, uploads())
     }
