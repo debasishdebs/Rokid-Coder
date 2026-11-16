@@ -4,6 +4,8 @@ import com.anezium.rokidbus.phone.CxrLAuth
 import com.anezium.rokidbus.phone.GlassesApkMetadata
 import com.anezium.rokidbus.phone.GlassesAppInstaller
 import com.anezium.rokidbus.phone.InstallResult
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.TestScope
@@ -25,11 +27,20 @@ class GlassesStepTest {
         override val ready = MutableStateFlow(false)
         override val cxrUp = MutableStateFlow(false)
         var connectSucceeds = true
+        var installed: Long? = 10000L
+        var installResult: InstallResult = InstallResult.Installed
+        var hold: CompletableDeferred<Unit>? = null
+        var installs = 0
         val installer = object : GlassesAppInstaller {
-            override suspend fun install(apk: File, expected: GlassesApkMetadata, onProgress: (Int) -> Unit) = InstallResult.Installed
+            override suspend fun install(apk: File, expected: GlassesApkMetadata, onProgress: (Int) -> Unit): InstallResult {
+                installs += 1
+                onProgress(50)
+                hold?.await()
+                return installResult
+            }
             override suspend fun installedVersion(): Long? {
                 calls += "installedVersion"
-                return 10000L
+                return installed
             }
             override fun cancel() = Unit
         }
@@ -63,11 +74,12 @@ class GlassesStepTest {
             calls += "authorize"
             authorization
         },
-        installs = { installer -> GlassesInstallController(installer, FakeAsset, File("build/tmp/onboarding-test"), expectedGlassesMetadata(FakeAsset.info, FakeAsset.info.packageName, "ef".repeat(32), release = true)) },
+        installs = { installer -> GlassesInstallController(installer, FakeAsset, File("build/tmp/onboarding-test"), expectedGlassesMetadata(FakeAsset.info, FakeAsset.info.packageName, "ef".repeat(32), release = true), Dispatchers.Unconfined) },
         onComplete = { completed += "GLASSES" },
         scope = backgroundScope,
         autoConnectMs = 1_000L,
         connectTimeoutMs = 5_000L,
+        recheckMs = 1_000L,
     )
 
     private object FakeAsset : BundledGlassesAsset {
@@ -159,5 +171,85 @@ class GlassesStepTest {
         advanceTimeBy(1_000L)
         runCurrent()
         assertEquals(GlassesPhase.APP, step.view.value.phase)
+    }
+
+    private fun TestScope.appStep(): GlassesStepController {
+        host.ready.value = true
+        host.installed = null
+        val step = controller()
+        step.enter()
+        advanceTimeBy(2_000L)
+        runCurrent()
+        assertEquals(GlassesInstallState.NotInstalled, step.view.value.install)
+        return step
+    }
+
+    @Test
+    fun one_tap_on_install_or_retry_acts_and_shows_it_at_once() = runTest(UnconfinedTestDispatcher()) {
+        val step = appStep()
+        host.hold = CompletableDeferred()
+        host.installResult = InstallResult.Failed(OnboardingCopy.GLASSES_REFUSED)
+
+        step.installApp()
+        assertEquals("the screen shows the install the moment it starts", GlassesInstallState.Installing(50), step.view.value.install)
+        step.installApp()
+        assertEquals("a tap while it runs starts no second install", 1, host.installs)
+        host.hold!!.complete(Unit)
+        runCurrent()
+        assertEquals(GlassesInstallState.Failed(OnboardingCopy.GLASSES_REFUSED), step.view.value.install)
+
+        // Retry: the very first tap leaves the failure screen for the install.
+        host.hold = CompletableDeferred()
+        step.installApp()
+        assertEquals(GlassesInstallState.Installing(50), step.view.value.install)
+        assertEquals(2, host.installs)
+        host.installResult = InstallResult.Installed
+        host.hold!!.complete(Unit)
+        runCurrent()
+        assertEquals(GlassesInstallState.UpToDate, step.view.value.install)
+        assertEquals(listOf("GLASSES"), completed)
+    }
+
+    @Test
+    fun an_app_that_arrives_over_adb_finishes_the_step_without_leaving_it() = runTest(UnconfinedTestDispatcher()) {
+        val step = appStep()
+        advanceTimeBy(3_500L)
+        assertEquals("still not there", GlassesInstallState.NotInstalled, step.view.value.install)
+        assertTrue(completed.isEmpty())
+
+        host.installed = 10000L
+        advanceTimeBy(1_000L)
+        runCurrent()
+        assertEquals(GlassesInstallState.UpToDate, step.view.value.install)
+        assertEquals(listOf("GLASSES"), completed)
+    }
+
+    @Test
+    fun a_refusal_stays_on_screen_while_watching_and_the_watch_ends_when_the_step_is() = runTest(UnconfinedTestDispatcher()) {
+        val step = appStep()
+        host.installResult = InstallResult.Failed(OnboardingCopy.GLASSES_REFUSED)
+        step.installApp()
+        runCurrent()
+        advanceTimeBy(3_500L)
+        assertEquals("the reason is not wiped by a look that finds nothing", GlassesInstallState.Failed(OnboardingCopy.GLASSES_REFUSED), step.view.value.install)
+
+        host.installed = 10000L
+        advanceTimeBy(1_000L)
+        runCurrent()
+        assertEquals(GlassesInstallState.UpToDate, step.view.value.install)
+        assertEquals(listOf("GLASSES"), completed)
+
+        val looks = calls.count { it == "installedVersion" }
+        advanceTimeBy(10_000L)
+        assertEquals("no more looks once the app is there", looks, calls.count { it == "installedVersion" })
+    }
+
+    @Test
+    fun leaving_the_step_stops_the_watch() = runTest(UnconfinedTestDispatcher()) {
+        val step = appStep()
+        step.leave()
+        val looks = calls.count { it == "installedVersion" }
+        advanceTimeBy(10_000L)
+        assertEquals(looks, calls.count { it == "installedVersion" })
     }
 }

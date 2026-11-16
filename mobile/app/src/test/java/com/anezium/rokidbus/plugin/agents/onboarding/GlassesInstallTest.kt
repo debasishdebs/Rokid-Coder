@@ -193,4 +193,38 @@ class GlassesInstallTest {
         val build = File("build.gradle.kts").readText()
         assertFalse("the app does not depend on apksig itself", Regex("""implementation\("com\.android\.tools\.build:apksig""").containsMatchIn(build))
     }
+
+    @Test
+    fun recheck_finishes_on_an_app_that_arrived_by_adb_and_keeps_a_failure_otherwise() = runTest {
+        val installer = FakeInstaller().apply { result = InstallResult.Failed("The glasses did not install the app.") }
+        val install = controller(installer)
+        install.install()
+        install.recheck()
+        assertEquals("nothing found: the failure's reason stays", GlassesInstallState.Failed("The glasses did not install the app."), install.state.value)
+
+        installer.installed = 10000L
+        install.recheck()
+        assertEquals(GlassesInstallState.UpToDate, install.state.value)
+    }
+
+    @Test
+    fun recheck_leaves_an_install_under_way_alone() = runTest(UnconfinedTestDispatcher()) {
+        val installer = FakeInstaller().apply { hold = CompletableDeferred() }
+        val install = controller(installer)
+        val job = launch { install.install() }
+        installer.installed = 10000L
+        install.recheck()
+        assertEquals(GlassesInstallState.Installing(50), install.state.value)
+        installer.hold!!.complete(Unit)
+        job.join()
+    }
+
+    @Test
+    fun the_glasses_refusal_says_how_to_install_from_a_computer() {
+        val refused = OnboardingCopy.glassesApp(GlassesInstallState.Failed(OnboardingCopy.GLASSES_REFUSED))
+        assertTrue(refused.lines.any { "adb install" in it && "continues by itself" in it })
+        assertEquals("Retry", refused.action)
+        val other = OnboardingCopy.glassesApp(GlassesInstallState.Failed("Connection to the glasses was lost."))
+        assertTrue(other.lines.none { "adb install" in it })
+    }
 }

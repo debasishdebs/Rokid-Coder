@@ -79,13 +79,27 @@ internal class GlassesInstallController(
     val state: StateFlow<GlassesInstallState> = _state.asStateFlow()
 
     suspend fun refresh() {
-        val installed = installer.installedVersion()
-        _state.value = when {
-            installed == null -> GlassesInstallState.NotInstalled
-            installed < expected.versionCode -> GlassesInstallState.UpdateAvailable
-            installed == expected.versionCode -> GlassesInstallState.UpToDate
-            else -> GlassesInstallState.NewerOnGlasses
-        }
+        _state.value = stateFor(installer.installedVersion())
+    }
+
+    /**
+     * A quiet look at the glasses again, for an app that arrived another way (adb from a computer).
+     * It never touches an install under way, and it leaves a failure's reason on screen unless the
+     * app turned out to be there: only then does the step finish.
+     */
+    suspend fun recheck() {
+        if (_state.value is GlassesInstallState.Installing) return
+        val found = stateFor(installer.installedVersion())
+        // An install may have started while the glasses were being asked.
+        if (_state.value is GlassesInstallState.Installing) return
+        if (found.completesStep || _state.value !is GlassesInstallState.Failed) _state.value = found
+    }
+
+    private fun stateFor(installed: Long?): GlassesInstallState = when {
+        installed == null -> GlassesInstallState.NotInstalled
+        installed < expected.versionCode -> GlassesInstallState.UpdateAvailable
+        installed == expected.versionCode -> GlassesInstallState.UpToDate
+        else -> GlassesInstallState.NewerOnGlasses
     }
 
     suspend fun install() {

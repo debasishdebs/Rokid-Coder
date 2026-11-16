@@ -3,7 +3,9 @@ package com.anezium.rokidbus.plugin.agents.onboarding
 import com.anezium.rokidbus.phone.CxrLAuth
 import com.anezium.rokidbus.phone.GlassesAppInstaller
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -54,6 +56,7 @@ internal class GlassesStepController(
     /** How long an earlier authorization's stored token gets to connect on its own. */
     private val autoConnectMs: Long = AUTO_CONNECT_MS,
     private val connectTimeoutMs: Long = CONNECT_TIMEOUT_MS,
+    private val recheckMs: Long = RECHECK_MS,
 ) {
     private val _view = MutableStateFlow(GlassesView(GlassesPhase.STARTING))
     val view: StateFlow<GlassesView> = _view.asStateFlow()
@@ -62,6 +65,7 @@ internal class GlassesStepController(
     private var token: String? = null
     private var install: GlassesInstallController? = null
     private var work: Job? = null
+    private var watcher: Job? = null
 
     fun enter() {
         host.startFromForeground()
@@ -95,16 +99,27 @@ internal class GlassesStepController(
         }
     }
 
+    /** One tap starts the install, and the screen says so at once: a second tap while it runs does nothing. */
     fun installApp() {
         val controller = install ?: return
+        if (controller.state.value is GlassesInstallState.Installing) return
+        watcher?.cancel()
         scope.launch {
+            // The install's own state is what the screen shows while it runs: without it, a
+            // failed attempt and the Retry before it look the same, and the tap seems to do nothing.
+            val shown = launch(start = CoroutineStart.UNDISPATCHED) {
+                controller.state.collect { _view.value = GlassesView(GlassesPhase.APP, install = it) }
+            }
             controller.install()
+            shown.cancel()
             publishInstall(controller.state.value)
+            watchForApp(controller)
         }
     }
 
     /** The user left the step: an install not yet uploading is cancelled. */
     fun leave() {
+        watcher?.cancel()
         install?.leave()
     }
 
@@ -134,6 +149,21 @@ internal class GlassesStepController(
         _view.value = GlassesView(GlassesPhase.APP, install = controller.state.value)
         controller.refresh()
         publishInstall(controller.state.value)
+        watchForApp(controller)
+    }
+
+    /** While the app is not there yet it may arrive from a computer's adb: look again until it is. */
+    private fun watchForApp(controller: GlassesInstallController) {
+        watcher?.cancel()
+        if (controller.state.value.completesStep) return
+        watcher = scope.launch {
+            while (true) {
+                delay(recheckMs)
+                controller.recheck()
+                publishInstall(controller.state.value)
+                if (controller.state.value.completesStep) return@launch
+            }
+        }
     }
 
     private fun publishInstall(state: GlassesInstallState) {
@@ -144,5 +174,6 @@ internal class GlassesStepController(
     companion object {
         const val AUTO_CONNECT_MS = 4_000L
         const val CONNECT_TIMEOUT_MS = 20_000L
+        const val RECHECK_MS = 5_000L
     }
 }

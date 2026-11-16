@@ -32,6 +32,12 @@ internal object OnboardingCopy {
     const val CONNECTING = "Connecting to your glasses…"
     const val CONNECT_FAILED = "Couldn't connect to your glasses."
     const val RETRY = "Retry"
+
+    /** What the core says when the glasses answer no to the push (CxrGlassesAppInstaller). */
+    const val GLASSES_REFUSED = "The glasses did not install the app."
+    const val ADB_INSTALL =
+        "You can install it from a computer instead: with the glasses connected, run adb install on " +
+            "rokid-coder-glasses-<version>.apk from the releases page. Setup continues by itself once the glasses app is on the glasses and running."
     const val NEXUS_PACKAGE = "com.anezium.rokidbus.phone"
     const val NEXUS_INSTALLED = "Rokid Nexus is installed. Open it and tap Stop hub (or force-stop or uninstall it), then tap Retry."
     const val OPEN_NEXUS = "Open Rokid Nexus"
@@ -61,13 +67,15 @@ internal object OnboardingCopy {
     const val TEST_ALERT_BODY = "Look at your glasses: a test alert is on its way, with the sound you chose for Done."
     const val SAW_IT = "I saw it"
     const val DIDNT_SEE_IT = "I didn't see it"
-    val TEST_ALERT_ACTIONS = listOf(SAW_IT, DIDNT_SEE_IT)
+    const val SEND_AGAIN = "Send again"
+    val TEST_ALERT_ACTIONS = listOf(SAW_IT, SEND_AGAIN, DIDNT_SEE_IT)
     const val TEST_ALERT_MISSED =
-        "Check that the glasses are on and connected: open Settings → Glasses on this phone. You can send another test alert from there."
+        "Check that the glasses are on and connected and that the glasses app is running, then tap Send again."
 
     // SOUNDS
     const val SOUNDS_TITLE = "Sounds"
     const val SOUNDS_BODY = "What the glasses do when each kind of alert arrives. You can change this later in Settings."
+    const val SOUNDS_PREVIEW = "Tap Speak or Chime to hear it now. The preview plays on this phone; real alerts sound on your glasses."
     const val FINISH = "Finish"
 
     fun installerHint(os: ComputerOs): List<String> = when (os) {
@@ -97,7 +105,15 @@ internal object OnboardingCopy {
             listOf("Your glasses have a newer Rokid Coder Glasses than this phone app. It is left as it is; update the phone app to match."),
         )
         is GlassesInstallState.Installing -> ScreenCopy("Glasses app", listOf("Installing on your glasses… ${state.progress}%"))
-        is GlassesInstallState.Failed -> ScreenCopy("Glasses app", listOf("The install did not finish.", state.reason), RETRY)
+        is GlassesInstallState.Failed -> ScreenCopy(
+            "Glasses app",
+            buildList {
+                add("The install did not finish.")
+                add(state.reason)
+                if (state.reason == GLASSES_REFUSED) add(ADB_INSTALL)
+            },
+            RETRY,
+        )
     }
 
     fun pairing(view: PairingView): ScreenCopy {
