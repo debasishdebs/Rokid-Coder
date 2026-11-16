@@ -42,7 +42,7 @@ test("distribution_declares_the_only_hard_prerequisites", () => {
   const xml = render();
   assert.match(xml, /<allowed-os-versions>\s*<os-version min="13.0"\s*\/>\s*<\/allowed-os-versions>/);
   assert.match(xml, /<domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"\s*\/>/);
-  assert.match(xml, /<pkg-ref id="io.github.debasishdebs.rokidcoder.computer" version="1.0.0"/);
+  assert.match(xml, /<pkg-ref id="io.github.debasishdebs.rokidcoder.computer.1.0.0" version="1.0.0"/);
   assert.doesNotMatch(xml, /ROKID_(VERSION|ARCH|MIN_OS)/, "every placeholder is filled");
 });
 

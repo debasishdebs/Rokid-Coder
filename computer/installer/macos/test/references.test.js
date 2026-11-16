@@ -10,6 +10,7 @@ const { MACOS, makeMac } = require("./helpers");
 const skip = process.platform !== "darwin" && "the installer scripts run on macOS";
 const UNINSTALL = path.join(MACOS, "uninstall.sh");
 const v = (n) => `1.0.0-test.${n}`;
+const ID = "io.github.debasishdebs.rokidcoder.computer";
 
 /**
  * A: on test.1 with previous test.0. B: on test.2, its handoff committed. C:
@@ -35,6 +36,7 @@ function crowdedMac(t) {
 test("prune_keeps_every_referenced_version_across_users", { skip }, (t) => {
   const { mac, dirs } = crowdedMac(t);
   mac.console("loginwindow", 0);
+  mac.receipts(["com.apple.pkg.CLTools_Executables", ...["-1", "0", "1", "2", "4", "5", "6"].map((n) => `${ID}.${v(n)}`)]);
 
   const result = mac.run(path.join(mac.scripts(v(6)), "postinstall"));
 
@@ -42,6 +44,7 @@ test("prune_keeps_every_referenced_version_across_users", { skip }, (t) => {
   assert.equal(fs.existsSync(dirs["-1"]), false, "the one version nothing references is gone");
   for (const n of ["0", "1", "2", "4", "5", "6"]) assert.ok(fs.existsSync(dirs[n]), `${v(n)} is kept`);
   assert.ok(fs.existsSync(path.join(mac.installRoot, "handoff")));
+  assert.deepEqual(mac.calls("pkgutil").filter((c) => c[1] === "--forget"), [["pkgutil", "--forget", `${ID}.${v(-1)}`]], "only the pruned version's receipt goes");
   assert.deepEqual(mac.calls("dscl").find((c) => c[2] === "-list"), ["dscl", ".", "-list", "/Users", "NFSHomeDirectory"]);
 });
 
@@ -80,10 +83,15 @@ test("uninstall_system_refuses_while_other_users_installed", { skip }, (t) => {
   assert.match(pending.output, /dave/);
   assert.doesNotMatch(pending.output, /\b(alice|bob|carol)\b/);
 
+  mac.receipts([`${ID}.${v(1)}`, "com.apple.pkg.CLTools_Executables", ID, `${ID}.${v(2)}`, `${ID}x.other`]);
   const forced = mac.run(UNINSTALL, ["--system", "--force"], { extraEnv: { SUDO_USER: "alice" } });
   assert.equal(forced.status, 0, forced.output);
   assert.equal(fs.existsSync(mac.installRoot), false);
-  assert.deepEqual(mac.calls("pkgutil"), [["pkgutil", "--forget", "io.github.debasishdebs.rokidcoder.computer"]]);
+  // Every version's receipt, and the release candidates' bare one; nobody else's.
+  assert.deepEqual(
+    mac.calls("pkgutil").filter((c) => c[1] === "--forget"),
+    [`${ID}.${v(1)}`, ID, `${ID}.${v(2)}`].map((id) => ["pkgutil", "--forget", id]),
+  );
 });
 
 test("uninstall_system_ignores_the_invokers_own_pending_handoff", { skip }, (t) => {

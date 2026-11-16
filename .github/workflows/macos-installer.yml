@@ -193,7 +193,7 @@ jobs:
           set -euo pipefail
           # `sudo installer` is a command-line install: the payload goes in, setup is deferred.
           sudo installer -pkg "$PKG" -target /
-          pkgutil --pkg-info "$PACKAGE_ID"
+          pkgutil --pkg-info "$PACKAGE_ID.$VERSION"
           test -x "$BUNDLE_DIR/bin/rokid-setup"
           test -x "$BUNDLE_DIR/Rokid Coder Setup.command"
           test -x "$BUNDLE_DIR/uninstall.sh"
@@ -519,7 +519,8 @@ jobs:
 
       - name: Install the package and run setup, failing after the new agent starts
         run: |
-          set -uo pipefail
+          # The step's shell runs with -e, and setup is meant to fail here.
+          set +e -uo pipefail
           sudo installer -pkg "$PKG" -target / || exit 1
           ROKID_SETUP_TEST=1 ROKID_SETUP_FAIL_AT=9 "$BUNDLE_DIR/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null 2>&1 | tee "$RUNNER_TEMP/setup.out"
           status=${PIPESTATUS[0]}
@@ -613,8 +614,8 @@ jobs:
           "$DIR1/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null
           health "$V1" "$DIR1"
           sudo installer -pkg "$PKG2" -target /
-          ls "$INSTALL_ROOT"
-          grep -E "RokidCoder|rokid|Removing|removed" /var/log/install.log | tail -n 30 || true
+          # Each version is its own package: installing test.2 must leave test.1's files alone.
+          test -x "$DIR1/bin/rokid-setup" || { echo "installing $V2 removed $V1"; exit 1; }
           "$DIR2/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null
           health "$V2" "$DIR2"
           if pgrep -f "RokidCoder/$V1/"; then echo "a $V1 process is still running"; exit 1; fi
@@ -651,4 +652,4 @@ jobs:
           [ ! -e "$HOME/.nexus-agentd" ]
           "$DIR1/uninstall.sh" --system
           [ ! -e "$INSTALL_ROOT" ]
-          if pkgutil --pkg-info "$PACKAGE_ID" > /dev/null 2>&1; then echo "the receipt is still there"; exit 1; fi
+          if pkgutil --pkgs | grep -Fx -e "$PACKAGE_ID" -e "$PACKAGE_ID.$V1" -e "$PACKAGE_ID.$V2"; then echo "a receipt is still there"; exit 1; fi

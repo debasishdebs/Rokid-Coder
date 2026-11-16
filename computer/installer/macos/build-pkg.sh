@@ -109,9 +109,11 @@ while /usr/bin/plutil -extract "$i" xml1 -o /dev/null "$stage/component.plist" >
   i=$((i + 1))
 done
 
+# Each version its own identifier: Installer's receipt-based obsoleting deletes what an earlier
+# package of the same identifier installed, and setup's rollback needs the previous version's dir.
 /usr/bin/pkgbuild --root "$stage/root" --component-plist "$stage/component.plist" \
   --install-location "$INSTALL_ROOT" --scripts "$stage/scripts" \
-  --identifier "$PACKAGE_ID" --version "$version" --ownership recommended \
+  --identifier "$PACKAGE_ID.$version" --version "$version" --ownership recommended \
   "$stage/rokid-coder-component.pkg"
 render_distribution "$version" > "$stage/Distribution.xml"
 mkdir -p "$out"

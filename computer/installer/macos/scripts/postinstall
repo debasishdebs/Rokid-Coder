@@ -7,11 +7,13 @@
 # this always exits 0, whatever happens to the handoff.
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-if [ "${ROKID_INSTALLER_TEST:-}" != 1 ]; then unset ROKID_INSTALL_ROOT ROKID_INSTALL_LOG DSCL PLUTIL; fi
+if [ "${ROKID_INSTALLER_TEST:-}" != 1 ]; then unset ROKID_INSTALL_ROOT ROKID_INSTALL_LOG DSCL PLUTIL PKGUTIL; fi
 ROOT=${ROKID_INSTALL_ROOT:-/Library/Application Support/RokidCoder}
 INSTALL_LOG=${ROKID_INSTALL_LOG:-/var/log/install.log}
 DSCL=${DSCL:-/usr/bin/dscl}
 PLUTIL=${PLUTIL:-/usr/bin/plutil}
+PKGUTIL=${PKGUTIL:-/usr/sbin/pkgutil}
+PACKAGE_ID=io.github.debasishdebs.rokidcoder.computer
 VERSION=$(cat "$here/version")
 BUNDLE="$ROOT/$VERSION"
 . "$here/lib/references.sh"

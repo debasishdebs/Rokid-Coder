@@ -5,7 +5,7 @@
 # always agree. It runs as root over files the users own, so it only reads
 # regular files, never through a symlink, and only through plutil.
 #
-# Needs DSCL and PLUTIL set.
+# Needs DSCL, PLUTIL, PKGUTIL and PACKAGE_ID set.
 
 # rokid_json <file> <key path>: the value at the key path, or nothing.
 rokid_json() {
@@ -75,6 +75,22 @@ rokid_prune() {
     # Only what the package laid out: a bundle.
     [ -f "$rokid_candidate/bundle.json" ] || continue
     rokid_is_referenced "$rokid_candidate" "$rokid_refs" && continue
-    rm -rf -- "$rokid_candidate" && printf 'removed %s, which no user references any more\n' "${rokid_candidate##*/}"
+    rm -rf -- "$rokid_candidate" || continue
+    rokid_forget_receipts "${rokid_candidate##*/}"
+    printf 'removed %s, which no user references any more\n' "${rokid_candidate##*/}"
+  done
+}
+
+# rokid_forget_receipts <version>: forgets that version's package receipt (each version has its
+# own identifier, PACKAGE_ID.<version>), or with "" every Rokid Coder receipt, the bare
+# PACKAGE_ID of the release candidates before them included.
+rokid_forget_receipts() {
+  "$PKGUTIL" --pkgs 2>/dev/null | while read -r rokid_receipt; do
+    case $rokid_receipt in
+      "$PACKAGE_ID.$1") ;;
+      "$PACKAGE_ID" | "$PACKAGE_ID".*) [ -z "$1" ] || continue ;;
+      *) continue ;;
+    esac
+    "$PKGUTIL" --forget "$rokid_receipt" > /dev/null 2>&1
   done
 }

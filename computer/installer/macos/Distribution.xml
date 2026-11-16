@@ -99,12 +99,12 @@ function rokidVolumeCheck() {
   ]]></script>
   <choices-outline>
     <line choice="default">
-      <line choice="io.github.debasishdebs.rokidcoder.computer"/>
+      <line choice="io.github.debasishdebs.rokidcoder.computer.ROKID_VERSION"/>
     </line>
   </choices-outline>
   <choice id="default"/>
-  <choice id="io.github.debasishdebs.rokidcoder.computer" visible="false">
-    <pkg-ref id="io.github.debasishdebs.rokidcoder.computer"/>
+  <choice id="io.github.debasishdebs.rokidcoder.computer.ROKID_VERSION" visible="false">
+    <pkg-ref id="io.github.debasishdebs.rokidcoder.computer.ROKID_VERSION"/>
   </choice>
-  <pkg-ref id="io.github.debasishdebs.rokidcoder.computer" version="ROKID_VERSION" onConclusion="none">rokid-coder-component.pkg</pkg-ref>
+  <pkg-ref id="io.github.debasishdebs.rokidcoder.computer.ROKID_VERSION" version="ROKID_VERSION" onConclusion="none">rokid-coder-component.pkg</pkg-ref>
 </installer-gui-script>

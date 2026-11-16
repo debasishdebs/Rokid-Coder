@@ -1,6 +1,6 @@
 #!/bin/bash
 # The clean-runtime job's starting point [FR 12]: every node, npm, npx and
-# node-gyp under the places a Mac keeps them, Xcode and the Command Line Tools
+# node-gyp and every python under the places a Mac keeps them, Xcode and the Command Line Tools
 # are moved aside, then it proves that nothing is left: no node on PATH, and
 # the /usr/bin/cc and /usr/bin/python3 shims have nothing behind them.
 set -euo pipefail
@@ -11,7 +11,7 @@ for root in /usr/local /opt/homebrew /Users/runner/hostedtoolcache /Library/Fram
   while IFS= read -r -d '' file; do
     sudo mv "$file" "$file.rokid-removed"
     echo "moved aside: $file"
-  done < <(sudo find "$root" \( -name node -o -name npm -o -name npx -o -name node-gyp \) \( -type f -o -type l \) -print0 2>/dev/null)
+  done < <(sudo find "$root" \( -name node -o -name npm -o -name npx -o -name node-gyp -o -name python -o -name 'python3*' \) \( -type f -o -type l \) -print0 2>/dev/null)
 done
 for app in /Applications/Xcode*.app; do
   if [ -e "$app" ]; then
