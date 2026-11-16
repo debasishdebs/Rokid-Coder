@@ -384,7 +384,7 @@ class OnboardingActivity : ComponentActivity() {
                 when (link) {
                     OnboardingCopy.AWAY_FROM_HOME -> pairing?.awayFromHome()
                     OnboardingCopy.TAILSCALE_LINK -> startActivity(Intent(this, ConnectorsActivity::class.java))
-                    OnboardingCopy.SCAN_INSTEAD -> startActivity(Intent(this, AddComputerActivity::class.java))
+                    OnboardingCopy.SCAN_QR -> startActivity(Intent(this, AddComputerActivity::class.java).putExtra(AddComputerActivity.EXTRA_SCAN, true))
                 }
             }
         }

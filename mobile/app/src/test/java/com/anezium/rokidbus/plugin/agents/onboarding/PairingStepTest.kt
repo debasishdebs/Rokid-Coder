@@ -169,19 +169,24 @@ class PairingStepTest {
     fun pairing_check_offers_tailscale_and_qr_when_unreachable() = runTest(UnconfinedTestDispatcher()) {
         val step = controller()
         step.enter()
+        assertEquals(
+            "the QR scan is offered before anything fails; Tailscale waits behind away from home",
+            listOf(OnboardingCopy.SCAN_QR, OnboardingCopy.AWAY_FROM_HOME),
+            OnboardingCopy.pairing(step.view.value).links,
+        )
         step.openWindow()
         door.remainingMs = 0L
         step.tick()
         assertEquals(PairingPhase.EXPIRED, step.view.value.phase)
         assertTrue("no peer seen: the computer could not reach the phone", step.view.value.offerFallback)
         val copy = OnboardingCopy.pairing(step.view.value)
-        assertTrue(copy.links.containsAll(listOf(OnboardingCopy.TAILSCALE_LINK, OnboardingCopy.SCAN_INSTEAD)))
+        assertEquals(listOf(OnboardingCopy.SCAN_QR, OnboardingCopy.TAILSCALE_LINK), copy.links)
 
         val other = controller()
         other.enter()
         other.awayFromHome()
         assertTrue(other.view.value.offerFallback)
-        assertTrue(OnboardingCopy.pairing(other.view.value).links.contains(OnboardingCopy.SCAN_INSTEAD))
+        assertEquals(listOf(OnboardingCopy.SCAN_QR, OnboardingCopy.TAILSCALE_LINK), OnboardingCopy.pairing(other.view.value).links)
     }
 
     @Test

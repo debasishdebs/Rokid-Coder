@@ -50,7 +50,7 @@ internal object OnboardingCopy {
     const val READY_TO_PAIR = "Ready to pair — tap to open the window"
     const val AWAY_FROM_HOME = "Use it away from home"
     const val TAILSCALE_LINK = "Set up Tailscale"
-    const val SCAN_INSTEAD = "Scan the code on your computer instead"
+    const val SCAN_QR = "Scan the QR code on your computer"
     const val CODES_MATCH = "Codes match"
     const val CODES_DONT_MATCH = "Codes don't match"
     val SAS_ACTIONS = listOf(CODES_MATCH, CODES_DONT_MATCH)
@@ -101,7 +101,8 @@ internal object OnboardingCopy {
     }
 
     fun pairing(view: PairingView): ScreenCopy {
-        val fallback = if (view.offerFallback) listOf(TAILSCALE_LINK, SCAN_INSTEAD) else listOf(AWAY_FROM_HOME)
+        // The QR code is on the computer's screen from the start, so its scan is always on offer.
+        val fallback = listOf(SCAN_QR) + if (view.offerFallback) listOf(TAILSCALE_LINK) else listOf(AWAY_FROM_HOME)
         return when (view.phase) {
             PairingPhase.READY -> ScreenCopy(FINISH_TITLE, action = READY_TO_PAIR, links = fallback)
             PairingPhase.WINDOW_OPEN -> ScreenCopy(
