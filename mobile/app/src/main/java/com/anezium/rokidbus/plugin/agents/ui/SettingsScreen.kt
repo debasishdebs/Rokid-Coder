@@ -183,7 +183,7 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
         HistoryScreen(state, actions, onBack = { historyOpen = false })
         return
     }
-    SettingsPage(title = "Agents", onBack = actions.onBack, tag = "agents_settings") {
+    SettingsPage(title = "Rokid Coder", onBack = actions.onBack, tag = "agents_settings") {
         item {
             SettingsCard {
                 NoticeText(
