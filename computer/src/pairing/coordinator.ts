@@ -195,6 +195,18 @@ export class PairingCoordinator {
       return undefined;
     }
     if (this.current?.active) {
+      // The same phone on the other transport (agentd dials the phone while the phone dials agentd):
+      // the TLS handshake proved the same client key, so it is no second device. The duplicate goes,
+      // quietly: no pair_abort, because the phone's attempt model is one object for both transports
+      // and a frame on the duplicate would abort the attempt the phone is showing.
+      // The first transport wins whichever it is. The phone's SAS screen and its confirmation read
+      // that shared model, not a transport, so the code is shown either way; and moving the attempt
+      // to the other transport would mean aborting a commitment that is already bound to this one.
+      if (this.current.phoneFp === phoneFp) {
+        this.options.logger.info("pairing_duplicate_transport", { transport: transport.transport, fingerprint: shortFingerprint(phoneFp) });
+        transport.close();
+        return undefined;
+      }
       this.options.logger.warn("pairing_second_peer", {
         transport: transport.transport,
         fingerprint: shortFingerprint(phoneFp),
