@@ -46,7 +46,8 @@ class AgentsPaletteTest {
         for ((surface, background) in surfaces) {
             check("ink on $surface", light.ink, background, 7.0)
             check("body grey on $surface", light.ink2, background, 4.5)
-            check("meta grey on $surface", light.ink3, background, 3.0)
+            check("label grey on $surface", light.ink3, background, 4.5)
+            check("hint grey on $surface", light.ink4, background, 4.5)
             check("accent on $surface", light.green, background, 4.5)
             check("amber on $surface", light.amber, background, 4.5)
             check("danger on $surface", light.danger, background, 4.5)
