@@ -28,7 +28,7 @@ if [ -f "$FAKE_DATA/sudo-exec" ]; then exec "$@"; fi
 exit 0`,
   getconf: `cat "$FAKE_DATA/user-tmpdir"`,
   open: `exit 0`,
-  pkgutil: `exit 0`,
+  pkgutil: `[ "$1" != --pkgs ] || cat "$FAKE_DATA/pkgutil-pkgs" 2>/dev/null; exit 0`,
 };
 
 function writeExecutable(file, content) {
@@ -115,6 +115,9 @@ function makeMac(t) {
     whoami(name, uid) {
       fs.writeFileSync(path.join(data, "id-u"), `${uid}\n`);
       fs.writeFileSync(path.join(data, "id-un"), `${name}\n`);
+    },
+    receipts(ids) {
+      fs.writeFileSync(path.join(data, "pkgutil-pkgs"), ids.map((id) => `${id}\n`).join(""));
     },
     userTmpdir(dir) {
       fs.writeFileSync(path.join(data, "user-tmpdir"), `${dir}\n`);

@@ -65,5 +65,5 @@ if [ -n "$others" ] && [ -z "$force" ]; then
   exit 1
 fi
 rm -rf -- "$ROOT" || exit 1
-"$PKGUTIL" --forget "$PACKAGE_ID" > /dev/null 2>&1
-echo "Removed $ROOT and the package receipt."
+rokid_forget_receipts ""
+echo "Removed $ROOT and the package receipts."

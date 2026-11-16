@@ -119,6 +119,7 @@ test("failure_after_autostart_rolls_back_everything", async (t) => {
   assert.match(run.stdout, /injected failure at step 9/);
   assert.match(run.stdout, /Rolled back to your 0\.8\.0 setup\n/);
   assertBackOn080(world, setup);
+  assert.equal(world.fakeState().autostart, undefined, "the new agent's autostart is gone, so it cannot come back at the next login");
   const health = await world.health();
   assert.equal(health.agentdVersion, "0.8.0");
 });
