@@ -24,6 +24,9 @@ if [ -e /Library/Developer/CommandLineTools ]; then
   echo "moved aside: /Library/Developer/CommandLineTools"
 fi
 
+# Root-only: macOS still finds an Xcode by its bundle id wherever it was moved to.
+sudo chmod 0700 "$aside"
+
 hash -r
 if command -v node; then
   echo "node is still on PATH"
@@ -32,6 +35,9 @@ fi
 for shim in /usr/bin/cc /usr/bin/python3; do
   if "$shim" --version < /dev/null > /dev/null 2>&1; then
     echo "$shim still runs a toolchain"
+    "$shim" --version < /dev/null 2>&1 | head -n 2
+    xcode-select -p 2>&1 || true
+    [ "$shim" != /usr/bin/python3 ] || "$shim" -c 'import sys; print(sys.executable)' < /dev/null 2>&1 || true
     exit 1
   fi
 done

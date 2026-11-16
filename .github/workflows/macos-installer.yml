@@ -521,7 +521,7 @@ jobs:
         run: |
           set -uo pipefail
           sudo installer -pkg "$PKG" -target / || exit 1
-          ROKID_SETUP_TEST=1 ROKID_SETUP_FAIL_AT=9 "$BUNDLE_DIR/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null | tee "$RUNNER_TEMP/setup.out"
+          ROKID_SETUP_TEST=1 ROKID_SETUP_FAIL_AT=9 "$BUNDLE_DIR/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null 2>&1 | tee "$RUNNER_TEMP/setup.out"
           status=${PIPESTATUS[0]}
           [ "$status" -ne 0 ] || { echo "setup should have failed at step 9"; exit 1; }
           grep -q "Rolled back to your 0.8.0 setup" "$RUNNER_TEMP/setup.out"
@@ -613,6 +613,8 @@ jobs:
           "$DIR1/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null
           health "$V1" "$DIR1"
           sudo installer -pkg "$PKG2" -target /
+          ls "$INSTALL_ROOT"
+          grep -E "RokidCoder|rokid|Removing|removed" /var/log/install.log | tail -n 30 || true
           "$DIR2/Rokid Coder Setup.command" --answers "$ANSWERS" < /dev/null
           health "$V2" "$DIR2"
           if pgrep -f "RokidCoder/$V1/"; then echo "a $V1 process is still running"; exit 1; fi
