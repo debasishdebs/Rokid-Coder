@@ -17,7 +17,20 @@ interface SessionRecord {
   firstUserPrompt?: string;
   aiTitle?: string;
   transcriptPath?: string;
+  /** Subagents running now, oldest first. */
+  subagents?: SubagentRun[];
 }
+
+interface SubagentRun {
+  /** The Task/Agent tool call that started it, when a PreToolUse said so. */
+  toolUseId?: string;
+  /** The id a SubagentStart or SubagentStop names it by. */
+  agentId?: string;
+  startedAt: number;
+}
+
+/** The tool Claude Code starts a subagent with: "Task", and "Agent" in newer versions. */
+const SUBAGENT_TOOLS = new Set(["Task", "Agent"]);
 
 const HEADING_PROMPT_CHARS = 48;
 
@@ -72,6 +85,7 @@ function cloneSession(session: Session): Session {
   return {
     ...session,
     turn: session.turn ? { ...session.turn } : undefined,
+    ...(session.subagents ? { subagents: { ...session.subagents } } : {}),
     pendingRequest: session.pendingRequest ? { ...session.pendingRequest } : undefined,
   };
 }
@@ -198,6 +212,7 @@ export class SessionStore {
     let refreshTitle = true;
     switch (eventName) {
       case "SessionStart":
+        record.subagents = undefined;
         record.session.status = "idle";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
@@ -220,6 +235,7 @@ export class SessionStore {
         break;
       }
       case "Stop": {
+        record.subagents = undefined;
         record.session.currentFile = undefined;
         record.session.step = undefined;
         // Stop fires before the transcript holds the final message, so the tail
@@ -241,9 +257,16 @@ export class SessionStore {
         }
         break;
       }
+      case "SubagentStart":
+        this.subagentStarted(record, asString(payload.agent_id), now);
+        break;
       case "SubagentStop":
+        this.subagentEnded(record, { agentId: asString(payload.agent_id) });
         break;
       case "PreToolUse": {
+        if (SUBAGENT_TOOLS.has(asString(payload.tool_name) ?? "")) {
+          (record.subagents ??= []).push({ toolUseId: asString(payload.tool_use_id), startedAt: now });
+        }
         const input = payload.tool_input;
         const fields = input && typeof input === "object" && !Array.isArray(input)
           ? input as Record<string, unknown>
@@ -259,12 +282,17 @@ export class SessionStore {
       case "PostToolUse":
       case "PostToolUseFailure":
       case "PermissionDenied":
+        if (SUBAGENT_TOOLS.has(asString(payload.tool_name) ?? "")) {
+          this.subagentEnded(record, { toolUseId: asString(payload.tool_use_id) });
+        }
+        break;
       case "UserPromptExpansion":
         break;
       case "Notification":
         this.applyNotification(record, asString(payload.message), now);
         break;
       case "SessionEnd":
+        record.subagents = undefined;
         record.session.status = "done";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
@@ -279,7 +307,53 @@ export class SessionStore {
       this.refreshDerivedTitle(record);
     }
     this.refreshHeading(record);
+    this.applySubagents(record);
     this.emitUpsert(record.session);
+  }
+
+  /**
+   * A SubagentStart is the same subagent as an earlier PreToolUse that no agent id is bound to yet,
+   * so it is bound to that one and counts nothing new; otherwise (no tool call was seen) it is new.
+   */
+  private subagentStarted(record: SessionRecord, agentId: string | undefined, now: number): void {
+    const runs = (record.subagents ??= []);
+    if (agentId && runs.some((run) => run.agentId === agentId)) {
+      return;
+    }
+    const unbound = runs.find((run) => run.agentId === undefined && run.toolUseId !== undefined);
+    if (unbound) {
+      unbound.agentId = agentId;
+    } else {
+      runs.push({ agentId, startedAt: now });
+    }
+  }
+
+  /**
+   * Whichever end arrives first removes the run; the other finds nothing, so one subagent is never
+   * counted off twice. A SubagentStop that names no known run ends nothing: only an exact id may.
+   */
+  private subagentEnded(record: SessionRecord, ended: { toolUseId?: string; agentId?: string }): void {
+    const runs = record.subagents;
+    if (!runs) {
+      return;
+    }
+    const at = runs.findIndex((run) =>
+      (ended.toolUseId !== undefined && run.toolUseId === ended.toolUseId) ||
+      (ended.agentId !== undefined && run.agentId === ended.agentId));
+    if (at >= 0) {
+      runs.splice(at, 1);
+    }
+  }
+
+  /** The phone's view of them: absent when none run, so an idle session's frame is what it always was. */
+  private applySubagents(record: SessionRecord): void {
+    const runs = record.subagents;
+    if (runs && runs.length === 0) {
+      record.subagents = undefined;
+    }
+    record.session.subagents = record.subagents
+      ? { running: record.subagents.length, since: Math.min(...record.subagents.map((run) => run.startedAt)) }
+      : undefined;
   }
 
   applyTranscriptUpdate(sessionId: string, update: TranscriptUpdate): void {

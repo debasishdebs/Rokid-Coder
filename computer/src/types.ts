@@ -47,6 +47,8 @@ export interface Session {
   nativeMode?: string;
   pendingSettings?: { model?: string; effort?: string };
   sandbox?: string;
+  /** Claude subagents running now; absent when none. `since` is the epoch ms the oldest one started. */
+  subagents?: { running: number; since: number };
 }
 
 export interface ContextFill {

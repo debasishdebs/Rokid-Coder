@@ -62,6 +62,8 @@ export interface SessionUpsertV2Fields {
   context?: { used: number; window: number };
   pendingSettings?: { model?: string; effort?: string };
   sandbox?: string;
+  /** Additive: absent when no subagent runs, so a phone that does not know it sees what it always saw. */
+  subagents?: { running: number; since: number };
 }
 
 /** The v2 additions to a v1 `session_upsert`; `session` keeps its v1 shape. */
