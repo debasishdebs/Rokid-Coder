@@ -490,6 +490,14 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
       if (eventName === "Stop") {
         approvals?.resolveSession(sessionId, "turn_ended");
         phoneV2?.onClaudeStop(sessionId);
+        // Esc in Claude kills the Stop hook, which closes this request: the wearer is at the laptop, so the
+        // Done just pushed is old news and must not come back as a reminder.
+        const onKilled = (): void => phoneV2?.onLaptopPrompt(sessionId);
+        if (closed.aborted) {
+          onKilled();
+        } else {
+          closed.addEventListener("abort", onKilled, { once: true });
+        }
         return stopWait.hold(sessionId, closed);
       }
       if (eventName === "PreToolUse") {
