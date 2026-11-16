@@ -111,7 +111,17 @@ jobs:
       - name: Install Pester
         run: |
           $ErrorActionPreference = 'Stop'
-          Install-Module Pester -RequiredVersion $env:PESTER_VERSION -Force -SkipPublisherCheck -Scope CurrentUser
+          # PowerShell Gallery now and then serves a truncated package ("End of Central Directory record could not be found").
+          for ($try = 1; $try -le 3; $try++) {
+            try {
+              Install-Module Pester -RequiredVersion $env:PESTER_VERSION -Force -SkipPublisherCheck -Scope CurrentUser
+              break
+            } catch {
+              if ($try -eq 3) { throw }
+              Write-Host "Pester install failed (try $try of 3): $($_.Exception.Message)"
+              Start-Sleep -Seconds (10 * $try)
+            }
+          }
 
       - name: Run the Pester suite
         run: |
