@@ -121,22 +121,115 @@ export function helpCommands(help: string): Set<string> {
   return names;
 }
 
-function listOf(value: unknown, key: string): Record<string, unknown>[] {
-  const list = Array.isArray(value) ? value : (value as Record<string, unknown> | null)?.[key];
-  if (!Array.isArray(list)) {
-    throw new Error(`unexpected ${key} list output`);
-  }
-  return list.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object");
+type Entry = Record<string, unknown>;
+
+function isEntry(value: unknown): value is Entry {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function marketplaceSource(entry: Record<string, unknown>): string | undefined {
+/** One list from a CLI's `--json`: its entries, each with the section of the output it came from. */
+interface Listed {
+  entry: Entry;
+  section: string;
+}
+
+function entriesIn(list: unknown, section: string, idField: string, out: Listed[]): boolean {
+  if (Array.isArray(list)) {
+    const entries = list.filter(isEntry);
+    if (list.length > 0 && entries.length === 0) {
+      throw new Error(`unexpected ${section} list output`);
+    }
+    for (const entry of entries) out.push({ entry, section });
+    return true;
+  }
+  if (isEntry(list)) {
+    // Entries keyed by their id.
+    const keyed = Object.entries(list);
+    if (keyed.length > 0 && !keyed.every(([, entry]) => isEntry(entry))) {
+      return false;
+    }
+    for (const [key, entry] of keyed) out.push({ entry: { [idField]: key, ...(entry as Entry) }, section });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * What a CLI's `plugin list --json` and `plugin marketplace list --json` hold, across the shapes
+ * the CLIs print: a top-level array; `{plugins|marketplaces: [...]}`; codex 0.169's
+ * `{installed: [...]}` (other keys ignored, `available: [...]` read too); entries keyed by id; and
+ * marketplaces that carry their own `plugins`. Anything else is not a list and throws.
+ */
+function listOf(value: unknown, containers: string[], idField: string): Listed[] {
+  const out: Listed[] = [];
+  if (Array.isArray(value)) {
+    entriesIn(value, containers[0], idField, out);
+    return out;
+  }
+  if (!isEntry(value)) {
+    throw new Error(`unexpected ${containers[0]} list output`);
+  }
+  let found = false;
+  for (const key of containers) {
+    if (key in value && entriesIn(value[key], key, idField, out)) {
+      found = true;
+    }
+  }
+  if (!found) {
+    // `{"rokid@rokid-coder": {...}}`, or `{"rokid-coder": {"source": ...}}`: every key an id, every value an entry.
+    const keyed = Object.entries(value);
+    const idLike = (key: string, entry: unknown): boolean =>
+      isEntry(entry) && (idField === "id" ? /^[^@\s]+@[^@\s]+$/.test(key) : marketplaceSource(entry) !== undefined);
+    if (keyed.length > 0 && keyed.every(([key, entry]) => idLike(key, entry))) {
+      entriesIn(value, containers[0], idField, out);
+      found = true;
+    }
+  }
+  // `{marketplaces: [{name, plugins: [...]}]}`: the plugins of each marketplace.
+  if (idField === "id" && "marketplaces" in value) {
+    const marketplaces: Listed[] = [];
+    if (entriesIn(value.marketplaces, "marketplaces", "name", marketplaces)) {
+      found = true;
+    }
+    for (const { entry } of marketplaces) {
+      const name = typeof entry.name === "string" ? entry.name : undefined;
+      const nested: Listed[] = [];
+      if (entriesIn(entry.plugins, "plugins", "id", nested)) {
+        for (const item of nested) out.push({ entry: { ...(name ? { marketplaceName: name } : {}), ...item.entry }, section: "plugins" });
+      }
+    }
+  }
+  if (!found) {
+    throw new Error(`unexpected ${containers[0]} list output`);
+  }
+  return out;
+}
+
+function stringOf(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === "string" && value !== "");
+}
+
+function marketplaceSource(entry: Entry): string | undefined {
   const source = entry.source as unknown;
+  const located = entry.marketplaceSource as unknown;
   if (typeof entry.path === "string") return entry.path;
   if (typeof source === "string" && path.isAbsolute(source)) return source;
-  if (source && typeof source === "object" && typeof (source as Record<string, unknown>).path === "string") {
-    return (source as Record<string, string>).path;
+  if (isEntry(source) && typeof source.path === "string") return source.path;
+  // codex 0.169 puts it on the plugin entry: {"sourceType":"local","source":"/abs/dir"}.
+  if (isEntry(located)) {
+    const where = stringOf(located.source, located.path);
+    if (where && path.isAbsolute(where)) return where;
   }
   return undefined;
+}
+
+function marketplaceNameOf(entry: Entry): string | undefined {
+  const named = entry.marketplace;
+  return stringOf(entry.marketplaceName, named, isEntry(named) ? named.name : undefined);
+}
+
+function isOurPlugin(entry: Entry): boolean {
+  return stringOf(entry.pluginId, entry.id) === PLUGIN_ID || (entry.name === PLUGIN_NAME && marketplaceNameOf(entry) === MARKETPLACE);
 }
 
 class CliPluginDriver implements PluginDriver {
@@ -165,24 +258,25 @@ class CliPluginDriver implements PluginDriver {
 
   async status(): Promise<PluginStatus> {
     const verbs = await this.cliVerbs();
-    const marketplaces = listOf(JSON.parse(await this.run(["marketplace", "list", "--json"])), "marketplaces");
-    const plugins = listOf(JSON.parse(await this.run(["list", "--json"])), "plugins");
+    const marketplaces = listOf(JSON.parse(await this.run(["marketplace", "list", "--json"])), ["marketplaces", "installed", "available"], "name");
+    const plugins = listOf(JSON.parse(await this.run(["list", "--json"])), ["plugins", "installed", "available"], "id");
     const status: PluginStatus = { verbs };
-    const marketplace = marketplaces.find((entry) => entry.name === MARKETPLACE);
-    const source = marketplace && marketplaceSource(marketplace);
+    // Codex lists what its marketplaces offer too: only an entry that is not marked installed:false is installed,
+    // and one in its "available" section only when it says installed:true.
+    const found = plugins.find(
+      ({ entry, section }) => isOurPlugin(entry) && (entry.installed === true || (section !== "available" && entry.installed !== false)),
+    )?.entry;
+    const listed = marketplaces.find(({ entry }) => stringOf(entry.name, entry.marketplaceName) === MARKETPLACE)?.entry;
+    const source =
+      (listed && marketplaceSource(listed)) ??
+      plugins.filter(({ entry }) => isOurPlugin(entry)).map(({ entry }) => marketplaceSource({ marketplaceSource: entry.marketplaceSource })).find(Boolean);
     if (source) {
       status.marketplace = { source };
     }
-    // Codex lists what its marketplaces offer: only an entry not marked installed:false is installed.
-    const plugin = plugins.find(
-      (entry) =>
-        (entry.id === PLUGIN_ID || (entry.name === PLUGIN_NAME && entry.marketplace === MARKETPLACE)) && entry.installed !== false,
-    );
-    if (plugin) {
+    if (found) {
       status.plugin = {
-        version: typeof plugin.version === "string" ? plugin.version : undefined,
-        installPath:
-          typeof plugin.installPath === "string" ? plugin.installPath : typeof plugin.path === "string" ? plugin.path : undefined,
+        version: typeof found.version === "string" ? found.version : undefined,
+        installPath: stringOf(found.installPath, found.path),
       };
     }
     return status;

@@ -1,0 +1,9 @@
+{
+  "plugins": [
+    {
+      "name": "rokid",
+      "marketplace": "rokid-coder",
+      "version": "1.0.0"
+    }
+  ]
+}
