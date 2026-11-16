@@ -62,9 +62,9 @@ class GlassesAppInstallerTest {
     private val progressThreads = CopyOnWriteArrayList<String>()
 
     @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
-    private fun installAsync(apk: File, expected: GlassesApkMetadata): Deferred<InstallResult> =
+    private fun installAsync(apk: File, expected: GlassesApkMetadata, force: Boolean = false): Deferred<InstallResult> =
         GlobalScope.async(Dispatchers.IO, start = CoroutineStart.DEFAULT) {
-            installer.install(apk, expected) { value ->
+            installer.install(apk, expected, force) { value ->
                 progress += value
                 progressThreads += Thread.currentThread().name
             }
@@ -100,6 +100,51 @@ class GlassesAppInstallerTest {
             if (System.currentTimeMillis() > deadline) fail("timed out: $what")
             Thread.sleep(5)
         }
+    }
+
+    // ---- a forced install replaces a same-version app; an unforced one never does ----
+
+    @Test
+    fun forced_install_replaces_an_equal_or_newer_app_and_unforced_does_not() {
+        val apk = signedApk()
+        val expected = metadata(apk)
+
+        // Unforced, equal: still AlreadyCurrent, nothing pushed.
+        announced = "1.5.0"
+        val unforced = installAsync(apk, expected)
+        answer(0, "query", true)
+        assertEquals(InstallResult.AlreadyCurrent, await(unforced))
+        assertEquals(0, uploads())
+
+        // Forced, equal: no version question, the APK goes up.
+        val forced = installAsync(apk, expected, force = true)
+        answer(1, "upload", true)
+        assertEquals(InstallResult.Installed, await(forced))
+        assertEquals(1, uploads())
+
+        // Unforced, newer on the glasses: never downgraded.
+        announced = "1.6.0"
+        val newer = installAsync(apk, expected)
+        answer(2, "query", true)
+        assertEquals(InstallResult.NewerOnGlasses, await(newer))
+        assertEquals(1, uploads())
+
+        // Older on the glasses needs no force: the normal update.
+        announced = "1.4.0"
+        val older = installAsync(apk, expected)
+        answer(3, "query", true)
+        answer(4, "upload", true)
+        assertEquals(InstallResult.Installed, await(older))
+        assertEquals(2, uploads())
+    }
+
+    @Test
+    fun forced_install_is_still_verified_first() {
+        val apk = signedApk()
+        val calls = cxr.appCalls.size
+        val wrongSigner = await(installAsync(apk, metadata(apk).copy(signerSha256 = "ab".repeat(32)), force = true))
+        assertEquals(InstallResult.Failed("Glasses APK signer does not match this phone build."), wrongSigner)
+        assertEquals("nothing reached the glasses", calls, cxr.appCalls.size)
     }
 
     // ---- installer_verifies_before_every_push_and_reports_each_result ----
