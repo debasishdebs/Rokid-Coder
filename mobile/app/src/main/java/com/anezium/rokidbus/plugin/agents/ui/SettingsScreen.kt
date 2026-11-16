@@ -172,6 +172,8 @@ internal class SettingsActions(
     val onConnectors: () -> Unit = {},
     /** The bundled glasses app: install or update it on the glasses. */
     val onGlassesApp: () -> Unit = {},
+    /** A Done alert raised on this phone, shown and sounded on the glasses like a real one. */
+    val onTestAlert: () -> Unit = {},
     /** Settings → About: the version and the privacy note. */
     val onAbout: () -> Unit = {},
 )
@@ -207,6 +209,8 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
             SettingsCard {
                 NoticeText("The Rokid Coder Glasses app that comes with this phone app.", tag = "glasses_app_hint")
                 SecondaryAction("Glasses app", actions.onGlassesApp, tag = "glasses_app")
+                NoticeText("Shows a test Done alert on your glasses, with the sound you chose for Done.", tag = "test_alert_hint")
+                SecondaryAction("Send a test alert", actions.onTestAlert, tag = "test_alert")
             }
         }
 
