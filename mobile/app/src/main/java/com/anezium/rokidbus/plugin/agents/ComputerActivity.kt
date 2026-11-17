@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
 
@@ -41,11 +42,13 @@ class ComputerActivity : Activity() {
         machineId = intent.getStringExtra(EXTRA_MACHINE_ID) ?: run { finish(); return }
         machineName = intent.getStringExtra(EXTRA_MACHINE_NAME) ?: machineId
         buildUi()
+        // The same live links the Settings rows read: this computer is connected by either one.
         uiScope.launch {
-            AgentsRuntime.store.linkMachine.collectLatest { renderStatus(it) }
-        }
-        uiScope.launch {
-            AgentsRuntime.store.connections.collectLatest { renderReason() }
+            combine(
+                AgentsRuntime.store.linkMachine,
+                AgentsRuntime.activeSecureLinks,
+                AgentsRuntime.store.connections,
+            ) { _, _, _ -> }.collectLatest { renderStatus() }
         }
     }
 
@@ -138,28 +141,27 @@ class ComputerActivity : Activity() {
         )
     }
 
-    private fun renderStatus(link: LinkMachine?) {
-        val connected = link?.machineId == machineId
-        if (connected) {
-            statusLine.text =
-                if (link?.overTailnet == true) "CONNECTED · OVER TAILSCALE" else "CONNECTED · SAME WI-FI"
-            NexusUi.setDotColor(statusDot, NexusUi.GREEN)
-        } else {
-            val machine = configStore.trustedMachines().firstOrNull { it.machineId == machineId }
-            statusLine.text = lastSeenText(machine?.lastSeenAtMs).uppercase()
-            NexusUi.setDotColor(statusDot, NexusUi.INK3)
-        }
-    }
-
-    /** Why this computer is not answering, when the phone has been dialling it and found nothing at any address. */
-    private fun renderReason() {
+    /**
+     * Connected by the link agentd dialled or by the one this phone dialled, the same answer the Settings row
+     * gives; and, when the phone dials this computer and nothing answers, why.
+     */
+    private fun renderStatus() {
         val connection = AgentsRuntime.store.connections.value.getValue(AgentProvider.CLAUDE)
-        val reason = connection.detail.takeIf {
-            connection.state != ConnectionState.CONNECTED && machineId == configStore.slotMachineId() &&
-                PairingCopy.isUnreachable(it)
-        }
-        reasonLine.text = reason.orEmpty()
-        reasonLine.visibility = if (reason == null) View.GONE else View.VISIBLE
+        val unreachable = connection.detail.takeIf { connection.state != ConnectionState.CONNECTED && PairingCopy.isUnreachable(it) }
+        val slotMachineId = configStore.slotMachineId()
+        val status = ComputerRows.status(
+            machineId = machineId,
+            trusted = configStore.trustedMachines(),
+            inbound = AgentsRuntime.store.linkMachine.value,
+            slot = ComputerRows.dialledSlot(configStore.load().agentd, slotMachineId, AgentsRuntime.activeSecureLinks.value),
+            slotBelongsTo = configStore::slotBelongsTo,
+            unreachable = unreachable,
+            now = System.currentTimeMillis(),
+        )
+        statusLine.text = status.line
+        NexusUi.setDotColor(statusDot, if (status.connected) NexusUi.GREEN else NexusUi.INK3)
+        reasonLine.text = status.reason.orEmpty()
+        reasonLine.visibility = if (status.reason == null) View.GONE else View.VISIBLE
     }
 
     private fun renderProjects() {

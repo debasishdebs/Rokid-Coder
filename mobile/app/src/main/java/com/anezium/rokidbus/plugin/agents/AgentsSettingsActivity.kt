@@ -254,13 +254,7 @@ class AgentsSettingsActivity : ComponentActivity() {
         // Why the dialled computer is not answering, said under its name rather than only on the Monitoring card.
         val unreachable = connection.detail.takeIf { connection.state != ConnectionState.CONNECTED && PairingCopy.isUnreachable(it) }
         val slotMachineId = configStore.slotMachineId()
-        val slot = config.agentd?.let { paired ->
-            // The link the phone dialled, not the one agentd dialled: the key's transport tells them apart.
-            val link = AgentsRuntime.activeSecureLinks.value.entries
-                .firstOrNull { it.key.transport == LinkTransport.OUTBOUND && (slotMachineId == null || it.value.machineId == slotMachineId) }
-                ?.value
-            DialledSlot(paired, slotMachineId, link)
-        }
+        val slot = ComputerRows.dialledSlot(config.agentd, slotMachineId, AgentsRuntime.activeSecureLinks.value)
         return ComputerRows.build(
             trusted = configStore.trustedMachines(),
             projectCount = { configStore.projects(it).size },
