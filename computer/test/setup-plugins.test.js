@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { makeWorld } = require("./fixtures/plugin-cli/harness");
 const os = require("node:os");
-const { createDriver, syncPlugin, removePlugin, helpCommands } = require("../dist/setup/plugins.js");
+const { createDriver, syncPlugin, removePlugin, restorePlugin, helpCommands } = require("../dist/setup/plugins.js");
 
 const options = (world) => ({ home: world.home, env: world.env });
 const RECORDED = path.join(__dirname, "fixtures", "plugin-cli", "recorded");
@@ -323,4 +323,116 @@ test("plugin_content_digest_covers_every_file_and_skips_noise", (t) => {
   assert.equal(contentDigest(pluginFiles(dir)), base);
   fs.writeFileSync(path.join(dir, "a", "x.json"), "changed");
   assert.notEqual(contentDigest(pluginFiles(dir)), base);
+});
+
+// A reported install path that is gone is a difference, and a reinstall must not switch a disabled plugin back on.
+
+const PLUGIN = "rokid@rokid-coder";
+const stateFile = (world, tool) => path.join(world.home, ".fake-plugin-cli", tool, "state.json");
+/** Marks the installed plugin enabled or disabled in the fake CLI's own state (as the user's `plugin disable` would). */
+function setEnabled(world, tool, enabled) {
+  const state = world.cliState(tool);
+  state.plugins[PLUGIN].enabled = enabled;
+  fs.writeFileSync(stateFile(world, tool), JSON.stringify(state));
+}
+const isEnabled = (world, tool) => world.cliState(tool).plugins[PLUGIN].enabled !== false;
+const disableCalls = (world, tool) => world.cliCalls(tool).filter((args) => args[1] === "disable");
+
+for (const tool of ["claude", "codex"]) {
+  test(`plugins_${tool}_reported_install_path_that_is_missing_reinstalls`, async (t) => {
+    const { world, sync, installed } = await installedWorld(t, tool);
+    fs.rmSync(installed(), { recursive: true, force: true });
+    world.clearCliCalls(tool);
+    const outcome = await sync();
+    assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+    assert.equal(world.mutatingCalls(tool).length, 2, "uninstall then install");
+    assert.ok(fs.existsSync(path.join(installed(), "hooks", "hooks.json")));
+  });
+}
+
+test("plugins_claude_disabled_plugin_stays_disabled_after_a_same_version_refresh", async (t) => {
+  const { world, source, sync } = await installedWorld(t, "claude");
+  setEnabled(world, "claude", false);
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  world.clearCliCalls("claude");
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+  assert.equal(outcome.warning, undefined);
+  assert.equal(outcome.prior.enabled, false, "the prior registration records that it was off");
+  assert.equal(world.mutatingCalls("claude").filter((args) => args[1] !== "disable").length, 2, "refreshed");
+  assert.deepEqual(disableCalls(world, "claude"), [["plugin", "disable", PLUGIN]], "turned off again by the CLI's own verb");
+  assert.equal(isEnabled(world, "claude"), false);
+});
+
+test("plugins_claude_enabled_plugin_stays_enabled_and_is_never_disabled", async (t) => {
+  const { world, source, sync } = await installedWorld(t, "claude");
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  world.clearCliCalls("claude");
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok");
+  assert.equal(outcome.warning, undefined);
+  assert.equal(outcome.prior.enabled, undefined);
+  assert.deepEqual(disableCalls(world, "claude"), []);
+  assert.equal(isEnabled(world, "claude"), true);
+});
+
+test("plugins_claude_disabled_plugin_with_current_content_is_left_alone", async (t) => {
+  const { world, sync } = await installedWorld(t, "claude");
+  setEnabled(world, "claude", false);
+  world.clearCliCalls("claude");
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok");
+  assert.equal(outcome.warning, undefined);
+  assert.deepEqual(world.mutatingCalls("claude"), []);
+  assert.equal(isEnabled(world, "claude"), false);
+});
+
+test("plugins_a_cli_without_a_disable_verb_warns_that_the_plugin_is_enabled_again", async (t) => {
+  const { world, source, sync } = await installedWorld(t, "codex");
+  setEnabled(world, "codex", false);
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok");
+  assert.equal(outcome.warning, "The Rokid plugin was disabled before this update; it is enabled again - disable it in /plugins if you want it off");
+  assert.deepEqual(disableCalls(world, "codex"), [], "no disable verb is guessed");
+  assert.equal(outcome.prior.enabled, false);
+});
+
+test("plugins_a_failing_disable_verb_warns_rather_than_leaving_the_plugin_silently_enabled", async (t) => {
+  const { world, source, sync } = await installedWorld(t, "claude");
+  setEnabled(world, "claude", false);
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  // The login shell's `claude` stays; make `disable` fail by pointing the driver at a wrapper that refuses it.
+  const cli = world.cli("claude");
+  const real = fs.readFileSync(cli, "utf8");
+  fs.writeFileSync(cli, `#!/bin/sh\n[ "$2" = disable ] && { echo "boom" >&2; exit 1; }\n${real.split("\n").slice(1).join("\n")}`, { mode: 0o755 });
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok");
+  assert.match(outcome.warning, /disabled before this update; it is enabled again - disable it in \/plugin/);
+});
+
+test("plugins_restore_puts_a_disabled_plugin_back_disabled", async (t) => {
+  const { world, source, installed } = await installedWorld(t, "claude");
+  const marketplace = path.dirname(source);
+  const driver = createDriver("claude", world.cli("claude"), options(world));
+  const roots = [path.dirname(path.dirname(marketplace))];
+  const prior = { source: marketplace, pluginVersion: "1.0.0", enabled: false };
+  assert.equal(isEnabled(world, "claude"), true);
+  await restorePlugin(driver, prior, roots);
+  assert.equal(isEnabled(world, "claude"), false);
+  // Already as it was: nothing more to do, and an enabled prior is never disabled.
+  world.clearCliCalls("claude");
+  await restorePlugin(driver, prior, roots);
+  assert.deepEqual(world.mutatingCalls("claude"), []);
+  setEnabled(world, "claude", true);
+  await restorePlugin(driver, { source: marketplace, pluginVersion: "1.0.0" }, roots);
+  assert.deepEqual(disableCalls(world, "claude"), [], "an enabled prior is never disabled");
+  assert.ok(fs.existsSync(installed()));
+});
+
+test("plugins_restore_says_so_when_it_cannot_disable_again", async (t) => {
+  const { world, source } = await installedWorld(t, "codex");
+  const marketplace = path.dirname(source);
+  const driver = createDriver("codex", world.cli("codex", { fixture: "codex-withpath" }), options(world));
+  await assert.rejects(() => restorePlugin(driver, { source: marketplace, pluginVersion: "1.0.0", enabled: false }, [path.dirname(path.dirname(marketplace))]), /disabled before setup/);
 });
