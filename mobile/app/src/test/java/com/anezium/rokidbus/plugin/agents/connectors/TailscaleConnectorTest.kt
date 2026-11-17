@@ -158,7 +158,8 @@ class TailscaleConnectorTest {
         test.testScheduler.runCurrent()
         assertTrue("a disconnect removes its entry", AgentsRuntime.activeSecureLinks.value.isEmpty())
 
-        test.testScheduler.advanceTimeBy(60_000L)
+        // Past the backoff, not past the dial deadline: a connection nobody answers within it is abandoned.
+        test.testScheduler.advanceTimeBy(2_000L)
         test.testScheduler.runCurrent()
         pinned.connections.last().apply { open(); ack() }
         val second = AgentsRuntime.activeSecureLinks.value.keys.single()

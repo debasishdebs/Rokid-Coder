@@ -2,6 +2,7 @@ package com.anezium.rokidbus.plugin.agents
 
 import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.TestScope
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -52,6 +53,29 @@ class TailnetHostsTest {
         // The longest name that is still a name.
         val longest = List(4) { "a".repeat(61) }.joinToString(".")
         assertEquals(listOf(longest), EndpointHosts.clean(listOf(longest)))
+    }
+
+    @Test
+    fun ipv6_literals_are_checked_by_structure() {
+        val good = listOf(
+            "fe80::1", "::1", "::", "2001:db8::1", "fd7a:115c:a1e0::1", "1:2:3:4:5:6:7:8", "1::8", "::ffff:192.168.1.1",
+            "2001:DB8:0:0:0:0:0:1",
+        )
+        good.forEach { assertTrue(it, EndpointHosts.isValid(it)) }
+        val bad = listOf(
+            "::::", ":::", "1::2::3", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7::8", "12345::1", "g::1", ":1::2",
+            "1::2:", "1:::2", "1.2.3.4::", "::1.2.3.256", "::1.2.3", "fe80::1%eth0", "1:2:3:4:5:6:7:",
+        )
+        bad.forEach { assertFalse(it, EndpointHosts.isValid(it)) }
+        assertEquals(emptyList<String>(), EndpointHosts.clean(bad))
+        assertEquals(listOf("2001:db8::1"), EndpointHosts.clean(bad + "2001:db8::1"))
+    }
+
+    @Test
+    fun the_line_and_the_frame_both_drop_a_bad_ipv6_entry() {
+        val mixed = JSONArray(listOf("::::", "1::2::3", tailnet, "fe80::1"))
+        assertEquals(listOf(tailnet, "fe80::1"), target(line(hosts = mixed)).hosts)
+        assertEquals(AgentdAction.Endpoint(listOf(tailnet, "fe80::1"), 8792), parseFrame(endpointFrame(hosts = mixed)))
     }
 
     @Test
@@ -286,7 +310,7 @@ class TailnetHostsTest {
     // -------------------------------------------------------------- the dial, with no sockets
 
     /** An AgentdClient on virtual time whose every connection is a fake the test answers or fails by hand. */
-    private inner class Harness(var alts: () -> List<String>? = { null }) {
+    private inner class Harness(deadlineMs: Long = DIAL_DEADLINE_MS, var alts: () -> List<String>? = { null }) {
         val test = TestScope()
         val wss = FakeWebSocketClient()
         val sessions = AgentSessionStore()
@@ -296,6 +320,7 @@ class TailnetHostsTest {
             OkHttpClient(), sessions, test, "test", FixturePhoneTlsIdentity(),
             pinnedClient = { wss },
             freshAltHosts = { alts() },
+            connectDeadlineMs = deadlineMs,
             onSecureConnected = { _, _, _, address -> connected += address },
             onEndpoint = { fp, hosts, port -> endpoints += Triple(fp, hosts, port) },
         ) {}
@@ -422,7 +447,7 @@ class TailnetHostsTest {
     @Test
     fun an_alternate_learned_between_rounds_is_dialled_from_the_next_round() {
         val learned = CopyOnWriteArrayList<String>()
-        val harness = Harness { learned.toList() }
+        val harness = Harness(alts = { learned.toList() })
         harness.client.start(config(emptyList()))
         harness.fail(0)
         assertEquals(listOf(lan), harness.dialled())
@@ -431,6 +456,93 @@ class TailnetHostsTest {
         harness.fail(1)
         assertEquals(listOf(lan, lan, tailnet), harness.dialled())
         harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun an_address_that_cannot_be_dialled_costs_only_itself() {
+        // Saved before the validator, or by a bug: the request for it throws.
+        val harness = Harness(alts = { listOf("::::", tailnet) })
+        harness.client.start(config())
+        harness.fail(0)
+        assertEquals(listOf(lan, tailnet), harness.dialled())
+        harness.accept(1)
+        assertEquals(ConnectionState.CONNECTED, harness.state().state)
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun a_throwing_attempt_is_skipped_and_the_round_goes_on() {
+        val tried = mutableListOf<String>()
+        val outcome = kotlinx.coroutines.runBlocking {
+            dialRound(listOf("bad", tailnet), listOf("bad", tailnet)) { host ->
+                tried += host
+                if (host == "bad") throw IllegalArgumentException("not a url") else ConnectionOutcome.Retry
+            }
+        }
+        assertEquals(listOf("bad", tailnet), tried)
+        assertEquals(ConnectionOutcome.Retry, outcome)
+    }
+
+    @Test
+    fun an_address_that_never_finishes_connecting_is_abandoned_for_the_next_one() {
+        val harness = Harness()
+        harness.client.start(config())
+        harness.settle()
+        // Opened nothing, failed nothing: TCP taken, TLS never answered.
+        harness.advance(DIAL_DEADLINE_MS - 1)
+        assertEquals(listOf(lan), harness.dialled())
+        harness.advance(1)
+        harness.settle()
+        assertEquals(listOf(lan, tailnet), harness.dialled())
+        harness.accept(1)
+        assertEquals(ConnectionState.CONNECTED, harness.state().state)
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun a_whole_round_of_silent_hosts_ends_after_one_deadline_each() {
+        val harness = Harness()
+        harness.client.start(config())
+        harness.settle()
+        harness.advance(DIAL_DEADLINE_MS)
+        harness.advance(DIAL_DEADLINE_MS)
+        assertEquals(listOf(lan, tailnet), harness.dialled())
+        assertEquals(PairingCopy.cantReach(listOf(lan, tailnet)), harness.state().detail)
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun a_host_that_takes_tcp_and_never_speaks_tls_does_not_hold_the_dial() {
+        val accepts = java.util.concurrent.atomic.AtomicInteger()
+        val held = CopyOnWriteArrayList<java.net.Socket>()
+        java.net.ServerSocket(0).use { silent ->
+            val acceptor = kotlin.concurrent.thread(isDaemon = true) {
+                while (true) {
+                    val socket = runCatching { silent.accept() }.getOrNull() ?: break
+                    accepts.incrementAndGet()
+                    held += socket
+                }
+            }
+            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+            try {
+                // As in production: no read timeout, so only the deadline can end a handshake nobody answers.
+                val base = OkHttpClient.Builder().readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+                val client = AgentdClient(
+                    base, AgentSessionStore(), scope, "test", FixturePhoneTlsIdentity(), connectDeadlineMs = 400,
+                ) {}
+                client.start(AgentdConfig("127.0.0.1", silent.localPort, "tok", "Desk", FP, STEER, altHosts = listOf("localhost")))
+                val deadline = System.currentTimeMillis() + 5_000
+                // The second accept is the second address: without the deadline the first would hold the round forever.
+                while (accepts.get() < 2 && System.currentTimeMillis() < deadline) Thread.sleep(20)
+                assertTrue("accepted ${accepts.get()}", accepts.get() >= 2)
+                client.stop(clearSessions = true)
+            } finally {
+                scope.cancel()
+                held.forEach { runCatching { it.close() } }
+                silent.close()
+                acceptor.join(2_000)
+            }
+        }
     }
 
     @Test
