@@ -15,7 +15,7 @@ internal object EndpointHosts {
     const val MAX_HOST_CHARS = 253
 
     private val IPV4 = Regex("(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})")
-    private val IPV6 = Regex("[0-9A-Fa-f:.]{2,45}")
+    private val IPV6_GROUP = Regex("[0-9A-Fa-f]{1,4}")
     private val LABEL = "[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
     private val DNS = Regex("$LABEL(\\.$LABEL)*")
 
@@ -36,9 +36,45 @@ internal object EndpointHosts {
     /** An IPv4 or IPv6 literal, or a DNS name; no scheme, port, path, brackets, zone or whitespace. */
     fun isValid(host: String): Boolean = when {
         host.isEmpty() || host.length > MAX_HOST_CHARS -> false
-        host.contains(':') -> host.length <= 45 && IPV6.matches(host) && host.count { it == ':' } >= 2
-        host.all { it.isDigit() || it == '.' } -> IPV4.matchEntire(host)?.groupValues?.drop(1)?.all { it.toInt() <= 255 } == true
+        host.contains(':') -> isIpv6(host)
+        host.all { it.isDigit() || it == '.' } -> isIpv4(host)
         else -> DNS.matches(host)
+    }
+
+    private fun isIpv4(host: String): Boolean =
+        IPV4.matchEntire(host)?.groupValues?.drop(1)?.all { it.toInt() <= 255 } == true
+
+    /**
+     * Structurally an IPv6 literal, because one that is not makes the request for it throw: eight groups
+     * of one to four hex digits, or fewer around a single `::`, with an IPv4 tail allowed last. A zone id is not.
+     */
+    private fun isIpv6(host: String): Boolean {
+        if (host.length > 45) return false
+        val gap = host.indexOf("::")
+        if (gap != host.lastIndexOf("::")) return false
+        val head = if (gap < 0) host else host.substring(0, gap)
+        val tail = if (gap < 0) "" else host.substring(gap + 2)
+        val first = groupCount(head, ipv4Tail = gap < 0) ?: return false
+        val second = groupCount(tail, ipv4Tail = true) ?: return false
+        return if (gap < 0) first == 8 else first + second <= 7
+    }
+
+    /** How many 16-bit groups [part] spells, or null when it is not groups at all. */
+    private fun groupCount(part: String, ipv4Tail: Boolean): Int? {
+        if (part.isEmpty()) return 0
+        val items = part.split(':')
+        var count = 0
+        for ((index, item) in items.withIndex()) {
+            when {
+                ipv4Tail && index == items.lastIndex && item.contains('.') -> {
+                    if (!isIpv4(item)) return null
+                    count += 2
+                }
+                IPV6_GROUP.matches(item) -> count += 1
+                else -> return null
+            }
+        }
+        return count
     }
 
     /** [hosts] without [primary], which is dialled first anyway. */

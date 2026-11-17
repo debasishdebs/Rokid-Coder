@@ -3,6 +3,12 @@ package com.anezium.rokidbus.plugin.agents
 /** How long one address gets to accept the connection before the next is tried. */
 internal const val DIAL_CONNECT_TIMEOUT_MS = 4_000L
 
+/**
+ * How long one address gets for the whole of establishing the link (TCP, TLS and the upgrade). The connect
+ * timeout alone leaves a host that accepts TCP and never answers TLS holding the dial forever.
+ */
+internal const val DIAL_DEADLINE_MS = 6_000L
+
 /** Which of a computer's addresses answered last, so the next dial starts there. */
 internal class DialOrder {
     @Volatile private var lastWorked: String? = null
@@ -35,7 +41,15 @@ internal suspend fun dialRound(
 ): ConnectionOutcome {
     val misses = mutableListOf<ConnectionOutcome.NotThere>()
     for (host in order) {
-        when (val outcome = attempt(host)) {
+        // One entry that cannot even be turned into a request must cost only itself.
+        val result = try {
+            attempt(host)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            ConnectionOutcome.NotThere(ConnectionOutcome.Retry, unreachable = true)
+        }
+        when (val outcome = result) {
             is ConnectionOutcome.NotThere -> misses += outcome
             else -> return outcome
         }

@@ -40,6 +40,8 @@ class AgentdClient(
     private val freshAltHosts: (() -> List<String>?)? = null,
     /** The pinned computer (named by its pin) listed where else it can be reached, over a link past its hello. */
     private val onEndpoint: (fp: String, hosts: List<String>, port: Int?) -> Unit = { _, _, _ -> },
+    /** The whole of one address's connection establishment; on expiry the next address is tried. */
+    private val connectDeadlineMs: Long = DIAL_DEADLINE_MS,
     /** Asked before every dial: false once the pairing went unused past the TTL, which signs it out (U7). */
     private val dialAllowed: () -> Boolean = { true },
     /** The pairing was just used: a secure hello_ack, or a link still up. */
@@ -302,6 +304,14 @@ class AgentdClient(
         val request = Request.Builder()
             .url(webSocketUrl(host, config.port, secure = true))
             .build()
+        // The TLS handshake and the upgrade have no timeout of their own on this client: a host that took the
+        // TCP connection and says nothing would otherwise hold the whole round.
+        val establishing = launch {
+            delay(connectDeadlineMs)
+            if (sockets.isCurrent(generation) && !opened.get()) {
+                finish(ConnectionOutcome.NotThere(ConnectionOutcome.Retry, unreachable = true))
+            }
+        }
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (!isLive()) {
@@ -309,6 +319,7 @@ class AgentdClient(
                     return
                 }
                 opened.set(true)
+                establishing.cancel()
                 // The handshake precedes the binding, so it is written to this
                 // socket directly; every later line goes through the wire. OkHttp
                 // opens only after the pinned trust manager and hostname check
@@ -479,6 +490,7 @@ class AgentdClient(
             ended.await()
         } finally {
             // Unbound before the slot is cleared, so no write outlives this connection's trust.
+            establishing.cancel()
             link.end(owner)
             if (connected.get()) onSecureLinkClosed(key)
             deadlines.clearAll()
