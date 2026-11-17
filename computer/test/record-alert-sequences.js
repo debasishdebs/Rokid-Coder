@@ -193,7 +193,7 @@ const SCENARIOS = {
     .push("A", "approval")
     .advance(2_000).glasses("closed", "A", { reason: "USER" })
     .phone("alert_shown", "A").phone("alert_dismissed", "A")
-    .advance(298_000)
+    .advance(300_000)
     .glasses("shown", "A").phone("alert_shown", "A")
     .advance(1_000).glasses("action", "A", { action: "allow" }).act("A", "allow")
     .done("The wearer dismisses an approval: agentd parks it and it comes back as a reminder, under the same id"),

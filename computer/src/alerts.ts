@@ -38,6 +38,14 @@ export interface QueueTimings extends AlertTimings {
 
 export type NewAlert = Omit<Alert, "id" | "state" | "attempts" | "promoted">;
 
+/**
+ * The longest the glasses can keep one band up: the hub caps a notice's
+ * lifetime at 90 s from its first show (45 s per ttl, restarted by an update).
+ * A configured "Alert stays on screen" above this is read as this, so the queue
+ * never holds the display for a card the glasses already dropped.
+ */
+export const MAX_BAND_DWELL_MS = 80_000;
+
 const KIND_RANK: Record<AlertKind, number> = {
   approval: 0,
   question: 1,
@@ -71,9 +79,22 @@ interface Entry {
  * or expired. Only a `shown` ack counts as delivered. The queue owns no timers;
  * the daemon drives it with tick() and everything time-based reads `now()`.
  *
- * One alert at a time occupies the glasses (current()). A shown alert that is
- * past its dwell and not acted stays "parked" and is requeued as a reminder
- * every reminderMs until the wait limit.
+ * One alert at a time occupies the glasses (current()). The card's lifetime on
+ * the glasses is the wearer's "Alert stays on screen" (`dwellMs`), counted from
+ * the `shown` ack; the phone takes the band down at that moment, and this queue
+ * frees the display at the same moment without touching the alert's own state.
+ * Past its dwell:
+ * - a Done or notice needs no answer and is closed (silently: the phone already
+ *   dropped it), so it never comes back;
+ * - an approval, question or error still needs the wearer: it stays pending, and
+ *   `reminderMs` after it was shown it is sent again as a reminder, until it is
+ *   answered, dismissed or the wait limit ends it. Approvals and questions stay
+ *   answerable from the phone and laptop the whole time.
+ *
+ * Before this rule `dwellMs` only decided when the next queued alert could take
+ * the display and when the first reminder was allowed; nothing took the card off
+ * the glasses except the hub's own ttl (45 s for an action band, 12 s for Done and
+ * error), and a reminder was counted from the last frame sent, not from the show.
  */
 export class AlertQueue {
   private readonly entries = new Map<string, Entry>();
@@ -235,14 +256,27 @@ export class AlertQueue {
     }
   }
 
-  /** A shown alert nobody acted on comes back as a reminder. */
+  /** What the glasses can show of "Alert stays on screen". */
+  private dwellMs(): number {
+    return Math.min(this.timings.dwellMs, MAX_BAND_DWELL_MS);
+  }
+
+  /**
+   * A shown alert whose card has left the glasses: a Done or notice is over, and
+   * the rest come back as a reminder `reminderMs` after they were shown.
+   */
   private remind(t: number): void {
-    for (const entry of this.entries.values()) {
+    for (const entry of [...this.entries.values()]) {
       if (entry.alert.state !== "shown" || entry.shownAt === undefined) {
         continue;
       }
-      const dwellOver = t - entry.shownAt >= this.timings.dwellMs;
-      if (dwellOver && t - entry.lastSentAt >= this.timings.reminderMs) {
+      const onScreenFor = t - entry.shownAt;
+      if (onScreenFor < this.dwellMs()) {
+        continue;
+      }
+      if (entry.alert.kind === "done" || entry.alert.kind === "notice") {
+        this.close(entry, "dismissed", "dismissed");
+      } else if (onScreenFor >= this.timings.reminderMs) {
         this.requeue(entry, false, "reminder");
       }
     }
@@ -278,7 +312,7 @@ export class AlertQueue {
     // Only a real approval displaces the current alert, whether it is still
     // waiting for its ack or inside its dwell.
     const inDwell = occupant.alert.state === "sent" ||
-      (occupant.alert.state === "shown" && t - (occupant.shownAt ?? t) < this.timings.dwellMs);
+      (occupant.alert.state === "shown" && t - (occupant.shownAt ?? t) < this.dwellMs());
     if (inDwell) {
       if (occupant.alert.kind !== "approval") {
         const approval = this.best((e) => e.alert.state === "queued" && e.alert.kind === "approval");

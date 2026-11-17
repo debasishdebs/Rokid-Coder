@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { AlertQueue } = require("../dist/alerts.js");
+const { AlertQueue, MAX_BAND_DWELL_MS } = require("../dist/alerts.js");
 
 const TIMINGS = {
   ageBoostMs: 30_000,
@@ -565,4 +565,126 @@ test("undelivered_retry_still_new", () => {
   assert.deepEqual(env.frames.map((f) => [f.id, f.reason]), [[id, "new"]]);
   env.advance(10_000);
   assert.deepEqual(env.frames.map((f) => f.reason), ["new", "retry"]);
+});
+
+// Alert card lifetime: "Alert stays on screen" (dwellMs) and "Remind me again after" (reminderMs).
+
+const frameReasons = (env) => env.frames.filter((f) => f.reason !== "update").map((f) => f.reason);
+
+for (const dwellMs of [8_000, 60_000]) {
+  test(`approval_leaves_after_${dwellMs}ms_returns_at_reminderMs_and_answering_stops_reminders`, () => {
+    const env = setup({ ...TIMINGS, dwellMs });
+    const id = env.queue.push(alert("approval", { createdAt: env.now() }));
+    env.queue.onShown(id);
+
+    // Still pending after its card has left the glasses, and still answerable.
+    env.advance(dwellMs);
+    assert.equal(env.queue.get(id).state, "shown");
+    assert.deepEqual(frameReasons(env), ["new"]);
+
+    env.advance(TIMINGS.reminderMs - dwellMs - 1);
+    assert.deepEqual(frameReasons(env), ["new"]);
+    env.advance(1);
+    assert.deepEqual(frameReasons(env), ["new", "reminder"]);
+
+    // The reminder is counted from when its card was shown.
+    env.queue.onShown(id);
+    env.advance(TIMINGS.reminderMs - 1);
+    assert.deepEqual(frameReasons(env), ["new", "reminder"]);
+    env.advance(1);
+    assert.deepEqual(frameReasons(env), ["new", "reminder", "reminder"]);
+
+    env.queue.onShown(id);
+    env.queue.onActed(id);
+    env.advance(TIMINGS.reminderMs * 3);
+    assert.deepEqual(frameReasons(env), ["new", "reminder", "reminder"]);
+    assert.equal(env.queue.get(id), undefined);
+  });
+
+  test(`done_leaves_after_${dwellMs}ms_and_never_reminds`, () => {
+    const closed = [];
+    let t = 1_000_000;
+    const frames = [];
+    const queue = new AlertQueue({ ...TIMINGS, dwellMs }, (f) => { frames.push(f); return true; }, () => t, (a, reason) => closed.push([a.kind, reason]));
+    const id = queue.push(alert("done", { createdAt: t }));
+    queue.onShown(id);
+    t += dwellMs - 1;
+    queue.tick();
+    assert.equal(queue.get(id).state, "shown");
+    t += 1;
+    queue.tick();
+    assert.equal(queue.get(id), undefined);
+    // Silent for the phone: a dismiss is the glasses' own doing.
+    assert.deepEqual(closed, [["done", "dismissed"]]);
+    t += TIMINGS.reminderMs * 3;
+    queue.tick();
+    assert.equal(frames.filter((f) => f.reason !== "update").length, 1);
+  });
+}
+
+test("a_done_that_was_never_acked_keeps_retrying_instead_of_leaving", () => {
+  const env = setup();
+  const id = env.queue.push(alert("done", { createdAt: env.now() }));
+  env.advance(5_000);
+  env.advance(10_000);
+  assert.equal(env.queue.get(id).state, "sent");
+  assert.deepEqual(frameReasons(env), ["new", "retry", "retry"]);
+});
+
+test("an_unanswered_question_stays_pending_after_its_card_left_and_is_reminded", () => {
+  const env = setup();
+  const id = env.queue.push(alert("question", { createdAt: env.now() }));
+  env.queue.onShown(id);
+  env.advance(TIMINGS.dwellMs);
+  assert.equal(env.queue.get(id).state, "shown");
+  env.advance(TIMINGS.reminderMs - TIMINGS.dwellMs);
+  assert.deepEqual(frameReasons(env), ["new", "reminder"]);
+  assert.equal(env.queue.get(id).kind, "question");
+});
+
+test("an_error_is_reminded_like_an_approval_until_it_is_dismissed", () => {
+  const env = setup();
+  const id = env.queue.push(alert("error", { createdAt: env.now() }));
+  env.queue.onShown(id);
+  env.advance(TIMINGS.reminderMs);
+  assert.deepEqual(frameReasons(env), ["new", "reminder"]);
+  env.queue.onShown(id);
+  env.queue.onDismissed(id);
+  env.advance(TIMINGS.reminderMs * 2);
+  assert.deepEqual(frameReasons(env), ["new", "reminder"]);
+});
+
+test("a_newer_alert_still_takes_the_display_when_the_dwell_is_over_and_the_old_one_stays_pending", () => {
+  const env = setup({ ...TIMINGS, dwellMs: 60_000 });
+  const first = env.queue.push(alert("question", { title: "first", createdAt: env.now() }));
+  env.queue.onShown(first);
+  env.queue.push(alert("error", { title: "second", createdAt: env.now() }));
+  env.advance(59_999);
+  assert.equal(env.queue.current().title, "first");
+  env.advance(1);
+  assert.equal(env.queue.current().title, "second");
+  assert.equal(env.queue.get(first).state, "shown");
+});
+
+test("an_approval_preempts_a_done_inside_the_dwell_and_the_done_resumes_for_its_dwell", () => {
+  const env = setup();
+  const done = env.queue.push(alert("done", { title: "done", createdAt: env.now() }));
+  env.queue.onShown(done);
+  env.advance(3_000);
+  const approval = env.queue.push(alert("approval", { title: "approval", createdAt: env.now() }));
+  assert.equal(env.queue.current().id, approval);
+  env.queue.onShown(approval);
+  env.queue.onActed(approval);
+  assert.equal(env.queue.current().id, done);
+  env.queue.onShown(done);
+  env.advance(TIMINGS.dwellMs);
+  assert.equal(env.queue.get(done), undefined);
+});
+
+test("a_dwell_longer_than_the_glasses_can_hold_a_band_is_read_as_the_band_ceiling", () => {
+  const env = setup({ ...TIMINGS, dwellMs: 3_600_000 });
+  const id = env.queue.push(alert("done", { createdAt: env.now() }));
+  env.queue.onShown(id);
+  env.advance(MAX_BAND_DWELL_MS);
+  assert.equal(env.queue.get(id), undefined);
 });
