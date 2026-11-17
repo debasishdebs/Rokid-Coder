@@ -72,14 +72,14 @@ object AlertNotices {
 
     /** A one-line message about what the wearer just did or could not do. */
     fun brief(title: String, body: String): NexusNotice = NexusNotice(
-        title = title.line(TITLE_CHARS).ifEmpty { "Agents" },
+        title = title.line(TITLE_CHARS).ifEmpty { PRODUCT_TITLE },
         body = body.line(BRIEF_BODY_CHARS).ifEmpty { null },
         ttlMs = NOTICE_TTL_MS,
     )
 
     /** Several safety briefs in one band, one per line. */
     fun briefLines(title: String, lines: List<String>): NexusNotice = NexusNotice(
-        title = title.line(TITLE_CHARS).ifEmpty { "Agents" },
+        title = title.line(TITLE_CHARS).ifEmpty { PRODUCT_TITLE },
         lines = lines.map { it.line(BRIEF_BODY_CHARS) }.filter(String::isNotEmpty).take(BRIEF_MAX_LINES),
         ttlMs = NOTICE_TTL_MS,
     )
@@ -106,7 +106,7 @@ object AlertNotices {
             listOf(header) + fitOldest(session?.lastAssistantText?.let(::proseSegments).orEmpty(), room)
         }
         return NexusReader(
-            title = (session?.displayTitle ?: alert.title).line(READER_TITLE_CHARS).ifEmpty { "Agents" },
+            title = (session?.displayTitle ?: alert.title).line(READER_TITLE_CHARS).ifEmpty { PRODUCT_TITLE },
             subtitle = "${providerLabel(alert)} · ${alert.kind.wire}".take(READER_LINE_CHARS),
             footer = "swipe scroll · 2-tap back",
             contentKey = digest(alert.id + segments.joinToString("\u0000") { it.text }),

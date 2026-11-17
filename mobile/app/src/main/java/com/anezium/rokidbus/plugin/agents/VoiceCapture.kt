@@ -386,5 +386,5 @@ object VoiceCard {
 
     /** The sub line of a failure that the wearer can fix, or null. */
     fun hint(state: VoiceCapture.State): String? =
-        if (state == VoiceCapture.State.Failed(VoiceCapture.UNAVAILABLE)) "allow Speech to text in Nexus settings" else null
+        if (state == VoiceCapture.State.Failed(VoiceCapture.UNAVAILABLE)) "allow Speech to text in Rokid Coder settings" else null
 }

@@ -8,6 +8,9 @@ import com.anezium.rokidbus.client.plugin.NexusReaderSegmentKind
 import com.anezium.rokidbus.client.plugin.NexusRowTone
 import java.security.MessageDigest
 
+/** What the glasses call this app: the board's title, the notices' fallback and the plugin's name. */
+internal const val PRODUCT_TITLE = "Rokid Coder"
+
 /**
  * How the board, the control menu and the two decision cards are drawn. Pure
  * builders over what the service hands them: nothing here keeps state or decides
@@ -151,7 +154,7 @@ internal object BoardCards {
 
         return Board(
             card(
-                title = "Agents",
+                title = PRODUCT_TITLE,
                 subtitle = sessionsSubtitle(sessions, connections, config),
                 rows = rows,
                 footer = if (sessions.isEmpty()) {
@@ -269,7 +272,7 @@ internal object BoardCards {
             .map { NexusReaderSegment(NexusReaderSegmentKind.PROSE, it) }
             .ifEmpty { listOf(NexusReaderSegment(NexusReaderSegmentKind.PROSE, "…")) }
         return NexusReader(
-            title = title.singleLine(110).ifBlank { "Agents" },
+            title = title.singleLine(110).ifBlank { PRODUCT_TITLE },
             footer = "swipe scroll · 2-tap back",
             handlesBack = true,
             contentKey = "menu:${text.hashCode()}",
