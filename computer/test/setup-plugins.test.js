@@ -434,5 +434,95 @@ test("plugins_restore_says_so_when_it_cannot_disable_again", async (t) => {
   const { world, source } = await installedWorld(t, "codex");
   const marketplace = path.dirname(source);
   const driver = createDriver("codex", world.cli("codex", { fixture: "codex-withpath" }), options(world));
-  await assert.rejects(() => restorePlugin(driver, { source: marketplace, pluginVersion: "1.0.0", enabled: false }, [path.dirname(path.dirname(marketplace))]), /disabled before setup/);
+  await assert.rejects(() => restorePlugin(driver, { source: marketplace, pluginVersion: "1.0.0", enabled: false }, [path.dirname(path.dirname(marketplace))]), /could not keep it disabled/);
+});
+
+// A failed reinstall must not leave the user with a silent gap, and an extra read that fails is only a warning.
+
+/**
+ * Wraps a fake CLI: `fail(args, n)` (n counts the calls with the same verb) decides whether a call fails
+ * with a transient-looking error before it reaches the fake.
+ */
+function flakyCli(world, tool, failures) {
+  const real = world.cli(tool, { fixture: tool === "codex" ? "codex-withpath" : tool });
+  const inner = `${real}.real`;
+  fs.renameSync(real, inner);
+  const counts = path.join(world.root, `${tool}-counts`);
+  fs.mkdirSync(counts, { recursive: true });
+  fs.writeFileSync(
+    real,
+    `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const key = args.slice(0, 2).join("_").replace(/[^a-z_]/g, "") || "x";
+const file = ${JSON.stringify(counts)} + "/" + key;
+const n = (fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8")) : 0) + 1;
+fs.writeFileSync(file, String(n));
+const failures = ${JSON.stringify(failures)};
+if ((failures[key] || []).includes(n)) { process.stderr.write("transient failure\\n"); process.exit(1); }
+const r = require("node:child_process").spawnSync(${JSON.stringify(inner)}, args, { stdio: "inherit" });
+process.exit(r.status === null ? 1 : r.status);
+`,
+    { mode: 0o755 },
+  );
+  return real;
+}
+
+const quickRetry = (t) => {
+  const before = process.env.ROKID_SETUP_PLUGIN_RETRY_MS;
+  process.env.ROKID_SETUP_PLUGIN_RETRY_MS = "0";
+  t.after(() => (before === undefined ? delete process.env.ROKID_SETUP_PLUGIN_RETRY_MS : (process.env.ROKID_SETUP_PLUGIN_RETRY_MS = before)));
+};
+
+/** A world with the plugin installed, then its content changed so the next sync must reinstall. */
+async function staleWorld(t, tool, failures) {
+  const base = await installedWorld(t, tool);
+  fs.writeFileSync(path.join(base.source, "hooks", "hooks.json"), HOOKS_NEW);
+  const cli = flakyCli(base.world, tool, failures);
+  const marketplace = path.dirname(base.source);
+  return { ...base, marketplace, driver: () => createDriver(tool, cli, options(base.world)) };
+}
+
+for (const tool of ["claude", "codex"]) {
+  const installKey = tool === "claude" ? "plugin_install" : "plugin_add";
+  test(`plugins_${tool}_a_reinstall_that_fails_once_is_retried_and_succeeds`, async (t) => {
+    quickRetry(t);
+    const { world, driver, marketplace, installed } = await staleWorld(t, tool, { [installKey]: [1] });
+    const outcome = await syncPlugin(driver(), marketplace);
+    assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+    assert.equal(outcome.warning, undefined);
+    assert.ok(fs.readFileSync(path.join(installed(), "hooks", "hooks.json"), "utf8").includes("SubagentStart"));
+    assert.ok(world.cliState(tool).plugins["rokid@rokid-coder"]);
+  });
+
+  test(`plugins_${tool}_a_reinstall_that_fails_twice_says_the_plugin_is_not_installed`, async (t) => {
+    quickRetry(t);
+    // The retry and the put-back attempt all fail too.
+    const { world, driver, marketplace } = await staleWorld(t, tool, { [installKey]: [1, 2, 3, 4, 5, 6] });
+    const outcome = await syncPlugin(driver(), marketplace);
+    assert.equal(outcome.result, "failed");
+    assert.equal(outcome.warning, `The Rokid plugin is currently NOT installed in ${tool}. Run: rokid-setup plugins sync --tool ${tool}`);
+    assert.equal(world.cliState(tool).plugins["rokid@rokid-coder"], undefined, "and that is true");
+  });
+
+  test(`plugins_${tool}_a_reinstall_that_fails_twice_but_restores_the_previous_registration_says_so`, async (t) => {
+    quickRetry(t);
+    // The first two installs (attempt and retry) fail, the put-back works.
+    const { world, driver, marketplace } = await staleWorld(t, tool, { [installKey]: [1, 2] });
+    const outcome = await syncPlugin(driver(), marketplace);
+    assert.equal(outcome.result, "failed");
+    assert.match(outcome.warning, /could not be updated in .*; the previous registration was put back\. Run: rokid-setup plugins sync/);
+    assert.ok(world.cliState(tool).plugins["rokid@rokid-coder"], "the plugin is installed again");
+  });
+}
+
+test("plugins_a_failing_enabled_state_read_after_a_good_refresh_is_a_warning_not_a_failure", async (t) => {
+  const { world, source, marketplace, driver } = await staleWorld(t, "claude", { plugin_list: [3] });
+  setEnabled(world, "claude", false);
+  // plugin list calls: 1 the first status, 2 the verification after the reinstall, 3 the enabled-state check.
+  const outcome = await syncPlugin(driver(), marketplace);
+  assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+  assert.match(outcome.warning, /could not check whether the Rokid plugin was disabled/);
+  assert.ok(fs.readFileSync(path.join(world.cliState("claude").plugins["rokid@rokid-coder"].installPath, "hooks", "hooks.json"), "utf8").includes("SubagentStart"));
+  assert.ok(source);
 });

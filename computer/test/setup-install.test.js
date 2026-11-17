@@ -619,3 +619,19 @@ test("a_cli_that_cannot_disable_again_shows_the_warning_in_the_setup_output", as
   const synced = world.run(["plugins", "sync", "--tool", "codex"]);
   assert.equal(synced.status, 0, synced.output);
 });
+
+test("a_plugin_that_cannot_be_reinstalled_is_named_in_the_final_output_and_setup_still_commits", async (t) => {
+  const world = makeWorld(t);
+  const cli = world.cli("claude");
+  const b1 = world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1", forwarder: "// forwarder one\n" });
+  const b2 = world.bundle("1.0.0-test.2", { pluginVersion: "1.0.1", forwarder: "// forwarder two\n" });
+  assert.equal(world.install(b1).status, 0);
+  // From here every `claude plugin install` fails, as a broken CLI would.
+  fs.renameSync(cli, `${cli}.real`);
+  fs.writeFileSync(cli, `#!/bin/sh\n[ "$1" = plugin ] && [ "$2" = install ] && { echo "install is broken" >&2; exit 1; }\nexec '${cli}.real' "$@"\n`, { mode: 0o755 });
+  const run = world.install(b2, {}, { extraEnv: { ROKID_SETUP_PLUGIN_RETRY_MS: "0" } });
+  assert.match(run.output, /The Rokid plugin is currently NOT installed in claude\. Run: rokid-setup plugins sync --tool claude\n/);
+  assert.equal(world.cliState("claude").plugins["rokid@rokid-coder"], undefined, "and it is true");
+  assert.equal(world.manifest().version, "1.0.0-test.2", "setup's other work was committed");
+  assert.equal(world.manifest().plugins.claude.status, "failed");
+});
