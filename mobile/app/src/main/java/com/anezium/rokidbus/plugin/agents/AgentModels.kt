@@ -122,6 +122,8 @@ data class SessionV2(
     val pendingModel: String?,
     val pendingEffort: String?,
     val sandbox: String?,
+    /** Why [followup] is [FollowupState.UNAVAILABLE]: `busy`, `draft` or `not_launcher`; null when unsaid or unknown. */
+    val followupWhy: String? = null,
 )
 
 enum class AlertKind(val wire: String) {

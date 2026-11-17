@@ -741,7 +741,18 @@ private fun JSONObject.toSessionV2(fallbackHeading: String): SessionV2? {
         pendingModel = pending?.nullableString("model", MAX_HUD_LABEL_CHARS),
         pendingEffort = pending?.nullableString("effort", MAX_HUD_LABEL_CHARS),
         sandbox = nullableString("sandbox", MAX_HUD_LABEL_CHARS),
+        followupWhy = followupWhy(capabilities),
     )
+}
+
+private val FOLLOWUP_WHY = setOf("busy", "draft", "not_launcher")
+
+/** Only meaningful while the follow-up is unavailable; an absent or unknown reason is null. */
+private fun JSONObject.followupWhy(capabilities: JSONObject): String? {
+    val raw = nullableString("followupWhy", MAX_WIRE_TYPE_CHARS)
+        ?: capabilities.nullableString("followupWhy", MAX_WIRE_TYPE_CHARS)
+    val state = FollowupState.fromWire(capabilities.nullableString("followup", MAX_WIRE_TYPE_CHARS))
+    return raw?.takeIf { it in FOLLOWUP_WHY && (state == null || state == FollowupState.UNAVAILABLE) }
 }
 
 private fun JSONObject.toQuestionPayload(): QuestionPayload? {
