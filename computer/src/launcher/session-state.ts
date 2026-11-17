@@ -694,8 +694,9 @@ export class LauncherRouter {
    */
   onBlocked(key: SessionKey): void {
     if (this.port.binding(key)) {
-      this.cancelUnwritten(key);
+      // A background reply that loses its evidence fails busy, as every revocation does.
       this.revokeBg(key);
+      this.cancelUnwritten(key);
       this.look(key, true);
     }
   }
