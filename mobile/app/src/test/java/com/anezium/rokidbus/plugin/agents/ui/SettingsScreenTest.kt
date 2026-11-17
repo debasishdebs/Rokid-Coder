@@ -20,6 +20,15 @@ class SettingsScreenTest {
         AgentSession(id = id, provider = provider, status = status)
 
     @Test
+    fun intro_names_the_product_not_the_old_plugin() {
+        assertEquals(
+            "Rokid Coder never alerts this phone: when a session needs you, it says so on your glasses. " +
+                "Its one notification just shows that monitoring is running.",
+            SettingsCopy.INTRO,
+        )
+    }
+
+    @Test
     fun mode_limits_copy_is_exact() {
         assertEquals(
             "Plugin mode (claude + /rokid:on): no compact or model change from the glasses; replies only while the session waits.",
@@ -61,7 +70,7 @@ class SettingsScreenTest {
 
     @Test
     fun notifications_off_line_is_the_one_from_task_8() {
-        assertEquals("Notifications off — Android may pause Agents", SettingsCopy.NOTIFICATIONS_OFF)
+        assertEquals("Notifications off — Android may pause Rokid Coder", SettingsCopy.NOTIFICATIONS_OFF)
     }
 
     @Test

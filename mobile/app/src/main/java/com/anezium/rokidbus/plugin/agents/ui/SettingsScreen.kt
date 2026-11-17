@@ -46,9 +46,12 @@ import com.anezium.rokidbus.plugin.agents.ui.theme.AgentsColors
 
 /** Copy that is part of the contract, kept in one place so a test can hold it to the brief. */
 internal object SettingsCopy {
+    const val INTRO =
+        "Rokid Coder never alerts this phone: when a session needs you, it says so on your " +
+            "glasses. Its one notification just shows that monitoring is running."
     const val SECURE = "Secure (TLS)"
     const val PAIR_AGAIN = "Not connected — pair again"
-    const val NOTIFICATIONS_OFF = "Notifications off — Android may pause Agents"
+    const val NOTIFICATIONS_OFF = "Notifications off — Android may pause Rokid Coder"
     const val DND = "Follows phone Do Not Disturb"
     const val REVOKE_ALL = "Turn off approve-all everywhere"
     const val PLUGIN_LIMITS =
@@ -189,9 +192,7 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
         item {
             SettingsCard {
                 NoticeText(
-                    "Mission control for Claude Code and Codex sessions. Agents never " +
-                        "alerts this phone: when a session needs you, it says so on your glasses. Its " +
-                        "one notification just shows that monitoring is running.",
+                    SettingsCopy.INTRO,
                     tag = "intro",
                 )
                 NoticeText("v${state.version}", tag = "version")
@@ -266,7 +267,7 @@ internal fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
         item { SectionLabel("Plugin") }
         item {
             SettingsCard {
-                Text("Uninstall Agents", style = MaterialTheme.typography.titleMedium)
+                Text("Uninstall Rokid Coder", style = MaterialTheme.typography.titleMedium)
                 NoticeText("Removes this plugin from the phone. Your computers keep their own settings.")
                 SecondaryAction("Uninstall", actions.onUninstall, tag = "uninstall")
             }
@@ -462,7 +463,7 @@ private fun BackgroundCard(state: SettingsUiState, actions: SettingsActions) {
     SettingsCard {
         StatusLine(
             when {
-                state.batteryFrozen -> "This phone has frozen Agents"
+                state.batteryFrozen -> "This phone has frozen Rokid Coder"
                 state.batteryAllowed -> "Allowed to keep running"
                 else -> "Android may freeze this app"
             },
@@ -470,18 +471,18 @@ private fun BackgroundCard(state: SettingsUiState, actions: SettingsActions) {
         )
         NoticeText(
             if (state.batteryFrozen) {
-                "Agents was frozen while monitoring, so sessions went unwatched and a computer waiting on " +
+                "Rokid Coder was frozen while monitoring, so sessions went unwatched and a computer waiting on " +
                     "you was answered back at its own keyboard. Allowing it below may not be enough on this " +
                     "phone: open App info, then under battery let it use power in the background. The warning " +
                     "clears when you act on it and comes back only if this happens again."
             } else {
-                "Android may treat Agents as idle and freeze it. Frozen, it stops seeing your sessions and a " +
+                "Android may treat Rokid Coder as idle and freeze it. Frozen, it stops seeing your sessions and a " +
                     "computer waiting on you is answered back at the keyboard instead of on your glasses."
             },
             tag = "battery_hint",
         )
         if (!ok) {
-            SecondaryAction("Let Agents keep running", actions.onBatteryGrant, tag = "battery_grant")
+            SecondaryAction("Let Rokid Coder keep running", actions.onBatteryGrant, tag = "battery_grant")
             SecondaryAction("Open App info", actions.onBatteryAppInfo, tag = "battery_app_info")
         }
     }
