@@ -431,7 +431,14 @@ export function priorOf(status: PluginStatus): PriorState {
  * verb. Returns the manual step to tell the user when that cannot be done (no disable verb, or it failed).
  */
 async function keepDisabled(driver: PluginDriver): Promise<string | undefined> {
-  const status = await driver.status();
+  const where = driver.tool === "claude" ? "/plugin" : "/plugins";
+  let status: PluginStatus;
+  try {
+    status = await driver.status();
+  } catch {
+    // The refresh itself is verified; only this extra read failed.
+    return `Setup could not check whether the Rokid plugin was disabled before this update; if it was, disable it in ${where} again`;
+  }
   if (!status.plugin || status.plugin.enabled === false) {
     return undefined;
   }
@@ -443,7 +450,7 @@ async function keepDisabled(driver: PluginDriver): Promise<string | undefined> {
       // Falls through to the manual step.
     }
   }
-  return `The Rokid plugin was disabled before this update; it is enabled again - disable it in ${driver.tool === "claude" ? "/plugin" : "/plugins"} if you want it off`;
+  return `The Rokid plugin was disabled before this update; it is enabled again - disable it in ${where} if you want it off`;
 }
 
 function realOrSelf(file: string): string {
@@ -478,10 +485,25 @@ function matches(status: PluginStatus, want: Want): boolean {
   return !want.files || (installedDifferences(status, want.files) ?? []).length === 0;
 }
 
+/** How long to wait before the one retry of a failed install; a transient CLI failure is the likely cause. */
+function retryPauseMs(): number {
+  const set = Number(process.env.ROKID_SETUP_PLUGIN_RETRY_MS);
+  return process.env.ROKID_SETUP_PLUGIN_RETRY_MS !== undefined && Number.isFinite(set) && set >= 0 ? set : 1500;
+}
+
+async function installWithRetry(driver: PluginDriver): Promise<void> {
+  try {
+    await driver.installPlugin();
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, retryPauseMs()));
+    await driver.installPlugin();
+  }
+}
+
 /** Installs, updates, or (with no update verb, or when update keeps the same version) uninstalls and reinstalls. */
 async function converge(driver: PluginDriver, status: PluginStatus, want: Want): Promise<void> {
   if (!status.plugin) {
-    await driver.installPlugin();
+    await installWithRetry(driver);
     return;
   }
   if (status.verbs.update && status.plugin.version !== want.version) {
@@ -495,7 +517,38 @@ async function converge(driver: PluginDriver, status: PluginStatus, want: Want):
   }
   // Also refreshes the vendor's installed copy (Claude's plugin cache) when the version did not change.
   await driver.removePlugin();
-  await driver.installPlugin();
+  await installWithRetry(driver);
+}
+
+/**
+ * After a failed install or update: what is true now, for the user. A plugin that was installed before and is gone
+ * is put back from its previous registration when that is known; whatever happens, the warning says whether the
+ * plugin is installed, with the command that retries.
+ */
+async function afterFailedConverge(driver: PluginDriver, prior: PriorState): Promise<string | undefined> {
+  const retry = `Run: rokid-setup plugins sync --tool ${driver.tool}`;
+  const installed = async (): Promise<boolean | undefined> => {
+    try {
+      return (await driver.status()).plugin !== undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const now = await installed();
+  if (now === undefined || now) {
+    return undefined;
+  }
+  if (prior.source && prior.pluginVersion) {
+    try {
+      await restorePlugin(driver, prior, []);
+    } catch {
+      // Whether it came back is read next.
+    }
+    if ((await installed()) !== false) {
+      return `The Rokid plugin could not be updated in ${driver.tool}; the previous registration was put back. ${retry}`;
+    }
+  }
+  return `The Rokid plugin is currently NOT installed in ${driver.tool}. ${retry}`;
 }
 
 async function pointMarketplaceAt(driver: PluginDriver, status: PluginStatus, dir: string): Promise<boolean> {
@@ -546,7 +599,17 @@ export async function syncPlugin(driver: PluginDriver, marketplaceDir: string): 
       if (!canInstall) {
         return { result: "manual_step_required", prior, record: record("manual_step_required", MANUAL_STEP[driver.tool]) };
       }
-      await converge(driver, status, want);
+      try {
+        await converge(driver, status, want);
+      } catch (error) {
+        const warning = await afterFailedConverge(driver, prior);
+        return {
+          result: "failed",
+          prior,
+          ...(warning ? { warning } : {}),
+          record: record("failed", error instanceof Error ? error.message : String(error)),
+        };
+      }
       status = await driver.status();
     }
     if (!matches(status, want)) {
@@ -593,8 +656,9 @@ export async function restorePlugin(driver: PluginDriver, prior: PriorState, our
   if (!matches(status, want)) {
     throw new Error(`${driver.tool} still reports plugin version ${status.plugin?.version ?? "none"} after restoring ${prior.pluginVersion}`);
   }
-  if (prior.enabled === false && (await keepDisabled(driver))) {
-    throw new Error(`${driver.tool} plugin restored, but it was disabled before setup and is enabled now: disable it in ${driver.tool === "claude" ? "/plugin" : "/plugins"}`);
+  const manual = prior.enabled === false ? await keepDisabled(driver) : undefined;
+  if (manual) {
+    throw new Error(`the ${driver.tool} plugin was restored, but setup could not keep it disabled: ${manual}`);
   }
 }
 

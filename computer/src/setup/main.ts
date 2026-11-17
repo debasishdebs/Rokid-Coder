@@ -165,7 +165,7 @@ async function pluginsSync(ctx: SetupContext, tools: Tool[]): Promise<Record<str
     const outcome = await syncPlugin(createDriver(tool, cli.path, { home: ctx.home, env: pluginEnv }), path.join(manifest.bundleDir, "plugins"));
     manifest.clis[tool] = { path: cli.path, version: cli.version, ...(cli.interpreter ? { interpreter: cli.interpreter } : {}) };
     manifest.plugins[tool] = outcome.record;
-    const detail = outcome.record.detail ?? outcome.warning;
+    const detail = [outcome.record.detail, outcome.warning].filter(Boolean).join(". ") || undefined;
     results[tool] = { result: outcome.result, ...(detail ? { detail } : {}) };
   }
   writeManifest(ctx.home, manifest);

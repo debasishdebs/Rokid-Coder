@@ -590,7 +590,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
       const outcome = await syncPlugin(driver, path.join(bundleDir, "plugins"));
       newManifest.plugins[tool] = outcome.record;
       pluginSources[tool] = prior;
-      if (outcome.warning) manual.push(`${outcome.warning}.`);
+      if (outcome.warning) (outcome.result === "failed" ? warnings : manual).push(outcome.result === "failed" ? outcome.warning : `${outcome.warning}.`);
       if (outcome.result === "manual_step_required") manual.push(`${outcome.record.detail}.`);
       if (outcome.result === "failed") warnings.push(`The ${tool} plugin could not be set up (${outcome.record.detail}). Try again with: rokid-setup plugins sync --tool ${tool}`);
     }
