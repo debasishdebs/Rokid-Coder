@@ -481,6 +481,10 @@ class AgentdProtocolV2Test {
         assertNull(why(15, "unavailable", 7))
         assertNull(why(16, "ready", "busy"))
         assertEquals("background", why(17, "unavailable", "background"))
+        assertEquals("bg_off", why(18, "unavailable", "bg_off"))
+        assertEquals("needs_auto_mode", why(19, "unavailable", "needs_auto_mode"))
+        assertNull(why(20, "ready", "bg_off"))
+        assertNull(why(21, "unavailable", "bg-off"))
     }
 
     @Test
@@ -521,7 +525,21 @@ class AgentdProtocolV2Test {
         // Each steering frame carries a real id of its own; the monitor frames carry none.
         assertEquals("$type msgId presence", expected.has("msgId"), actual.has("msgId"))
         if (actual.has("msgId")) assertEquals(MSG_ID, actual.getString("msgId"))
+        // bgReplies is additive and always sent; a fixture that predates it must see it off.
+        if (!expected.has("bgReplies") && actual.has("bgReplies")) {
+            assertFalse("$type: bgReplies without a fixture value must be false", actual.getBoolean("bgReplies"))
+            actual.remove("bgReplies")
+        }
         assertEquals("$type: built $actual vs fixture $expected", withoutMsgId(expected), withoutMsgId(actual))
+    }
+
+    @Test
+    fun settings_sync_always_carries_bg_replies() {
+        val timings = AlertTimings(30_000, 8_000, 5_000, listOf(5_000), 300_000)
+        val off = JSONObject(AgentdProtocolCodec.settingsSync(timings, 1_800_000, MSG_ID))
+        assertTrue(off.has("bgReplies"))
+        assertFalse(off.getBoolean("bgReplies"))
+        assertTrue(JSONObject(AgentdProtocolCodec.settingsSync(timings, 1_800_000, MSG_ID, bgReplies = true)).getBoolean("bgReplies"))
     }
 
     @Test
@@ -600,6 +618,7 @@ class AgentdProtocolV2Test {
                 ),
                 f("settings_sync").getLong("waitLimitMs"),
                 MSG_ID,
+                bgReplies = f("settings_sync").optBoolean("bgReplies", false),
             ),
             "models_request" to AgentdProtocolCodec.modelsRequest(codex),
         )

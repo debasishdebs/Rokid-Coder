@@ -556,7 +556,7 @@ class AgentdProtocolCodec {
         }
 
         /** The thresholds, the wait limit and the days a pairing may go unused that the phone owns; agentd derives the alert expiry from the limit. */
-        fun settingsSync(timings: AlertTimings, waitLimitMs: Long, msgId: String, pairingTtlDays: Int = 14): String =
+        fun settingsSync(timings: AlertTimings, waitLimitMs: Long, msgId: String, pairingTtlDays: Int = 14, bgReplies: Boolean = false): String =
             steering("settings_sync", msgId)
                 .put(
                     "timings",
@@ -569,6 +569,7 @@ class AgentdProtocolCodec {
                 )
                 .put("waitLimitMs", waitLimitMs)
                 .put("pairingTtlDays", pairingTtlDays)
+                .put("bgReplies", bgReplies)
                 .toString()
 
         fun modelsRequest(sessionKey: String): String =
@@ -745,7 +746,7 @@ private fun JSONObject.toSessionV2(fallbackHeading: String): SessionV2? {
     )
 }
 
-private val FOLLOWUP_WHY = setOf("busy", "background", "draft", "not_launcher")
+private val FOLLOWUP_WHY = setOf("busy", "background", "draft", "not_launcher", "bg_off", "needs_auto_mode")
 
 /** Only meaningful while the follow-up is unavailable; an absent or unknown reason is null. */
 private fun JSONObject.followupWhy(capabilities: JSONObject): String? {

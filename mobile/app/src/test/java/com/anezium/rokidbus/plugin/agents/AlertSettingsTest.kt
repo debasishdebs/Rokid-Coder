@@ -83,6 +83,30 @@ class AlertSettingsTest {
     }
 
     @Test
+    fun bg_replies_is_off_by_default_and_survives_a_save() {
+        assertFalse(AlertSettings().bgReplies)
+        assertFalse(AlertSettings.fromJson(null).bgReplies)
+        // An old save has no such key.
+        assertFalse(AlertSettings.fromJson("""{"waitLimitMs":900000}""").bgReplies)
+        assertFalse(AlertSettings.fromJson("""{"bgReplies":"yes"}""").bgReplies)
+        val on = AlertSettings(bgReplies = true)
+        assertTrue(AlertSettings.fromJson(on.toJson()).bgReplies)
+        assertFalse(AlertSettings.fromJson(AlertSettings().toJson()).bgReplies)
+        // Reading a save keeps the other fields.
+        assertEquals(900_000L, AlertSettings.fromJson(on.copy(waitLimitMs = 900_000).toJson()).waitLimitMs)
+    }
+
+    @Test
+    fun the_sync_frame_carries_bg_replies_as_a_boolean_every_time() {
+        val off = JSONObject(AlertSettings().syncFrames { "m" }.first())
+        assertTrue(off.has("bgReplies"))
+        assertFalse(off.getBoolean("bgReplies"))
+        assertTrue(JSONObject(AlertSettings(bgReplies = true).syncFrames { "m" }.first()).getBoolean("bgReplies"))
+        // It is not a defaults_set field.
+        assertFalse(JSONObject(AlertSettings(bgReplies = true).syncFrames { "m" }[1]).has("bgReplies"))
+    }
+
+    @Test
     fun approve_all_never_a_default() {
         val v = AlertSettings(defaultClaude = TempMode.APPROVE_ALL, defaultCodex = TempMode.ACCEPT_EDITS).validated()
         assertEquals(TempMode.ASK, v.defaultClaude)
@@ -161,11 +185,18 @@ class AlertSettingsTest {
             retryBackoffMs = timings.getJSONArray("retryBackoffMs").let { a -> List(a.length()) { a.getLong(it) } },
             defaultClaude = TempMode.fromWire(modes.getString("claude"))!!,
             defaultCodex = TempMode.fromWire(modes.getString("codex"))!!,
+            bgReplies = sync.optBoolean("bgReplies", false),
         )
         val ids = ArrayDeque(listOf("id-1", "id-2"))
         val (syncLine, defaultsLine) = settings.syncFrames { ids.removeFirst() }
 
-        assertEquals(withoutMsgId(sync), withoutMsgId(JSONObject(syncLine)))
+        // bgReplies is additive and always sent; a fixture that predates it must see it off.
+        val actual = JSONObject(syncLine)
+        if (!sync.has("bgReplies")) {
+            assertFalse(actual.getBoolean("bgReplies"))
+            actual.remove("bgReplies")
+        }
+        assertEquals(withoutMsgId(sync), withoutMsgId(actual))
         assertEquals(withoutMsgId(fixtures.getJSONObject("defaults_set")), withoutMsgId(JSONObject(defaultsLine)))
         assertEquals("id-1", JSONObject(syncLine).getString("msgId"))
         assertEquals("id-2", JSONObject(defaultsLine).getString("msgId"))
