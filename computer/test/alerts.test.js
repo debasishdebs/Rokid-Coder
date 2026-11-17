@@ -702,3 +702,14 @@ test("a_reminder_due_at_or_past_the_wait_limit_is_still_sent_before_the_alert_ex
     assert.equal(env.queue.get(id).kind, "question");
   }
 });
+
+test("a_pending_approval_is_reminded_inside_the_wait_limit_even_when_the_dwell_is_longer", () => {
+  const env = setup({ ...TIMINGS, expireMs: 30_000, dwellMs: 80_000, reminderMs: 300_000 });
+  const id = env.queue.push(alert("approval", { createdAt: env.now() }));
+  env.queue.onShown(id);
+  env.advance(14_999);
+  assert.deepEqual(frameReasons(env), ["new"]);
+  env.advance(1);
+  assert.deepEqual(frameReasons(env), ["new", "reminder"]);
+  assert.equal(env.queue.get(id).kind, "approval");
+});

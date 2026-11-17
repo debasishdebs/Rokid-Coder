@@ -262,18 +262,20 @@ export class AlertQueue {
   }
 
   /**
-   * `reminderMs`, but never so late that the alert expires first: an alert lives
-   * `expireMs` (the wait limit) from its first show, so a reminder due at or past
-   * that point would never be sent and the wearer would lose the item silently.
-   * Half the limit leaves at least one reminder inside it.
+   * When a shown approval, question or error is sent again: `reminderMs` after it
+   * was shown, and not before its card has left (the dwell) -- but never later than
+   * half the wait limit. An alert lives `expireMs` from its first show, so a
+   * reminder due at or past that point would never be sent and the wearer would
+   * lose the item silently; inside the expiry window the reminder does not wait for
+   * the dwell either (the phone shows the reminder over whatever is still up).
    */
-  private reminderMs(): number {
-    return Math.min(this.timings.reminderMs, this.timings.expireMs / 2);
+  private reminderDueMs(): number {
+    return Math.min(Math.max(this.dwellMs(), this.timings.reminderMs), this.timings.expireMs / 2);
   }
 
   /**
    * A shown alert whose card has left the glasses: a Done or notice is over, and
-   * the rest come back as a reminder `reminderMs` after they were shown.
+   * the rest come back as a reminder.
    */
   private remind(t: number): void {
     for (const entry of [...this.entries.values()]) {
@@ -281,12 +283,11 @@ export class AlertQueue {
         continue;
       }
       const onScreenFor = t - entry.shownAt;
-      if (onScreenFor < this.dwellMs()) {
-        continue;
-      }
       if (entry.alert.kind === "done" || entry.alert.kind === "notice") {
-        this.close(entry, "dismissed", "dismissed");
-      } else if (onScreenFor >= this.reminderMs()) {
+        if (onScreenFor >= this.dwellMs()) {
+          this.close(entry, "dismissed", "dismissed");
+        }
+      } else if (onScreenFor >= this.reminderDueMs()) {
         this.requeue(entry, false, "reminder");
       }
     }
