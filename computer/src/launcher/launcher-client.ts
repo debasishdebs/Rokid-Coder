@@ -1,5 +1,6 @@
 import { readClaudeSession, type ClaudeSessionFile } from "./claude-sessions";
 import type { TypeCommand } from "./launcher-hub";
+import { ScreenModel } from "./screen-probe";
 import type { PtyChild } from "./pty";
 import { LaptopInput, sessionBusySince } from "./laptop-input";
 import { Typist, sessionReady, systemClock, type BindingView, type Clock } from "./typist";
@@ -19,6 +20,8 @@ export interface LauncherClientOptions {
   binding: BindingView;
   sessionsDir: string;
   clock?: Clock;
+  /** The terminal's size, which the screen model needs to read Claude's layout. */
+  size?: { cols: number; rows: number };
 }
 
 function asTypeCommand(frame: Frame): TypeCommand | undefined {
@@ -65,6 +68,7 @@ export class LauncherClient {
   private owned?: { sessionId: string; pid: number };
   private epoch = 0;
   private running?: { cmdId: string; epoch: number };
+  private readonly screen: ScreenModel;
   private reportedDraft = false;
   private lastReportAt = Number.NEGATIVE_INFINITY;
   private reportTimer?: unknown;
@@ -81,8 +85,11 @@ export class LauncherClient {
     };
     const ready = (after?: number): boolean => sessionReady(readOwned(), after);
     this.input = new LaptopInput({ clock: this.clock, busySince: (at) => sessionBusySince(readOwned(), at) });
+    this.screen = new ScreenModel(options.size?.cols ?? 80, options.size?.rows ?? 24);
     this.typist = new Typist(options.child, this.input, ready, this.clock, {
       binding: options.binding,
+      screen: this.screen,
+      fileStatus: () => readOwned()?.status,
       onWritten: (cmdId, at) => {
         if (this.running?.cmdId === cmdId && this.running.epoch === this.epoch) {
           this.send({ type: "command_written", cmdId, at });
@@ -90,6 +97,11 @@ export class LauncherClient {
       },
     });
     this.input.onDraftChange(() => this.reportDraft());
+  }
+
+  /** The terminal was resized. */
+  resize(cols: number, rows: number): void {
+    this.screen.resize(cols, rows);
   }
 
   /** Bytes from the user's terminal. */

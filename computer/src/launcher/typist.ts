@@ -2,6 +2,7 @@ import { REPLAY_GAP_MS, type LaptopInput } from "./laptop-input";
 import type { CommandError, TypeCommand } from "./launcher-hub";
 import { OutputScanner } from "./output-scanner";
 import type { PtyChild } from "./pty";
+import { showsIdlePrompt, type ScreenModel } from "./screen-probe";
 
 export interface Clock {
   now(): number;
@@ -40,6 +41,13 @@ const RECOVERY_QUIET_MS = 1000;
 /** A TUI that never goes quiet still ends the recovery. */
 const RECOVERY_CAP_MS = 5000;
 const POLL_MS = 100;
+/**
+ * A `viaHooks` text waits for the screen to show Claude's idle prompt this long
+ * without a break, judged on the screen the output draws, not on its arrival:
+ * a spinner or a footer that animates never starves it, a screen that is not
+ * positively the idle prompt never lets it through.
+ */
+const SCREEN_SETTLE_MS = 300;
 const MAX_TEXT_BYTES = 16 * 1024;
 const CLAUDE_MODELS: ReadonlySet<string> = new Set(["opus", "sonnet", "haiku"]);
 const DIALOG_MARKER = "Switch model?";
@@ -75,12 +83,21 @@ interface Active {
   scanner?: OutputScanner;
   writtenAt?: number;
   escAt?: number;
+  /** When the screen started showing the idle prompt, unbroken, for a `viaHooks` command. */
+  screenIdleSince?: number;
 }
 
 export interface TypistOptions {
   binding: BindingView;
   /** Right after a command's first write; `at` is the clock's time of the write. */
   onWritten?: (cmdId: string, at: number) => void;
+  /**
+   * What `viaHooks` needs and nothing else supplies: Claude's own file status
+   * right now, and the screen model of what the terminal shows. Without them
+   * a `viaHooks` command is never typed.
+   */
+  fileStatus?: () => string | undefined;
+  screen?: ScreenModel;
 }
 
 /**
@@ -115,6 +132,7 @@ export class Typist {
     this.lastOutputAt = clock.now();
     pty.onData((chunk) => {
       this.lastOutputAt = this.clock.now();
+      this.options.screen?.push(chunk);
       this.active?.scanner?.push(chunk);
       this.step();
     });
@@ -303,12 +321,7 @@ export class Typist {
       this.end(active);
       return;
     }
-    if (
-      !this.input.holding &&
-      !this.input.draft &&
-      now - this.lastOutputAt >= OUTPUT_QUIET_MS &&
-      this.promptFree(active.cmd)
-    ) {
+    if (!this.input.holding && !this.input.draft && this.promptFree(active, now)) {
       this.firstWrite(active, now);
     } else if (now >= active.deadline) {
       this.settle(active, this.input.draft ? "laptop_draft" : "busy");
@@ -317,13 +330,29 @@ export class Typist {
   }
 
   /**
-   * The prompt may take this command. Claude's file idle, as ever, except for a
-   * text command agentd sent on hook evidence (`viaHooks`): a background
-   * subagent keeps the file `busy` for its whole life, so the file cannot be
-   * waited on; agentd saw the main turn's Stop and judged the prompt free.
+   * The prompt may take this command, judged at the moment of the write.
+   * Claude's file idle and the output quiet, as ever, except for a text
+   * command agentd sent on hook evidence (`viaHooks`): a background subagent
+   * keeps the file `busy` for its whole life, so the file cannot be waited on.
+   * That command fails closed instead: the file says `busy` or `idle` and
+   * nothing else (`waiting`, an unknown value or no file refuses), the binding
+   * is not uncertain, and the screen has positively shown Claude's idle prompt,
+   * unbroken, for SCREEN_SETTLE_MS (an animation does not count as output to
+   * wait out, an unrecognised layout never passes).
    */
-  private promptFree(cmd: TypeCommand): boolean {
-    return (cmd.command === "text" && cmd.viaHooks === true) || this.ready(cmd.notBefore);
+  private promptFree(active: Active, now: number): boolean {
+    const { cmd } = active;
+    if (!(cmd.command === "text" && cmd.viaHooks === true)) {
+      return now - this.lastOutputAt >= OUTPUT_QUIET_MS && this.ready(cmd.notBefore);
+    }
+    const status = this.options.fileStatus?.();
+    const screen = this.options.screen;
+    if ((status !== "busy" && status !== "idle") || !screen || !showsIdlePrompt(screen)) {
+      active.screenIdleSince = undefined;
+      return false;
+    }
+    active.screenIdleSince ??= now;
+    return now - active.screenIdleSince >= SCREEN_SETTLE_MS;
   }
 
   private firstWrite(active: Active, now: number): void {
