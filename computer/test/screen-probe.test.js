@@ -6,7 +6,7 @@
  */
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { ScreenModel, probe, showsText, showsCleared } = require("../dist/launcher/screen-probe.js");
+const { ScreenModel, probe, showsText, showsCleared, showsEmptyPrompt } = require("../dist/launcher/screen-probe.js");
 const { bgReplyText } = require("../dist/launcher/paste-text.js");
 
 const RULE = "─".repeat(60);
@@ -31,10 +31,35 @@ test("an_empty_or_placeholder_box_is_a_prompt_whose_text_is_not_ours", () => {
   assert.equal(showsText(result, "yes do it"), false);
 });
 
+test("a_box_is_visibly_empty_only_when_nothing_in_it_is_solid_text", () => {
+  const empty = (input) => showsEmptyPrompt(probe(screen(repaint({ input }))));
+  assert.equal(empty(""), true);
+  assert.equal(empty("   "), true);
+  // Claude's own hint in an empty box.
+  assert.equal(empty('Try "fix lint errors"'), true);
+  // Placeholders and suggestions are drawn faint or in gray, whatever the way.
+  assert.equal(empty("\x1b[2mrun the tests\x1b[22m"), true);
+  assert.equal(empty("\x1b[2mrun the tests\x1b[0m"), true);
+  assert.equal(empty("\x1b[90mrun the tests\x1b[39m"), true);
+  assert.equal(empty("\x1b[38;5;245mrun the tests\x1b[0m"), true);
+  assert.equal(empty("\x1b[38;2;128;128;128mrun the tests\x1b[0m"), true);
+  // Anything else is text: a draft, a queued message, a follow-up, a style the model cannot read.
+  assert.equal(empty("run the tests"), false);
+  assert.equal(empty("\x1b[0mrun the tests"), false);
+  assert.equal(empty("\x1b[2m\x1b[22mrun the tests"), false);
+  assert.equal(empty("\x1b[38;2;215;119;87mrun the tests\x1b[0m"), false);
+  assert.equal(empty("\x1b[31mrun the tests\x1b[39m"), false);
+  assert.equal(empty("\x1b[38:2::128:128:128mrun the tests\x1b[0m"), false);
+  assert.equal(empty("\x1b[2mghost\x1b[22m and a draft"), false);
+  // A dialog is not an empty prompt.
+  assert.equal(showsEmptyPrompt({ kind: "blocked", reason: "dialog" }), false);
+  assert.equal(showsEmptyPrompt({ kind: "unknown", reason: "no_box" }), false);
+});
+
 test("the_pasted_text_alone_on_the_input_line_inside_the_box_is_shown", () => {
   const model = screen(repaint({ input: "yes do it" }));
   const result = probe(model);
-  assert.deepEqual(result, { kind: "prompt", text: "yesdoit" });
+  assert.deepEqual(result, { kind: "prompt", text: "yesdoit", empty: false });
   assert.equal(showsText(result, "yes do it"), true);
   assert.equal(showsText(result, "yes do it please"), false);
   // Text that is not alone is not what was pasted: a laptop draft in front of it.

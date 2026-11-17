@@ -3,7 +3,7 @@ import type { CommandError, TypeCommand } from "./launcher-hub";
 import { OutputScanner } from "./output-scanner";
 import { bgReplyText, pasteText } from "./paste-text";
 import type { PtyChild } from "./pty";
-import { probe, showsCleared, showsText, type ScreenModel } from "./screen-probe";
+import { probe, showsCleared, showsEmptyPrompt, showsText, type ScreenModel } from "./screen-probe";
 
 export interface Clock {
   now(): number;
@@ -426,15 +426,23 @@ export class Typist {
    * A background reply is not waited on by Claude's file going idle (it stays
    * busy for as long as the subagent lives) and not by the output going quiet
    * (a spinner never lets it). It is allowed only while Claude's file reads
-   * `busy` and the screen positively shows the framed input box with no dialog
-   * and no running-turn sign, on two looks 40 ms apart; then agentd, which
-   * alone holds the rest of the evidence, is asked to allow the paste.
+   * `busy` and the screen positively shows the framed input box VISIBLY EMPTY,
+   * with no dialog, question, follow-up text or running-turn sign, on two looks
+   * 40 ms apart; then agentd, which alone holds the rest of the evidence, is
+   * asked to allow the paste. A box that shows anything else, on two looks, gets
+   * nothing sent and the retryable `not_sent`.
    */
   private stepBgWaiting(active: Active, now: number): void {
-    if (this.bgBoundaryOpen()) {
+    const boundary = this.bgBoundary();
+    if (boundary === "open" || boundary === "full") {
       active.seenAt ??= now;
       if (now - active.seenAt >= BG_STABLE_MS) {
         active.seenAt = undefined;
+        if (boundary === "full") {
+          this.settle(active, "not_sent");
+          this.end(active);
+          return;
+        }
         active.phase = "bg_ask_paste";
         active.deadline = now + BG_VERDICT_MS;
         this.options.bg?.askWrite(active.cmd.cmdId, "paste");
@@ -449,16 +457,22 @@ export class Typist {
     }
   }
 
-  /** The first byte may go: nothing of the laptop's is in the way, Claude's file reads busy, the screen shows the prompt box. */
-  private bgBoundaryOpen(): boolean {
+  /**
+   * Whether the first byte may go. "open": nothing of the laptop's is in the
+   * way, Claude's file reads busy and the screen shows the prompt box visibly
+   * empty. "full": all of that but the screen shows something else, a
+   * dialog, a menu, a running turn or text in the box. "closed": anything else.
+   */
+  private bgBoundary(): "open" | "full" | "closed" {
     const bg = this.options.bg;
-    return (
-      bg !== undefined &&
-      !this.input.holding &&
-      !this.input.draft &&
-      bg.fileStatus() === "busy" &&
-      probe(bg.screen).kind === "prompt"
-    );
+    if (!bg || this.input.holding || this.input.draft || bg.fileStatus() !== "busy") {
+      return "closed";
+    }
+    const seen = probe(bg.screen);
+    if (seen.kind === "unknown") {
+      return "closed";
+    }
+    return showsEmptyPrompt(seen) ? "open" : "full";
   }
 
   /** agentd's answer to a write check. Anything but a clear yes, or a yes for a phase not being asked, is a no. */
@@ -468,10 +482,11 @@ export class Typist {
       return;
     }
     if (phase === "paste" && active.phase === "bg_ask_paste") {
-      if (ok === true && !this.stale(active) && !this.uncertain() && this.bgBoundaryOpen()) {
+      if (ok === true && !this.stale(active) && !this.uncertain() && this.bgBoundary() === "open") {
         this.bgPaste(active, this.clock.now());
       } else {
-        this.settle(active, ok === true && this.stale(active) ? "cancelled" : "busy");
+        // Agentd's no is a busy; its yes against a boundary that has since closed is a reply not sent.
+        this.settle(active, ok !== true ? "busy" : this.stale(active) ? "cancelled" : "not_sent");
         this.end(active);
       }
     } else if (phase === "enter" && active.phase === "bg_ask_enter") {

@@ -21,7 +21,10 @@ const STATUS_ROWS = 8;
 /** The most rows the input line may wrap over. */
 const MAX_INPUT_ROWS = 10;
 
-type ParseState = "text" | "esc" | "esc_intermediate" | "csi" | "string" | "string_esc";
+/** Prefixes the cell of a muted character; never a character a terminal would draw. */
+const MUTED = "\u0001";
+
+type ParseState ="text" | "esc" | "esc_intermediate" | "csi" | "string" | "string_esc";
 
 /** Private modes that change nothing this model draws. */
 const BENIGN_PRIVATE_MODES: ReadonlySet<number> = new Set([
@@ -81,6 +84,9 @@ export class ScreenModel {
   private stringLength = 0;
   private alt = false;
   private taintCount = 0;
+  /** SGR state: text drawn now is muted (faint or a gray foreground), as placeholders and suggestions are. */
+  private faint = false;
+  private grayFg = false;
 
   constructor(
     private cols = 80,
@@ -115,7 +121,17 @@ export class ScreenModel {
 
   /** The visible rows, trailing blanks removed. */
   lines(): string[] {
-    return this.grid.map((cells) => cells.join("").replace(/\s+$/, ""));
+    return this.grid.map((cells) => cells.join("").split(MUTED).join("").replace(/\s+$/, ""));
+  }
+
+  /** The visible rows with every muted character blanked: what is on screen that is not a placeholder or a suggestion. */
+  solidLines(): string[] {
+    return this.grid.map((cells) =>
+      cells
+        .map((cell) => (cell.startsWith(MUTED) ? " ".repeat(Math.max(1, [...cell].length - 1)) : cell))
+        .join("")
+        .replace(/\s+$/, ""),
+    );
   }
 
   rowDubious(index: number): boolean {
@@ -203,7 +219,7 @@ export class ScreenModel {
     if (width === undefined) {
       this.dubious[this.row] = true;
     }
-    cellsRow[this.col] = ch;
+    cellsRow[this.col] = this.faint || this.grayFg ? MUTED + ch : ch;
     if (cells === 2) {
       cellsRow[this.col + 1] = "";
     }
@@ -468,11 +484,55 @@ export class ScreenModel {
         this.col = this.saved.col;
         break;
       case "m":
-        break; // colours and styles: the model is of text only
+        this.sgr(args, raw.includes(":"));
+        break;
       default:
         // Scroll regions, insert and delete of characters, modes, reports: not modelled.
         this.taint();
         break;
+    }
+  }
+
+  /**
+   * Only one thing about styles matters: whether text is muted (faint, or a
+   * gray foreground), which is how Claude draws a placeholder or a suggestion
+   * in an input box that holds nothing of the wearer's. A style the model
+   * cannot read (colon sub-parameters) is not muted, so such text counts as
+   * text and an input line holding it is not empty.
+   */
+  private sgr(args: number[], colon: boolean): void {
+    if (colon) {
+      this.grayFg = false;
+      return;
+    }
+    const list = args.length === 0 || (args.length === 1 && Number.isNaN(args[0])) ? [0] : args;
+    for (let i = 0; i < list.length; i += 1) {
+      const code = Number.isNaN(list[i]) ? 0 : list[i];
+      if (code === 0) {
+        this.faint = false;
+        this.grayFg = false;
+      } else if (code === 2) {
+        this.faint = true;
+      } else if (code === 22) {
+        this.faint = false;
+      } else if (code === 39 || (code >= 30 && code <= 37) || (code >= 91 && code <= 97)) {
+        this.grayFg = false;
+      } else if (code === 90) {
+        this.grayFg = true;
+      } else if (code === 38) {
+        if (list[i + 1] === 5) {
+          const n = list[i + 2];
+          this.grayFg = n === 8 || (n >= 232 && n <= 255);
+          i += 2;
+        } else if (list[i + 1] === 2) {
+          const [r, g, b] = [list[i + 2], list[i + 3], list[i + 4]];
+          this.grayFg = [r, g, b].every(Number.isFinite) && Math.max(r, g, b) - Math.min(r, g, b) <= 8;
+          i += 4;
+        } else {
+          this.grayFg = false;
+          i = list.length;
+        }
+      }
     }
   }
 
@@ -526,8 +586,13 @@ export type ProbeResult =
   | { kind: "unknown"; reason: string }
   /** A dialog, a question, a permission prompt or a running-turn sign is on screen. */
   | { kind: "blocked"; reason: string }
-  /** The framed prompt box, with what is on its input line (whitespace removed). */
-  | { kind: "prompt"; text: string };
+  /**
+   * The framed prompt box, with what is on its input line (whitespace removed),
+   * and whether that line is visibly empty: nothing on it but muted text (the
+   * placeholder or a suggestion Claude draws in faint or gray) or Claude's own
+   * `Try "..."` hint.
+   */
+  | { kind: "prompt"; text: string; empty: boolean };
 
 export interface ProbeOptions {
   /** `screen.taints` as read before the screen of interest was drawn; any later taint is `unknown`. */
@@ -599,13 +664,27 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   if ([...around, ...inputRows].some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row))) {
     return { kind: "blocked", reason: "dialog" };
   }
-  const content = inputRows
+  const text = stripWhitespace(inputContent(inputRows));
+  const solid = stripWhitespace(inputContent(screen.solidLines().slice(top + 1, bottom)));
+  return { kind: "prompt", text, empty: solid === "" || TRY_HINT.test(text) };
+}
+
+/** Claude's own hint in an empty box, `Try "fix lint errors"`, whitespace removed. */
+const TRY_HINT = /^Try["“'‘].*["”'’]$/;
+
+/** What the input rows hold after the prompt character and the box's side borders. */
+function inputContent(rows: string[]): string {
+  return rows
     .map((row, index) => {
       const withoutBorder = row.replace(BORDER_LEFT, index === 0 ? "" : " ").replace(BORDER_RIGHT, "");
       return index === 0 ? withoutBorder.replace(/^\s*[>❯]/, "") : withoutBorder;
     })
     .join("");
-  return { kind: "prompt", text: stripWhitespace(content) };
+}
+
+/** Whether the probe shows the framed prompt box visibly empty, with no dialog, question or other text in it. */
+export function showsEmptyPrompt(result: ProbeResult): boolean {
+  return result.kind === "prompt" && result.empty;
 }
 
 /** Whether the probe shows `expected` (already sanitised) on the input line, and nothing but it. */

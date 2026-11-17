@@ -445,3 +445,79 @@ test("an_ordinary_text_command_is_typed_exactly_as_before", async () => {
   assert.deepEqual(t.pty.writes, [`${PASTE("plain")}\r`]);
   assert.deepEqual(box.result, { ok: true });
 });
+
+test("a_box_that_is_not_visibly_empty_gets_no_paste_and_a_retryable_not_sent", async () => {
+  for (const [what, screenDraw] of [
+    ["text in the box", repaint({ input: "something half typed" })],
+    ["a queued follow-up", repaint({ input: "\x1b[38;2;215;119;87mfollow up on the failing test\x1b[0m" })],
+    ["a question beside it", repaint({ above: ["Which suite should I run?"], input: "x", footer: ["  Enter to select · ↑/↓ to navigate"] })],
+    ["a dialog", `Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`],
+    ["a running turn", repaint({ above: ["✻ Thinking… (3s · esc to interrupt)"] })],
+  ]) {
+    const t = setup();
+    t.draw(screenDraw);
+    const box = t.run();
+    await t.advance(300);
+    assert.deepEqual(t.pty.writes, [], what);
+    assert.deepEqual(t.asked, [], `${what}: agentd is not even asked`);
+    assert.deepEqual(box.result, { ok: false, error: "not_sent" }, what);
+  }
+});
+
+test("a_muted_placeholder_or_suggestion_is_an_empty_box_and_the_paste_goes", async () => {
+  for (const input of ['Try "fix lint errors"', "\x1b[2mrun the test suite\x1b[22m", "\x1b[90msuggestion\x1b[39m"]) {
+    const t = setup();
+    t.draw(repaint({ input }));
+    t.run();
+    await t.advance(150);
+    assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], input);
+    t.typist.verdict("c1", "paste", true);
+    await t.advance(0);
+    assert.deepEqual(t.pty.writes, [PASTE("yes do it")], input);
+  }
+});
+
+test("a_box_that_fills_between_agentds_yes_and_the_paste_gets_no_paste", async () => {
+  const t = setup();
+  t.draw(repaint());
+  const box = t.run();
+  await t.advance(150);
+  assert.deepEqual(t.asked.map((a) => a.phase), ["paste"]);
+  // A subagent's question lands in the box before the yes arrives.
+  t.draw(repaint({ above: ["bg agent: should I delete the branch?"], input: "", footer: ["  Enter to select · ↑/↓ to navigate"] }));
+  t.typist.verdict("c1", "paste", true);
+  await t.advance(0);
+  assert.deepEqual(t.pty.writes, []);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+});
+
+test("a_question_that_appears_between_the_paste_and_the_check_is_cleared_and_never_sent", async () => {
+  const t = setup();
+  const box = await t.toPasted();
+  // The paste echoes, and in the same moment a subagent's question takes the footer.
+  t.draw(repaint({ input: "yes do it", footer: ["  Enter to select · ↑/↓ to navigate"] }));
+  await t.advance(300);
+  assert.deepEqual(t.pty.writes, [PASTE("yes do it"), CTRL_U]);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+  assert.deepEqual(t.asked.map((a) => a.phase), ["paste"]);
+});
+
+test("text_other_than_ours_in_the_box_after_the_paste_is_cleared_and_never_sent", async () => {
+  const t = setup();
+  const box = await t.toPasted();
+  t.draw(repaint({ input: "yes do it and a follow-up suggestion" }));
+  await t.advance(1700);
+  assert.deepEqual(t.pty.writes, [PASTE("yes do it"), CTRL_U]);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+});
+
+test("an_enter_needs_the_check_to_pass_on_two_looks", async () => {
+  const t = setup();
+  await t.toPasted();
+  t.draw(repaint({ input: "yes do it" }));
+  await t.advance(0);
+  // One look only: the Enter has not even been asked about.
+  assert.deepEqual(t.asked.map((a) => a.phase), ["paste"]);
+  await t.advance(60);
+  assert.deepEqual(t.asked.map((a) => a.phase), ["paste", "enter"]);
+});
