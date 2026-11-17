@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { Typist, sessionReady } = require("../dist/launcher/typist.js");
+const { ScreenModel, showsIdlePrompt } = require("../dist/launcher/screen-probe.js");
 const { LaptopInput, sessionBusySince } = require("../dist/launcher/laptop-input.js");
 const { readClaudeSession } = require("../dist/launcher/claude-sessions.js");
 const { LauncherClient } = require("../dist/launcher/launcher-client.js");
@@ -92,8 +93,9 @@ function track(promise) {
 }
 
 /** A typist over a fake pty and clock, with the session file as a plain object. */
-function setup({ gen = 1 } = {}) {
+function setup({ gen = 1, screen = false } = {}) {
   const pty = new FakePty();
+  const model = screen ? new ScreenModel(80, 24) : undefined;
   const clock = new FakeClock();
   const session = { status: "idle", statusUpdatedAt: clock.now() - 10_000 };
   const input = new LaptopInput({ clock, busySince: (at) => sessionBusySince(session, at) });
@@ -102,6 +104,7 @@ function setup({ gen = 1 } = {}) {
   const typist = new Typist(pty, input, (after) => sessionReady(session, after), clock, {
     binding,
     onWritten: (cmdId, at) => written.push({ cmdId, at }),
+    ...(model ? { screen: model, fileStatus: () => session.status } : {}),
   });
   // rk's stdin path: what passes goes to the child; the typist replays what a takeover released.
   const type = (data) => {
@@ -121,8 +124,18 @@ function setup({ gen = 1 } = {}) {
     clock.advance(ms);
     await flush();
   };
-  return { pty, clock, input, session, binding, written, typist, type, run, advance };
+  return { pty, clock, input, session, binding, written, typist, type, run, advance, model, paint: (text) => t_paint(pty, text) };
 }
+
+const t_paint = (pty, text) => pty.emit(text);
+
+/** What Claude Code draws at an idle main prompt, with a footer. */
+const RULE = "─".repeat(60);
+const idleScreen = (footer = "  ? for shortcuts") =>
+  `\x1b[2J\x1b[H  Earlier output\r\n\r\n${RULE}\r\n> \r\n${RULE}\r\n${footer}`;
+/** The same prompt while a turn runs. */
+const workingScreen = () =>
+  `\x1b[2J\x1b[H  Earlier output\r\n✻ Working… (12s · esc to interrupt)\r\n${RULE}\r\n> \r\n${RULE}\r\n  ? for shortcuts`;
 
 /** Moves the session through busy to a fresh idle, as Claude's own file would. */
 function freshIdle(t) {
@@ -1134,8 +1147,13 @@ test("unbound_launcher_clears_uncertainty_from_its_polled_session_file", async (
   });
 });
 
-test("a_text_command_on_hook_evidence_types_while_the_file_stays_busy", async () => {
-  const t = setup();
+// agentd's hook evidence is not enough for a live terminal: the typist wants the
+// screen to positively show Claude's idle prompt and the file to read busy or idle.
+
+const viaHooks = (extra = {}) => ({ command: "text", text: "from the glasses", viaHooks: true, ...extra });
+
+test("a_text_command_on_hook_evidence_types_when_the_screen_shows_the_idle_prompt_and_the_file_is_busy", async () => {
+  const t = setup({ screen: true });
   t.session.status = "busy";
   t.session.statusUpdatedAt = t.clock.now();
   // Without the flag the busy file keeps it waiting, as ever.
@@ -1143,19 +1161,140 @@ test("a_text_command_on_hook_evidence_types_while_the_file_stays_busy", async ()
   assert.equal(plain.result, undefined);
   assert.deepEqual(t.pty.writes, []);
   t.typist.cancel("c1");
-  t.pty.writes.length = 0;
-  // agentd judged the prompt free from hooks: the file is not waited on, notBefore included.
-  const box = await t.run({ cmdId: "c2", command: "text", text: "from the glasses", notBefore: t.clock.now(), viaHooks: true }, 600);
+  t.paint(idleScreen("  1 agent · ↓ to manage"));
+  const box = await t.run(viaHooks({ cmdId: "c2", notBefore: t.clock.now() }), 100);
+  assert.equal(box.result, undefined, "the screen must stay idle for the settle time first");
+  assert.deepEqual(t.pty.writes, []);
+  await t.advance(400);
   assert.deepEqual(t.pty.writes, [PASTE("from the glasses") + "\r"]);
   assert.deepEqual(box.result, { ok: true });
   t.typist.dispose();
 });
 
-test("viaHooks_never_lets_compact_or_model_skip_the_file", async () => {
+test("viaHooks_never_types_without_a_positive_idle_prompt_on_screen", async () => {
+  const cases = {
+    "nothing drawn": "",
+    "a running turn": workingScreen(),
+    "an unknown layout": `\x1b[2J\x1b[H  some other TUI\r\n  press q to quit`,
+    "a dialog": `\x1b[2J\x1b[H${RULE}\r\n  Do you want to proceed?\r\n  ❯ 1. Yes\r\n    2. No\r\n  Esc to cancel`,
+    "a prompt with no rule below": `\x1b[2J\x1b[H${RULE}\r\n> \r\n  ? for shortcuts`,
+  };
+  for (const [name, screen] of Object.entries(cases)) {
+    const t = setup({ screen: true });
+    t.session.status = "busy";
+    t.paint(screen);
+    const box = await t.run(viaHooks(), 5000);
+    assert.equal(box.result, undefined, name);
+    assert.deepEqual(t.pty.writes, [], name);
+    await t.advance(56_000);
+    assert.deepEqual(box.result, { ok: false, error: "busy" }, name);
+    t.typist.dispose();
+  }
+});
+
+test("viaHooks_without_the_probe_or_the_file_status_is_never_typed", async () => {
   const t = setup();
   t.session.status = "busy";
+  const box = await t.run(viaHooks(), 61_000);
+  assert.deepEqual(box.result, { ok: false, error: "busy" });
+  assert.deepEqual(t.pty.writes, []);
+  t.typist.dispose();
+});
+
+test("viaHooks_refuses_any_file_status_but_busy_or_idle", async () => {
+  for (const status of ["waiting", "unknown-new-value", "idle-ish"]) {
+    const t = setup({ screen: true });
+    t.session.status = status;
+    t.paint(idleScreen());
+    const box = await t.run(viaHooks(), 61_000);
+    assert.deepEqual(box.result, { ok: false, error: "busy" }, status);
+    assert.deepEqual(t.pty.writes, [], status);
+    t.typist.dispose();
+  }
+});
+
+test("the_file_turning_waiting_before_the_write_stops_it", async () => {
+  const t = setup({ screen: true });
+  t.session.status = "busy";
+  t.paint(idleScreen());
+  const box = await t.run(viaHooks(), 250);
+  assert.equal(box.result, undefined);
+  // The settle time is almost over; Claude opens a permission dialog.
+  t.session.status = "waiting";
+  await t.advance(400);
+  assert.deepEqual(t.pty.writes, [], "nothing typed into the dialog");
+  t.session.status = "busy";
+  await t.advance(100);
+  assert.deepEqual(t.pty.writes, [], "the settle time starts over");
+  await t.advance(300);
+  assert.deepEqual(t.pty.writes, [PASTE("from the glasses") + "\r"]);
+  t.typist.dispose();
+});
+
+test("the_screen_leaving_the_idle_prompt_before_the_write_stops_it", async () => {
+  const t = setup({ screen: true });
+  t.session.status = "busy";
+  t.paint(idleScreen());
+  const box = await t.run(viaHooks(), 250);
+  t.paint(workingScreen());
+  await t.advance(2000);
+  assert.deepEqual(t.pty.writes, []);
+  assert.equal(box.result, undefined);
+  t.typist.dispose();
+});
+
+test("an_animated_footer_does_not_starve_a_ready_viaHooks_write", async () => {
+  const t = setup({ screen: true });
+  t.session.status = "busy";
+  t.paint(idleScreen("  1 agent"));
+  const frames = ["-", "\\", "|", "/"];
+  const box = await t.run(viaHooks(), 0);
+  // Output every 200 ms, redrawing the footer in place; the old quiet rule would never pass.
+  for (let i = 0; i < 6; i += 1) {
+    t.paint(`\r\x1b[2K  1 agent ${frames[i % 4]}`);
+    await t.advance(200);
+  }
+  assert.deepEqual(t.pty.writes, [PASTE("from the glasses") + "\r"]);
+  assert.deepEqual(box.result, { ok: true });
+  t.typist.dispose();
+});
+
+test("an_animation_that_redraws_the_busy_indicator_never_passes", async () => {
+  const t = setup({ screen: true });
+  t.session.status = "busy";
+  t.paint(workingScreen());
+  const box = await t.run(viaHooks(), 0);
+  for (let i = 0; i < 20; i += 1) {
+    t.paint("\x1b[7;1H\x1b[2K✻ Working… (" + i + "s · esc to interrupt)");
+    await t.advance(200);
+  }
+  assert.deepEqual(t.pty.writes, []);
+  assert.equal(box.result, undefined);
+  t.typist.dispose();
+});
+
+test("viaHooks_never_lets_compact_or_model_skip_the_file", async () => {
+  const t = setup({ screen: true });
+  t.session.status = "busy";
+  t.paint(idleScreen());
   const box = await t.run({ command: "compact", viaHooks: true }, 60_100);
   assert.deepEqual(box.result, { ok: false, error: "busy" });
   assert.deepEqual(t.pty.writes, []);
   t.typist.dispose();
+});
+
+test("the_screen_probe_reads_claude_layouts_it_knows_and_nothing_else", () => {
+  const screen = (text, cols = 80) => {
+    const model = new ScreenModel(cols, 24);
+    model.push(text);
+    return model;
+  };
+  assert.equal(showsIdlePrompt(screen(idleScreen())), true);
+  assert.equal(showsIdlePrompt(screen(idleScreen("  ⏵⏵ accept edits on (shift+tab to cycle) · 1 agent"))), true);
+  // The boxed variant, with side borders.
+  const boxed = `\x1b[2J\x1b[H╭${"─".repeat(60)}╮\r\n│ >${" ".repeat(57)}│\r\n╰${"─".repeat(60)}╯\r\n  ? for shortcuts`;
+  assert.equal(showsIdlePrompt(screen(boxed)), true);
+  assert.equal(showsIdlePrompt(screen("")), false);
+  assert.equal(showsIdlePrompt(screen(workingScreen())), false);
+  assert.equal(showsIdlePrompt(screen(idleScreen(), 30)), false, "a narrow window is not trusted");
 });

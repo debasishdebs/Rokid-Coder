@@ -663,3 +663,96 @@ test("a_write_newer_than_the_stop_ends_background_readiness", () => {
   router.onHook(KEY, "Stop", {});
   assert.equal(states.state(KEY), "ready");
 });
+
+// Codex review: the evidence is only as good as its classification, and a
+// command sent on it dies with it.
+
+test("a_stop_that_another_stop_hook_continued_is_no_evidence", () => {
+  const { states, router } = backgroundSession();
+  router.onHook(KEY, "UserPromptSubmit", { prompt: "go" });
+  router.onHook(KEY, "Stop", { stop_hook_active: true });
+  assert.equal(states.state(KEY), "busy");
+  router.onHook(KEY, "Stop", { stop_hook_active: false });
+  assert.equal(states.state(KEY), "ready");
+  // A continued Stop after a real one takes the evidence back.
+  router.onHook(KEY, "Stop", { stop_hook_active: true });
+  assert.equal(states.state(KEY), "busy");
+});
+
+test("notifications_are_classified_by_notification_type", () => {
+  const harmless = [
+    { notification_type: "idle_prompt", message: "Claude is waiting for your input" },
+    { notification_type: "auth_success", message: "Signed in" },
+    { message: "Claude is waiting for your input" },
+  ];
+  for (const payload of harmless) {
+    const { states, router } = backgroundSession();
+    stopAfterPrompt(router);
+    router.onHook(KEY, "Notification", payload);
+    assert.equal(states.state(KEY), "ready", JSON.stringify(payload));
+  }
+  const blocking = [
+    { notification_type: "permission_prompt", message: "Approve network access?" },
+    { notification_type: "elicitation_dialog", message: "Pick one" },
+    { notification_type: "some_future_type", message: "Claude is waiting for your input" },
+    { message: "Approve network access?" },
+    {},
+  ];
+  for (const payload of blocking) {
+    const { states, router } = backgroundSession();
+    stopAfterPrompt(router);
+    router.onHook(KEY, "Notification", payload);
+    assert.equal(states.state(KEY), "busy", JSON.stringify(payload));
+  }
+});
+
+test("revoking_the_evidence_between_dispatch_and_write_cancels_the_command_as_busy", async () => {
+  const revocations = [
+    ["SubagentStop", { agent_id: "a1" }],
+    ["PreToolUse", { tool_name: "Bash" }],
+    ["PermissionRequest", { tool_name: "Bash" }],
+    ["Notification", { notification_type: "permission_prompt", message: "Approve network access?" }],
+    ["Stop", { stop_hook_active: true }],
+  ];
+  for (const [event, payload] of revocations) {
+    const { port, router } = backgroundSession();
+    stopAfterPrompt(router);
+    const result = router.followup(KEY, "never typed", () => assert.fail("nothing is held"));
+    await until(() => port.sent.length === 1, 200, "the dispatch");
+    assert.equal(port.sent[0].viaHooks, true);
+    router.onHook(KEY, event, payload);
+    assert.deepEqual(await result, { ok: false, error: "busy" }, event);
+    assert.deepEqual(port.commandCancels, [port.sent[0].cmdId], `${event} cancels the command at the launcher`);
+    assert.equal(port.sent.length, 1, "never retyped");
+  }
+});
+
+test("a_running_subagent_ending_or_the_file_leaving_busy_revokes_an_unwritten_command", async () => {
+  const lost = [
+    (ctx) => (ctx.flags.subagents = 0),
+    (ctx) => (ctx.file.status = "waiting"),
+    (ctx) => (ctx.flags.asking = true),
+  ];
+  for (const change of lost) {
+    const ctx = backgroundSession();
+    stopAfterPrompt(ctx.router);
+    ctx.router.start();
+    const result = ctx.router.followup(KEY, "never typed", () => assert.fail("nothing is held"));
+    await until(() => ctx.port.sent.length === 1, 200, "the dispatch");
+    change(ctx);
+    assert.deepEqual(await result, { ok: false, error: "busy" });
+    ctx.router.stop();
+  }
+});
+
+test("a_viaHooks_command_already_typed_is_not_revoked", async () => {
+  const { port, router } = backgroundSession();
+  stopAfterPrompt(router);
+  const result = router.followup(KEY, "typed", () => assert.fail("nothing is held"));
+  await until(() => port.sent.length === 1, 200, "the dispatch");
+  port.written(Date.now());
+  router.onHook(KEY, "SubagentStop", { agent_id: "a1" });
+  port.settle({ ok: true });
+  router.onHook(KEY, "UserPromptSubmit", { prompt: "typed" });
+  assert.deepEqual(await result, { ok: true });
+});
