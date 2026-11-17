@@ -162,9 +162,26 @@ nothing: every target is dialled over TLS.
 node dist/cli.js pair
 ```
 
-The command prints a one-line JSON pairing payload and a terminal QR code. It prefers the
-first IPv4 address on an interface whose name contains `Tailscale`. The Android plugin can
-scan the QR code or accept the printed JSON pasted directly.
+The command prints a one-line JSON pairing payload and a terminal QR code. The Android
+plugin can scan the QR code or accept the printed JSON pasted directly.
+
+The payload says where to dial this computer: `host` (the first address, which phones that
+predate the list use) and `hosts`, the whole list: the LAN address first and this
+computer's Tailscale IPv4 (100.64.0.0/10) last, at most four. Away from home a phone can
+only reach the Tailscale one. agentd finds that address by asking the Tailscale CLI
+(`tailscale ip -4`), never by interface name (macOS calls it `utunN`); the answer is cached
+for 30 seconds, and without Tailscale, or with `tailnetDiscovery` turned off in
+`config.json`, the list is the one LAN address, as before. In WSL's NAT mode the list is
+the Windows host's addresses (Tailscale's first, as before), with the tailnet address
+added if it is missing.
+
+`pair_credentials` carries the same list as `wsHosts` beside `wsHost` and `wsPort`.
+
+Every accepted `wss` link is also sent `{"type":"endpoint","v":2,"hosts":[...],"port":8792}`
+right after the snapshot, and again whenever the list changes while the phone is linked
+(agentd looks every 15 seconds), so a phone paired before it carried a tailnet address
+learns it the next time it connects at home, without pairing again. Phones that do not
+know the frame ignore it.
 
 The window stays open for two minutes and trusts the first new phone to connect and
 authenticate, on either path (the phone dialling in over `wss`, or agentd dialling the

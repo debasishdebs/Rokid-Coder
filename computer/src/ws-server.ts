@@ -8,7 +8,7 @@ import type { TLSSocket } from "node:tls";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { NotAttachedError } from "./attach-registry";
 import type { PairingCoordinator, PairingSession } from "./pairing/coordinator";
-import { gateFrame, linkTrustFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
+import { endpointFrame, gateFrame, linkTrustFrame, type PhoneChannel, type PhoneV2Hooks } from "./protocol-v2";
 import {
   DAY_MS,
   DEFAULT_PAIRING_TTL_DAYS,
@@ -92,6 +92,8 @@ interface ClientState {
   openSessionId?: string;
   /** The last session_upsert payload sent to this client, by session id, so an identical one is not sent again. */
   lastUpserts: Map<string, string>;
+  /** The `endpoint` frame last sent to this client, serialized, so an unchanged list is not sent again. */
+  lastEndpoint?: string;
 }
 
 export interface WsHubOptions {
@@ -138,6 +140,13 @@ export interface WsHubOptions {
   /** How often live clients are re-checked against the current secret (the file watch also triggers it). */
   trustCheckIntervalMs?: number;
   v2?: PhoneV2Hooks;
+  /**
+   * Where phones should dial now (`advertisedEndpoint`). Each accepted client is
+   * sent it as an `endpoint` frame after its snapshot, and again when it changes.
+   */
+  endpoint?: () => { hosts: readonly string[]; port: number };
+  /** How often a changed `endpoint` is looked for while clients are linked. */
+  endpointCheckIntervalMs?: number;
   /** A client finished its handshake, after it has its snapshot. `trusted` is whether it may steer: always, for an accepted client. */
   onClientConnected?: (trusted: boolean) => void;
   /** An authenticated client went away. */
@@ -170,6 +179,7 @@ export class WsHub {
   private sockets?: WebSocketServer;
   private keepaliveTimer?: NodeJS.Timeout;
   private stopTrustWatch?: () => void;
+  private endpointTimer?: NodeJS.Timeout;
   private readonly clients = new Map<WebSocket, ClientState>();
   private sequence = 0;
   private readonly unsubscribeUpsert: () => void;
@@ -247,6 +257,10 @@ export class WsHub {
         const interval = this.options.keepaliveIntervalMs ?? 30_000;
         this.keepaliveTimer = setInterval(() => this.keepalive(), interval);
         this.keepaliveTimer.unref();
+        if (this.options.endpoint) {
+          this.endpointTimer = setInterval(() => this.broadcastEndpoint(), this.options.endpointCheckIntervalMs ?? 15_000);
+          this.endpointTimer.unref();
+        }
         this.stopTrustWatch = watchFiles(
           [this.options.steerFile, this.pins.filePath].filter((file): file is string => file !== undefined),
           this.options.trustCheckIntervalMs ?? 1_000,
@@ -269,6 +283,10 @@ export class WsHub {
     if (this.keepaliveTimer) {
       clearInterval(this.keepaliveTimer);
       this.keepaliveTimer = undefined;
+    }
+    if (this.endpointTimer) {
+      clearInterval(this.endpointTimer);
+      this.endpointTimer = undefined;
     }
     this.stopTrustWatch?.();
     this.stopTrustWatch = undefined;
@@ -534,6 +552,7 @@ export class WsHub {
       },
     });
     this.sendSnapshot(socket);
+    this.sendEndpoint(socket, state);
     this.options.onClientConnected?.(this.isTrusted(state));
     // Admitted: this is a use of the pairing.
     this.touchPairing(state);
@@ -857,6 +876,33 @@ export class WsHub {
       socket.ping();
       // A link that stays up keeps its pairing in use.
       this.touchPairing(state);
+    }
+  }
+
+  /** Tells one authenticated client where to dial, unless it already has exactly this. */
+  private sendEndpoint(socket: WebSocket, state: ClientState): void {
+    if (!this.options.endpoint) {
+      return;
+    }
+    try {
+      const frame = endpointFrame(this.options.endpoint());
+      const serialized = JSON.stringify(frame);
+      if (serialized !== state.lastEndpoint) {
+        state.lastEndpoint = serialized;
+        this.send(socket, frame);
+      }
+    } catch (error) {
+      // An endpoint that cannot be worked out costs the phone a hint, never the link.
+      this.logger.warn("ws_endpoint_unavailable", { reason: error instanceof Error ? error.name : "error" });
+    }
+  }
+
+  /** The host list may change while phones are linked (Wi-Fi moved, Tailscale came up). */
+  private broadcastEndpoint(): void {
+    for (const [socket, state] of this.clients) {
+      if (state.authenticated && socket.readyState === WebSocket.OPEN) {
+        this.sendEndpoint(socket, state);
+      }
     }
   }
 

@@ -17,6 +17,8 @@ import { claudeSessionGone, discoverRecentSessions } from "./discovery";
 import { HookHttpServer } from "./http-server";
 import { claudeSessionsDir, liveClaudeSessionIds, readClaudeSession } from "./launcher/claude-sessions";
 import { LauncherHub } from "./launcher/launcher-hub";
+import { advertisedEndpoint } from "./advertise";
+import { startTailnetHostRefresh } from "./endpoint-hosts";
 import { bestHostGuess } from "./pairing";
 import { PairingCoordinator } from "./pairing/coordinator";
 import { COMPACT_LIMIT_MS, LauncherRouter, READY_WAIT_MS, SessionStates } from "./launcher/session-state";
@@ -628,6 +630,7 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
     steer: () => readSteerSecret(tlsDir),
     steerFile: steerSecretFile(tlsDir),
     v2: v2Hooks,
+    endpoint: () => advertisedEndpoint(config, () => bestHostGuess()),
     onClientConnected: (trusted) => onPhoneConnected("wshub", trusted),
     onClientDisconnected: () => onPhoneDisconnected(false),
     onTrustRevoked: onPhoneTrustRevoked,
@@ -805,6 +808,8 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
   sweepPairings();
   const pairingTimer = setInterval(() => sweepPairings(), PAIRING_SWEEP_INTERVAL_MS);
   pairingTimer.unref();
+  // Keeps this computer's Tailscale address cached, so advertising it never waits on the CLI.
+  const stopTailnetHostRefresh = startTailnetHostRefresh(config);
 
   try {
     await httpServer.start();
@@ -817,6 +822,7 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
   } catch (error) {
     clearInterval(heartbeatTimer);
     clearInterval(pairingTimer);
+    stopTailnetHostRefresh();
     launcherRouter.stop();
     phone.stop();
     stopListeningForDetach();
@@ -864,6 +870,7 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
       stopped = true;
       clearInterval(heartbeatTimer);
       clearInterval(pairingTimer);
+      stopTailnetHostRefresh();
       stopListeningForDetach();
       launcherRouter.stop();
       await launchers.stop();
