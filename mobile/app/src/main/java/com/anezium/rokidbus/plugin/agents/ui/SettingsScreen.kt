@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.background
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -58,6 +59,14 @@ internal object SettingsCopy {
         "Plugin mode (claude + /rokid:on): no compact or model change from the glasses; " +
             "replies only while the session waits."
     const val LAUNCHER_LIMITS = "Launcher mode (rk claude): everything, including after the wait."
+
+    const val BG_REPLIES_TITLE = "Replies while background work runs"
+    const val BG_REPLIES_WARNING =
+        "Experimental. Lets you send a reply from the glasses while Claude has background subagents running, " +
+            "by typing it into your terminal. It works only when Claude is in auto mode, and only in sessions " +
+            "started with rk claude. If Claude is showing a permission prompt or a question, the reply is not sent."
+    const val BG_REPLIES_TURN_ON = "Turn on"
+    const val BG_REPLIES_CANCEL = "Cancel"
 
     /** U6: with no computer yet, the way in is one button that walks through pairing. */
     const val ADD_FIRST_COMPUTER = "Add your first computer"
@@ -383,6 +392,31 @@ private fun AlertsCard(alerts: AlertSettings, voiceWordLimit: Int, actions: Sett
             tag = "voice_word_limit",
         )
         NoticeText("A long reply you dictate is shown shortened on the glasses. It is always sent in full.")
+        var confirmBgReplies by remember { mutableStateOf(false) }
+        SwitchRow(
+            SettingsCopy.BG_REPLIES_TITLE, null, alerts.bgReplies,
+            { on -> if (on) confirmBgReplies = true else actions.onAlerts { copy(bgReplies = false) } },
+            tag = "bg_replies",
+        )
+        NoticeText(SettingsCopy.BG_REPLIES_WARNING, tag = "bg_replies_notice")
+        if (confirmBgReplies) {
+            AlertDialog(
+                onDismissRequest = { confirmBgReplies = false },
+                title = { Text(SettingsCopy.BG_REPLIES_TITLE) },
+                text = { Text(SettingsCopy.BG_REPLIES_WARNING, modifier = Modifier.testTag("bg_replies_dialog_text")) },
+                confirmButton = {
+                    TextButton(
+                        onClick = { confirmBgReplies = false; actions.onAlerts { copy(bgReplies = true) } },
+                        modifier = Modifier.testTag("bg_replies_turn_on"),
+                    ) { Text(SettingsCopy.BG_REPLIES_TURN_ON) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmBgReplies = false }, modifier = Modifier.testTag("bg_replies_cancel")) {
+                        Text(SettingsCopy.BG_REPLIES_CANCEL)
+                    }
+                },
+            )
+        }
         for (slot in SoundSlot.values()) {
             val choice = alerts.sounds[slot]
             ChoiceRow(

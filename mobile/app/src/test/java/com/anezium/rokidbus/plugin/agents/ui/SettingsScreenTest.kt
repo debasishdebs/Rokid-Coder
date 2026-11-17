@@ -41,6 +41,19 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun background_replies_copy_is_exact() {
+        assertEquals("Replies while background work runs", SettingsCopy.BG_REPLIES_TITLE)
+        assertEquals(
+            "Experimental. Lets you send a reply from the glasses while Claude has background subagents running, " +
+                "by typing it into your terminal. It works only when Claude is in auto mode, and only in sessions " +
+                "started with rk claude. If Claude is showing a permission prompt or a question, the reply is not sent.",
+            SettingsCopy.BG_REPLIES_WARNING,
+        )
+        assertEquals("Turn on", SettingsCopy.BG_REPLIES_TURN_ON)
+        assertEquals("Cancel", SettingsCopy.BG_REPLIES_CANCEL)
+    }
+
+    @Test
     fun link_trust_is_secure_or_pair_again_and_absent_when_not_connected() {
         assertEquals("Secure (TLS)", trustLabel(connected = true, secure = true))
         // There is no monitor-only link: a link that cannot steer is one to pair again.
