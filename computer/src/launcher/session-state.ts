@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FollowupState, SessionKey } from "../protocol-v2";
-import type { CommandResult, SendError, TypeCommand } from "./launcher-hub";
+import type { CommandResult, SendError, TypeCommand, WriteCheckPhase } from "./launcher-hub";
+import { bgReplyText } from "./paste-text";
 
 /**
  * Where a launcher-bound Claude session stands, for typing into it (R55):
@@ -10,6 +11,27 @@ import type { CommandResult, SendError, TypeCommand } from "./launcher-hub";
  * so a missed hook cannot leave a session stuck in either direction.
  */
 export type LaunchState = "busy" | "held" | "ready";
+
+/**
+ * An opt-in exception to "ready comes from Claude's file alone", for sessions
+ * with a running background subagent: Claude's file stays `busy` for as long as
+ * the subagent lives, though the main prompt is free. See `bgPicture` for what
+ * it takes. A main-thread `Stop` older than this is no evidence.
+ */
+export const BACKGROUND_STOP_FRESH_MS = 6 * 60 * 60_000;
+
+/**
+ * The permission modes (the `permission_mode` of a hook payload) in which a
+ * background reply may be typed. Only modes where Claude never stops to ask:
+ * - `auto`, `bypassPermissions`: allowed;
+ * - `acceptEdits`: refused, it still asks for every shell command and other tool;
+ * - `dontAsk`: refused although it does not ask (it denies what is not
+ *   pre-approved), because "nothing can open a dialog" is the whole reason a
+ *   reply may be pasted into a busy session, and that is a claim about
+ *   `auto` and `bypassPermissions`; widening it is a decision for the wearer;
+ * - `default`, `plan` and anything unknown or missing: refused.
+ */
+export const AUTO_APPROVING_MODES: ReadonlySet<string> = new Set(["auto", "bypassPermissions"]);
 
 /** The brief's windows. */
 export const READY_WAIT_MS = 60_000;
@@ -22,6 +44,8 @@ export const READY_POLL_MS = 250;
  * cancelled.
  */
 const RESULT_SLACK_MS = 30_000;
+/** How long after the launcher's ok a background reply waits to see Claude take its prompt. */
+const BG_ACCEPT_MS = 15_000;
 /** How often bound sessions are looked at when nothing is waiting on them. */
 const WATCH_MS = 500;
 
@@ -44,6 +68,8 @@ export interface StateSources {
   asking(key: SessionKey): boolean;
   /** Ends the binding's uncertainty; the launcher is told. */
   clearUncertain(key: SessionKey): void;
+  /** Subagents the session store counts as running (SubagentStart seen, SubagentStop not yet). Absent: none. */
+  subagents?(key: SessionKey): number;
 }
 
 interface CompactWatch {
@@ -63,7 +89,51 @@ interface Entry {
   passedLatchAt?: number;
   inFlight: boolean;
   compact?: CompactWatch;
+  /**
+   * When agentd saw a main-thread `Stop` (stop_hook_active not true) and no
+   * sign of main-thread work since: see `trackMainThread` for what clears it.
+   */
+  stopAt?: number;
+  /** The `permission_mode` of the latest main-thread hook; undefined when that hook carried none. */
+  mode?: string;
 }
+
+/** What the evidence for a background reply says, short of the phone's switch (the router adds it). */
+export interface BgPicture {
+  /** Every item of evidence but the permission mode holds. */
+  eligible: boolean;
+  /** The main thread's latest known permission mode is an auto-approving one. */
+  modeOk: boolean;
+}
+
+/** A prompt or a reply with every whitespace removed, so that it can be compared with the other. */
+function squash(text: string | undefined): string {
+  return (text ?? "").replace(/\s+/g, "");
+}
+
+/** A hook fired inside a subagent carries that subagent's id; the main thread's does not. */
+function isSubagentHook(payload: Record<string, unknown>): boolean {
+  return payload.agent_id !== undefined && payload.agent_id !== null && payload.agent_id !== "";
+}
+
+/** Hooks whose main-thread firing is a sign the main thread is working. */
+const MAIN_THREAD_WORK: ReadonlySet<string> = new Set([
+  "UserPromptSubmit",
+  "UserPromptExpansion",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PermissionDenied",
+  "PreCompact",
+  "PostCompact",
+  "SessionStart",
+  "SessionEnd",
+  "StopFailure",
+]);
+/** Hooks that mean something is, or may be, waiting on the wearer, whichever thread fired them. */
+const BLOCKING_HOOKS: ReadonlySet<string> = new Set(["PermissionRequest", "Elicitation", "ElicitationResult", "SubagentStop"]);
+/** Notifications that do not say the prompt is taken: the prompt is idle, a login finished. */
+const QUIET_NOTIFICATIONS: ReadonlySet<string> = new Set(["idle_prompt", "auth_success"]);
 
 export class SessionStates {
   private readonly entries = new Map<SessionKey, Entry>();
@@ -79,8 +149,13 @@ export class SessionStates {
    * than `at`, the session is not ready. Set synchronously on a Stop delivery
    * and on `command_written`; it only ever moves forward.
    */
-  latch(key: SessionKey, at: number): void {
+  latch(key: SessionKey, at: number, keepStop = false): void {
     const entry = this.entry(key);
+    // Whatever the latch stands for (a write, a delivered Stop) is main-thread
+    // work. A background reply's own paste keeps the evidence until its Enter is allowed.
+    if (!keepStop) {
+      entry.stopAt = undefined;
+    }
     entry.latchAt = entry.latchAt === undefined ? at : Math.max(entry.latchAt, at);
   }
 
@@ -109,8 +184,17 @@ export class SessionStates {
     return entry?.latchAt ?? entry?.passedLatchAt;
   }
 
+  /** The evidence of a main-thread Stop is used up or gone. */
+  clearStop(key: SessionKey): void {
+    const entry = this.entries.get(key);
+    if (entry) {
+      entry.stopAt = undefined;
+    }
+  }
+
   /** The hooks that tell agentd something the file cannot. */
   onHook(key: SessionKey, event: string, payload: Record<string, unknown>): void {
+    this.trackMainThread(key, event, payload);
     switch (event) {
       case "UserPromptSubmit":
         // Nothing is typed while uncertain, so a prompt now is the wearer's own:
@@ -142,6 +226,75 @@ export class SessionStates {
         break;
       }
     }
+  }
+
+  /**
+   * The background-reply evidence from hooks. A Stop hook alone does not prove
+   * the main turn is over (another Stop hook can continue it, which is what
+   * `stop_hook_active` says), so a Stop only counts when it says it is not a
+   * continuation, and everything that shows the main thread working, or
+   * something waiting on the wearer, takes it away. Hooks fired inside a
+   * subagent (`agent_id`) say nothing about the main thread, except those that
+   * can put a dialog on the main screen, which clear it whoever fired them.
+   * Notifications are told apart by `notification_type`, never by their text.
+   */
+  private trackMainThread(key: SessionKey, event: string, payload: Record<string, unknown>): void {
+    const sub = isSubagentHook(payload);
+    const entry = this.entry(key);
+    if (!sub) {
+      entry.mode = typeof payload.permission_mode === "string" && payload.permission_mode.length <= 40
+        ? payload.permission_mode
+        : undefined;
+    }
+    if (event === "Stop") {
+      const continued = payload.stop_hook_active !== undefined && payload.stop_hook_active !== false;
+      entry.stopAt = sub || continued ? undefined : this.clock();
+    } else if (event === "Notification") {
+      if (typeof payload.notification_type !== "string" || !QUIET_NOTIFICATIONS.has(payload.notification_type)) {
+        entry.stopAt = undefined;
+      }
+    } else if (BLOCKING_HOOKS.has(event) || (!sub && MAIN_THREAD_WORK.has(event))) {
+      entry.stopAt = undefined;
+    }
+  }
+
+  /**
+   * Whether the hook evidence for typing a background reply holds: Claude's
+   * file says `busy` (never `waiting`, never `idle`, which takes the ordinary
+   * path), for this session; the session is bound, with nothing held, asked,
+   * uncertain or (unless `ownsClaim`, for the command that holds it) in flight;
+   * a main-thread Stop, not a continued one, is no older than
+   * BACKGROUND_STOP_FRESH_MS with no main-thread work since; and the store
+   * counts a running subagent. `modeOk` is the permission-mode item, kept apart
+   * so the phone can be told that one is what is missing. The laptop draft and
+   * the phone's switch are the router's.
+   */
+  bgPicture(key: SessionKey, ownsClaim = false): BgPicture {
+    const no: BgPicture = { eligible: false, modeOk: false };
+    const binding = this.sources.binding(key);
+    const entry = this.entries.get(key);
+    if (
+      this.sources.held(key) ||
+      !binding ||
+      binding.claudePid === undefined ||
+      binding.uncertain ||
+      (entry?.inFlight === true && !ownsClaim) ||
+      this.sources.asking(key)
+    ) {
+      return no;
+    }
+    const file = this.readSession(binding.claudePid);
+    if (!file || file.status !== "busy" || file.sessionId !== key.slice(key.indexOf(":") + 1)) {
+      return no;
+    }
+    const stopAge = entry?.stopAt === undefined ? undefined : this.clock() - entry.stopAt;
+    if (stopAge === undefined || stopAge < 0 || stopAge > BACKGROUND_STOP_FRESH_MS) {
+      return no;
+    }
+    if ((this.sources.subagents?.(key) ?? 0) < 1) {
+      return no;
+    }
+    return { eligible: true, modeOk: entry?.mode !== undefined && AUTO_APPROVING_MODES.has(entry.mode) };
   }
 
   /**
@@ -274,6 +427,8 @@ export interface LauncherPort {
   onCommandWritten(cb: (key: SessionKey, cmdId: string, at: number) => void): void;
   /** R165: the launcher's own result for a command agentd had already cancelled. */
   onLateResult(cb: (cmdId: string, ok: boolean) => void): void;
+  /** A launcher asks, mid-command, whether a background reply may write now (`paste`, then `enter`). */
+  onWriteCheck?(cb: (key: SessionKey, cmdId: string, phase: WriteCheckPhase) => boolean): void;
 }
 
 export interface RouterTimings {
@@ -282,6 +437,8 @@ export interface RouterTimings {
   pollMs: number;
   /** R165: how long a cancel waits to hear whether the launcher typed the command anyway. */
   cancelSettleMs: number;
+  /** How long a background reply waits, after the launcher pressed Enter, to see Claude take its prompt. */
+  bgAcceptMs: number;
 }
 
 export const CANCEL_SETTLE_MS = 500;
@@ -305,6 +462,13 @@ interface Running {
   abort: (error: string) => void;
   /** Set while a cancel waits to settle: the launcher has answered for the command. */
   settled?: () => void;
+  /** A background reply (see `bgAssess`): written is its paste, `enterGranted` its Enter allowed. */
+  bg?: boolean;
+  enterGranted?: boolean;
+  /** The command was aborted here; no later write check of it is answered yes. */
+  dead?: boolean;
+  /** A background reply: called with the prompt of a UserPromptSubmit seen after its Enter was allowed. */
+  accept?: (prompt: string | undefined) => void;
 }
 
 /**
@@ -323,6 +487,7 @@ export class LauncherRouter {
   private readonly running = new Map<SessionKey, Running>();
   private readonly shown = new Map<SessionKey, string>();
   private watchTimer?: NodeJS.Timeout;
+  private readonly bgSwitch: () => boolean;
 
   constructor(options: {
     port: LauncherPort;
@@ -331,6 +496,8 @@ export class LauncherRouter {
     timings?: Partial<RouterTimings>;
     /** A bound session's follow-up state or binding changed: republish it. */
     onStateChange?: (key: SessionKey) => void;
+    /** The phone's opt-in for background replies, read live; absent, off. */
+    bgReplies?: () => boolean;
   }) {
     this.port = options.port;
     this.states = options.states;
@@ -340,11 +507,15 @@ export class LauncherRouter {
       compactLimitMs: options.timings?.compactLimitMs ?? COMPACT_LIMIT_MS,
       pollMs: options.timings?.pollMs ?? READY_POLL_MS,
       cancelSettleMs: options.timings?.cancelSettleMs ?? CANCEL_SETTLE_MS,
+      bgAcceptMs: options.timings?.bgAcceptMs ?? BG_ACCEPT_MS,
     };
+    this.bgSwitch = options.bgReplies ?? (() => false);
     this.onStateChange = options.onStateChange ?? (() => undefined);
+    this.port.onWriteCheck?.((key, cmdId, phase) => this.writeCheck(key, cmdId, phase));
     this.port.onCommandWritten((key, cmdId, at) => {
-      this.states.latch(key, at);
       const running = this.running.get(key);
+      // A background reply's own paste is not the main thread's work; its Enter is.
+      this.states.latch(key, at, running?.cmdId === cmdId && running.bg === true && running.enterGranted !== true);
       if (running?.cmdId === cmdId) {
         running.written = true;
         running.writtenAt ??= at;
@@ -415,17 +586,49 @@ export class LauncherRouter {
     if (state === "held") {
       return "waiting";
     }
-    return state === "ready" && !this.port.laptopDraft(key) ? "ready" : "unavailable";
+    if (this.port.laptopDraft(key)) {
+      return "unavailable";
+    }
+    return state === "ready" || this.bgAssess(key) === "ready" ? "ready" : "unavailable";
+  }
+
+  /**
+   * The background-reply decision for a session whose file says `busy`:
+   * "ready" only when all of `SessionStates.bgPicture`, no laptop draft and
+   * the phone's switch hold; "needs_auto_mode" or "bg_off" when everything else
+   * would allow it and that one item is what is missing (the mode first);
+   * "no" otherwise. Never says "ready" for a session whose file is not busy.
+   */
+  private bgAssess(key: SessionKey, ownsClaim = false): "ready" | "bg_off" | "needs_auto_mode" | "no" {
+    const picture = this.states.bgPicture(key, ownsClaim);
+    if (!picture.eligible || this.port.laptopDraft(key)) {
+      return "no";
+    }
+    if (!picture.modeOk) {
+      return "needs_auto_mode";
+    }
+    let on = false;
+    try {
+      on = this.bgSwitch() === true;
+    } catch {
+      on = false;
+    }
+    return on ? "ready" : "bg_off";
   }
 
   /**
    * Why `followupState` is "unavailable", for the phone to say, never for
-   * deciding anything: "draft" (text at the laptop prompt), "background"
-   * (Claude's file is busy while `subagentsRunning` subagents run, so the
-   * main prompt may well be free) or "busy" (everything else). Undefined when
-   * the follow-up is available or waiting, or the session is not bound.
+   * deciding anything: "draft" (text at the laptop prompt), "needs_auto_mode"
+   * or "bg_off" (a background reply would be allowed but for the permission
+   * mode, or but for the phone's switch), "background" (Claude's file is busy
+   * while `subagentsRunning` subagents run, so the main prompt may well be
+   * free) or "busy" (everything else). Undefined when the follow-up is
+   * available or waiting, or the session is not bound.
    */
-  followupWhy(key: SessionKey, subagentsRunning = 0): "busy" | "draft" | "background" | undefined {
+  followupWhy(
+    key: SessionKey,
+    subagentsRunning = 0,
+  ): "busy" | "draft" | "background" | "bg_off" | "needs_auto_mode" | undefined {
     if (!this.port.binding(key)) {
       return undefined;
     }
@@ -439,7 +642,24 @@ export class LauncherRouter {
     if (state === "ready") {
       return undefined;
     }
+    const bg = this.bgAssess(key);
+    if (bg === "ready") {
+      return undefined;
+    }
+    if (bg === "bg_off" || bg === "needs_auto_mode") {
+      return bg;
+    }
     return subagentsRunning > 0 && this.states.fileBusy(key) ? "background" : "busy";
+  }
+
+  /** The phone's switch or its link changed: a background reply whose evidence is gone is cancelled now. */
+  bgRepliesChanged(): void {
+    for (const key of this.running.keys()) {
+      this.revokeBg(key);
+    }
+    for (const key of this.port.boundKeys()) {
+      this.look(key, false);
+    }
   }
 
   /** A Stop hook just carried a follow-up: Claude carries on, so the session is busy before the hook returns. */
@@ -450,10 +670,20 @@ export class LauncherRouter {
 
   onHook(key: SessionKey, event: string, payload: Record<string, unknown>): void {
     this.states.onHook(key, event, payload);
+    // A hook may take a background reply's evidence away.
+    this.revokeBg(key);
     if (event === "UserPromptSubmit" && this.port.binding(key)) {
+      const running = this.running.get(key);
+      if (running?.bg && running.enterGranted) {
+        running.accept?.(typeof payload.prompt === "string" ? payload.prompt : undefined);
+      }
       // R163: a laptop turn started; a reply queued before it is not for it.
       this.cancelUnwritten(key);
       this.port.promptSubmitted(key, this.clock());
+    }
+    if (this.port.binding(key)) {
+      // A Stop or the like changes what the phone may show; the file never would.
+      this.look(key, false);
     }
   }
 
@@ -465,6 +695,7 @@ export class LauncherRouter {
   onBlocked(key: SessionKey): void {
     if (this.port.binding(key)) {
       this.cancelUnwritten(key);
+      this.revokeBg(key);
       this.look(key, true);
     }
   }
@@ -474,6 +705,41 @@ export class LauncherRouter {
     if (this.port.binding(key)) {
       this.look(key, true);
     }
+  }
+
+  /**
+   * The background reply in flight, before its Enter is allowed, loses its
+   * evidence: it is aborted busy at once (before the paste nothing was typed;
+   * after it the launcher clears the input line), and never retyped.
+   */
+  private revokeBg(key: SessionKey): void {
+    const running = this.running.get(key);
+    if (running?.bg && !running.enterGranted && !running.dead && this.bgAssess(key, true) !== "ready") {
+      running.abort("busy");
+    }
+  }
+
+  /**
+   * The write boundary, asked by the launcher right before its paste and right
+   * before its Enter: all the evidence again, on this very answer. Allowing
+   * the Enter is what uses the Stop up, so a later one cannot reuse it.
+   */
+  private writeCheck(key: SessionKey, cmdId: string, phase: WriteCheckPhase): boolean {
+    const running = this.running.get(key);
+    if (!running?.bg || running.cmdId !== cmdId || running.dead || running.enterGranted) {
+      return false;
+    }
+    if (this.interrupted(key, running.gen, this.epoch(key)) || (phase === "paste") === running.written) {
+      return false;
+    }
+    if (this.bgAssess(key, true) !== "ready") {
+      return false;
+    }
+    if (phase === "enter") {
+      running.enterGranted = true;
+      this.states.clearStop(key);
+    }
+    return true;
   }
 
   private cancelUnwritten(key: SessionKey): void {
@@ -499,11 +765,11 @@ export class LauncherRouter {
       return fail("not_launcher");
     }
     const epoch = this.epoch(key);
-    const ready = await this.waitForReady(key, start.gen, epoch, false);
+    const ready = await this.waitForReady(key, start.gen, epoch, false, false);
     if (ready !== "ready") {
       return fail(ready);
     }
-    return this.run(key, start.gen, epoch, cmd);
+    return this.run(key, start.gen, epoch, cmd, false);
   }
 
   /**
@@ -516,21 +782,30 @@ export class LauncherRouter {
       return fail("not_launcher");
     }
     const epoch = this.epoch(key);
-    const ready = await this.waitForReady(key, start.gen, epoch, true);
+    // Only a text Claude can echo whole may take the background route.
+    const ready = await this.waitForReady(key, start.gen, epoch, true, bgReplyText(text) !== undefined);
     if (ready === "held") {
       return deliverHeld();
     }
-    if (ready !== "ready") {
+    if (ready !== "ready" && ready !== "ready_bg") {
       return fail(ready);
     }
-    return this.run(key, start.gen, epoch, { command: "text", text });
+    return this.run(key, start.gen, epoch, { command: "text", text }, ready === "ready_bg");
   }
 
   /**
    * Waits up to the readiness window. Resolves "ready" with the session
-   * claimed, "held" (only when `takeHeld`), or the error to reject with.
+   * claimed ("ready_bg" when that is the background-reply exception, which only
+   * a `background` caller, a text, ever takes), "held" (only when `takeHeld`),
+   * or the error to reject with.
    */
-  private async waitForReady(key: SessionKey, gen: number, epoch: number, takeHeld: boolean): Promise<string> {
+  private async waitForReady(
+    key: SessionKey,
+    gen: number,
+    epoch: number,
+    takeHeld: boolean,
+    background: boolean,
+  ): Promise<string> {
     const deadline = this.clock() + this.timings.readyWaitMs;
     for (;;) {
       const problem = this.interrupted(key, gen, epoch);
@@ -548,8 +823,9 @@ export class LauncherRouter {
       // The launcher would hold it behind the draft anyway (Review Focus 1);
       // waiting here keeps what agentd dispatches in line with what it shows.
       const draft = this.port.laptopDraft(key);
-      if (state === "ready" && !draft && this.states.claim(key)) {
-        return "ready";
+      const viaBg = background && state !== "ready" && state !== "held" && this.bgAssess(key) === "ready";
+      if ((state === "ready" || viaBg) && !draft && this.states.claim(key)) {
+        return viaBg ? "ready_bg" : "ready";
       }
       if (this.clock() >= deadline) {
         return state === "ready" && draft ? "laptop_draft" : "busy";
@@ -559,15 +835,38 @@ export class LauncherRouter {
   }
 
   /** Runs a claimed command to its end; the claim is released whatever happens. */
-  private async run(key: SessionKey, gen: number, epoch: number, cmd: LauncherCommand): Promise<RouteOutcome> {
+  private async run(
+    key: SessionKey,
+    gen: number,
+    epoch: number,
+    cmd: LauncherCommand,
+    bg: boolean,
+  ): Promise<RouteOutcome> {
     const cmdId = randomUUID();
     let timer: NodeJS.Timeout | undefined;
     let compactDone: Promise<string> | undefined;
-    const running: Running = { cmdId, written: false, gen, abort: () => undefined };
+    const running: Running = { cmdId, written: false, gen, abort: () => undefined, ...(bg ? { bg: true } : {}) };
+    // A background reply is spent only when its Enter was allowed: before that
+    // the launcher clears the paste away, and the same msgId may be sent again.
+    const spent = (): boolean => (bg ? running.enterGranted === true : running.written);
     // Typed, then failed: the msgId is spent, so a resend is a duplicate, never a retype.
-    const failed = (error: string): RouteOutcome => (running.written ? { ok: false, error, consumed: true } : fail(error));
+    const failed = (error: string): RouteOutcome => (spent() ? { ok: false, error, consumed: true } : fail(error));
+    const promptSeen = bg && cmd.command === "text"
+      ? new Promise<string>((resolve) => {
+          const want = squash(cmd.text);
+          // The prompt of a background task's report is another turn's; ours may follow it.
+          running.accept = (prompt) => {
+            if (prompt === undefined || squash(prompt) === want) {
+              resolve("accepted");
+            }
+          };
+        })
+      : undefined;
     const interrupt = new Promise<string>((resolve) => {
-      running.abort = resolve;
+      running.abort = (error) => {
+        running.dead = true;
+        resolve(error);
+      };
       this.running.set(key, running);
       const limit = cmd.command === "compact"
         ? this.timings.compactLimitMs
@@ -582,7 +881,12 @@ export class LauncherRouter {
         compactDone = new Promise<string>((resolve) => this.states.armCompact(key, gen, () => resolve("done")));
       }
       const notBefore = this.states.notBefore(key);
-      const sent = this.port.send(key, { cmdId, ...cmd, ...(notBefore !== undefined ? { notBefore } : {}) });
+      const sent = this.port.send(key, {
+        cmdId,
+        ...cmd,
+        ...(notBefore !== undefined ? { notBefore } : {}),
+        ...(bg ? { bgReply: true as const } : {}),
+      });
       const result: CommandResult | string = await Promise.race([sent, interrupt]);
       if (typeof result === "string") {
         // The launcher has not answered in time, or the session went away:
@@ -592,6 +896,9 @@ export class LauncherRouter {
         this.noteFailure(key, gen, cmd, result);
         // R165: it was typed before the cancel reached the launcher. The msgId
         // is spent, so a resend is a duplicate and never typed twice.
+        if (bg && !spent()) {
+          return running.written ? fail("not_sent") : fail(result);
+        }
         return running.written ? { ok: false, error: "typed_after_cancel", consumed: true } : failed(result);
       }
       if (!result.ok) {
@@ -605,6 +912,18 @@ export class LauncherRouter {
         return OK;
       }
       if (cmd.command === "text") {
+        if (promptSeen) {
+          // The launcher pressed Enter; it counts only once Claude takes the prompt, and is never retyped.
+          const acceptTimer = new Promise<string>((resolve) => {
+            const handle = setTimeout(() => resolve("timeout"), this.timings.bgAcceptMs);
+            void promptSeen.then(() => clearTimeout(handle));
+            void interrupt.then(() => clearTimeout(handle));
+          });
+          const end = await Promise.race([promptSeen, acceptTimer, interrupt]);
+          if (end !== "accepted") {
+            return failed(end);
+          }
+        }
         return OK;
       }
       const end = await Promise.race([compactDone as Promise<string>, interrupt]);
@@ -689,7 +1008,9 @@ export class LauncherRouter {
       }
       return;
     }
-    const seen = this.followupState(key);
+    this.revokeBg(key);
+    // What the phone shows is the follow-up state and, when unavailable, why.
+    const seen = `${this.followupState(key)}/${this.bgAssess(key)}`;
     if (always || this.shown.get(key) !== seen) {
       this.shown.set(key, seen);
       this.onStateChange(key);
