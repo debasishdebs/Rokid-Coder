@@ -373,7 +373,13 @@ async function runClaude(args: string[]): Promise<void> {
   /** The session the last launcher_bind named; agentd may accept it later, on /rokid:on. */
   let askedId: string | undefined;
   let refused: { sessionId: string; delay: number; retryAt: number } | undefined;
-  const client = new LauncherClient({ child, send: (frame) => link.send(frame), binding, sessionsDir });
+  const client = new LauncherClient({
+    child,
+    send: (frame) => link.send(frame),
+    binding,
+    sessionsDir,
+    size: { cols: process.stdout.columns || 80, rows: process.stdout.rows || 24 },
+  });
   // R151: keys typed while a glasses /model dialog may be open are dropped. The
   // bell says so at once without drawing over Claude's screen (N5: never inside one of
   // its escape sequences); the line after exit says why.
@@ -518,7 +524,10 @@ async function runClaude(args: string[]): Promise<void> {
     onStdinEnd();
   }
 
-  process.stdout.on("resize", () => child.resize(process.stdout.columns || 80, process.stdout.rows || 24));
+  process.stdout.on("resize", () => {
+    child.resize(process.stdout.columns || 80, process.stdout.rows || 24);
+    client.resize(process.stdout.columns || 80, process.stdout.rows || 24);
+  });
 
   const onSignal = (signal: NodeJS.Signals): void => beginShutdown(signal, 128 + (signalNumber(signal) ?? 15));
   process.on("SIGTERM", () => onSignal("SIGTERM"));

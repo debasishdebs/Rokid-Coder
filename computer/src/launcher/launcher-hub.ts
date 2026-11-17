@@ -35,12 +35,21 @@ export type CommandError =
   | "laptop_draft"
   | "cancelled"
   | "taken_over"
-  | "uncertain";
+  | "uncertain"
+  /** A background reply was pasted but never submitted: the screen did not confirm it, or its evidence went. */
+  | "not_sent";
 
 export interface TypeCommand {
   cmdId: string;
   gen: number;
   notBefore?: number;
+  /**
+   * A reply agentd allows while Claude's file says `busy` because a background
+   * subagent runs (opt-in, auto-approving permission modes only). The launcher
+   * pastes without Enter, must see the text on Claude's input line, and asks
+   * agentd (`write_check`) before the paste and again before the Enter.
+   */
+  bgReply?: true;
   command: TypeCommandKind;
   model?: string;
   text?: string;
@@ -51,6 +60,8 @@ export interface TypeCommand {
  * was never sent. It is a hard failure, never worth retrying.
  */
 export type SendError = CommandError | "too_long";
+
+export type WriteCheckPhase = "paste" | "enter";
 
 export interface CommandResult {
   ok: boolean;
@@ -122,6 +133,7 @@ const COMMAND_ERRORS: ReadonlySet<string> = new Set<CommandError>([
   "cancelled",
   "taken_over",
   "uncertain",
+  "not_sent",
 ]);
 const LAUNCHER_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SESSION_ID = /^[A-Za-z0-9._-]{1,256}$/;
@@ -207,6 +219,7 @@ export class LauncherHub {
   private readonly listeners: Array<(key: SessionKey) => void> = [];
   private readonly writtenListeners: Array<(key: SessionKey, cmdId: string, at: number) => void> = [];
   private readonly lateResultListeners: Array<(cmdId: string, ok: boolean) => void> = [];
+  private writeChecker?: (key: SessionKey, cmdId: string, phase: WriteCheckPhase) => boolean;
   /** Why each key's last binding ended: `exited` when its launcher went away, `cancelled` when it moved on. */
   private readonly unbound = new Map<SessionKey, CommandError>();
   private generation = 0;
@@ -298,6 +311,7 @@ export class LauncherHub {
       cmdId: cmd.cmdId ?? randomUUID(),
       gen: binding.gen,
       ...(cmd.notBefore !== undefined ? { notBefore: cmd.notBefore } : {}),
+      ...(cmd.bgReply ? { bgReply: true as const } : {}),
       command: cmd.command,
       ...(cmd.model !== undefined ? { model: cmd.model } : {}),
       ...(cmd.text !== undefined ? { text: cmd.text } : {}),
@@ -383,6 +397,15 @@ export class LauncherHub {
   /** R165: the launcher's own result for a command agentd had already cancelled on its connection. */
   onLateResult(cb: (cmdId: string, ok: boolean) => void): void {
     this.lateResultListeners.push(cb);
+  }
+
+  /**
+   * The one question a launcher asks mid-command: may a background reply write
+   * now? Answered synchronously from agentd's own evidence; an exception or no
+   * checker is a no. Only the connection's pending command is ever answered yes.
+   */
+  onWriteCheck(cb: (key: SessionKey, cmdId: string, phase: WriteCheckPhase) => boolean): void {
+    this.writeChecker = cb;
   }
 
   /** A launcher wrote a command's first bytes into its session's prompt. */
@@ -636,6 +659,27 @@ export class LauncherHub {
           this.emitWritten(connection.binding.key, frame.cmdId, frame.at);
         }
         return undefined;
+      case "write_check": {
+        if (
+          !hasShape(frame, ["type", "cmdId", "phase"]) ||
+          typeof frame.cmdId !== "string" ||
+          !CMD_ID.test(frame.cmdId) ||
+          (frame.phase !== "paste" && frame.phase !== "enter")
+        ) {
+          return "bad_frame";
+        }
+        const phase: WriteCheckPhase = frame.phase;
+        let ok = false;
+        if (connection.binding && connection.pending?.cmdId === frame.cmdId && this.writeChecker) {
+          try {
+            ok = this.writeChecker(connection.binding.key, frame.cmdId, phase) === true;
+          } catch (error) {
+            this.options.logger.error("launcher_listener_failed", { reason: errorCode(error) });
+          }
+        }
+        this.write(connection, { type: "write_verdict", cmdId: frame.cmdId, phase, ok });
+        return undefined;
+      }
       case "laptop_state":
         if (!hasShape(frame, ["type", "draft"]) || typeof frame.draft !== "boolean") {
           return "bad_frame";
