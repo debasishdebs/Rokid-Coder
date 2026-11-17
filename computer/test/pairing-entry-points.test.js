@@ -182,7 +182,7 @@ test("agentd_pair_shows_the_code_and_confirms_on_y", async () => {
     const run = runCli(coderDir, ["pair"]);
     await run.until("Pairing window open");
     const line = JSON.parse(run.out.split("\n").find((l) => l.startsWith("{")));
-    assert.deepEqual(Object.keys(line).sort(), ["fp", "host", "kind", "port", "v"]);
+    assert.deepEqual(Object.keys(line).sort(), ["fp", "host", "hosts", "kind", "port", "v"]);
     assert.equal(run.out.includes(token), false);
     assert.equal(run.out.includes(steer), false);
     const phone = await sasPhone(wsPort, "cli-phone");
@@ -262,8 +262,8 @@ test("agentd_pair_answered_n_aborts_as_mismatch", async () => {
 
 test("qr_v2_has_no_secrets_and_still_requires_sas", async () => {
   const fp = "AB:".repeat(31) + "AB";
-  const line = JSON.parse(pairingPayload({ machineName: "pc", wsPort: 8792, token: "TOKEN-X" }, fp));
-  assert.deepEqual(Object.keys(line).sort(), ["fp", "host", "kind", "port", "v"]);
+  const line = JSON.parse(pairingPayload({ machineName: "pc", wsPort: 8792, token: "TOKEN-X", tailnetDiscovery: false }, fp));
+  assert.deepEqual(Object.keys(line).sort(), ["fp", "host", "hosts", "kind", "port", "v"]);
   assert.equal(line.v, 2);
   assert.equal(line.kind, "rokid-coder");
   assert.equal(JSON.stringify(line).includes("TOKEN-X"), false);
@@ -284,7 +284,7 @@ test("qr_v2_has_no_secrets_and_still_requires_sas", async () => {
 test("pair_ready_announcement_carries_no_secrets_and_stops_once_a_peer_arrives", () => {
   const logs = [];
   const logger = { info: (e, m) => logs.push([e, m]), warn: (e, m) => logs.push([e, m]), error: (e, m) => logs.push([e, m]) };
-  const config = { token: "TOKEN-Y", wsPort: 8792, machineId: "m", machineName: "desk" };
+  const config = { token: "TOKEN-Y", wsPort: 8792, machineId: "m", machineName: "desk", tailnetDiscovery: false };
   const pins = new PinStore();
   const pairing = new PairingCoordinator({ config, pins, logger, steer: () => "STEER-Y", wsHost: () => "10.0.0.2" });
   track(() => pairing.dispose());

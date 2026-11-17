@@ -13,6 +13,12 @@ internal sealed interface ConnectionOutcome {
     data object Retry : ConnectionOutcome
     data class RetryWithDetail(val detail: String) : ConnectionOutcome
     data class AuthFailed(val detail: String) : ConnectionOutcome
+
+    /**
+     * This address did not give us the pinned computer: nothing answered ([unreachable]), or something
+     * else did (another certificate, a failed handshake). [fallback] is what it means if it was the only address.
+     */
+    data class NotThere(val fallback: ConnectionOutcome, val unreachable: Boolean) : ConnectionOutcome
 }
 
 internal fun reconnectDelayMs(attempt: Int, random: Random = Random.Default): Long {

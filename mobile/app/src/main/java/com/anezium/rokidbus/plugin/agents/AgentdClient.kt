@@ -18,6 +18,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The paired path: the phone dials agentd's WebSocket, `wss://` through
@@ -33,6 +34,18 @@ class AgentdClient(
     private val versionName: String,
     identity: PhoneTlsIdentity,
     private val pinnedClient: (pin: String) -> OkHttpClient = { pin -> pinnedOkHttpClient(httpClient, pin, identity) },
+    /**
+     * The saved alternate addresses, read at the start of every round: one learned over a live link is
+     * dialled from the next round on without restarting the client. Null reads [AgentdConfig.altHosts].
+     */
+    private val freshAltHosts: (() -> List<String>?)? = null,
+    /** The pinned computer (named by its pin) listed where else it can be reached, over a link past its hello. */
+    private val onEndpoint: (fp: String, hosts: List<String>, port: Int?) -> Unit = { _, _, _ -> },
+    /** The whole of one address's connection establishment; on expiry the next address is tried. */
+    private val connectDeadlineMs: Long = DIAL_DEADLINE_MS,
+    /** Test seams, called just before onOpen and the deadline each claim the attempt; they pin an interleaving. */
+    private val beforeOpenClaim: () -> Unit = {},
+    private val beforeExpiryClaim: () -> Unit = {},
     /** Asked before every dial: false once the pairing went unused past the TTL, which signs it out (U7). */
     private val dialAllowed: () -> Boolean = { true },
     /** The pairing was just used: a secure hello_ack, or a link still up. */
@@ -56,6 +69,7 @@ class AgentdClient(
     private var loopJob: Job? = null
     private val sockets = GenerationSlot<WebSocket>()
     private val connectionIds = java.util.concurrent.atomic.AtomicLong()
+    private val dialOrder = DialOrder()
 
     /** OkHttp only enqueues, so this never blocks the caller's thread. */
     private val wire = AgentdWire { line -> sockets.current()?.send(line) ?: false }
@@ -202,22 +216,31 @@ class AgentdClient(
         val http = pinnedClient(pin)
         val backoff = ReconnectBackoff()
         var redialing = redialing
+        // After a failed round the screen keeps saying why while the next one runs, not only between rounds.
+        var lastReason: String? = null
         while (scope.isActive && sockets.isCurrent(generation)) {
             // Every dial, redials included: a pairing that went stale since the last one is not dialled.
             if (!dialAllowed()) return authFailed(generation, PairingCopy.SIGNED_OUT)
             // A refused pairing being tried again keeps saying so, rather than flickering to Connecting.
-            if (!redialing && !publishIfCurrent(generation, ConnectionState.CONNECTING)) return
+            if (!redialing && !publishIfCurrent(generation, ConnectionState.CONNECTING, lastReason)) return
             redialing = false
+            val shown = (listOf(config.host) + (freshAltHosts?.invoke() ?: config.altHosts))
+                .distinctBy { it.lowercase() }
             val result = try {
-                connectOnce(config, steer, http, generation, backoff)
+                dialRound(dialOrder.order(shown), shown) { host ->
+                    try {
+                        connectOnce(config, host, steer, http, generation, backoff)
+                    } finally {
+                        sockets.clear(generation)?.cancel()
+                    }
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Throwable) {
                 ConnectionOutcome.Retry
-            } finally {
-                sockets.clear(generation)?.cancel()
             }
             if (!sockets.isCurrent(generation)) return
+            lastReason = (result as? ConnectionOutcome.RetryWithDetail)?.detail?.takeIf(PairingCopy::isUnreachable)
             when (result) {
                 // Final: no backoff, no redial, until a new pairing restarts the client.
                 is ConnectionOutcome.AuthFailed -> {
@@ -232,7 +255,8 @@ class AgentdClient(
                 is ConnectionOutcome.RetryWithDetail -> {
                     publishIfCurrent(generation, ConnectionState.DISCONNECTED, result.detail)
                 }
-                ConnectionOutcome.Retry -> {
+                // dialRound resolves every NotThere into one of the others; this only completes the match.
+                ConnectionOutcome.Retry, is ConnectionOutcome.NotThere -> {
                     publishIfCurrent(generation, ConnectionState.DISCONNECTED, "Connection lost")
                 }
             }
@@ -250,6 +274,7 @@ class AgentdClient(
 
     private suspend fun connectOnce(
         config: AgentdConfig,
+        host: String,
         steer: String,
         http: OkHttpClient,
         generation: Long,
@@ -258,6 +283,10 @@ class AgentdClient(
         val codec = AgentdProtocolCodec().also(AgentdProtocolCodec::reset)
         val ended = CompletableDeferred<ConnectionOutcome>()
         val connected = AtomicBoolean(false)
+        // One attempt has one fate, decided by a single transition: onOpen and the deadline race for it, the
+        // winner owns the attempt and the loser does nothing, so an expired attempt never sends the hello and an
+        // opened one is never discarded.
+        val fate = AtomicInteger(ATTEMPT_NEW)
         val owner = LinkOwner()
         val key = LinkKey(LinkTransport.OUTBOUND, connectionIds.incrementAndGet())
         // The dialled computer is known by its pinned fingerprint: the owner of the sessions it reports.
@@ -280,14 +309,30 @@ class AgentdClient(
             }
         }
         val request = Request.Builder()
-            .url(webSocketUrl(config.host, config.port, secure = true))
+            .url(webSocketUrl(host, config.port, secure = true))
             .build()
+        // The TLS handshake and the upgrade have no timeout of their own on this client: a host that took the
+        // TCP connection and says nothing would otherwise hold the whole round.
+        val establishing = launch {
+            delay(connectDeadlineMs)
+            beforeExpiryClaim()
+            if (fate.compareAndSet(ATTEMPT_NEW, ATTEMPT_EXPIRED) && sockets.isCurrent(generation)) {
+                finish(ConnectionOutcome.NotThere(ConnectionOutcome.Retry, unreachable = true))
+            }
+        }
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (!isLive()) {
                     webSocket.cancel()
                     return
                 }
+                beforeOpenClaim()
+                if (!fate.compareAndSet(ATTEMPT_NEW, ATTEMPT_OPENED)) {
+                    // The deadline took this attempt first: nothing is sent on it.
+                    webSocket.cancel()
+                    return
+                }
+                establishing.cancel()
                 // The handshake precedes the binding, so it is written to this
                 // socket directly; every later line goes through the wire. OkHttp
                 // opens only after the pinned trust manager and hostname check
@@ -319,8 +364,9 @@ class AgentdClient(
                             key,
                             machineId,
                             action.machineName?.takeIf(String::isNotBlank) ?: config.name,
-                            config.host,
+                            host,
                         )
+                        dialOrder.worked(host)
                         deadlines.clear(DEADLINE_HELLO)
                         deadlines.arm(DEADLINE_SNAPSHOT, "Daemon snapshot timed out")
                         backoff.reset()
@@ -385,6 +431,10 @@ class AgentdClient(
                     is AgentdAction.SessionInputAnswered -> {
                         if (connected.get()) store.setSessionInputResult(action.result)
                     }
+                    is AgentdAction.Endpoint -> {
+                        // Only past the pinned hello: before it the peer has proved nothing but its certificate.
+                        if (connected.get()) onEndpoint(config.fp.orEmpty(), action.hosts, action.port)
+                    }
                     is AgentdAction.Send -> {
                         // Nothing but the handshake is written before the link is bound.
                         if (!connected.get()) return
@@ -426,14 +476,17 @@ class AgentdClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (sockets.isCurrent(generation)) {
+                    val outcome = when {
+                        // Final until re-paired: another certificate is another computer, or someone in between.
+                        CertPins.isPinMismatch(t) -> ConnectionOutcome.AuthFailed(PairingCopy.CERT_CHANGED)
+                        // Retried over wss again, and said so.
+                        CertPins.isTlsFailure(t) -> ConnectionOutcome.RetryWithDetail(SECURE_LINK_FAILED)
+                        else -> ConnectionOutcome.Retry
+                    }
+                    // Before the socket opened this address gave us nothing, and the next one may.
                     finish(
-                        when {
-                            // Final until re-paired: another certificate is another computer, or someone in between.
-                            CertPins.isPinMismatch(t) -> ConnectionOutcome.AuthFailed(PairingCopy.CERT_CHANGED)
-                            // Retried over wss again, and said so.
-                            CertPins.isTlsFailure(t) -> ConnectionOutcome.RetryWithDetail(SECURE_LINK_FAILED)
-                            else -> ConnectionOutcome.Retry
-                        },
+                        if (fate.get() == ATTEMPT_OPENED) outcome
+                        else ConnectionOutcome.NotThere(outcome, unreachable = outcome == ConnectionOutcome.Retry && response == null),
                     )
                 } else {
                     link.end(owner)
@@ -450,6 +503,7 @@ class AgentdClient(
             ended.await()
         } finally {
             // Unbound before the slot is cleared, so no write outlives this connection's trust.
+            establishing.cancel()
             link.end(owner)
             if (connected.get()) onSecureLinkClosed(key)
             deadlines.clearAll()
@@ -473,6 +527,9 @@ class AgentdClient(
             else -> null
         }
         private const val SECURE_LINK_FAILED = "Secure link failed"
+        private const val ATTEMPT_NEW = 0
+        private const val ATTEMPT_OPENED = 1
+        private const val ATTEMPT_EXPIRED = 2
         private const val DEADLINE_HELLO = "hello"
         private const val DEADLINE_SNAPSHOT = "snapshot"
     }

@@ -102,5 +102,7 @@ internal fun pinnedOkHttpClient(base: OkHttpClient, pin: String, identity: Phone
         .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS))
         .followRedirects(false)
         .followSslRedirects(false)
+        // One address of several must not hold up the rest: a LAN address from mobile data just goes unanswered.
+        .connectTimeout(DIAL_CONNECT_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
         .build()
 }

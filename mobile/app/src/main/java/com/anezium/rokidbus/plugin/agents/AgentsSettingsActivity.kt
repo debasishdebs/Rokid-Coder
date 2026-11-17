@@ -224,7 +224,7 @@ class AgentsSettingsActivity : ComponentActivity() {
             trust = trustLabel(connected, secure),
             steering = connected && secure,
             notificationsOff = config.shouldMonitor && !NotificationManagerCompat.from(this).areNotificationsEnabled(),
-            computers = computerRows(config),
+            computers = computerRows(config, connection),
             alerts = configStore.alertSettings(),
             pairingTtlDays = configStore.pairingTtlDays(),
             signedOut = configStore.signedOut(),
@@ -249,12 +249,16 @@ class AgentsSettingsActivity : ComponentActivity() {
         AgentsRuntime.history.prune(AgentsRuntime.history.now(), policy.windowMs, policy.keepAfterSession)
     }
 
-    private fun computerRows(config: AgentsConfig): List<ComputerRow> {
+    private fun computerRows(config: AgentsConfig, connection: ProviderConnectionState): List<ComputerRow> {
+        // Why the dialled computer is not answering, said under its name rather than only on the Monitoring card.
+        val unreachable = connection.detail.takeIf { connection.state != ConnectionState.CONNECTED && PairingCopy.isUnreachable(it) }
+        val dialledId = configStore.slotMachineId()
         val rows = configStore.trustedMachines().map { machine ->
             val connected = liveLink?.machineId == machine.machineId
             val sub = when {
                 connected && liveLink?.overTailnet == true -> "Connected · over Tailscale"
                 connected -> "Connected · same Wi-Fi"
+                machine.machineId == dialledId && unreachable != null -> unreachable
                 else -> lastSeenText(machine.lastSeenAtMs)
             }
             val projects = configStore.projects(machine.machineId).size
@@ -266,7 +270,8 @@ class AgentsSettingsActivity : ComponentActivity() {
             )
         }
         val paired = config.agentd ?: return rows
-        val pairedSub = "Paired by hand · ${paired.host}:${paired.port}"
+        val pairedSub = "Paired by hand · ${paired.host}:${paired.port}" +
+            (unreachable?.takeIf { dialledId == null }?.let { " · $it" }.orEmpty())
         return rows + ComputerRow(
             title = paired.name,
             // agentd admits only a pinned link with the steering secret; a slot without them is never dialled.

@@ -343,6 +343,24 @@ export function linkTrustFrame(steering: boolean): LinkTrustFrame & Record<strin
   return { type: "link_trust", v: 2, steering };
 }
 
+/**
+ * Where to dial agentd now (agent -> phone, additive): the advertised hosts
+ * (LAN first, Tailscale last, at most 4) and the wss port. Sent after every
+ * accepted hello and again whenever the list changes while the link is up, so
+ * a phone paired before it carried a tailnet address learns it without
+ * re-pairing. A phone that does not know the frame ignores it.
+ */
+export interface EndpointFrame {
+  type: "endpoint";
+  v: 2;
+  hosts: string[];
+  port: number;
+}
+
+export function endpointFrame(endpoint: { hosts: readonly string[]; port: number }): EndpointFrame & Record<string, unknown> {
+  return { type: "endpoint", v: 2, hosts: [...endpoint.hosts], port: endpoint.port };
+}
+
 export type FrameClass = "monitor" | "steering";
 
 /**

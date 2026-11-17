@@ -33,6 +33,7 @@ class ComputerActivity : Activity() {
     private lateinit var machineName: String
     private lateinit var statusDot: View
     private lateinit var statusLine: TextView
+    private lateinit var reasonLine: TextView
     private lateinit var projectsList: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,6 +43,9 @@ class ComputerActivity : Activity() {
         buildUi()
         uiScope.launch {
             AgentsRuntime.store.linkMachine.collectLatest { renderStatus(it) }
+        }
+        uiScope.launch {
+            AgentsRuntime.store.connections.collectLatest { renderReason() }
         }
     }
 
@@ -59,10 +63,12 @@ class ComputerActivity : Activity() {
         AgentsPalette.styleWindow(window)
         statusDot = NexusUi.dot(this)
         statusLine = NexusUi.statusLine(this)
+        reasonLine = NexusUi.rowSub(this, "").apply { visibility = View.GONE }
         projectsList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val content = NexusUi.contentColumn(this).apply {
             addView(connectionRow(this@ComputerActivity, statusDot, statusLine), NexusUi.block())
+            addView(reasonLine, NexusUi.block())
             addView(BusTheme.gap(this@ComputerActivity, 18))
             addView(NexusUi.sectionRow(this@ComputerActivity, "Projects"), NexusUi.block())
             addView(BusTheme.gap(this@ComputerActivity, 10))
@@ -143,6 +149,17 @@ class ComputerActivity : Activity() {
             statusLine.text = lastSeenText(machine?.lastSeenAtMs).uppercase()
             NexusUi.setDotColor(statusDot, NexusUi.INK3)
         }
+    }
+
+    /** Why this computer is not answering, when the phone has been dialling it and found nothing at any address. */
+    private fun renderReason() {
+        val connection = AgentsRuntime.store.connections.value.getValue(AgentProvider.CLAUDE)
+        val reason = connection.detail.takeIf {
+            connection.state != ConnectionState.CONNECTED && machineId == configStore.slotMachineId() &&
+                PairingCopy.isUnreachable(it)
+        }
+        reasonLine.text = reason.orEmpty()
+        reasonLine.visibility = if (reason == null) View.GONE else View.VISIBLE
     }
 
     private fun renderProjects() {

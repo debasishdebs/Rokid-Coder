@@ -75,6 +75,8 @@ internal class AgentdLinks(context: Context) : CoderCommands {
                 configStore.outboundAdmitted().also { admitted -> if (!admitted) alertScope.launch { reconcile() } }
             },
             touchUsed = configStore::touchAgentdUsed,
+            freshAltHosts = { configStore.load().agentd?.altHosts },
+            onEndpoint = { fp, hosts, port -> configStore.learnAltHosts(fp, hosts, port) },
             // A refused slot is dialled again while a guided attempt's window is open (R198).
             repairRedial = configStore::isLinkWindowOpen,
             onSecureConnected = AgentsRuntime::announceSecureConnection,
@@ -244,7 +246,8 @@ internal class AgentdLinks(context: Context) : CoderCommands {
             temporaryAgentd?.cancel()
             temporaryAgentd = null
         }
-        if (wantedAgentd != runningAgentd) {
+        // A learned alternate address changes nothing the live link needs: the client reads them afresh each round.
+        if (wantedAgentd?.sameDialAs(runningAgentd) != true && (wantedAgentd != null || runningAgentd != null)) {
             if (wantedAgentd == null) {
                 agentdClient.stop(clearSessions = true)
             } else {
@@ -347,7 +350,7 @@ internal class AgentdLinks(context: Context) : CoderCommands {
         if (!configStore.load().agentdEnabled) configStore.setAgentdEnabled(true)
         if (target.port !in 1..65535) return
         lineArmed.set(true)
-        sasDialer.dial(target.host, target.port, target.fp, peerName = target.host)
+        sasDialer.dial(target.host, target.port, target.fp, peerName = target.host, lineHosts = target.hosts)
     }
 
     /** With nothing monitored there is no link, and the next secure link up sends the saved settings instead. */

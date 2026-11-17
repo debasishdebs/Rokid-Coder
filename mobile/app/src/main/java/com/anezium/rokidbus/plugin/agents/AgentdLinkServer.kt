@@ -483,6 +483,8 @@ class AgentdLinkServer internal constructor(
             is AgentdAction.Hello,
             is AgentdAction.HelloAcknowledged,
             is AgentdAction.HelloRejected,
+            // Where to dial is learned over the phone's own dialled link, which is the one that dials.
+            is AgentdAction.Endpoint,
             AgentdAction.Ignore,
             -> Unit
         }
