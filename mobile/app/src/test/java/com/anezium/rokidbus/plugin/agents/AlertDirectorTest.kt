@@ -1146,4 +1146,19 @@ class AlertDirectorTest {
         director.reopen("A")
         assertEquals(shows, glasses.log.count { it.startsWith("show") })
     }
+
+    @Test
+    fun a_reopen_the_glasses_refuse_keeps_the_item_in_the_menu() {
+        up()
+        feed(alert(kind = "approval"))
+        director.onBandShown()
+        fireDwell()
+        glasses.takesBand = false
+        director.reopen("A")
+        assertEquals(listOf("A"), director.pending.value.map { it.id })
+        glasses.takesBand = true
+        director.reopen("A")
+        assertEquals("show CLAUDE · approve", glasses.log.last())
+        assertTrue(director.pending.value.isEmpty())
+    }
 }

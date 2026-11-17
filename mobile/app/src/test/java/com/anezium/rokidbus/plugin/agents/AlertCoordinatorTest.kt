@@ -758,4 +758,32 @@ class AlertCoordinatorTest {
         coordinator.onDwellElapsed("D")
         assertNull(coordinator.hiddenFor("claude:s1"))
     }
+
+    @Test
+    fun an_acknowledged_approval_replaced_by_another_plugin_stays_reachable_from_the_menu() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(frame("A", "new"))
+        coordinator.onShownEvidence("A")
+        coordinator.onBandClosed("A", NexusNoticeCloseReason.REPLACED)
+        assertEquals("A", coordinator.hiddenFor("claude:s1")?.id)
+    }
+
+    @Test
+    fun a_reopen_the_hub_could_not_show_puts_the_item_back_until_agentd_closes_it() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(frame("A", "new"))
+        coordinator.onShownEvidence("A")
+        coordinator.onDwellElapsed("A")
+
+        assertTrue(coordinator.reopen("A").any { it is Effect.Show })
+        assertNull(coordinator.hiddenFor("claude:s1"))
+        // The director's failed showBand reports the band as gone.
+        coordinator.onBandClosed("A", NexusNoticeCloseReason.DISCONNECT)
+        assertEquals("A", coordinator.hiddenFor("claude:s1")?.id)
+
+        // It can be reopened again, and only agentd's close ends it.
+        assertTrue(coordinator.reopen("A").any { it is Effect.Show })
+        coordinator.onAlertClosed("A", "acted")
+        assertNull(coordinator.hiddenFor("claude:s1"))
+    }
 }

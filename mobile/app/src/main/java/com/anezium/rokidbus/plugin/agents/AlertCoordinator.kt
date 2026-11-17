@@ -291,10 +291,10 @@ class AlertCoordinator(
     /** The band for [id] closed. Only the wearer's close is evidence; any close ends the episode. */
     fun onBandClosed(id: String, reason: NexusNoticeCloseReason): List<Effect> {
         val closing = episode?.takeIf { it.alert.id == id } ?: return emptyList()
-        // Closed by the wearer, or timed out after the glasses showed it: gone from the display, still pending.
-        if (reason == NexusNoticeCloseReason.USER || reason == NexusNoticeCloseReason.TIMEOUT && closing.evidence) {
-            keepForMenu(closing.alert)
-        }
+        // However the band ended (the wearer, the hub's ttl, another plugin taking it, a hub that could not
+        // take a reopened card), agentd still holds the item: it stays reachable from the menu until agentd
+        // closes it, its reminder shows it again, or the link returns.
+        keepForMenu(closing.alert)
         val effects = if (reason == NexusNoticeCloseReason.USER) {
             // agentd parks an approval or question and brings it back as a reminder (R22).
             evidence(id) + Effect.Send(AgentdProtocolCodec.alertDismissed(id)) + Effect.Dismissed(id)
