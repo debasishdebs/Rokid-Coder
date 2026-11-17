@@ -646,4 +646,31 @@ class AlertCoordinatorTest {
         assertEquals(emptyList<Effect>(), coordinator.onAck(AgentdAction.Ack(frame.getString("msgId"), "applied", null)))
         assertEquals(emptyList<Effect>(), coordinator.onAck(AgentdAction.Ack("elsewhere", "duplicate", null)))
     }
+
+    private fun frame(id: String, reason: String, kind: String = "approval") = AgentdProtocolCodec().parse(
+        JSONObject()
+            .put("type", "alert").put("v", 2).put("id", id).put("sessionKey", "claude:s1")
+            .put("kind", kind).put("title", "t").put("body", "b").put("waiting", 0).put("reason", reason)
+            .put("actions", JSONArray(listOf("allow", "deny")))
+            .toString(),
+    ) as AgentdAction.Alert
+
+    @Test
+    fun the_dwell_taking_a_band_down_sends_nothing_and_keeps_the_card_from_coming_back_on_an_update() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(frame("A", "new"))
+        coordinator.onShownEvidence("A")
+        assertTrue(coordinator.hasEvidence("A"))
+
+        assertEquals(listOf<Effect>(Effect.Hide), coordinator.onDwellElapsed("A"))
+        assertNull(coordinator.current)
+        assertEquals(emptyList<Effect>(), coordinator.onAlert(frame("A", "update")))
+        // A stale timer for a band that is no longer up does nothing.
+        assertEquals(emptyList<Effect>(), coordinator.onDwellElapsed("A"))
+        assertEquals(emptyList<Effect>(), coordinator.onDwellElapsed("other"))
+        // agentd's reminder shows it again, silently.
+        val shown = coordinator.onAlert(frame("A", "reminder")).filterIsInstance<Effect.Show>().single()
+        assertFalse(shown.sound)
+        assertTrue(shown.wake)
+    }
 }

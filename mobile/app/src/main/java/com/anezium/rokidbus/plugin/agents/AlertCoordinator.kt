@@ -242,6 +242,20 @@ class AlertCoordinator(
         )
     }
 
+    /** Whether the band up for [id] has display evidence: the hub or the wearer said it was seen. */
+    fun hasEvidence(id: String): Boolean = episode?.takeIf { it.alert.id == id }?.evidence == true
+
+    /**
+     * "Alert stays on screen" ran out for the band up for [id]: it leaves the glasses, and nothing else
+     * changes. Agentd keeps the alert as it was (an approval stays answerable, a Done is closed by
+     * agentd's own dwell), and the episode ends so a later `update` frame does not put the card back.
+     */
+    fun onDwellElapsed(id: String): List<Effect> {
+        if (episode?.alert?.id != id) return emptyList()
+        episode = null
+        return listOf(Effect.Hide)
+    }
+
     /** The band for [id] closed. Only the wearer's close is evidence; any close ends the episode. */
     fun onBandClosed(id: String, reason: NexusNoticeCloseReason): List<Effect> {
         if (episode?.alert?.id != id) return emptyList()

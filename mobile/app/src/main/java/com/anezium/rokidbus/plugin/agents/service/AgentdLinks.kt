@@ -152,6 +152,7 @@ internal class AgentdLinks(context: Context) : CoderCommands {
             historyPolicy = { configStore.historyPolicy() },
             headingOf = { key -> AgentsRuntime.store.sessions.value.firstOrNull { it.key == key }?.historyHeading() },
             soundPrefs = { configStore.alertSettings().sounds },
+            dwellMs = { configStore.alertSettings().dwellMs },
         )
     }
 

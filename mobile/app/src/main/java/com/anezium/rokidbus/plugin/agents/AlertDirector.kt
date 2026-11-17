@@ -39,6 +39,13 @@ interface AlertGlasses {
  * are applied to the glasses, and `Send` lines go to agentd through the wire,
  * which classifies each one by its type.
  *
+ * Card lifetime: a band stays up for the wearer's "Alert stays on screen" ([dwellMs]), counted from
+ * the glasses' own shown report, then this director takes it down ([AlertCoordinator.onDwellElapsed])
+ * without telling agentd anything: agentd measures the same dwell from the `alert_shown` it got, keeps
+ * the alert pending, and sends it again as a reminder. Before this, nothing on the phone took a band
+ * down: the hub's own ttl did (45 s for an approval or question, 12 s for Done and error), whatever the
+ * setting said. The ttl stays on the band as the backstop for a phone that cannot run the timer.
+ *
  * It keeps what the SDK does not tell it. A notice close carries no identity, so
  * the director remembers which alert's band it put up last and passes that id to
  * the coordinator. It also owns the band slot: a brief message never replaces an
@@ -59,6 +66,8 @@ class AlertDirector(
     private val headingOf: (String) -> String? = { null },
     /** The wearer's sound choice for each alert state, read as each band goes up (U19). */
     private val soundPrefs: () -> SoundPrefs = { SoundPrefs() },
+    /** The wearer's "Alert stays on screen", read as each band goes up. */
+    private val dwellMs: () -> Long = { AlertNotices.DEFAULT_DWELL_MS },
 ) {
     /** The alert whose band the director put up and has not seen end. Only [post]ed work touches it. */
     private var bandId: String? = null
@@ -71,6 +80,13 @@ class AlertDirector(
 
     /** An alert whose band the hub took from us (REPLACED) or timed out: its next frame re-shows it. */
     private var goneId: String? = null
+
+    /** Cancels the dwell timer of the band up now; it starts at the glasses' shown report and ends with the band. */
+    private var dwellTimer: (() -> Unit)? = null
+    private var dwellFor: String? = null
+
+    /** Cancels the ttl extension of a band whose lifetime exceeds one hub ttl. */
+    private var keepAliveTimer: (() -> Unit)? = null
 
     /**
      * Briefs wait here while an alert band is up or an earlier brief is on screen:
@@ -169,6 +185,8 @@ class AlertDirector(
      */
     fun onBandAction(action: String) = post {
         val id = bandId ?: return@post orphanedBand()
+        // The wearer is working with this band: it is theirs until they or the hub's ttl end it.
+        cancelDwell()
         apply(coordinator.onAction(id, action, secure()))
     }
 
@@ -176,6 +194,7 @@ class AlertDirector(
     fun onBandInput() = post {
         val id = bandId ?: return@post orphanedBand()
         val alert = coordinator.current?.takeIf { it.id == id } ?: return@post
+        cancelDwell()
         apply(coordinator.onShownEvidence(id))
         if (alert.kind == AlertKind.DONE || alert.kind == AlertKind.ERROR) {
             history.onDismissed(id, read = true)
@@ -198,6 +217,7 @@ class AlertDirector(
             val id = bandId ?: return@post
             if (serial != bandSerial || coordinator.current?.id != id) return@post
             apply(coordinator.onShownEvidence(id))
+            startDwell(id)
         }
     }
 
@@ -206,10 +226,13 @@ class AlertDirector(
         // This plugin's own hide: the coordinator already moved on.
         if (reason == NexusNoticeCloseReason.OWNER) return@post
         bandId = null
-        // Another plugin took the band, or it ran out: either way no band of ours is
-        // up, and the next frame for this alert must show it again (R93).
+        cancelTimers()
+        // Another plugin took the band, or it ran out unseen: either way no band of ours is
+        // up, and the next frame for this alert must show it again (R93). A band that ran out
+        // after the glasses reported it shown has had its dwell: agentd's reminder is the way back.
+        val seenOnGlasses = coordinator.hasEvidence(id)
         goneId = id.takeIf {
-            reason == NexusNoticeCloseReason.REPLACED || reason == NexusNoticeCloseReason.TIMEOUT
+            reason == NexusNoticeCloseReason.REPLACED || (reason == NexusNoticeCloseReason.TIMEOUT && !seenOnGlasses)
         }
         apply(coordinator.onBandClosed(id, reason))
     }
@@ -311,6 +334,7 @@ class AlertDirector(
                 is AlertCoordinator.Effect.Show -> showBand(effect.alert, effect.wake, effect.sound)
                 is AlertCoordinator.Effect.Update -> updateBand(effect.alert)
                 AlertCoordinator.Effect.Hide -> {
+                    cancelTimers()
                     bandId = null
                     goneId = null
                     glasses()?.hideBand()
@@ -338,7 +362,9 @@ class AlertDirector(
     }
 
     private fun showBand(alert: AgentdAction.Alert, wake: Boolean, sound: Boolean = false) {
-        val taken = glasses()?.showBand(AlertNotices.build(alert, wake = wake)) == true
+        cancelTimers()
+        val dwell = dwellMs()
+        val taken = glasses()?.showBand(AlertNotices.build(alert, wake = wake, dwellMs = dwell)) == true
         if (!taken) {
             // No band is up for this alert, so the coordinator must not refresh one;
             // agentd's next retry shows it again.
@@ -347,6 +373,7 @@ class AlertDirector(
             return
         }
         bandId = alert.id
+        armKeepAlive(alert.id, dwell)
         history.onShown(alert, headingOf(alert.sessionKey) ?: alert.sessionKey.substringAfter(':'))
         bandSerial++
         goneId = null
@@ -359,6 +386,45 @@ class AlertDirector(
             val heard = provider?.let { AlertSoundPolicy.sound(alert.kind, it, alert.reason, soundPrefs()) }
             if (heard != null && heard != AlertSound.None) glasses()?.playSound(heard)
         }
+    }
+
+    /** The glasses reported [id]'s band shown: from now it stays for the wearer's dwell, then leaves. */
+    private fun startDwell(id: String) {
+        if (dwellFor == id || bandId != id) return
+        cancelDwell()
+        dwellFor = id
+        val dwell = dwellMs().coerceIn(MIN_DWELL_MS, AlertNotices.MAX_DWELL_MS)
+        dwellTimer = schedule(dwell) {
+            post {
+                if (dwellFor != id) return@post
+                dwellTimer = null
+                dwellFor = null
+                if (bandId == id) apply(coordinator.onDwellElapsed(id))
+            }
+        }
+    }
+
+    private fun cancelDwell() {
+        dwellTimer?.invoke()
+        dwellTimer = null
+        dwellFor = null
+    }
+
+    /** One hub ttl is shorter than a long dwell: stretch it once, before it runs out. */
+    private fun armKeepAlive(id: String, dwell: Long) {
+        if (AlertNotices.lifetimeMs(dwell) <= AlertNotices.MAX_TTL_MS) return
+        keepAliveTimer = schedule(AlertNotices.KEEP_ALIVE_AT_MS) {
+            post {
+                keepAliveTimer = null
+                if (bandId == id) glasses()?.updateBand(AlertNotices.keepAlive(dwell))
+            }
+        }
+    }
+
+    private fun cancelTimers() {
+        cancelDwell()
+        keepAliveTimer?.invoke()
+        keepAliveTimer = null
     }
 
     /**
@@ -383,6 +449,7 @@ class AlertDirector(
     private companion object {
         const val MAX_BRIEFS = 4
         const val MAX_FOLLOWUPS = 32
+        const val MIN_DWELL_MS = 1_000L
         const val ERROR_CHARS = 120
 
         const val MERGED_LINES = 6
