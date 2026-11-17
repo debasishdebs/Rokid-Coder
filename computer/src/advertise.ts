@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { ensureTailnet, lanThenTailnet, tailnetHostFor } from "./endpoint-hosts";
 import { bestHostGuess } from "./pairing";
 import type { AgentConfig } from "./types";
 
@@ -146,10 +147,22 @@ function recordFor(config: AgentConfig): AdvertiseRecord | undefined {
   return stateDir ? readAdvertise(stateDir) : undefined;
 }
 
-/** The ONLY source of the pairing line's host, `pair-ready` and `pair_credentials{wsHost,wsPort}`. */
-export function advertisedEndpoint(config: AgentConfig, guess: () => string = () => bestHostGuess()): AdvertisedEndpoint {
+/**
+ * The ONLY source of the pairing line's `host`/`hosts`, `pair-ready`,
+ * `pair_credentials{wsHost,wsHosts,wsPort}` and the `endpoint` frame. `hosts[0]`
+ * is what a phone that predates the list dials: LAN first, except that in WSL's
+ * NAT mode it stays the record's first host. The tailnet address, when
+ * Tailscale answers, is in the list (last, outside WSL).
+ */
+export function advertisedEndpoint(
+  config: AgentConfig,
+  guess: () => string = () => bestHostGuess(),
+  tailnet: () => string | undefined = () => tailnetHostFor(config),
+): AdvertisedEndpoint {
   const record = recordFor(config);
-  return record ? { hosts: record.hosts, port: record.port } : { hosts: [guess()], port: config.wsPort };
+  return record
+    ? { hosts: ensureTailnet(record.hosts, tailnet()), port: record.port }
+    : { hosts: lanThenTailnet([guess()], tailnet()), port: config.wsPort };
 }
 
 export function parseHostIpv4s(stdout: string): string[] {

@@ -22,7 +22,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function isTailnetIpv4(value: string): boolean {
+export function isTailnetIpv4(value: string): boolean {
   const parts = value.split(".");
   if (
     parts.length !== 4 ||

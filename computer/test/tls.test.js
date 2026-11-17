@@ -583,7 +583,7 @@ test("pair_without_a_running_agentd_says_so_and_admits_nobody", async () => {
     assert.match(failure.stderr, /agentd isn't running/);
     assert.equal(failure.stdout.includes("<"), false, "no placeholder is printed");
     const line = JSON.parse(failure.stdout.split("\n")[0]);
-    assert.deepEqual(Object.keys(line).sort(), ["fp", "host", "kind", "port", "v"]);
+    assert.deepEqual(Object.keys(line).sort(), ["fp", "host", "hosts", "kind", "port", "v"]);
     assert.equal(new PinStore(path.join(coderDir, "tls", "phone-pins.json")).isEmpty(), true);
   });
 });

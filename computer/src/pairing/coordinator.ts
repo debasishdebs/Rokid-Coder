@@ -35,6 +35,8 @@ export interface CoordinatorOptions {
   steer: () => string | undefined;
   /** Where the phone should dial agentd's wss, for the outbound slot it stores. */
   wsHost: () => string;
+  /** Test seam: the computer's Tailscale address; the Tailscale CLI's answer when absent. */
+  tailnetHost?: () => string | undefined;
   now?: () => number;
   /** How long an attempt may take from its first TLS peer to both confirmations. */
   attemptTimeoutMs?: number;
@@ -99,7 +101,7 @@ export class PairingCoordinator {
     if (!attempt) {
       return undefined;
     }
-    const endpoint = advertisedEndpoint(this.options.config, this.options.wsHost);
+    const endpoint = advertisedEndpoint(this.options.config, this.options.wsHost, this.options.tailnetHost);
     return {
       nexus: "agentd-pair-ready",
       v: 1,
@@ -351,7 +353,7 @@ export class PairingCoordinator {
       throw new Error("no steering secret");
     }
     this.options.pins.addProvisional(attempt.phoneFp, attempt.attempt, this.now(), PROVISIONAL_PIN_MS);
-    const endpoint = advertisedEndpoint(this.options.config, this.options.wsHost);
+    const endpoint = advertisedEndpoint(this.options.config, this.options.wsHost, this.options.tailnetHost);
     this.options.logger.info("pairing_pinned_provisional", { attempt: attempt.attempt, fingerprint: shortFingerprint(attempt.phoneFp) });
     return {
       type: "pair_credentials",
@@ -361,7 +363,9 @@ export class PairingCoordinator {
       steer,
       machineId: this.options.config.machineId,
       machineName: this.options.config.machineName,
+      // `wsHost` is for phones that predate `wsHosts`; they ignore the list.
       wsHost: endpoint.hosts[0],
+      wsHosts: endpoint.hosts,
       wsPort: endpoint.port,
     };
   }

@@ -165,6 +165,7 @@ test("credentials_sent_only_after_both_confirm_and_agentd_durable_only_after_pai
       machineId: "machine-sas",
       machineName: "sas-pc",
       wsHost: "127.0.0.1",
+      wsHosts: ["127.0.0.1"],
       wsPort: 0,
     },
   );
