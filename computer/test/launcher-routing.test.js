@@ -1046,8 +1046,8 @@ test("evidence_lost_before_the_write_is_refused_at_the_write_check_and_the_reply
 
 test("the_switch_and_the_mode_decide_what_the_glasses_are_told", async () => {
   await withBound(async ({ httpPort, claude, ack, phone }) => {
-    await backgroundStop(httpPort, claude, "default");
-    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.followupWhy === "needs_auto_mode");
+    await backgroundStop(httpPort, claude, "plan");
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.followupWhy === "mode_not_allowed");
     await postHook(httpPort, { hook_event_name: "Stop", session_id: ID, stop_hook_active: false, permission_mode: "bypassPermissions" });
     await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.followupWhy === "bg_off");
     phone.send(BG_SYNC("bg-s3", { bgReplies: true }));

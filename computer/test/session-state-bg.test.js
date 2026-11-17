@@ -76,7 +76,7 @@ function fakePort() {
 }
 
 /** A session at the point a background reply could be typed: file busy, a Stop, a subagent, auto mode, switch on. */
-function setup({ mode = "auto", switchOn = true, subagents = 1, stop = true, hookMode } = {}) {
+function setup({ mode = "auto", switchOn = true, subagents = 1, stop = true, hookMode, approvalSource = true } = {}) {
   const port = fakePort();
   // Real time, but movable: a frozen clock would never reach the readiness deadline.
   const clock = {
@@ -89,16 +89,18 @@ function setup({ mode = "auto", switchOn = true, subagents = 1, stop = true, hoo
     },
   };
   const file = { status: "busy", statusUpdatedAt: clock.t - 5000, sessionId: "s1" };
-  const flags = { held: false, asking: false, subagents, bg: switchOn };
+  // `approvals` is what the approval manager reports; `asking` is that or a question.
+  const flags = { held: false, asking: false, approvals: false, subagents, bg: switchOn };
   const states = new SessionStates(
     (pid) => (pid === PID ? { ...file } : undefined),
     () => clock.t,
     {
       binding: (key) => port.binding(key),
       held: () => flags.held,
-      asking: () => flags.asking,
+      asking: () => flags.asking || flags.approvals,
       clearUncertain: (key) => port.setUncertain(key, false),
       subagents: () => flags.subagents,
+      ...(approvalSource ? { approvalPending: () => flags.approvals } : {}),
     },
   );
   const router = new LauncherRouter({
@@ -132,14 +134,53 @@ test("switch_off_says_bg_off_and_is_not_ready", () => {
   assert.equal(t.router.followupWhy(KEY, 1), "bg_off");
 });
 
-test("modes_other_than_auto_and_bypassPermissions_say_needs_auto_mode", () => {
-  for (const mode of ["default", "plan", "acceptEdits", "dontAsk", "mystery"]) {
+test("auto_bypassPermissions_acceptEdits_dontAsk_and_default_pass_the_mode_gate", () => {
+  for (const mode of ["auto", "bypassPermissions", "acceptEdits", "dontAsk", "default"]) {
+    const t = setup({ mode });
+    assert.equal(ready(t), true, mode);
+    assert.equal(t.router.followupWhy(KEY, 1), undefined, mode);
+  }
+});
+
+test("plan_and_unknown_modes_say_mode_not_allowed", () => {
+  for (const mode of ["plan", "mystery", "", "AUTO", "manual"]) {
     const t = setup({ mode });
     assert.equal(ready(t), false, mode);
-    assert.equal(t.router.followupWhy(KEY, 1), "needs_auto_mode", mode);
+    assert.equal(t.router.followupWhy(KEY, 1), "mode_not_allowed", mode);
   }
+});
+
+test("outside_auto_and_bypassPermissions_the_approval_source_must_exist_and_say_none", () => {
+  for (const mode of ["acceptEdits", "dontAsk", "default"]) {
+    const missing = setup({ mode, approvalSource: false });
+    assert.equal(ready(missing), false, `${mode} without the source`);
+    assert.equal(missing.router.followupWhy(KEY, 1), "mode_not_allowed", mode);
+    const pending = setup({ mode });
+    pending.flags.approvals = true;
+    assert.equal(ready(pending), false, `${mode} with an approval pending`);
+  }
+  // Auto and bypassPermissions never stop to ask, so they need no such source.
   for (const mode of ["auto", "bypassPermissions"]) {
-    assert.equal(ready(setup({ mode })), true, mode);
+    assert.equal(ready(setup({ mode, approvalSource: false })), true, mode);
+  }
+});
+
+test("a_pending_approval_from_a_subagent_or_any_permission_prompt_revokes_in_every_mode", () => {
+  for (const mode of ["auto", "default", "acceptEdits", "dontAsk"]) {
+    for (const [event, extra] of [
+      ["PermissionRequest", { tool_name: "Bash", agent_id: "bg1" }],
+      ["PermissionRequest", { tool_name: "Bash" }],
+      ["Notification", { notification_type: "permission_prompt", agent_id: "bg1" }],
+      ["Notification", { notification_type: "elicitation_dialog" }],
+      ["Notification", { notification_type: "elicitation_dialog", agent_id: "bg1" }],
+    ]) {
+      const t = setup({ mode });
+      t.hook(event, extra);
+      assert.equal(ready(t), false, `${mode} ${event} ${JSON.stringify(extra)}`);
+      // Only a Stop after it gives the evidence back.
+      t.hook("Stop");
+      assert.equal(ready(t), true, `${mode} after a later Stop`);
+    }
   }
 });
 
@@ -148,17 +189,17 @@ test("an_unknown_or_missing_mode_is_refused_and_the_latest_main_thread_hook_deci
   // The Stop itself carries no permission_mode: the mode is unknown.
   t.router.onHook(KEY, "Stop", {});
   assert.equal(ready(t), false);
-  assert.equal(t.router.followupWhy(KEY, 1), "needs_auto_mode");
+  assert.equal(t.router.followupWhy(KEY, 1), "mode_not_allowed");
   // A subagent's hook never tells the main thread's mode.
   t.router.onHook(KEY, "Notification", { permission_mode: "auto", agent_id: "bg1", notification_type: "idle_prompt" });
   assert.equal(ready(t), false);
   // A later main-thread hook that says auto restores it.
   t.router.onHook(KEY, "Notification", { permission_mode: "auto", notification_type: "idle_prompt" });
   assert.equal(ready(t), true);
-  // Shift+Tab to a mode that asks: the next hook says so.
-  t.router.onHook(KEY, "Notification", { permission_mode: "default", notification_type: "idle_prompt" });
+  // Shift+Tab to plan mode: the next hook says so.
+  t.router.onHook(KEY, "Notification", { permission_mode: "plan", notification_type: "idle_prompt" });
   assert.equal(ready(t), false);
-  assert.equal(t.router.followupWhy(KEY, 1), "needs_auto_mode");
+  assert.equal(t.router.followupWhy(KEY, 1), "mode_not_allowed");
 });
 
 test("each_other_missing_item_makes_it_not_ready_and_gives_the_ordinary_reason", () => {
@@ -211,7 +252,7 @@ test("each_other_missing_item_makes_it_not_ready_and_gives_the_ordinary_reason",
     const bgReady = t.router.followupState(KEY) === "ready" && t.file.status === "busy";
     assert.equal(bgReady, false, what);
     assert.notEqual(t.router.followupWhy(KEY, 1), "bg_off", what);
-    assert.notEqual(t.router.followupWhy(KEY, 1), "needs_auto_mode", what);
+    assert.notEqual(t.router.followupWhy(KEY, 1), "mode_not_allowed", what);
   }
   const draft = setup();
   draft.port.drafts.set(KEY, true);
@@ -340,7 +381,7 @@ test("revocation_before_the_write_cancels_the_command_busy_and_unconsumed", asyn
     [
       "mode changed",
       (t) => {
-        t.hook("Notification", { permission_mode: "default", notification_type: "idle_prompt" });
+        t.hook("Notification", { permission_mode: "plan", notification_type: "idle_prompt" });
       },
     ],
     [
