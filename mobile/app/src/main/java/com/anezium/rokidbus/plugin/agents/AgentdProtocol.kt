@@ -79,6 +79,9 @@ sealed interface AgentdAction {
     /** The reply to a detail_open for a session agentd does not have attached. */
     data class DetailRejected(val sessionId: String) : AgentdAction
     data class Send(val text: String) : AgentdAction
+
+    /** Where else the computer can be dialled. Only a link that finished its pinned hello may act on it. */
+    data class Endpoint(val hosts: List<String>, val port: Int?) : AgentdAction
     data object Ignore : AgentdAction
 }
 
@@ -143,6 +146,8 @@ class AgentdProtocolCodec {
                     steering = json.booleanOrNull("steering"),
                 )
             }
+            EndpointFrame.TYPE -> EndpointFrame.parse(json)?.let { AgentdAction.Endpoint(it.hosts, it.port) }
+                ?: AgentdAction.Ignore
             "hello_reject" -> {
                 if (json.intOrNull("v") != 2) return AgentdAction.Ignore
                 AgentdAction.HelloRejected(json.nullableString("reason", MAX_WIRE_TYPE_CHARS).orEmpty())
