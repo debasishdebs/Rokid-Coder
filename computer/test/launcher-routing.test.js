@@ -968,3 +968,108 @@ test("a_background_subagent_session_says_background_but_is_still_not_ready", asy
     await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.capabilities.followup === "ready");
   }, { stopHold: false });
 });
+
+// ---- the opt-in background reply, through the real daemon -------------------------
+
+const BG_SYNC = (msgId, extra = {}) => ({
+  type: "settings_sync",
+  v: 2,
+  timings: { ageBoostMs: 30000, dwellMs: 8000, ackTimeoutMs: 5000, retryBackoffMs: [5000, 10000, 20000], reminderMs: 300000 },
+  waitLimitMs: 1800000,
+  msgId,
+  ...extra,
+});
+
+/** A busy session at its prompt with one background subagent, after a main-thread Stop in `mode`. */
+async function backgroundStop(httpPort, claude, mode = "auto") {
+  claude.write("busy");
+  await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: ID, prompt: "start the review", permission_mode: mode });
+  await postHook(httpPort, { hook_event_name: "SubagentStart", session_id: ID, agent_id: "bg1", permission_mode: mode });
+  await postHook(httpPort, { hook_event_name: "Stop", session_id: ID, stop_hook_active: false, permission_mode: mode });
+}
+
+test("a_background_reply_is_typed_in_two_phases_and_accepted_on_the_matching_prompt", async () => {
+  await withBound(async ({ httpPort, launcher, claude, followup, ack, phone }) => {
+    await backgroundStop(httpPort, claude);
+    // The switch has not been turned on: the glasses say so.
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.followupWhy === "bg_off");
+    phone.send(BG_SYNC("bg-s1", { bgReplies: true }));
+    assert.equal((await ack("bg-s1")).result, "applied");
+    const ready = await phone.waitFor(
+      "session_upsert",
+      (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.capabilities.followup === "ready",
+    );
+    assert.equal(ready.session.subagents.running, 1);
+
+    followup("yes do it", "bg-fu1");
+    const frame = await launcher.waitFor("type_command");
+    assert.equal(frame.bgReply, true);
+    assert.equal(frame.command, "text");
+    launcher.send({ type: "write_check", cmdId: frame.cmdId, phase: "paste" });
+    assert.deepEqual(
+      (({ ok, phase }) => ({ ok, phase }))(await launcher.waitFor("write_verdict", (f) => f.phase === "paste")),
+      { ok: true, phase: "paste" },
+    );
+    launcher.send({ type: "command_written", cmdId: frame.cmdId, at: Date.now() });
+    launcher.send({ type: "write_check", cmdId: frame.cmdId, phase: "enter" });
+    assert.equal((await launcher.waitFor("write_verdict", (f) => f.phase === "enter")).ok, true);
+    launcher.send({ type: "command_result", cmdId: frame.cmdId, ok: true });
+    await settle(100);
+    assert.equal(phone.frames.some((f) => f.type === "ack" && f.msgId === "bg-fu1"), false, "not accepted before Claude takes the prompt");
+    await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: ID, prompt: "yes do it", permission_mode: "auto" });
+    assert.equal((await ack("bg-fu1")).result, "applied");
+
+    // The Stop was used up by that reply: nothing more is typed until Claude stops again.
+    followup("and again", "bg-fu2");
+    assert.equal((await ack("bg-fu2", 5000)).error, "busy");
+    assert.equal(launcher.of("type_command").length, 1);
+  }, { stopHold: false });
+});
+
+test("evidence_lost_before_the_write_is_refused_at_the_write_check_and_the_reply_fails_busy", async () => {
+  await withBound(async ({ httpPort, launcher, claude, followup, ack, phone }) => {
+    await backgroundStop(httpPort, claude);
+    phone.send(BG_SYNC("bg-s2", { bgReplies: true }));
+    await ack("bg-s2");
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.capabilities.followup === "ready");
+    followup("yes do it", "bg-fu3");
+    const frame = await launcher.waitFor("type_command");
+    // The main thread starts a tool before the launcher writes anything.
+    await postHook(httpPort, { hook_event_name: "PreToolUse", session_id: ID, tool_name: "Bash", permission_mode: "auto" });
+    const late = await ack("bg-fu3");
+    assert.deepEqual([late.result, late.error, "consumed" in late], ["rejected", "busy", false]);
+    await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);
+    launcher.send({ type: "write_check", cmdId: frame.cmdId, phase: "paste" });
+    assert.equal((await launcher.waitFor("write_verdict", (f) => f.phase === "paste")).ok, false);
+  }, { stopHold: false });
+});
+
+test("the_switch_and_the_mode_decide_what_the_glasses_are_told", async () => {
+  await withBound(async ({ httpPort, claude, ack, phone }) => {
+    await backgroundStop(httpPort, claude, "default");
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.followupWhy === "needs_auto_mode");
+    await postHook(httpPort, { hook_event_name: "Stop", session_id: ID, stop_hook_active: false, permission_mode: "bypassPermissions" });
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.followupWhy === "bg_off");
+    phone.send(BG_SYNC("bg-s3", { bgReplies: true }));
+    await ack("bg-s3");
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.capabilities.followup === "ready");
+    // Absent means false: a settings_sync without the field turns it off again.
+    phone.send(BG_SYNC("bg-s4"));
+    assert.equal((await ack("bg-s4")).result, "applied");
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.followupWhy === "bg_off");
+    // Anything but a boolean refuses the whole frame, and leaves the switch where it was.
+    phone.send(BG_SYNC("bg-s5", { bgReplies: "yes" }));
+    const bad = await ack("bg-s5");
+    assert.deepEqual([bad.result, bad.error], ["rejected", "bad_settings"]);
+  }, { stopHold: false });
+});
+
+test("a_launcher_that_asks_for_a_write_check_nobody_is_waiting_for_gets_no", async () => {
+  await withBound(async ({ launcher }) => {
+    launcher.send({ type: "write_check", cmdId: "nothing", phase: "paste" });
+    const verdict = await launcher.waitFor("write_verdict");
+    assert.deepEqual([verdict.cmdId, verdict.ok], ["nothing", false]);
+    launcher.send({ type: "write_check", cmdId: "x", phase: "sideways" });
+    await launcher.waitFor("bind_accepted").catch(() => undefined);
+  });
+});
