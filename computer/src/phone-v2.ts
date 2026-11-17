@@ -18,6 +18,7 @@ import {
   type AlertClosedReason,
   type AlertFrame,
   type FollowupState,
+  type FollowupWhy,
   type PhoneChannel,
   type QuestionPayload,
   type SessionKey,
@@ -106,7 +107,8 @@ export interface PhoneV2Deps {
   appliedIds: AppliedIds;
   outlet: PhoneOutlet;
   /** Routes launcher_command and late follow-ups into `rk claude` sessions; absent, every session is plugin mode. */
-  launcher?: Pick<LauncherRouter, "isBound" | "followupState" | "command" | "followup">;
+  launcher?: Pick<LauncherRouter, "isBound" | "followupState" | "command" | "followup"> &
+    Partial<Pick<LauncherRouter, "followupWhy">>;
   /** Drains the reset notices queued since the last call, restart notices first. */
   takeResetNotices: () => ResetNotice[];
   logger: Logger;
@@ -210,12 +212,18 @@ export class PhoneV2 {
     const mode = provider === "claude"
       ? (launcher ? "launcher" : "plugin")
       : this.deps.attachRegistry.mode(provider, id) ?? "plugin";
+    const followup = provider === "codex" ? this.codexFollowup() : this.claudeFollowup(key, id, launcher);
+    const followupWhy = provider === "codex" || followup !== "unavailable"
+      ? undefined
+      : this.claudeFollowupWhy(key, launcher);
     return {
       ...session,
       mode,
       capabilities: provider === "codex"
-        ? { compact: true, model: true, followup: this.codexFollowup() }
-        : { compact: launcher, model: launcher, followup: this.claudeFollowup(key, id, launcher) },
+        ? { compact: true, model: true, followup }
+        : { compact: launcher, model: launcher, followup },
+      // Additive: present only while the follow-up is unavailable and the reason is known.
+      ...(followupWhy ? { followupWhy } : {}),
       tempMode: this.deps.approvalPolicy.get(key),
       heading: session.heading ?? (session.title.slice(0, HEADING_FALLBACK_CHARS) || id.slice(0, 8)),
     };
@@ -238,6 +246,14 @@ export class PhoneV2 {
       return "waiting";
     }
     return state.continuationsLeft === 0 ? "cap_reached" : "unavailable";
+  }
+
+  /** Why a Claude session's follow-up is "unavailable": busy or a laptop draft under a launcher, else not_launcher. */
+  private claudeFollowupWhy(key: SessionKey, launcher: boolean): FollowupWhy | undefined {
+    if (launcher && this.deps.launcher) {
+      return this.deps.launcher.followupWhy?.(key);
+    }
+    return "not_launcher";
   }
 
   /** A launcher bound, unbound or changed what a bound session can take: the phone sees it now. */

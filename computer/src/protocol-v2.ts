@@ -45,6 +45,16 @@ export type AlertKind = "approval" | "question" | "error" | "done" | "notice";
 
 export type FollowupState = "waiting" | "unavailable" | "cap_reached" | "ready";
 
+/**
+ * Why a follow-up is "unavailable":
+ * - `busy`: Claude is working on the main thread, its sessions file is not idle,
+ *   or a write is uncertain (a session whose only activity is a background
+ *   subagent is not busy: it takes follow-ups);
+ * - `draft`: text sits at the laptop's prompt, so typing would mix with it;
+ * - `not_launcher`: the session does not run under `rk claude`, so agentd cannot type into it.
+ */
+export type FollowupWhy = "busy" | "draft" | "not_launcher";
+
 // agent -> phone
 
 export interface SessionUpsertV2Fields {
@@ -62,6 +72,11 @@ export interface SessionUpsertV2Fields {
   context?: { used: number; window: number };
   pendingSettings?: { model?: string; effort?: string };
   sandbox?: string;
+  /**
+   * Additive: present only while `capabilities.followup` is "unavailable", and
+   * absent otherwise, so a phone that does not know it sees what it always saw.
+   */
+  followupWhy?: FollowupWhy;
   /** Additive: absent when no subagent runs, so a phone that does not know it sees what it always saw. */
   subagents?: { running: number; since: number };
 }
