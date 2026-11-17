@@ -199,6 +199,7 @@ class AgentsSettingsActivity : ComponentActivity() {
                     ) { _, _, _ -> }.collect { refresh() }
                 }
                 launch { AgentsRuntime.linkedMachines.collect { refresh() } }
+                launch { AgentsRuntime.activeSecureLinks.collect { refresh() } }
                 launch { AgentsRuntime.history.entries.collect { refresh() } }
                 // Relative times and expiry move with the clock, not only with what happens.
                 launch {
@@ -252,32 +253,22 @@ class AgentsSettingsActivity : ComponentActivity() {
     private fun computerRows(config: AgentsConfig, connection: ProviderConnectionState): List<ComputerRow> {
         // Why the dialled computer is not answering, said under its name rather than only on the Monitoring card.
         val unreachable = connection.detail.takeIf { connection.state != ConnectionState.CONNECTED && PairingCopy.isUnreachable(it) }
-        val dialledId = configStore.slotMachineId()
-        val rows = configStore.trustedMachines().map { machine ->
-            val connected = liveLink?.machineId == machine.machineId
-            val sub = when {
-                connected && liveLink?.overTailnet == true -> "Connected · over Tailscale"
-                connected -> "Connected · same Wi-Fi"
-                machine.machineId == dialledId && unreachable != null -> unreachable
-                else -> lastSeenText(machine.lastSeenAtMs)
-            }
-            val projects = configStore.projects(machine.machineId).size
-            ComputerRow(
-                title = machine.name,
-                sub = if (projects > 0) "$sub · $projects ${if (projects == 1) "project" else "projects"}" else sub,
-                connected = connected,
-                machineId = machine.machineId,
-            )
+        val slotMachineId = configStore.slotMachineId()
+        val slot = config.agentd?.let { paired ->
+            // The link the phone dialled, not the one agentd dialled: the key's transport tells them apart.
+            val link = AgentsRuntime.activeSecureLinks.value.entries
+                .firstOrNull { it.key.transport == LinkTransport.OUTBOUND && (slotMachineId == null || it.value.machineId == slotMachineId) }
+                ?.value
+            DialledSlot(paired, slotMachineId, link)
         }
-        val paired = config.agentd ?: return rows
-        val pairedSub = "Paired by hand · ${paired.host}:${paired.port}" +
-            (unreachable?.takeIf { dialledId == null }?.let { " · $it" }.orEmpty())
-        return rows + ComputerRow(
-            title = paired.name,
-            // agentd admits only a pinned link with the steering secret; a slot without them is never dialled.
-            sub = if (paired.canSteer) pairedSub else "$pairedSub · ${PairingCopy.OLDER_AGENTD}",
-            connected = false,
-            machineId = null,
+        return ComputerRows.build(
+            trusted = configStore.trustedMachines(),
+            projectCount = { configStore.projects(it).size },
+            inbound = liveLink,
+            slot = slot,
+            slotBelongsTo = configStore::slotBelongsTo,
+            unreachable = unreachable,
+            now = System.currentTimeMillis(),
         )
     }
 
