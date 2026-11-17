@@ -59,6 +59,10 @@ object ControlMenu {
 
     const val FOLLOWUP_CAP_REACHED = "continue on laptop or rk claude"
     const val FOLLOWUP_UNAVAILABLE = "session not waiting"
+    const val FOLLOWUP_BUSY = "Claude is working — try again when it is idle"
+    const val FOLLOWUP_BACKGROUND = "background work is running — wait for it, or reply at the laptop"
+    const val FOLLOWUP_DRAFT = "text typed at the laptop prompt — clear it first"
+    const val FOLLOWUP_NOT_LAUNCHER = "start the session with rk claude"
     const val MODEL_WARNING = "This also changes the default for new sessions"
     const val NOTICE_TITLE = "Session control"
 
@@ -115,7 +119,7 @@ object ControlMenu {
             if (replyNotSent != null) "Reply not sent: $replyNotSent" else when (v2.followup) {
                 FollowupState.WAITING, FollowupState.READY -> null
                 FollowupState.CAP_REACHED -> FOLLOWUP_CAP_REACHED
-                FollowupState.UNAVAILABLE -> FOLLOWUP_UNAVAILABLE
+                FollowupState.UNAVAILABLE -> followupUnavailable(v2.followupWhy)
             },
             v2.followup == FollowupState.WAITING || v2.followup == FollowupState.READY,
         )
@@ -591,6 +595,15 @@ object ControlMenu {
      */
     fun followupRejection(error: String?, limit: Int): String =
         if (error == NOT_LAUNCHER) NOT_LAUNCHER_FOLLOWUP else error?.singleLine(limit)?.takeIf(String::isNotBlank) ?: "rejected"
+
+    /** The row's text for an unavailable reply, by agentd's `followupWhy`; none or unknown keeps the old line. */
+    fun followupUnavailable(why: String?): String = when (why) {
+        "busy" -> FOLLOWUP_BUSY
+        "background" -> FOLLOWUP_BACKGROUND
+        "draft" -> FOLLOWUP_DRAFT
+        NOT_LAUNCHER -> FOLLOWUP_NOT_LAUNCHER
+        else -> FOLLOWUP_UNAVAILABLE
+    }
 
     /** `delivered` is the happy ending and gets no notice. */
     fun followupClosedNotice(reason: String): String? = when (reason) {

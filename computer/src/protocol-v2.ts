@@ -45,6 +45,20 @@ export type AlertKind = "approval" | "question" | "error" | "done" | "notice";
 
 export type FollowupState = "waiting" | "unavailable" | "cap_reached" | "ready";
 
+/**
+ * Why a follow-up is "unavailable", for the phone to say (never a readiness
+ * decision). Precedence: draft, background, busy.
+ * - `draft`: text sits at the laptop's prompt, so typing would mix with it;
+ * - `background`: Claude's sessions file says busy while the session runs at
+ *   least one background subagent (`subagents.running > 0`); the main prompt
+ *   may be free at the laptop, but agentd types only into a prompt Claude's
+ *   own file reports idle, so the reply waits;
+ * - `busy`: Claude is working, its file is not idle, an approval is pending or
+ *   a write is uncertain;
+ * - `not_launcher`: the session does not run under `rk claude`, so agentd cannot type into it.
+ */
+export type FollowupWhy = "busy" | "draft" | "background" | "not_launcher";
+
 // agent -> phone
 
 export interface SessionUpsertV2Fields {
@@ -62,6 +76,11 @@ export interface SessionUpsertV2Fields {
   context?: { used: number; window: number };
   pendingSettings?: { model?: string; effort?: string };
   sandbox?: string;
+  /**
+   * Additive: present only while `capabilities.followup` is "unavailable", and
+   * absent otherwise, so a phone that does not know it sees what it always saw.
+   */
+  followupWhy?: FollowupWhy;
   /** Additive: absent when no subagent runs, so a phone that does not know it sees what it always saw. */
   subagents?: { running: number; since: number };
 }

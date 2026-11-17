@@ -225,6 +225,26 @@ export class SessionStates {
     return binding.uncertain ? "busy" : "ready";
   }
 
+  /**
+   * Messaging only, never a readiness decision: Claude's own file says `busy`
+   * and nothing else is in the way (nothing held, asked, in flight or uncertain).
+   */
+  fileBusy(key: SessionKey): boolean {
+    const binding = this.sources.binding(key);
+    if (
+      this.sources.held(key) ||
+      this.sources.asking(key) ||
+      !binding ||
+      binding.uncertain ||
+      binding.claudePid === undefined ||
+      this.entries.get(key)?.inFlight
+    ) {
+      return false;
+    }
+    const file = this.readSession(binding.claudePid);
+    return file?.status === "busy" && (file.sessionId === undefined || file.sessionId === key.slice(key.indexOf(":") + 1));
+  }
+
   private entry(key: SessionKey): Entry {
     let entry = this.entries.get(key);
     if (!entry) {
@@ -396,6 +416,30 @@ export class LauncherRouter {
       return "waiting";
     }
     return state === "ready" && !this.port.laptopDraft(key) ? "ready" : "unavailable";
+  }
+
+  /**
+   * Why `followupState` is "unavailable", for the phone to say, never for
+   * deciding anything: "draft" (text at the laptop prompt), "background"
+   * (Claude's file is busy while `subagentsRunning` subagents run, so the
+   * main prompt may well be free) or "busy" (everything else). Undefined when
+   * the follow-up is available or waiting, or the session is not bound.
+   */
+  followupWhy(key: SessionKey, subagentsRunning = 0): "busy" | "draft" | "background" | undefined {
+    if (!this.port.binding(key)) {
+      return undefined;
+    }
+    const state = this.states.state(key);
+    if (state === "held") {
+      return undefined;
+    }
+    if (this.port.laptopDraft(key)) {
+      return "draft";
+    }
+    if (state === "ready") {
+      return undefined;
+    }
+    return subagentsRunning > 0 && this.states.fileBusy(key) ? "background" : "busy";
   }
 
   /** A Stop hook just carried a follow-up: Claude carries on, so the session is busy before the hook returns. */

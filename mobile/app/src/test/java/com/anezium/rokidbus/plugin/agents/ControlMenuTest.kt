@@ -21,6 +21,7 @@ class ControlMenuTest {
         pendingModel: String? = null,
         pendingEffort: String? = null,
         sandbox: String? = null,
+        followupWhy: String? = null,
     ) = SessionV2(
         mode = mode,
         canCompact = canCompact,
@@ -36,6 +37,7 @@ class ControlMenuTest {
         pendingModel = pendingModel,
         pendingEffort = pendingEffort,
         sandbox = sandbox,
+        followupWhy = followupWhy,
     )
 
     private fun session(
@@ -139,6 +141,19 @@ class ControlMenuTest {
             assertTrue(items(session(v2 = v2(followup = state))).one<MenuItem.ReplyByVoice>().enabled)
             assertTrue(items(codex(v2(followup = state))).one<MenuItem.ReplyByVoice>().enabled)
         }
+    }
+
+    @Test
+    fun an_unavailable_reply_says_why() {
+        fun sub(why: String?) = items(
+            session(v2 = v2(followup = FollowupState.UNAVAILABLE, followupWhy = why)),
+        ).one<MenuItem.ReplyByVoice>().let { assertFalse(it.enabled); it.sub }
+        assertEquals("Claude is working — try again when it is idle", sub("busy"))
+        assertEquals("background work is running — wait for it, or reply at the laptop", sub("background"))
+        assertEquals("text typed at the laptop prompt — clear it first", sub("draft"))
+        assertEquals("start the session with rk claude", sub("not_launcher"))
+        assertEquals("session not waiting", sub(null))
+        assertEquals("session not waiting", sub("something_new"))
     }
 
     @Test

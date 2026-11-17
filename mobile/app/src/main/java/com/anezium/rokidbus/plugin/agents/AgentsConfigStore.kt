@@ -778,12 +778,17 @@ class AgentsConfigStore internal constructor(
     /** Forgets the whole pairing: its PhoneLink trust, and its outbound slot when the slot is its own. */
     fun forgetPairing(machineId: String) {
         synchronized(STORE_LOCK) {
-            val record = PairingRecord.fromJson(prefs.getString("$KEY_PAIRING_RECORD_PREFIX$machineId", null))
-            val slotIsIts = slotMachineId() == machineId ||
-                (record != null && prefs.getString(KEY_AGENTD_FP, null) == record.agentdFp)
+            val slotIsIts = slotBelongsTo(machineId)
             forgetMachine(machineId)
             if (slotIsIts) saveAgentd(null, load().agentdEnabled)
         }
+    }
+
+    /** Whether the outbound slot is this machine's: its own id, or the certificate pin its pairing recorded. */
+    fun slotBelongsTo(machineId: String): Boolean = synchronized(STORE_LOCK) {
+        val record = PairingRecord.fromJson(prefs.getString("$KEY_PAIRING_RECORD_PREFIX$machineId", null))
+        slotMachineId() == machineId ||
+            (record != null && prefs.getString(KEY_AGENTD_FP, null) == record.agentdFp)
     }
 
     fun forgetMachine(machineId: String) {

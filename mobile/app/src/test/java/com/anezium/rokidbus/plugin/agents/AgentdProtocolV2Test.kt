@@ -468,6 +468,19 @@ class AgentdProtocolV2Test {
         assertEquals("Refactor the parser", capped.heading)
         assertEquals(MAX_HUD_LABEL_CHARS, capped.step!!.length)
         assertEquals(MAX_PATH_CHARS, capped.currentFile!!.length)
+        // Why a reply is unavailable: only the three known reasons, only while unavailable.
+        fun why(seq: Long, state: String, value: Any?) = upsertWith(seq) {
+            getJSONObject("capabilities").put("followup", state)
+            if (value != null) put("followupWhy", value)
+        }.v2!!.followupWhy
+        assertEquals("busy", why(10, "unavailable", "busy"))
+        assertEquals("draft", why(11, "unavailable", "draft"))
+        assertEquals("not_launcher", why(12, "unavailable", "not_launcher"))
+        assertNull(why(13, "unavailable", null))
+        assertNull(why(14, "unavailable", "teleport"))
+        assertNull(why(15, "unavailable", 7))
+        assertNull(why(16, "ready", "busy"))
+        assertEquals("background", why(17, "unavailable", "background"))
     }
 
     @Test

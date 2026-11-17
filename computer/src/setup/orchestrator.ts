@@ -24,7 +24,7 @@ import {
 import { watchPairStatus } from "../pairing/terminal-client";
 import { type WatchPairing, pairStep } from "./pair-step";
 import { AUTOSTART, type PlatformHooks, type RetiredRecord } from "./platform/index";
-import { createDriver, restorePlugin, syncPlugin } from "./plugins";
+import { createDriver, priorOf, restorePlugin, syncPlugin } from "./plugins";
 import { profileFiles, readBlock, renderBlock, writeBlock } from "./profile-path";
 import { type ResolvedCli, cliRunEnv, envFilePath, resolveAll, writeDaemonEnv } from "./resolve-cli";
 import {
@@ -581,10 +581,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
       let prior: PriorRegistration = {};
       try {
         const status = await driver.status();
-        prior = {
-          ...(status.marketplace ? { source: status.marketplace.source } : {}),
-          ...(status.plugin?.version ? { pluginVersion: status.plugin.version } : {}),
-        };
+        prior = priorOf(status);
       } catch {
         // syncPlugin reports it
       }
@@ -593,6 +590,7 @@ export async function install(ctx: SetupContext, options: InstallOptions): Promi
       const outcome = await syncPlugin(driver, path.join(bundleDir, "plugins"));
       newManifest.plugins[tool] = outcome.record;
       pluginSources[tool] = prior;
+      if (outcome.warning) (outcome.result === "failed" ? warnings : manual).push(outcome.result === "failed" ? outcome.warning : `${outcome.warning}.`);
       if (outcome.result === "manual_step_required") manual.push(`${outcome.record.detail}.`);
       if (outcome.result === "failed") warnings.push(`The ${tool} plugin could not be set up (${outcome.record.detail}). Try again with: rokid-setup plugins sync --tool ${tool}`);
     }

@@ -58,7 +58,7 @@ function main(argv) {
     const file = tool === "claude" ? path.join(dir, ".claude-plugin", "plugin.json") : path.join(dir, ".codex-plugin", "plugin.json");
     return JSON.parse(fs.readFileSync(file, "utf8")).version;
   };
-  const copyIn = (id) => {
+  const copyIn = (id, keepEnabled) => {
     const [name, marketplace] = id.split("@");
     const registered = state.marketplaces[marketplace];
     if (!registered) fail(`Marketplace '${marketplace}' not found`);
@@ -68,7 +68,8 @@ function main(argv) {
     const installPath = path.join(stateDir, "cache", marketplace, name, version);
     fs.rmSync(installPath, { recursive: true, force: true });
     fs.cpSync(source, installPath, { recursive: true });
-    state.plugins[id] = { name, marketplace, version, installPath };
+    // A fresh install is enabled; an update keeps what the user chose.
+    state.plugins[id] = { name, marketplace, version, installPath, enabled: keepEnabled ?? true };
   };
 
   if (args[0] === "--version") {
@@ -142,9 +143,16 @@ function main(argv) {
       return;
     }
     fs.rmSync(current.installPath, { recursive: true, force: true });
-    copyIn(id);
+    copyIn(id, current.enabled);
     save();
     out(`Updated ${id}\n`);
+  } else if (verb === "disable" || verb === "enable") {
+    // Only where the CLI's help lists them (claude); the help gate above refuses it for codex.
+    const current = state.plugins[id];
+    if (!current) fail(`Plugin '${id}' is not installed`);
+    current.enabled = verb === "enable";
+    save();
+    out(`Successfully ${verb}d plugin: ${id}\n`);
   } else if (verb === "uninstall" || verb === "remove") {
     const current = state.plugins[id];
     if (!current) fail(`Plugin '${id}' is not installed`);
@@ -157,19 +165,19 @@ function main(argv) {
       // codex-cli 0.169.0's `plugin list --json`, as recorded from a real install: an object whose
       // "installed" array holds one entry per installed plugin. "available" is this fake's own guess
       // at what the marketplaces offer beyond that (the recorded output was cut off before any other key).
-      const entry = (name, marketplace, version, installed) => ({
+      const entry = (name, marketplace, version, installed, enabled = installed) => ({
         pluginId: `${name}@${marketplace}`,
         name,
         marketplaceName: marketplace,
         version,
         installed,
-        enabled: installed,
+        enabled,
         source: { source: "local", path: pluginSourceDir(state.marketplaces[marketplace].path, name) },
         marketplaceSource: { sourceType: "local", source: state.marketplaces[marketplace].path },
         installPolicy: "AVAILABLE",
         authPolicy: "ON_USE",
       });
-      const installed = Object.values(state.plugins).map((p) => entry(p.name, p.marketplace, p.version, true));
+      const installed = Object.values(state.plugins).map((p) => entry(p.name, p.marketplace, p.version, true, p.enabled !== false));
       const available = [];
       for (const [marketplace, m] of Object.entries(state.marketplaces)) {
         const manifest = JSON.parse(fs.readFileSync(marketplaceManifest(m.path), "utf8"));
@@ -183,8 +191,8 @@ function main(argv) {
     }
     const list = Object.entries(state.plugins).map(([pluginId, p]) =>
       meta.listFormat === "array"
-        ? { id: pluginId, version: p.version, scope: "user", enabled: true, installPath: p.installPath }
-        : { name: p.name, marketplace: p.marketplace, version: p.version, path: p.installPath, installed: true },
+        ? { id: pluginId, version: p.version, scope: "user", enabled: p.enabled !== false, installPath: p.installPath }
+        : { name: p.name, marketplace: p.marketplace, version: p.version, path: p.installPath, installed: true, enabled: p.enabled !== false },
     );
     // Codex lists what its marketplaces offer, installed or not.
     if (tool === "codex") {

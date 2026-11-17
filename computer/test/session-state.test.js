@@ -490,3 +490,58 @@ test("model_ok_keeps_a_latch_newer_than_its_own_write", async () => {
   assert.deepEqual(await second, { ok: true });
   assert.equal(states2.latchAt(KEY), undefined);
 });
+
+// `followupWhy` is messaging only: it never changes when typing is allowed.
+
+test("followupWhy_is_draft_background_or_busy_in_that_order_and_absent_when_available", () => {
+  const { port, file, flags, router } = setup();
+  assert.equal(router.followupState(KEY), "ready");
+  assert.equal(router.followupWhy(KEY), undefined);
+  assert.equal(router.followupWhy(KEY, 3), undefined, "a running subagent changes nothing while ready");
+
+  claudeWrites(file, "busy");
+  assert.equal(router.followupState(KEY), "unavailable");
+  assert.equal(router.followupWhy(KEY), "busy");
+  assert.equal(router.followupWhy(KEY, 0), "busy");
+  assert.equal(router.followupWhy(KEY, 1), "background");
+  assert.equal(router.followupState(KEY), "unavailable", "the reason never makes it ready");
+
+  // Not Claude's file alone: a pending approval is busy, not background.
+  flags.asking = true;
+  assert.equal(router.followupWhy(KEY, 1), "busy");
+  flags.asking = false;
+  port.bindings.get(KEY).uncertain = true;
+  assert.equal(router.followupWhy(KEY, 1), "busy");
+  port.bindings.get(KEY).uncertain = false;
+  // Any other file status is busy.
+  file.status = "waiting";
+  assert.equal(router.followupWhy(KEY, 1), "busy");
+  file.status = "busy";
+
+  port.drafts.set(KEY, true);
+  assert.equal(router.followupWhy(KEY, 1), "draft", "draft outranks background");
+  port.drafts.set(KEY, false);
+  claudeWrites(file, "idle");
+  assert.equal(router.followupWhy(KEY, 1), undefined);
+  port.drafts.set(KEY, true);
+  assert.equal(router.followupWhy(KEY), "draft");
+});
+
+test("followupWhy_is_absent_for_held_and_unbound_sessions", () => {
+  const { port, flags, router } = setup({ held: true });
+  assert.equal(router.followupState(KEY), "waiting");
+  assert.equal(router.followupWhy(KEY, 1), undefined);
+  flags.held = false;
+  port.bindings.delete(KEY);
+  assert.equal(router.followupWhy(KEY, 1), undefined);
+});
+
+test("a_busy_file_is_never_ready_whatever_hooks_and_subagents_say", () => {
+  const { file, states, router } = setup();
+  claudeWrites(file, "busy");
+  router.onHook(KEY, "UserPromptSubmit", { prompt: "go" });
+  router.onHook(KEY, "SubagentStart", { agent_id: "a1" });
+  router.onHook(KEY, "Stop", {});
+  assert.equal(states.state(KEY), "busy");
+  assert.equal(router.followupWhy(KEY, 1), "background");
+});

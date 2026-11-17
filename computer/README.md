@@ -239,6 +239,11 @@ Limits to know about:
 
 - Replies, compact and model change are typed into Claude's prompt, so they run only when Claude is idle.
   A busy session makes them wait (up to 60 s) and then fail with `busy`.
+- When a reply is unavailable the phone's session object carries `followupWhy`: `draft` (text at the laptop
+  prompt), `background` (Claude's file says busy while a background subagent runs; the prompt may be free
+  at the laptop, but agentd types only when Claude's own file says idle), `busy` (Claude is working, a
+  question or approval is pending, or a write is uncertain) or `not_launcher` (the session is not under
+  `rk claude`), in that order of precedence. It is absent whenever the reply is available.
 - Nothing is typed over a half-written prompt. If you have text in the prompt, a command waits until you
   submit or clear it, and fails with `laptop_draft` after 60 s.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result

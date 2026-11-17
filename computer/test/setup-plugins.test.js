@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { makeWorld } = require("./fixtures/plugin-cli/harness");
 const os = require("node:os");
-const { createDriver, syncPlugin, removePlugin, helpCommands } = require("../dist/setup/plugins.js");
+const { createDriver, syncPlugin, removePlugin, restorePlugin, helpCommands } = require("../dist/setup/plugins.js");
 
 const options = (world) => ({ home: world.home, env: world.env });
 const RECORDED = path.join(__dirname, "fixtures", "plugin-cli", "recorded");
@@ -211,4 +211,318 @@ test("plugin_list_garbage_is_refused", async (t) => {
     await assert.rejects(() => statusOf(t, { plugins }), /unexpected|JSON/, plugins);
   }
   await assert.rejects(() => statusOf(t, { plugins: "[]", marketplaces: '{"error":"boom"}' }), /unexpected/);
+});
+
+// The offered plugin's whole content decides whether the installed copy is current, not its version alone.
+
+const SOURCES = { claude: "claude-code", codex: "codex" };
+const HOOKS_OLD = `${JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "node hook-forward.js" }] }] } })}\n`;
+const HOOKS_NEW = `${JSON.stringify({ hooks: { SessionStart: [{ hooks: [] }], SubagentStart: [{ hooks: [] }] } })}\n`;
+
+/** A synced world: both tools' plugin sources hold hooks.json and commands/on.md, and both are installed at one version. */
+async function installedWorld(t, tool, fixture = tool === "codex" ? "codex-withpath" : tool) {
+  const world = makeWorld(t);
+  const marketplace = path.join(world.bundle("1.0.0"), "plugins");
+  const source = path.join(marketplace, SOURCES[tool]);
+  fs.mkdirSync(path.join(source, "hooks"), { recursive: true });
+  fs.mkdirSync(path.join(source, "commands"), { recursive: true });
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_OLD);
+  fs.writeFileSync(path.join(source, "commands", "on.md"), "turn on\n");
+  const cli = world.cli(tool, { fixture });
+  const sync = () => syncPlugin(createDriver(tool, cli, options(world)), marketplace);
+  assert.equal((await sync()).result, "ok");
+  const installed = () => path.join(world.cliState(tool).plugins["rokid@rokid-coder"].installPath);
+  return { world, source, sync, installed };
+}
+
+for (const tool of ["claude", "codex"]) {
+  test(`plugins_${tool}_same_version_changed_hooks_json_reinstalls`, async (t) => {
+    const { world, source, sync, installed } = await installedWorld(t, tool);
+    fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+    assert.ok(!fs.readFileSync(path.join(installed(), "hooks", "hooks.json"), "utf8").includes("SubagentStart"));
+    world.clearCliCalls(tool);
+    const outcome = await sync();
+    assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+    const verbs = world.mutatingCalls(tool).map((args) => args.slice(1).join(" "));
+    assert.deepEqual(verbs, [`${tool === "claude" ? "uninstall" : "remove"} rokid@rokid-coder`, `${tool === "claude" ? "install" : "add"} rokid@rokid-coder`]);
+    assert.ok(fs.readFileSync(path.join(installed(), "hooks", "hooks.json"), "utf8").includes("SubagentStart"), "the installed copy has the new event");
+    // Settled: the next run only reads.
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.deepEqual(world.mutatingCalls(tool), []);
+  });
+
+  test(`plugins_${tool}_same_version_identical_content_does_not_churn`, async (t) => {
+    const { world, sync } = await installedWorld(t, tool);
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.equal((await sync()).result, "ok");
+    assert.deepEqual(world.mutatingCalls(tool), [], "no uninstall, install or update");
+  });
+
+  test(`plugins_${tool}_extra_file_in_installed_copy_is_not_a_difference`, async (t) => {
+    const { world, sync, installed } = await installedWorld(t, tool);
+    fs.writeFileSync(path.join(installed(), ".cache-note"), "added by the CLI\n");
+    fs.mkdirSync(path.join(installed(), "node_modules", "x"), { recursive: true });
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.deepEqual(world.mutatingCalls(tool), []);
+    assert.ok(fs.existsSync(path.join(installed(), ".cache-note")), "left alone");
+  });
+
+  test(`plugins_${tool}_changed_command_file_reinstalls`, async (t) => {
+    const { world, source, sync, installed } = await installedWorld(t, tool);
+    fs.writeFileSync(path.join(source, "commands", "on.md"), "turn on, louder\n");
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.equal(world.mutatingCalls(tool).length, 2, "uninstall then install");
+    assert.equal(fs.readFileSync(path.join(installed(), "commands", "on.md"), "utf8"), "turn on, louder\n");
+  });
+
+  test(`plugins_${tool}_new_and_removed_offered_files_reinstall`, async (t) => {
+    const { world, source, sync, installed } = await installedWorld(t, tool);
+    fs.writeFileSync(path.join(source, "commands", "off.md"), "turn off\n");
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.equal(world.mutatingCalls(tool).length, 2);
+    assert.ok(fs.existsSync(path.join(installed(), "commands", "off.md")));
+    // A file the installed copy lacks (deleted behind the CLI's back) also reinstalls.
+    fs.rmSync(path.join(installed(), "commands", "off.md"));
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.equal(world.mutatingCalls(tool).length, 2);
+    assert.ok(fs.existsSync(path.join(installed(), "commands", "off.md")));
+  });
+}
+
+test("plugins_codex_without_install_path_trusts_the_version", async (t) => {
+  // The recorded codex list says where the marketplace is, not where the installed copy is.
+  const { world, source, sync } = await installedWorld(t, "codex", "codex");
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  world.clearCliCalls("codex");
+  assert.equal((await sync()).result, "ok");
+  assert.deepEqual(world.mutatingCalls("codex"), [], "no installed path to compare, so the version is trusted");
+});
+
+test("plugin_content_digest_covers_every_file_and_skips_noise", (t) => {
+  const { pluginFiles, contentDigest } = require("../dist/setup/plugins.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rokid-digest-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, "a"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "a", "x.json"), "1");
+  fs.writeFileSync(path.join(dir, "y.md"), "2");
+  const base = contentDigest(pluginFiles(dir));
+  assert.deepEqual(Object.keys(pluginFiles(dir)), ["a/x.json", "y.md"]);
+  // Skipped: node_modules, .git, .DS_Store, symlinks.
+  fs.mkdirSync(path.join(dir, "node_modules", "m"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "node_modules", "m", "i.js"), "3");
+  fs.mkdirSync(path.join(dir, ".git"));
+  fs.writeFileSync(path.join(dir, ".git", "HEAD"), "4");
+  fs.writeFileSync(path.join(dir, ".DS_Store"), "5");
+  fs.symlinkSync(path.join(dir, "y.md"), path.join(dir, "link.md"));
+  assert.equal(contentDigest(pluginFiles(dir)), base);
+  fs.writeFileSync(path.join(dir, "a", "x.json"), "changed");
+  assert.notEqual(contentDigest(pluginFiles(dir)), base);
+});
+
+// A reported install path that is gone is a difference, and a reinstall must not switch a disabled plugin back on.
+
+const PLUGIN = "rokid@rokid-coder";
+const stateFile = (world, tool) => path.join(world.home, ".fake-plugin-cli", tool, "state.json");
+/** Marks the installed plugin enabled or disabled in the fake CLI's own state (as the user's `plugin disable` would). */
+function setEnabled(world, tool, enabled) {
+  const state = world.cliState(tool);
+  state.plugins[PLUGIN].enabled = enabled;
+  fs.writeFileSync(stateFile(world, tool), JSON.stringify(state));
+}
+const isEnabled = (world, tool) => world.cliState(tool).plugins[PLUGIN].enabled !== false;
+const disableCalls = (world, tool) => world.cliCalls(tool).filter((args) => args[1] === "disable");
+
+for (const tool of ["claude", "codex"]) {
+  test(`plugins_${tool}_reported_install_path_that_is_missing_reinstalls`, async (t) => {
+    const { world, sync, installed } = await installedWorld(t, tool);
+    fs.rmSync(installed(), { recursive: true, force: true });
+    world.clearCliCalls(tool);
+    const outcome = await sync();
+    assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+    assert.equal(world.mutatingCalls(tool).length, 2, "uninstall then install");
+    assert.ok(fs.existsSync(path.join(installed(), "hooks", "hooks.json")));
+  });
+}
+
+test("plugins_claude_disabled_plugin_stays_disabled_after_a_same_version_refresh", async (t) => {
+  const { world, source, sync } = await installedWorld(t, "claude");
+  setEnabled(world, "claude", false);
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  world.clearCliCalls("claude");
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+  assert.equal(outcome.warning, undefined);
+  assert.equal(outcome.prior.enabled, false, "the prior registration records that it was off");
+  assert.equal(world.mutatingCalls("claude").filter((args) => args[1] !== "disable").length, 2, "refreshed");
+  assert.deepEqual(disableCalls(world, "claude"), [["plugin", "disable", PLUGIN]], "turned off again by the CLI's own verb");
+  assert.equal(isEnabled(world, "claude"), false);
+});
+
+test("plugins_claude_enabled_plugin_stays_enabled_and_is_never_disabled", async (t) => {
+  const { world, source, sync } = await installedWorld(t, "claude");
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  world.clearCliCalls("claude");
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok");
+  assert.equal(outcome.warning, undefined);
+  assert.equal(outcome.prior.enabled, undefined);
+  assert.deepEqual(disableCalls(world, "claude"), []);
+  assert.equal(isEnabled(world, "claude"), true);
+});
+
+test("plugins_claude_disabled_plugin_with_current_content_is_left_alone", async (t) => {
+  const { world, sync } = await installedWorld(t, "claude");
+  setEnabled(world, "claude", false);
+  world.clearCliCalls("claude");
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok");
+  assert.equal(outcome.warning, undefined);
+  assert.deepEqual(world.mutatingCalls("claude"), []);
+  assert.equal(isEnabled(world, "claude"), false);
+});
+
+test("plugins_a_cli_without_a_disable_verb_warns_that_the_plugin_is_enabled_again", async (t) => {
+  const { world, source, sync } = await installedWorld(t, "codex");
+  setEnabled(world, "codex", false);
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok");
+  assert.equal(outcome.warning, "The Rokid plugin was disabled before this update; it is enabled again - disable it in /plugins if you want it off");
+  assert.deepEqual(disableCalls(world, "codex"), [], "no disable verb is guessed");
+  assert.equal(outcome.prior.enabled, false);
+});
+
+test("plugins_a_failing_disable_verb_warns_rather_than_leaving_the_plugin_silently_enabled", async (t) => {
+  const { world, source, sync } = await installedWorld(t, "claude");
+  setEnabled(world, "claude", false);
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  // The login shell's `claude` stays; make `disable` fail by pointing the driver at a wrapper that refuses it.
+  const cli = world.cli("claude");
+  const real = fs.readFileSync(cli, "utf8");
+  fs.writeFileSync(cli, `#!/bin/sh\n[ "$2" = disable ] && { echo "boom" >&2; exit 1; }\n${real.split("\n").slice(1).join("\n")}`, { mode: 0o755 });
+  const outcome = await sync();
+  assert.equal(outcome.result, "ok");
+  assert.match(outcome.warning, /disabled before this update; it is enabled again - disable it in \/plugin/);
+});
+
+test("plugins_restore_puts_a_disabled_plugin_back_disabled", async (t) => {
+  const { world, source, installed } = await installedWorld(t, "claude");
+  const marketplace = path.dirname(source);
+  const driver = createDriver("claude", world.cli("claude"), options(world));
+  const roots = [path.dirname(path.dirname(marketplace))];
+  const prior = { source: marketplace, pluginVersion: "1.0.0", enabled: false };
+  assert.equal(isEnabled(world, "claude"), true);
+  await restorePlugin(driver, prior, roots);
+  assert.equal(isEnabled(world, "claude"), false);
+  // Already as it was: nothing more to do, and an enabled prior is never disabled.
+  world.clearCliCalls("claude");
+  await restorePlugin(driver, prior, roots);
+  assert.deepEqual(world.mutatingCalls("claude"), []);
+  setEnabled(world, "claude", true);
+  await restorePlugin(driver, { source: marketplace, pluginVersion: "1.0.0" }, roots);
+  assert.deepEqual(disableCalls(world, "claude"), [], "an enabled prior is never disabled");
+  assert.ok(fs.existsSync(installed()));
+});
+
+test("plugins_restore_says_so_when_it_cannot_disable_again", async (t) => {
+  const { world, source } = await installedWorld(t, "codex");
+  const marketplace = path.dirname(source);
+  const driver = createDriver("codex", world.cli("codex", { fixture: "codex-withpath" }), options(world));
+  await assert.rejects(() => restorePlugin(driver, { source: marketplace, pluginVersion: "1.0.0", enabled: false }, [path.dirname(path.dirname(marketplace))]), /could not keep it disabled/);
+});
+
+// A failed reinstall must not leave the user with a silent gap, and an extra read that fails is only a warning.
+
+/**
+ * Wraps a fake CLI: `fail(args, n)` (n counts the calls with the same verb) decides whether a call fails
+ * with a transient-looking error before it reaches the fake.
+ */
+function flakyCli(world, tool, failures) {
+  const real = world.cli(tool, { fixture: tool === "codex" ? "codex-withpath" : tool });
+  const inner = `${real}.real`;
+  fs.renameSync(real, inner);
+  const counts = path.join(world.root, `${tool}-counts`);
+  fs.mkdirSync(counts, { recursive: true });
+  fs.writeFileSync(
+    real,
+    `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const key = args.slice(0, 2).join("_").replace(/[^a-z_]/g, "") || "x";
+const file = ${JSON.stringify(counts)} + "/" + key;
+const n = (fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8")) : 0) + 1;
+fs.writeFileSync(file, String(n));
+const failures = ${JSON.stringify(failures)};
+if ((failures[key] || []).includes(n)) { process.stderr.write("transient failure\\n"); process.exit(1); }
+const r = require("node:child_process").spawnSync(${JSON.stringify(inner)}, args, { stdio: "inherit" });
+process.exit(r.status === null ? 1 : r.status);
+`,
+    { mode: 0o755 },
+  );
+  return real;
+}
+
+const quickRetry = (t) => {
+  const before = process.env.ROKID_SETUP_PLUGIN_RETRY_MS;
+  process.env.ROKID_SETUP_PLUGIN_RETRY_MS = "0";
+  t.after(() => (before === undefined ? delete process.env.ROKID_SETUP_PLUGIN_RETRY_MS : (process.env.ROKID_SETUP_PLUGIN_RETRY_MS = before)));
+};
+
+/** A world with the plugin installed, then its content changed so the next sync must reinstall. */
+async function staleWorld(t, tool, failures) {
+  const base = await installedWorld(t, tool);
+  fs.writeFileSync(path.join(base.source, "hooks", "hooks.json"), HOOKS_NEW);
+  const cli = flakyCli(base.world, tool, failures);
+  const marketplace = path.dirname(base.source);
+  return { ...base, marketplace, driver: () => createDriver(tool, cli, options(base.world)) };
+}
+
+for (const tool of ["claude", "codex"]) {
+  const installKey = tool === "claude" ? "plugin_install" : "plugin_add";
+  test(`plugins_${tool}_a_reinstall_that_fails_once_is_retried_and_succeeds`, async (t) => {
+    quickRetry(t);
+    const { world, driver, marketplace, installed } = await staleWorld(t, tool, { [installKey]: [1] });
+    const outcome = await syncPlugin(driver(), marketplace);
+    assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+    assert.equal(outcome.warning, undefined);
+    assert.ok(fs.readFileSync(path.join(installed(), "hooks", "hooks.json"), "utf8").includes("SubagentStart"));
+    assert.ok(world.cliState(tool).plugins["rokid@rokid-coder"]);
+  });
+
+  test(`plugins_${tool}_a_reinstall_that_fails_twice_says_the_plugin_is_not_installed`, async (t) => {
+    quickRetry(t);
+    // The retry and the put-back attempt all fail too.
+    const { world, driver, marketplace } = await staleWorld(t, tool, { [installKey]: [1, 2, 3, 4, 5, 6] });
+    const outcome = await syncPlugin(driver(), marketplace);
+    assert.equal(outcome.result, "failed");
+    assert.equal(outcome.warning, `The Rokid plugin is currently NOT installed in ${tool}. Run: rokid-setup plugins sync --tool ${tool}`);
+    assert.equal(world.cliState(tool).plugins["rokid@rokid-coder"], undefined, "and that is true");
+  });
+
+  test(`plugins_${tool}_a_reinstall_that_fails_twice_but_restores_the_previous_registration_says_so`, async (t) => {
+    quickRetry(t);
+    // The first two installs (attempt and retry) fail, the put-back works.
+    const { world, driver, marketplace } = await staleWorld(t, tool, { [installKey]: [1, 2] });
+    const outcome = await syncPlugin(driver(), marketplace);
+    assert.equal(outcome.result, "failed");
+    assert.match(outcome.warning, /could not be updated in .*; the previous registration was put back\. Run: rokid-setup plugins sync/);
+    assert.ok(world.cliState(tool).plugins["rokid@rokid-coder"], "the plugin is installed again");
+  });
+}
+
+test("plugins_a_failing_enabled_state_read_after_a_good_refresh_is_a_warning_not_a_failure", async (t) => {
+  const { world, source, marketplace, driver } = await staleWorld(t, "claude", { plugin_list: [3] });
+  setEnabled(world, "claude", false);
+  // plugin list calls: 1 the first status, 2 the verification after the reinstall, 3 the enabled-state check.
+  const outcome = await syncPlugin(driver(), marketplace);
+  assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+  assert.match(outcome.warning, /could not check whether the Rokid plugin was disabled/);
+  assert.ok(fs.readFileSync(path.join(world.cliState("claude").plugins["rokid@rokid-coder"].installPath, "hooks", "hooks.json"), "utf8").includes("SubagentStart"));
+  assert.ok(source);
 });

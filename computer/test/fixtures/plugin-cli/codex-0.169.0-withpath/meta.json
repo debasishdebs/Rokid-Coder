@@ -1,0 +1,9 @@
+{
+  "tool": "codex",
+  "version": "0.169.0",
+  "versionOutput": "codex-cli 0.169.0",
+  "listFormat": "plugins-key",
+  "recorded": false,
+  "inherits": "codex-0.169.0",
+  "note": "A hypothetical Codex whose `plugin list --json` also says where the installed copy is (a {plugins: [...]} list with a path), as claude's does. The recorded codex-cli 0.169.0 does not say, so this keeps the by-content comparison tested for a Codex that does. Everything else is codex-0.169.0's."
+}

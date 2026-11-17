@@ -18,6 +18,7 @@ const FIXTURES = {
   claude: path.join(__dirname, "claude-2.1.285"),
   codex: path.join(__dirname, "codex-0.169.0"),
   "codex-noinstall": path.join(__dirname, "codex-0.169.0-noinstall"),
+  "codex-withpath": path.join(__dirname, "codex-0.169.0-withpath"),
 };
 const NODE = fs.realpathSync(process.execPath);
 const MUTATING = new Set(["add", "remove", "rm", "install", "i", "update", "uninstall"]);

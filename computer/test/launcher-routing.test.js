@@ -943,3 +943,28 @@ test("consumed_launcher_failure_ack_says_consumed", async () => {
     assert.deepEqual([bad.error, "consumed" in bad], ["bad_command", false]);
   });
 });
+
+test("a_background_subagent_session_says_background_but_is_still_not_ready", async () => {
+  await withBound(async ({ httpPort, launcher, claude, followup, ack, phone }) => {
+    claude.write("busy");
+    await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: ID, prompt: "start the review" });
+    await postHook(httpPort, { hook_event_name: "SubagentStart", session_id: ID, agent_id: "bg1" });
+    await postHook(httpPort, { hook_event_name: "Stop", session_id: ID });
+    const frame = await phone.waitFor(
+      "session_upsert",
+      (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.followupWhy === "background",
+    );
+    assert.equal(frame.session.capabilities.followup, "unavailable");
+    // Nothing is typed into a session whose own file says busy.
+    followup("not now", "bg-fu1");
+    assert.equal((await ack("bg-fu1", 5000)).error, "busy");
+    assert.deepEqual(launcher.of("type_command"), []);
+    launcher.send({ type: "laptop_state", draft: true });
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.followupWhy === "draft");
+    launcher.send({ type: "laptop_state", draft: false });
+    await postHook(httpPort, { hook_event_name: "SubagentStop", session_id: ID, agent_id: "bg1" });
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.followupWhy === "busy");
+    claude.write("idle");
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.capabilities.followup === "ready");
+  }, { stopHold: false });
+});

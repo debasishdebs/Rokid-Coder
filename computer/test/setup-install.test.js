@@ -559,3 +559,79 @@ test("install_does_not_tell_a_terminal_that_already_has_rk_to_open_a_new_one", a
   assert.equal(run.status, 0, run.output);
   assert.doesNotMatch(run.stdout, /Open a new terminal tab/);
 });
+
+// A plugin the user disabled stays disabled across a refresh, an interrupted install and a rollback.
+
+function setPluginEnabled(world, tool, enabled) {
+  const state = world.cliState(tool);
+  state.plugins["rokid@rokid-coder"].enabled = enabled;
+  fs.writeFileSync(path.join(world.home, ".fake-plugin-cli", tool, "state.json"), JSON.stringify(state));
+}
+const pluginEnabled = (world, tool) => world.cliState(tool).plugins["rokid@rokid-coder"].enabled !== false;
+const forwarderOf = (world, tool) => fs.readFileSync(path.join(world.cliState(tool).plugins["rokid@rokid-coder"].installPath, "bin", "hook-forward.js"), "utf8");
+
+test("a_disabled_plugin_stays_disabled_across_a_same_version_refresh_and_rollback", async (t) => {
+  const world = makeWorld(t);
+  world.cli("claude");
+  const b1 = world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1", forwarder: "// forwarder one\n" });
+  const b2 = world.bundle("1.0.0-test.2", { pluginVersion: "1.0.1", forwarder: "// forwarder two\n" });
+  assert.equal(world.install(b1).status, 0);
+  setPluginEnabled(world, "claude", false);
+
+  // Same plugin version, new content: refreshed by uninstall + install, which alone would enable it again.
+  const upgraded = world.install(b2);
+  assert.equal(upgraded.status, 0, upgraded.output);
+  assert.equal(forwarderOf(world, "claude"), "// forwarder two\n", "refreshed");
+  assert.equal(pluginEnabled(world, "claude"), false, "disabled again through the CLI's own verb");
+  assert.doesNotMatch(upgraded.output, /disabled before this update/);
+  assert.equal(world.manifest().previous.pluginSources.claude.enabled, false, "the prior registration records it");
+  assert.ok(world.cliCalls("claude").some((args) => args[1] === "disable"));
+
+  const rolled = world.run(["rollback"]);
+  assert.equal(rolled.status, 0, rolled.output);
+  assert.equal(forwarderOf(world, "claude"), "// forwarder one\n", "the previous content is back");
+  assert.equal(pluginEnabled(world, "claude"), false, "and still disabled");
+});
+
+test("an_interrupted_install_puts_a_disabled_plugin_back_disabled", async (t) => {
+  const world = makeWorld(t);
+  world.cli("claude");
+  const b1 = world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1", forwarder: "// forwarder one\n" });
+  const b2 = world.bundle("1.0.0-test.2", { pluginVersion: "1.0.1", forwarder: "// forwarder two\n" });
+  assert.equal(world.install(b1).status, 0);
+  setPluginEnabled(world, "claude", false);
+  assert.equal(world.install(b2, {}, { extraEnv: { ROKID_SETUP_FAIL_AT: "9" } }).status, 1);
+  assert.equal(forwarderOf(world, "claude"), "// forwarder one\n");
+  assert.equal(pluginEnabled(world, "claude"), false);
+});
+
+test("a_cli_that_cannot_disable_again_shows_the_warning_in_the_setup_output", async (t) => {
+  const world = makeWorld(t);
+  world.cli("codex");
+  const b1 = world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1" });
+  const b2 = world.bundle("1.0.0-test.2", { pluginVersion: "1.0.2" });
+  assert.equal(world.install(b1).status, 0);
+  setPluginEnabled(world, "codex", false);
+  const upgraded = world.install(b2);
+  assert.equal(upgraded.status, 0, upgraded.output);
+  assert.match(upgraded.output, /The Rokid plugin was disabled before this update; it is enabled again - disable it in \/plugins if you want it off\./);
+  assert.ok(!world.cliCalls("codex").some((args) => args[1] === "disable"), "no disable verb is guessed");
+  const synced = world.run(["plugins", "sync", "--tool", "codex"]);
+  assert.equal(synced.status, 0, synced.output);
+});
+
+test("a_plugin_that_cannot_be_reinstalled_is_named_in_the_final_output_and_setup_still_commits", async (t) => {
+  const world = makeWorld(t);
+  const cli = world.cli("claude");
+  const b1 = world.bundle("1.0.0-test.1", { pluginVersion: "1.0.1", forwarder: "// forwarder one\n" });
+  const b2 = world.bundle("1.0.0-test.2", { pluginVersion: "1.0.1", forwarder: "// forwarder two\n" });
+  assert.equal(world.install(b1).status, 0);
+  // From here every `claude plugin install` fails, as a broken CLI would.
+  fs.renameSync(cli, `${cli}.real`);
+  fs.writeFileSync(cli, `#!/bin/sh\n[ "$1" = plugin ] && [ "$2" = install ] && { echo "install is broken" >&2; exit 1; }\nexec '${cli}.real' "$@"\n`, { mode: 0o755 });
+  const run = world.install(b2, {}, { extraEnv: { ROKID_SETUP_PLUGIN_RETRY_MS: "0" } });
+  assert.match(run.output, /The Rokid plugin is currently NOT installed in claude\. Run: rokid-setup plugins sync --tool claude\n/);
+  assert.equal(world.cliState("claude").plugins["rokid@rokid-coder"], undefined, "and it is true");
+  assert.equal(world.manifest().version, "1.0.0-test.2", "setup's other work was committed");
+  assert.equal(world.manifest().plugins.claude.status, "failed");
+});
