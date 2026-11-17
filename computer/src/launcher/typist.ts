@@ -307,23 +307,13 @@ export class Typist {
       !this.input.holding &&
       !this.input.draft &&
       now - this.lastOutputAt >= OUTPUT_QUIET_MS &&
-      this.promptFree(active.cmd)
+      this.ready(active.cmd.notBefore)
     ) {
       this.firstWrite(active, now);
     } else if (now >= active.deadline) {
       this.settle(active, this.input.draft ? "laptop_draft" : "busy");
       this.end(active);
     }
-  }
-
-  /**
-   * The prompt may take this command. Claude's file idle, as ever, except for a
-   * text command agentd sent on hook evidence (`viaHooks`): a background
-   * subagent keeps the file `busy` for its whole life, so the file cannot be
-   * waited on; agentd saw the main turn's Stop and judged the prompt free.
-   */
-  private promptFree(cmd: TypeCommand): boolean {
-    return (cmd.command === "text" && cmd.viaHooks === true) || this.ready(cmd.notBefore);
   }
 
   private firstWrite(active: Active, now: number): void {

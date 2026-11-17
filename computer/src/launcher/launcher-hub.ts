@@ -41,12 +41,6 @@ export interface TypeCommand {
   cmdId: string;
   gen: number;
   notBefore?: number;
-  /**
-   * agentd judged the main prompt free from hook evidence while Claude's file
-   * says `busy` (a background subagent runs): a text command is typed without
-   * waiting for the file to read idle.
-   */
-  viaHooks?: boolean;
   command: TypeCommandKind;
   model?: string;
   text?: string;
@@ -304,7 +298,6 @@ export class LauncherHub {
       cmdId: cmd.cmdId ?? randomUUID(),
       gen: binding.gen,
       ...(cmd.notBefore !== undefined ? { notBefore: cmd.notBefore } : {}),
-      ...(cmd.viaHooks ? { viaHooks: true } : {}),
       command: cmd.command,
       ...(cmd.model !== undefined ? { model: cmd.model } : {}),
       ...(cmd.text !== undefined ? { text: cmd.text } : {}),

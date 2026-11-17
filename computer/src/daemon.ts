@@ -263,8 +263,6 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
         return approvals?.hasPendingForSession(id) === true || questionRelay.hasPendingForSession(id);
       },
       clearUncertain: (key) => launchers.setUncertain(key, false),
-      // SubagentStart seen and SubagentStop not yet, as the store counts them.
-      subagents: (key) => sessions.get(key.slice(key.indexOf(":") + 1))?.subagents?.running ?? 0,
     },
   );
   // The environment overrides exist only so tests need not wait the windows out.
