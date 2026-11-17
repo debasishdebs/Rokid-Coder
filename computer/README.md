@@ -240,10 +240,41 @@ Limits to know about:
 - Replies, compact and model change are typed into Claude's prompt, so they run only when Claude is idle.
   A busy session makes them wait (up to 60 s) and then fail with `busy`.
 - When a reply is unavailable the phone's session object carries `followupWhy`: `draft` (text at the laptop
-  prompt), `background` (Claude's file says busy while a background subagent runs; the prompt may be free
-  at the laptop, but agentd types only when Claude's own file says idle), `busy` (Claude is working, a
-  question or approval is pending, or a write is uncertain) or `not_launcher` (the session is not under
-  `rk claude`), in that order of precedence. It is absent whenever the reply is available.
+  prompt), `mode_not_allowed` and `bg_off` (a reply while a background subagent runs would be allowed but
+  for the permission mode, or but for the phone's switch; see below), `background` (Claude's file says busy
+  while a background subagent runs and the evidence below is not there, so agentd types only when Claude's
+  own file says idle), `busy` (Claude is working, a question or approval is pending, or a write is
+  uncertain) or `not_launcher` (the session is not under `rk claude`), in that order of precedence. It is
+  absent whenever the reply is available. A phone that does not know a value shows it as `busy`.
+- Replies while a background subagent runs are opt-in. Claude's file stays `busy` for as long as a
+  background subagent lives, though the main prompt is free, so the phone's Settings switch `bgReplies`
+  (`settings_sync`; absent is off, kept in memory for the connected phone and sent again on every connect)
+  lets agentd type on hook evidence instead. All of it is required, and every item is checked again by
+  agentd (`write_check`) right before the paste and right before the Enter; any loss cancels the reply as
+  `busy` and it is never retyped:
+  - Claude's file says `busy` for this session (`idle` takes the ordinary path, `waiting` never types);
+  - the main thread's latest `permission_mode` is `auto`, `bypassPermissions`, `acceptEdits`, `dontAsk` or
+    `default`. `plan` (its plan-approval dialog would take the keys) and an unknown or missing mode give
+    `mode_not_allowed`. Outside `auto` and `bypassPermissions` a dialog may open, so agentd must also know
+    that no approval of any origin, a subagent's included, is pending;
+  - a main-thread `Stop` with `stop_hook_active` not true, at most 6 hours old, and no main-thread work
+    since: a UserPromptSubmit, a main-thread PreToolUse, a PermissionRequest or an Elicitation from any
+    agent, a SubagentStop, any Notification whose `notification_type` is not `idle_prompt` or
+    `auth_success`, a typed write or a delivered Stop hold all take it away; a hook with an `agent_id` is a
+    subagent's and says nothing about the main thread;
+  - at least one running subagent; nothing pending, held, in flight or uncertain; no draft at the laptop;
+  - the reply is one line of at most 600 characters.
+
+  The launcher then pastes the text with no Enter, and only presses Enter when the screen shows the
+  input box visibly empty before the paste and exactly the reply in it after, with no dialog, question or
+  running-turn sign, on two looks. Otherwise it sends Ctrl+U and the reply fails `not_sent`, which the phone
+  words as "Claude is busy with something else, wait a moment and try again". The reply counts as taken
+  when Claude's UserPromptSubmit for it arrives, and is never retyped. The screen model is deliberately
+  small: an incomplete or unknown escape sequence, a switch to the alternate screen, a resize, or a
+  character of uncertain width on the input line make it unsure, and unsure never presses Enter or
+  pastes. After a resize or a sequence it cannot follow, replies stay `not_sent` until the screen is
+  erased and drawn whole again (Ctrl+L, or `/clear`). The reply must match word for word: a missing or
+  extra space in the box counts as altered text.
 - Nothing is typed over a half-written prompt. If you have text in the prompt, a command waits until you
   submit or clear it, and fails with `laptop_draft` after 60 s.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result

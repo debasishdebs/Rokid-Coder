@@ -47,17 +47,32 @@ export type FollowupState = "waiting" | "unavailable" | "cap_reached" | "ready";
 
 /**
  * Why a follow-up is "unavailable", for the phone to say (never a readiness
- * decision). Precedence: draft, background, busy.
+ * decision). Precedence: draft, mode_not_allowed, bg_off, background, busy.
  * - `draft`: text sits at the laptop's prompt, so typing would mix with it;
+ * - `mode_not_allowed`: the main prompt looks free while a background subagent
+ *   runs (a main-thread Stop and no work since, Claude's file `busy`), but the
+ *   session's permission mode is `plan` (its plan-approval dialog would take
+ *   the keys), is not known to agentd, or is one where a dialog may open
+ *   (`default`, `acceptEdits`, `dontAsk`) while agentd cannot say that no
+ *   approval is pending;
+ * - `bg_off`: everything else would allow a reply while a background subagent
+ *   runs, but the phone's `bgReplies` switch (settings_sync) is off: the
+ *   glasses say "turn on background replies in Settings";
  * - `background`: Claude's sessions file says busy while the session runs at
- *   least one background subagent (`subagents.running > 0`); the main prompt
- *   may be free at the laptop, but agentd types only into a prompt Claude's
- *   own file reports idle, so the reply waits;
+ *   least one background subagent (`subagents.running > 0`), and the evidence
+ *   above is not there, so the reply waits for Claude's own file to say idle;
  * - `busy`: Claude is working, its file is not idle, an approval is pending or
  *   a write is uncertain;
  * - `not_launcher`: the session does not run under `rk claude`, so agentd cannot type into it.
+ * A phone that does not know a value shows it as `busy`.
  */
-export type FollowupWhy = "busy" | "draft" | "background" | "not_launcher";
+export type FollowupWhy =
+  | "busy"
+  | "draft"
+  | "background"
+  | "bg_off"
+  | "mode_not_allowed"
+  | "not_launcher";
 
 // agent -> phone
 
@@ -323,6 +338,15 @@ export interface SettingsSyncFrame {
   v: 2;
   timings: AlertTimings;
   waitLimitMs: number;
+  /**
+   * Additive and optional (absent is false): the wearer allows glasses replies
+   * to be typed into a launcher-bound session while a background subagent keeps
+   * Claude's file `busy`, in any permission mode but `plan`. agentd
+   * keeps it in memory for the connected link, forgets it when the link goes,
+   * and the phone sends it again on every connect. Anything but a boolean
+   * rejects the frame.
+   */
+  bgReplies?: boolean;
   msgId: string;
 }
 
@@ -507,4 +531,6 @@ export interface PhoneV2Hooks {
   handle(frame: Record<string, unknown>, channel: PhoneChannel): boolean;
   /** The session as published to the phone, with the v2 fields. */
   decorate(session: Session): Record<string, unknown>;
+  /** A connection has closed; whatever v2 kept for it (a `bgReplies` opt-in) is dropped. */
+  channelClosed?(channel: PhoneChannel): void;
 }

@@ -826,6 +826,11 @@ export class PhoneLink {
     const wasAuthenticated = this.authenticated;
     const wasTrusted = this.linkTrusted;
     const target = this.connectedTo;
+    const closedChannel = this.channel;
+    this.channel = undefined;
+    if (closedChannel) {
+      this.options.v2?.channelClosed?.(closedChannel);
+    }
     const sas = this.sas;
     this.sas = undefined;
     this.awaitingProof = undefined;

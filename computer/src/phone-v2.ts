@@ -108,7 +108,7 @@ export interface PhoneV2Deps {
   outlet: PhoneOutlet;
   /** Routes launcher_command and late follow-ups into `rk claude` sessions; absent, every session is plugin mode. */
   launcher?: Pick<LauncherRouter, "isBound" | "followupState" | "command" | "followup"> &
-    Partial<Pick<LauncherRouter, "followupWhy">>;
+    Partial<Pick<LauncherRouter, "followupWhy" | "bgRepliesChanged">>;
   /** Drains the reset notices queued since the last call, restart notices first. */
   takeResetNotices: () => ResetNotice[];
   logger: Logger;
@@ -269,6 +269,41 @@ export class PhoneV2 {
   }
 
   // Outbound: alerts, resets and waits
+
+  /**
+   * The wearer's opt-in to background replies, as each connected phone last
+   * said it in settings_sync. Memory only: a channel is one connection, so a
+   * disconnect forgets it and the phone says it again when it reconnects. A
+   * connection that is no longer trusted does not count.
+   */
+  private readonly bgChannels = new Set<PhoneChannel>();
+
+  /** Whether any trusted, connected phone has background replies on. */
+  bgRepliesEnabled(): boolean {
+    for (const channel of this.bgChannels) {
+      if (channel.trusted) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private setBgReplies(channel: PhoneChannel, on: boolean): void {
+    const was = this.bgRepliesEnabled();
+    if (on) {
+      this.bgChannels.add(channel);
+    } else {
+      this.bgChannels.delete(channel);
+    }
+    if (was !== this.bgRepliesEnabled()) {
+      this.deps.launcher?.bgRepliesChanged?.();
+    }
+  }
+
+  /** A connection closed: its opt-in goes with it. */
+  channelClosed(channel: PhoneChannel): void {
+    this.setBgReplies(channel, false);
+  }
 
   /** A phone link came up: send what was waiting for one, and any resets nobody has been told about. */
   onChannelConnected(): void {
@@ -916,9 +951,16 @@ export class PhoneV2 {
     }
     const parsedTimings = parseTimings(frame.timings);
     const waitLimitMs = parseWaitLimitMs(frame.waitLimitMs);
+    // Optional (absent is false); a present one that is not a boolean refuses the whole frame.
+    const bgReplies = frame.bgReplies === undefined ? false : frame.bgReplies;
     // Optional, so a phone that does not send it leaves the stored value alone; a present one must be valid.
     const pairingTtlDays = "pairingTtlDays" in frame ? parsePairingTtlDays(frame.pairingTtlDays) : undefined;
-    if (!parsedTimings || waitLimitMs === undefined || ("pairingTtlDays" in frame && pairingTtlDays === undefined)) {
+    if (
+      !parsedTimings ||
+      waitLimitMs === undefined ||
+      ("pairingTtlDays" in frame && pairingTtlDays === undefined) ||
+      typeof bgReplies !== "boolean"
+    ) {
       this.ack(channel, msgId, "rejected", "bad_settings");
       return;
     }
@@ -932,6 +974,7 @@ export class PhoneV2 {
       this.ack(channel, msgId, "rejected", "state_unwritable");
       return;
     }
+    this.setBgReplies(channel, bgReplies);
     this.alerts.setTimings(queueTimings({ timings: parsedTimings, waitLimitMs }));
     this.deps.stopWait.setWaitLimitMs(waitLimitMs);
     this.deps.questionRelay.setWaitLimitMs(waitLimitMs);

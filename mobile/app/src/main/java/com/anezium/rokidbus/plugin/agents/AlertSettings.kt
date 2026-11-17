@@ -26,6 +26,8 @@ data class AlertSettings(
     val defaultClaude: TempMode = TempMode.ASK,
     val defaultCodex: TempMode = TempMode.ASK,
     val quiet: Boolean = false,
+    /** Experimental: agentd may type a reply into the terminal while background subagents run. Off until the wearer turns it on. */
+    val bgReplies: Boolean = false,
     /** What each alert state sounds like on the phone (U19). Kept on the phone: never sent to agentd. */
     val sounds: SoundPrefs = SoundPrefs(),
 ) {
@@ -61,7 +63,7 @@ data class AlertSettings(
     ): List<String> {
         val v = validated()
         return listOf(
-            AgentdProtocolCodec.settingsSync(v.timings(), v.waitLimitMs, newMsgId(), pairingTtlDays),
+            AgentdProtocolCodec.settingsSync(v.timings(), v.waitLimitMs, newMsgId(), pairingTtlDays, v.bgReplies),
             AgentdProtocolCodec.defaultsSet(v.defaultClaude, v.defaultCodex, newMsgId()),
         )
     }
@@ -79,6 +81,7 @@ data class AlertSettings(
             .put("retryBackoffMs", JSONArray(v.retryBackoffMs))
             .put("defaultClaude", v.defaultClaude.wire)
             .put("defaultCodex", v.defaultCodex.wire)
+            .put("bgReplies", v.bgReplies)
         for (slot in SoundSlot.values()) json.put(slot.key, v.sounds[slot].wire)
         return json.toString()
     }
@@ -120,6 +123,8 @@ data class AlertSettings(
                 defaultClaude = mode("defaultClaude"),
                 defaultCodex = mode("defaultCodex"),
                 quiet = quiet,
+                // Only a stored true counts; an old save has no key and reads false.
+                bgReplies = json.optBoolean("bgReplies", false),
                 sounds = sounds,
             ).validated()
         }

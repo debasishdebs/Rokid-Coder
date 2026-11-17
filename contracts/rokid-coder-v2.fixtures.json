@@ -327,6 +327,7 @@
       },
       "waitLimitMs": 1800000,
       "pairingTtlDays": 14,
+      "bgReplies": false,
       "msgId": "fx-msg-settings_sync"
     },
     "models_request": {

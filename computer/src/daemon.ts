@@ -263,6 +263,10 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
         return approvals?.hasPendingForSession(id) === true || questionRelay.hasPendingForSession(id);
       },
       clearUncertain: (key) => launchers.setUncertain(key, false),
+      // SubagentStart seen and SubagentStop not yet, as the store counts them.
+      subagents: (key) => sessions.get(key.slice(key.indexOf(":") + 1))?.subagents?.running ?? 0,
+      // Every pending approval counts, a subagent's included; an unknown manager is not "none".
+      approvalPending: (key) => approvals?.hasPendingForSession(key.slice(key.indexOf(":") + 1)) !== false,
     },
   );
   // The environment overrides exist only so tests need not wait the windows out.
@@ -274,6 +278,8 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
       compactLimitMs: envMs("ROKID_LAUNCHER_COMPACT_LIMIT_MS", COMPACT_LIMIT_MS),
     },
     onStateChange: (key) => phoneV2?.onLauncherChange(key),
+    // The phone's opt-in, read live; false until a phone says otherwise.
+    bgReplies: () => phoneV2?.bgRepliesEnabled() === true,
   });
   // Synchronous, inside the release: the session is busy before the Stop hook's
   // response is written (Review Focus 2).
@@ -571,6 +577,7 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
   const v2Hooks = {
     handle: (frame: Record<string, unknown>, channel: Parameters<PhoneV2["handle"]>[1]) =>
       phoneV2?.handle(frame, channel) ?? false,
+    channelClosed: (channel: Parameters<PhoneV2["handle"]>[1]) => phoneV2?.channelClosed(channel),
     decorate: (session: Parameters<PhoneV2["decorate"]>[0]) => phoneV2?.decorate(session) ?? { ...session },
   };
 
