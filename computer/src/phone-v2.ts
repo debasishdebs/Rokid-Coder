@@ -215,7 +215,7 @@ export class PhoneV2 {
     const followup = provider === "codex" ? this.codexFollowup() : this.claudeFollowup(key, id, launcher);
     const followupWhy = provider === "codex" || followup !== "unavailable"
       ? undefined
-      : this.claudeFollowupWhy(key, launcher);
+      : this.claudeFollowupWhy(key, launcher, session);
     return {
       ...session,
       mode,
@@ -249,9 +249,9 @@ export class PhoneV2 {
   }
 
   /** Why a Claude session's follow-up is "unavailable": busy or a laptop draft under a launcher, else not_launcher. */
-  private claudeFollowupWhy(key: SessionKey, launcher: boolean): FollowupWhy | undefined {
+  private claudeFollowupWhy(key: SessionKey, launcher: boolean, session: Session): FollowupWhy | undefined {
     if (launcher && this.deps.launcher) {
-      return this.deps.launcher.followupWhy?.(key);
+      return this.deps.launcher.followupWhy?.(key, session.subagents?.running ?? 0);
     }
     return "not_launcher";
   }

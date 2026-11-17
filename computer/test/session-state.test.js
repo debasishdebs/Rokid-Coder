@@ -103,19 +103,18 @@ function fakePort() {
 function setup({ held = false, asking = false } = {}) {
   const port = fakePort();
   const file = { status: "idle", statusUpdatedAt: Date.now() - 60_000, sessionId: "s1" };
-  const flags = { held, asking, subagents: 0, skew: 0 };
+  const flags = { held, asking };
   const states = new SessionStates(
     (pid) => (pid === PID ? { ...file } : undefined),
-    () => Date.now() + flags.skew,
+    Date.now,
     {
       binding: (key) => port.binding(key),
       held: () => flags.held,
       asking: () => flags.asking,
-      subagents: () => flags.subagents,
       clearUncertain: (key) => port.setUncertain(key, false),
     },
   );
-  const router = new LauncherRouter({ port, states, timings: TIMINGS, clock: () => Date.now() + flags.skew });
+  const router = new LauncherRouter({ port, states, timings: TIMINGS });
   return { port, file, flags, states, router };
 }
 
@@ -492,174 +491,57 @@ test("model_ok_keeps_a_latch_newer_than_its_own_write", async () => {
   assert.equal(states2.latchAt(KEY), undefined);
 });
 
-// The background-subagent exception: Claude's file says busy while a subagent
-// runs, the main prompt is free, and agentd knows it from hooks.
+// `followupWhy` is messaging only: it never changes when typing is allowed.
 
-const backgroundSession = (flags = { subagents: 1 }) => {
-  const ctx = setup();
-  claudeWrites(ctx.file, "busy");
-  ctx.flags.subagents = flags.subagents;
-  return ctx;
-};
-const stopAfterPrompt = (router) => {
-  router.onHook(KEY, "UserPromptSubmit", { prompt: "go" });
-  router.onHook(KEY, "Stop", {});
-};
-
-test("busy_file_with_a_stop_after_the_prompt_and_a_running_subagent_is_ready", () => {
-  const { states, router } = backgroundSession();
-  assert.equal(states.state(KEY), "busy", "no Stop seen yet");
-  stopAfterPrompt(router);
-  assert.equal(states.state(KEY), "ready");
+test("followupWhy_is_draft_background_or_busy_in_that_order_and_absent_when_available", () => {
+  const { port, file, flags, router } = setup();
   assert.equal(router.followupState(KEY), "ready");
   assert.equal(router.followupWhy(KEY), undefined);
-});
+  assert.equal(router.followupWhy(KEY, 3), undefined, "a running subagent changes nothing while ready");
 
-test("busy_file_with_no_stop_since_the_prompt_is_not_ready", () => {
-  const { states, router } = backgroundSession();
-  router.onHook(KEY, "Stop", {});
-  router.onHook(KEY, "UserPromptSubmit", { prompt: "again" });
-  assert.equal(states.state(KEY), "busy");
+  claudeWrites(file, "busy");
   assert.equal(router.followupState(KEY), "unavailable");
   assert.equal(router.followupWhy(KEY), "busy");
-});
+  assert.equal(router.followupWhy(KEY, 0), "busy");
+  assert.equal(router.followupWhy(KEY, 1), "background");
+  assert.equal(router.followupState(KEY), "unavailable", "the reason never makes it ready");
 
-test("busy_file_with_no_running_subagent_is_not_ready", () => {
-  const { states, router } = backgroundSession({ subagents: 0 });
-  stopAfterPrompt(router);
-  assert.equal(states.state(KEY), "busy");
-  assert.equal(router.followupWhy(KEY), "busy");
-});
-
-test("main_thread_work_after_the_stop_makes_it_busy_again", () => {
-  for (const [event, payload] of [
-    ["UserPromptSubmit", { prompt: "more" }],
-    ["PreToolUse", { tool_name: "Bash" }],
-    ["PermissionRequest", { tool_name: "Bash" }],
-    ["Notification", { message: "Claude needs your permission to use Bash" }],
-    ["SubagentStop", { agent_id: "a1" }],
-  ]) {
-    const { states, router } = backgroundSession();
-    stopAfterPrompt(router);
-    assert.equal(states.state(KEY), "ready", event);
-    router.onHook(KEY, event, payload);
-    assert.equal(states.state(KEY), "busy", `${event} after the Stop`);
-    router.onHook(KEY, "Stop", {});
-    assert.equal(states.state(KEY), "ready", `${event}, then a new Stop`);
-  }
-});
-
-test("a_subagents_own_tool_calls_and_the_idle_notice_do_not_end_readiness", () => {
-  const { states, router } = backgroundSession();
-  stopAfterPrompt(router);
-  router.onHook(KEY, "PreToolUse", { tool_name: "Grep", agent_id: "a1" });
-  router.onHook(KEY, "PermissionRequest", { tool_name: "Bash", agent_id: "a1" });
-  router.onHook(KEY, "Notification", { message: "Claude is waiting for your input" });
-  assert.equal(states.state(KEY), "ready");
-});
-
-test("a_stop_older_than_six_hours_is_not_trusted", () => {
-  const { states, router, flags } = backgroundSession();
-  stopAfterPrompt(router);
-  flags.skew = 6 * 60 * 60_000 + 1000;
-  assert.equal(states.state(KEY), "busy");
-});
-
-test("laptop_draft_and_other_conditions_still_block_the_background_ready_state", () => {
-  const { states, router, port, flags, file } = backgroundSession();
-  stopAfterPrompt(router);
-  port.drafts.set(KEY, true);
-  assert.equal(router.followupState(KEY), "unavailable");
-  assert.equal(router.followupWhy(KEY), "draft");
-  port.drafts.set(KEY, false);
+  // Not Claude's file alone: a pending approval is busy, not background.
   flags.asking = true;
-  assert.equal(states.state(KEY), "busy");
+  assert.equal(router.followupWhy(KEY, 1), "busy");
   flags.asking = false;
   port.bindings.get(KEY).uncertain = true;
-  assert.equal(states.state(KEY), "busy");
-  assert.equal(router.followupWhy(KEY), "busy");
+  assert.equal(router.followupWhy(KEY, 1), "busy");
   port.bindings.get(KEY).uncertain = false;
-  assert.equal(states.state(KEY), "ready");
-  file.sessionId = "someone-else";
-  assert.equal(states.state(KEY), "busy");
-});
-
-test("a_file_that_is_neither_idle_nor_busy_never_takes_the_exception", () => {
-  const { states, router, file } = backgroundSession();
-  stopAfterPrompt(router);
+  // Any other file status is busy.
   file.status = "waiting";
-  assert.equal(states.state(KEY), "busy");
+  assert.equal(router.followupWhy(KEY, 1), "busy");
+  file.status = "busy";
+
+  port.drafts.set(KEY, true);
+  assert.equal(router.followupWhy(KEY, 1), "draft", "draft outranks background");
+  port.drafts.set(KEY, false);
+  claudeWrites(file, "idle");
+  assert.equal(router.followupWhy(KEY, 1), undefined);
+  port.drafts.set(KEY, true);
+  assert.equal(router.followupWhy(KEY), "draft");
 });
 
-test("compact_and_model_still_need_the_files_own_idle", async () => {
-  const { port, states, router } = backgroundSession();
-  stopAfterPrompt(router);
-  assert.equal(states.state(KEY), "ready");
-  assert.deepEqual(await router.command(KEY, { command: "model", model: "opus" }), { ok: false, error: "busy" });
-  assert.equal(port.sent.length, 0);
+test("followupWhy_is_absent_for_held_and_unbound_sessions", () => {
+  const { port, flags, router } = setup({ held: true });
+  assert.equal(router.followupState(KEY), "waiting");
+  assert.equal(router.followupWhy(KEY, 1), undefined);
+  flags.held = false;
+  port.bindings.delete(KEY);
+  assert.equal(router.followupWhy(KEY, 1), undefined);
 });
 
-test("text_typed_on_hook_evidence_is_accepted_by_a_prompt_and_ready_again_after_the_next_stop", async () => {
-  const { port, states, router } = backgroundSession();
-  stopAfterPrompt(router);
-  const result = router.followup(KEY, "from the glasses", () => assert.fail("nothing is held"));
-  await until(() => port.sent.length === 1, 200, "the dispatch");
-  assert.equal(port.sent[0].viaHooks, true, "the launcher may type with the file busy");
-  assert.equal("notBefore" in port.sent[0], false);
-  const at = Date.now();
-  port.written(at);
-  port.settle({ ok: true });
-  // Typed, but not seen accepted: no success is claimed yet, and no second command is let in.
-  await settle(60);
-  let done = false;
-  result.then(() => (done = true));
-  await settle(30);
-  assert.equal(done, false);
-  assert.equal(states.state(KEY), "busy");
-  router.onHook(KEY, "UserPromptSubmit", { prompt: "something else entirely" });
-  assert.deepEqual(await result, { ok: true });
-  assert.equal(states.state(KEY), "busy", "the file stays busy and the turn has not stopped");
+test("a_busy_file_is_never_ready_whatever_hooks_and_subagents_say", () => {
+  const { file, states, router } = setup();
+  claudeWrites(file, "busy");
+  router.onHook(KEY, "UserPromptSubmit", { prompt: "go" });
+  router.onHook(KEY, "SubagentStart", { agent_id: "a1" });
   router.onHook(KEY, "Stop", {});
-  assert.equal(states.state(KEY), "ready");
-  assert.equal(router.followupState(KEY), "ready");
-});
-
-test("typed_on_hook_evidence_but_never_accepted_fails_as_consumed_timeout_and_is_not_retyped", async () => {
-  const { port, states, flags } = backgroundSession();
-  const router = new LauncherRouter({ port, states, timings: { ...TIMINGS, resultSlackMs: 60, cancelSettleMs: 10 } });
-  stopAfterPrompt(router);
-  const result = router.followup(KEY, "lost", () => assert.fail("nothing is held"));
-  await until(() => port.sent.length === 1, 200, "the dispatch");
-  port.written(Date.now());
-  port.settle({ ok: true });
-  // No UserPromptSubmit ever shows: the command was typed, so it is consumed, and success is not claimed.
-  assert.deepEqual(await result, { ok: false, error: "timeout", consumed: true });
-  assert.equal(port.sent.length, 1, "never retyped");
-  assert.equal(states.claimed(KEY), false);
-  assert.equal(flags.subagents, 1);
-});
-
-test("failure_paths_of_a_hook_typed_command_are_the_existing_ones", async () => {
-  const { port, router } = backgroundSession();
-  stopAfterPrompt(router);
-  const result = router.followup(KEY, "refused", () => assert.fail("nothing is held"));
-  await until(() => port.sent.length === 1, 200, "the dispatch");
-  port.settle({ ok: false, error: "laptop_draft" });
-  assert.deepEqual(await result, { ok: false, error: "laptop_draft" });
-});
-
-test("delivering_a_held_stop_ends_background_readiness_at_once", async () => {
-  const { states, router } = backgroundSession();
-  stopAfterPrompt(router);
-  router.onStopDelivered(KEY);
   assert.equal(states.state(KEY), "busy");
-});
-
-test("a_write_newer_than_the_stop_ends_background_readiness", () => {
-  const { states, router } = backgroundSession();
-  stopAfterPrompt(router);
-  states.latch(KEY, Date.now());
-  assert.equal(states.state(KEY), "busy");
-  router.onHook(KEY, "Stop", {});
-  assert.equal(states.state(KEY), "ready");
+  assert.equal(router.followupWhy(KEY, 1), "background");
 });

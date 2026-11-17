@@ -46,14 +46,18 @@ export type AlertKind = "approval" | "question" | "error" | "done" | "notice";
 export type FollowupState = "waiting" | "unavailable" | "cap_reached" | "ready";
 
 /**
- * Why a follow-up is "unavailable":
- * - `busy`: Claude is working on the main thread, its sessions file is not idle,
- *   or a write is uncertain (a session whose only activity is a background
- *   subagent is not busy: it takes follow-ups);
+ * Why a follow-up is "unavailable", for the phone to say (never a readiness
+ * decision). Precedence: draft, background, busy.
  * - `draft`: text sits at the laptop's prompt, so typing would mix with it;
+ * - `background`: Claude's sessions file says busy while the session runs at
+ *   least one background subagent (`subagents.running > 0`); the main prompt
+ *   may be free at the laptop, but agentd types only into a prompt Claude's
+ *   own file reports idle, so the reply waits;
+ * - `busy`: Claude is working, its file is not idle, an approval is pending or
+ *   a write is uncertain;
  * - `not_launcher`: the session does not run under `rk claude`, so agentd cannot type into it.
  */
-export type FollowupWhy = "busy" | "draft" | "not_launcher";
+export type FollowupWhy = "busy" | "draft" | "background" | "not_launcher";
 
 // agent -> phone
 

@@ -944,47 +944,27 @@ test("consumed_launcher_failure_ack_says_consumed", async () => {
   });
 });
 
-// A background subagent keeps Claude's sessions file `busy` while the main
-// prompt is free; the glasses must still be able to reply (hook evidence).
-
-const upsertWith = (phone, predicate) =>
-  phone.waitFor("session_upsert", (f) => f.session.id === ID && predicate(f.session));
-
-test("a_background_subagent_session_takes_a_reply_on_hook_evidence_through_the_real_daemon", async () => {
+test("a_background_subagent_session_says_background_but_is_still_not_ready", async () => {
   await withBound(async ({ httpPort, launcher, claude, followup, ack, phone }) => {
     claude.write("busy");
     await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: ID, prompt: "start the review" });
     await postHook(httpPort, { hook_event_name: "SubagentStart", session_id: ID, agent_id: "bg1" });
-    // The main turn is still going: unavailable, and busy is why.
-    const working = await upsertWith(phone, (s) => s.subagents?.running === 1);
-    assert.equal(working.session.capabilities.followup, "unavailable");
-    assert.equal(working.session.followupWhy, "busy");
     await postHook(httpPort, { hook_event_name: "Stop", session_id: ID });
-    const ready = await upsertWith(phone, (s) => s.capabilities.followup === "ready");
-    assert.equal("followupWhy" in ready.session, false, "absent unless unavailable");
-
-    followup("go on while it runs", "bg-fu1");
-    const frame = await launcher.waitFor("type_command");
-    assert.deepEqual([frame.command, frame.text, frame.viaHooks], ["text", "go on while it runs", true]);
-    assert.equal("notBefore" in frame, false);
-    answer(launcher, frame);
-    // Typed, not yet seen taken: no success claimed.
-    await settle(200);
-    assert.equal(phone.frames.some((f) => f.type === "ack" && f.msgId === "bg-fu1"), false);
-    await postHook(httpPort, { hook_event_name: "UserPromptSubmit", session_id: ID, prompt: "go on while it runs" });
-    assert.equal((await ack("bg-fu1")).result, "applied");
-    // The file never left busy; the turn has not stopped, so nothing more is typed yet.
-    const turn = await upsertWith(phone, (s) => s.capabilities.followup === "unavailable" && s.followupWhy === "busy");
-    assert.ok(turn);
-    await postHook(httpPort, { hook_event_name: "Stop", session_id: ID });
-    await upsertWith(phone, (s) => s.capabilities.followup === "ready");
-    // A laptop draft still blocks, and says so.
+    const frame = await phone.waitFor(
+      "session_upsert",
+      (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.followupWhy === "background",
+    );
+    assert.equal(frame.session.capabilities.followup, "unavailable");
+    // Nothing is typed into a session whose own file says busy.
+    followup("not now", "bg-fu1");
+    assert.equal((await ack("bg-fu1", 5000)).error, "busy");
+    assert.deepEqual(launcher.of("type_command"), []);
     launcher.send({ type: "laptop_state", draft: true });
-    const draft = await upsertWith(phone, (s) => s.followupWhy === "draft");
-    assert.equal(draft.session.capabilities.followup, "unavailable");
-    // The subagent ends: the main thread wakes, and the busy file means busy again.
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.followupWhy === "draft");
     launcher.send({ type: "laptop_state", draft: false });
     await postHook(httpPort, { hook_event_name: "SubagentStop", session_id: ID, agent_id: "bg1" });
-    await upsertWith(phone, (s) => s.capabilities.followup === "unavailable" && s.followupWhy === "busy");
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.followupWhy === "busy");
+    claude.write("idle");
+    await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.capabilities.followup === "ready");
   }, { stopHold: false });
 });
