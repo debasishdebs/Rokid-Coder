@@ -59,11 +59,56 @@ test("a_box_is_visibly_empty_only_when_nothing_in_it_is_solid_text", () => {
 test("the_pasted_text_alone_on_the_input_line_inside_the_box_is_shown", () => {
   const model = screen(repaint({ input: "yes do it" }));
   const result = probe(model);
-  assert.deepEqual(result, { kind: "prompt", text: "yesdoit", empty: false });
+  assert.deepEqual(result, { kind: "prompt", text: "yes do it", empty: false });
   assert.equal(showsText(result, "yes do it"), true);
   assert.equal(showsText(result, "yes do it please"), false);
   // Text that is not alone is not what was pasted: a laptop draft in front of it.
   assert.equal(showsText(probe(screen(repaint({ input: "draft yes do it" }))), "yes do it"), false);
+});
+
+test("altered_text_is_not_the_text_a_missing_or_extra_word_space_included", () => {
+  const shows = (input, expected = "yes do it") => showsText(probe(screen(repaint({ input }))), expected);
+  assert.equal(shows("yes do it"), true);
+  // Runs of whitespace are one space, the ends are trimmed.
+  assert.equal(shows("yes   do \t it  "), true);
+  assert.equal(shows("yesdo it"), false, "a missing space");
+  assert.equal(shows("yes doit"), false, "a missing space");
+  assert.equal(shows("yesdoit"), false, "no spaces at all");
+  assert.equal(shows("ye s do it"), false, "an extra space inside a word");
+  assert.equal(shows("yes do it ok"), false);
+  assert.equal(shows("yes do", "yes do it"), false);
+  assert.equal(showsCleared(probe(screen(repaint({ input: "yesdo it" }))), "yes do it"), true);
+  assert.equal(showsCleared(probe(screen(repaint({ input: "yes do it" }))), "yes do it"), false);
+});
+
+test("a_tainted_screen_is_refused_without_a_baseline_and_a_whole_screen_erase_heals_it", () => {
+  for (const seq of ["\x1b[1;20r", "\x1b#8", "\x1b#3", "\x1bc", "\x1b(0", "\x1b[?1049h\x1b[?1049l", "\x1b[?47h\x1b[?47l", "\x1b[?1047h\x1b[?1047l"]) {
+    const model = screen(repaint({ input: "yes do it" }));
+    assert.equal(model.tainted, false, "clean to start with");
+    model.push(seq);
+    assert.equal(model.tainted, true, JSON.stringify(seq));
+    // Redrawn in place with nothing erased, the stale grid would still read as the prompt.
+    model.push(`\x1b[H${["x", "", "", RULE, "> yes do it", RULE, FOOTER].map((row) => `${row}\x1b[K`).join("\r\n")}`);
+    assert.deepEqual(probe(model), { kind: "unknown", reason: "screen_disturbed" }, JSON.stringify(seq));
+    // Erased and redrawn whole, every cell is the child's again.
+    model.push(repaint({ input: "yes do it" }));
+    assert.equal(model.tainted, false, JSON.stringify(seq));
+    assert.equal(showsText(probe(model), "yes do it"), true, JSON.stringify(seq));
+  }
+  const resized = screen(repaint());
+  resized.resize(100, 30);
+  assert.equal(resized.tainted, true);
+  assert.equal(probe(resized).kind, "unknown");
+  // A sequence inside the alternate screen is not healed by an erase there.
+  const alt = screen(repaint());
+  alt.push("\x1b[?1049h\x1b[2J");
+  assert.equal(alt.tainted, true);
+});
+
+test("device_status_and_attribute_requests_draw_nothing_and_taint_nothing", () => {
+  const model = screen(repaint({ input: "ok" }));
+  model.push("\x1b[6n\x1b[c\x1b[>0q\x1b[?u");
+  assert.equal(model.tainted, false);
 });
 
 test("a_long_reply_wrapped_over_rows_is_still_found_whole", () => {

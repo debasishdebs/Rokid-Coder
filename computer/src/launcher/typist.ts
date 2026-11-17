@@ -468,6 +468,12 @@ export class Typist {
     if (!bg || this.input.holding || this.input.draft || bg.fileStatus() !== "busy") {
       return "closed";
     }
+    // A screen the model lost track of (a resize, a sequence it cannot follow) is
+    // refused outright: no baseline excuses earlier taint, and nothing is pasted
+    // until the child has erased and redrawn the whole screen.
+    if (bg.screen.tainted) {
+      return "full";
+    }
     const seen = probe(bg.screen);
     if (seen.kind === "unknown") {
       return "closed";

@@ -271,7 +271,10 @@ Limits to know about:
   words as "Claude is busy with something else, wait a moment and try again". The reply counts as taken
   when Claude's UserPromptSubmit for it arrives, and is never retyped. The screen model is deliberately
   small: an incomplete or unknown escape sequence, a switch to the alternate screen, a resize, or a
-  character of uncertain width on the input line make it unsure, and unsure never presses Enter.
+  character of uncertain width on the input line make it unsure, and unsure never presses Enter or
+  pastes. After a resize or a sequence it cannot follow, replies stay `not_sent` until the screen is
+  erased and drawn whole again (Ctrl+L, or `/clear`). The reply must match word for word: a missing or
+  extra space in the box counts as altered text.
 - Nothing is typed over a half-written prompt. If you have text in the prompt, a command waits until you
   submit or clear it, and fails with `laptop_draft` after 60 s.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result

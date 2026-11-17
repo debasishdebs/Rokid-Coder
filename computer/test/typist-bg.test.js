@@ -521,3 +521,64 @@ test("an_enter_needs_the_check_to_pass_on_two_looks", async () => {
   await t.advance(60);
   assert.deepEqual(t.asked.map((a) => a.phase), ["paste", "enter"]);
 });
+
+/** The prompt redrawn row by row in place, with nothing erased, as an app repainting after a resize might. */
+function inPlace({ input = "" } = {}) {
+  return `\x1b[H${["● Done with the review.", "", "✻ Working…", RULE, `> ${input}`, RULE, FOOTER].map((row) => `${row}\x1b[K`).join("\r\n")}`;
+}
+
+test("a_screen_tainted_before_the_paste_gets_no_paste_and_no_baseline_excuses_it", async () => {
+  for (const [what, taint] of [
+    ["a resize", (t) => t.screen.resize(100, 30)],
+    ["a scroll region", (t) => t.draw("\x1b[1;20r")],
+    ["DECALN", (t) => t.draw("\x1b#8")],
+    ["a reset", (t) => t.draw("\x1bc")],
+    ["an alternate screen visit", (t) => t.draw("\x1b[?1049h\x1b[?1049l")],
+  ]) {
+    const t = setup();
+    t.draw(repaint());
+    taint(t);
+    // The stale grid, redrawn in place, still reads as an empty prompt.
+    t.draw(inPlace());
+    const box = t.run();
+    await t.advance(300);
+    assert.deepEqual(t.pty.writes, [], what);
+    assert.deepEqual(t.asked, [], `${what}: agentd is not even asked`);
+    assert.deepEqual(box.result, { ok: false, error: "not_sent" }, what);
+  }
+});
+
+test("a_tainted_screen_is_trusted_again_only_after_the_whole_screen_is_erased_and_redrawn", async () => {
+  const t = setup();
+  t.draw(repaint());
+  t.screen.resize(100, 30);
+  t.draw(repaint());
+  assert.equal(t.screen.tainted, false);
+  t.run();
+  await t.advance(150);
+  assert.deepEqual(t.asked.map((a) => a.phase), ["paste"]);
+});
+
+test("a_screen_that_taints_after_a_clean_check_still_fails_the_paste_even_with_agentds_yes", async () => {
+  const t = setup();
+  t.draw(repaint());
+  const box = t.run();
+  await t.advance(150);
+  t.draw("\x1b[1;20r");
+  t.typist.verdict("c1", "paste", true);
+  await t.advance(0);
+  assert.deepEqual(t.pty.writes, []);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+});
+
+test("text_that_differs_from_the_reply_by_a_word_space_is_cleared_and_never_sent", async () => {
+  for (const shown of ["yesdo it", "yes doit", "ye s do it"]) {
+    const t = setup();
+    const box = await t.toPasted("yes do it");
+    t.draw(repaint({ input: shown }));
+    await t.advance(1700);
+    assert.deepEqual(t.pty.writes, [PASTE("yes do it"), CTRL_U], shown);
+    assert.deepEqual(box.result, { ok: false, error: "not_sent" }, shown);
+    assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], shown);
+  }
+});

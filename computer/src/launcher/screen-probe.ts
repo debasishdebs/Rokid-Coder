@@ -84,6 +84,8 @@ export class ScreenModel {
   private stringLength = 0;
   private alt = false;
   private taintCount = 0;
+  /** The taint count when the whole screen was last erased: what happened before it no longer matters. */
+  private cleanFrom = 0;
   /** SGR state: text drawn now is muted (faint or a gray foreground), as placeholders and suggestions are. */
   private faint = false;
   private grayFg = false;
@@ -102,6 +104,16 @@ export class ScreenModel {
   /** Events since the start that made the screen untrustworthy; compare two reads of it. */
   get taints(): number {
     return this.taintCount;
+  }
+
+  /**
+   * The screen may not be what the model holds: something it cannot follow (a
+   * resize, an unknown sequence, a switch of screens, a reset) happened and no
+   * whole-screen erase has been drawn since, which is what rewrites every cell.
+   * Nothing is ever baselined against this; a screen that is tainted is refused.
+   */
+  get tainted(): boolean {
+    return this.taintCount > this.cleanFrom;
   }
 
   /** Right now: the child is mid-sequence, or on the alternate screen. */
@@ -278,7 +290,8 @@ export class ScreenModel {
         } else {
           // `ESC ( B` selects ASCII; any other set (line drawing) would change what is drawn.
           const designation = /^[()*+]$/.test(this.intermediates);
-          if (!(designation && ch === "B") && !(this.intermediates === "#" && ch === "8")) {
+          // `ESC # 8` (DECALN) fills the screen with E and the other `ESC #` sequences resize lines: all taint.
+          if (!(designation && ch === "B")) {
             this.taint();
           }
           this.state = "text";
@@ -335,8 +348,10 @@ export class ScreenModel {
         this.col = this.saved.col;
         break;
       case "c":
+        // A full reset also resets modes and character sets the model does not track.
         this.clear();
         this.alt = false;
+        this.taint();
         break;
       case "D":
         this.lineFeed();
@@ -423,6 +438,10 @@ export class ScreenModel {
         if (mode === 2 || mode === 3) {
           this.grid = Array.from({ length: this.rows }, () => this.blankRow());
           this.dubious = Array.from({ length: this.rows }, () => false);
+          if (!this.alt) {
+            // Every cell is now what the child draws next, whatever the model lost track of before.
+            this.cleanFrom = this.taintCount;
+          }
         } else if (mode === 1) {
           for (let r = 0; r < this.row; r += 1) {
             this.grid[r] = this.blankRow();
@@ -483,6 +502,9 @@ export class ScreenModel {
         this.row = this.saved.row;
         this.col = this.saved.col;
         break;
+      case "n":
+      case "c":
+        break; // status and attribute requests to the terminal: they draw nothing
       case "m":
         this.sgr(args, raw.includes(":"));
         break;
@@ -595,24 +617,29 @@ export type ProbeResult =
   | { kind: "prompt"; text: string; empty: boolean };
 
 export interface ProbeOptions {
-  /** `screen.taints` as read before the screen of interest was drawn; any later taint is `unknown`. */
+  /**
+   * `screen.taints` as read when the screen was last verified clean (never
+   * while it was `tainted`); any later taint is `unknown`. Without it the
+   * screen must not be tainted at all.
+   */
   sinceTaints?: number;
 }
 
-const stripWhitespace = (text: string): string => text.replace(/\s+/g, "");
+/** Whitespace runs become one space and the ends are trimmed: where a line wrapped does not matter, a missing word space does. */
+const normalise = (text: string): string => text.replace(/\s+/g, " ").trim();
 
 /**
  * What the screen shows right now. `prompt` only when the framed input box is
  * found (a rule above, the `>`/`❯` input line, a rule below, a short footer),
- * nothing around it is a dialog, a menu or a running turn, and the model has
- * not been disturbed since `sinceTaints`. The text is what the input line holds,
- * every whitespace removed so that where a long line wrapped does not matter.
+ * nothing around it is a dialog, a menu or a running turn, and the model is
+ * not tainted (or, given `sinceTaints`, not disturbed since). The text is what
+ * the input line holds, whitespace normalised.
  */
 export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeResult {
   if (screen.unsettled) {
     return { kind: "unknown", reason: "screen_unsettled" };
   }
-  if (options.sinceTaints !== undefined && screen.taints > options.sinceTaints) {
+  if (options.sinceTaints === undefined ? screen.tainted : screen.taints > options.sinceTaints) {
     return { kind: "unknown", reason: "screen_disturbed" };
   }
   if (screen.width < MIN_COLS) {
@@ -664,22 +691,26 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   if ([...around, ...inputRows].some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row))) {
     return { kind: "blocked", reason: "dialog" };
   }
-  const text = stripWhitespace(inputContent(inputRows));
-  const solid = stripWhitespace(inputContent(screen.solidLines().slice(top + 1, bottom)));
+  const text = normalise(inputContent(inputRows));
+  const solid = normalise(inputContent(screen.solidLines().slice(top + 1, bottom)));
   return { kind: "prompt", text, empty: solid === "" || TRY_HINT.test(text) };
 }
 
-/** Claude's own hint in an empty box, `Try "fix lint errors"`, whitespace removed. */
-const TRY_HINT = /^Try["“'‘].*["”'’]$/;
+/** Claude's own hint in an empty box, `Try "fix lint errors"`. */
+const TRY_HINT = /^Try\s*["“'‘].*["”'’]$/;
 
-/** What the input rows hold after the prompt character and the box's side borders. */
+/**
+ * What the input rows hold after the prompt character and the box's side
+ * borders. Rows are joined by a space, so a line wrapped mid-word does not
+ * read as the text it was typed as: it is refused, never guessed.
+ */
 function inputContent(rows: string[]): string {
   return rows
     .map((row, index) => {
       const withoutBorder = row.replace(BORDER_LEFT, index === 0 ? "" : " ").replace(BORDER_RIGHT, "");
       return index === 0 ? withoutBorder.replace(/^\s*[>❯]/, "") : withoutBorder;
     })
-    .join("");
+    .join(" ");
 }
 
 /** Whether the probe shows the framed prompt box visibly empty, with no dialog, question or other text in it. */
@@ -689,10 +720,10 @@ export function showsEmptyPrompt(result: ProbeResult): boolean {
 
 /** Whether the probe shows `expected` (already sanitised) on the input line, and nothing but it. */
 export function showsText(result: ProbeResult, expected: string): boolean {
-  return result.kind === "prompt" && expected.length > 0 && result.text === stripWhitespace(expected);
+  return result.kind === "prompt" && expected.length > 0 && result.text === normalise(expected);
 }
 
 /** Whether the input line no longer holds `expected`: the box is found and the text is gone from it. */
 export function showsCleared(result: ProbeResult, expected: string): boolean {
-  return result.kind === "prompt" && !result.text.includes(stripWhitespace(expected));
+  return result.kind === "prompt" && !result.text.includes(normalise(expected));
 }
