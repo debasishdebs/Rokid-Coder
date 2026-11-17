@@ -135,13 +135,7 @@ export class SessionStates {
   onHook(key: SessionKey, event: string, payload: Record<string, unknown>): void {
     switch (event) {
       case "Stop":
-        // A Stop hook does not prove the main turn ended: another Stop hook may
-        // have continued it, and then `stop_hook_active` is true. That is no evidence.
-        if (payload.stop_hook_active === true) {
-          this.clearStop(key);
-        } else {
-          this.entry(key).stopAt = this.clock();
-        }
+        this.entry(key).stopAt = this.clock();
         break;
       case "SessionStart":
         this.entry(key).stopAt = undefined;
@@ -154,10 +148,8 @@ export class SessionStates {
         }
         break;
       case "Notification":
-        // Only the idle prompt and a finished sign-in leave the main prompt as it was.
-        // Every other type (permission_prompt, elicitation_dialog, any unknown one)
-        // may be waiting on the wearer; sandbox network prompts fire no PermissionRequest.
-        if (!isHarmlessNotification(payload)) {
+        // The idle-prompt notice says the prompt is free; a permission one says it is not.
+        if (typeof payload.message === "string" && payload.message.toLowerCase().includes("permission")) {
           this.clearStop(key);
         }
         break;
@@ -196,27 +188,6 @@ export class SessionStates {
         break;
       }
     }
-  }
-
-  /**
-   * Whether the background-subagent evidence holds right now, whatever a
-   * command in flight is doing: used to revoke a `viaHooks` command not yet
-   * typed. The file must still read `busy`, nothing may be pending or held.
-   */
-  hookEvidence(key: SessionKey): boolean {
-    if (this.sources.held(key) || this.sources.asking(key)) {
-      return false;
-    }
-    const binding = this.sources.binding(key);
-    if (!binding || binding.claudePid === undefined) {
-      return false;
-    }
-    const file = this.readSession(binding.claudePid);
-    const id = key.slice(key.indexOf(":") + 1);
-    if (!file || file.status !== "busy" || (file.sessionId !== undefined && file.sessionId !== id)) {
-      return false;
-    }
-    return this.backgroundReady(key, this.entries.get(key), binding.uncertain);
   }
 
   private clearStop(key: SessionKey): void {
@@ -352,19 +323,6 @@ export class SessionStates {
   }
 }
 
-/**
- * `notification_type` decides; the message text is read only when the type is
- * absent, and then only an idle-prompt notice counts as harmless.
- */
-function isHarmlessNotification(payload: Record<string, unknown>): boolean {
-  const type = payload.notification_type;
-  if (typeof type === "string") {
-    return type === "idle_prompt" || type === "auth_success";
-  }
-  const message = typeof payload.message === "string" ? payload.message.toLowerCase() : "";
-  return message.includes("waiting for your input") && !message.includes("permission");
-}
-
 /** A hook fired inside a subagent carries that subagent's id. */
 function isSubagentHook(payload: Record<string, unknown>): boolean {
   return typeof payload.agent_id === "string" && payload.agent_id.length > 0;
@@ -422,8 +380,6 @@ interface Running {
   abort: (error: string) => void;
   /** Set while a cancel waits to settle: the launcher has answered for the command. */
   settled?: () => void;
-  /** Sent on hook evidence: revoked, and cancelled if unwritten, the moment the evidence goes. */
-  viaHooks?: boolean;
   /** A `viaHooks` text command: called when a UserPromptSubmit hook arrives after its write. */
   accepted?: () => void;
 }
@@ -585,19 +541,6 @@ export class LauncherRouter {
   }
 
   /**
-   * A `viaHooks` command not yet typed is only as good as the evidence it was
-   * sent on: once that is gone (a SubagentStop, main-thread work, a permission
-   * notice, a continued Stop, the file leaving `busy`) it is cancelled, as
-   * busy and never retyped. One already typed is left alone.
-   */
-  private revokeUnwritten(key: SessionKey): void {
-    const running = this.running.get(key);
-    if (running?.viaHooks && !running.written && !this.states.hookEvidence(key)) {
-      running.abort("busy");
-    }
-  }
-
-  /**
    * R163: a Stop hold opened, or an approval or a question is now pending.
    * A dispatched command not yet typed is cancelled; one already typed is
    * left alone, since a `/model` mid-dialog must not get another Esc.
@@ -722,7 +665,7 @@ export class LauncherRouter {
     const cmdId = randomUUID();
     let timer: NodeJS.Timeout | undefined;
     let compactDone: Promise<string> | undefined;
-    const running: Running = { cmdId, written: false, gen, abort: () => undefined, viaHooks };
+    const running: Running = { cmdId, written: false, gen, abort: () => undefined };
     // The background-subagent exception (see `backgroundReady`): Claude's file
     // stays `busy` for as long as the subagent lives, so a text command cannot
     // be judged by it going idle. It is accepted when a UserPromptSubmit hook
@@ -866,7 +809,6 @@ export class LauncherRouter {
 
   /** Tells the phone when what it shows for a session would change; `always` for a binding change. */
   private look(key: SessionKey, always: boolean): void {
-    this.revokeUnwritten(key);
     if (!this.port.binding(key)) {
       if (this.shown.delete(key) || always) {
         this.onStateChange(key);
