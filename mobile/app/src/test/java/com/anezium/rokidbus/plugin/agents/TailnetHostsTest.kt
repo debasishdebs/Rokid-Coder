@@ -316,11 +316,15 @@ class TailnetHostsTest {
         val sessions = AgentSessionStore()
         val connected = CopyOnWriteArrayList<String?>()
         val endpoints = CopyOnWriteArrayList<Triple<String, List<String>, Int?>>()
+        var beforeOpenClaim: () -> Unit = {}
+        var beforeExpiryClaim: () -> Unit = {}
         val client = AgentdClient(
             OkHttpClient(), sessions, test, "test", FixturePhoneTlsIdentity(),
             pinnedClient = { wss },
             freshAltHosts = { alts() },
             connectDeadlineMs = deadlineMs,
+            beforeOpenClaim = { beforeOpenClaim() },
+            beforeExpiryClaim = { beforeExpiryClaim() },
             onSecureConnected = { _, _, _, address -> connected += address },
             onEndpoint = { fp, hosts, port -> endpoints += Triple(fp, hosts, port) },
         ) {}
@@ -500,6 +504,45 @@ class TailnetHostsTest {
     }
 
     @Test
+    fun an_attempt_the_deadline_took_first_never_sends_the_hello() {
+        val harness = Harness()
+        harness.client.start(config())
+        harness.settle()
+        // The socket opens, passes its liveness check, and the deadline fires before onOpen claims the attempt.
+        harness.beforeOpenClaim = {
+            harness.beforeOpenClaim = {}
+            harness.advance(DIAL_DEADLINE_MS)
+        }
+        harness.wss.connections[0].open()
+        harness.settle()
+        assertTrue("no token or secret on an expired attempt", harness.wss.connections[0].sent.isEmpty())
+        // The expiry stood: the next address is the one dialled.
+        assertEquals(listOf(lan, tailnet), harness.dialled())
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun an_attempt_that_opened_first_is_never_discarded_by_the_deadline() {
+        val harness = Harness()
+        harness.client.start(config())
+        harness.settle()
+        // The deadline has read that nothing opened and is about to discard; the open lands in that gap.
+        harness.beforeExpiryClaim = {
+            harness.beforeExpiryClaim = {}
+            harness.wss.connections[0].open()
+        }
+        harness.advance(DIAL_DEADLINE_MS)
+        assertEquals(1, harness.wss.connections[0].sent.size)
+        assertEquals(listOf(lan), harness.dialled())
+        harness.wss.connections[0].message(HELLO_ACK)
+        harness.settle()
+        assertEquals(ConnectionState.CONNECTED, harness.state().state)
+        harness.advance(DIAL_DEADLINE_MS)
+        assertEquals(listOf(lan), harness.dialled())
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
     fun a_whole_round_of_silent_hosts_ends_after_one_deadline_each() {
         val harness = Harness()
         harness.client.start(config())
@@ -571,10 +614,12 @@ class TailnetHostsTest {
     // ----------------------------------------------------------------------------- the fakes
 
     private class FakeConnection(val listener: WebSocketListener, val request: Request) {
+        val sent = CopyOnWriteArrayList<String>()
+
         val socket = object : WebSocket {
             override fun request(): Request = request
             override fun queueSize(): Long = 0L
-            override fun send(text: String): Boolean = true
+            override fun send(text: String): Boolean = sent.add(text)
             override fun send(bytes: ByteString): Boolean = false
             override fun close(code: Int, reason: String?): Boolean = true
             override fun cancel() = Unit
