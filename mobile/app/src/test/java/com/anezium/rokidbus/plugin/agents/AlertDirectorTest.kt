@@ -1123,4 +1123,27 @@ class AlertDirectorTest {
         feed(alert(kind = "approval", reason = "update", waiting = 1))
         assertEquals("show CLAUDE · approve", glasses.log.last())
     }
+
+    @Test
+    fun a_hidden_pending_item_is_published_and_reopened_like_a_reminder() {
+        up()
+        feed(alert(kind = "approval"))
+        director.onBandShown()
+        fireDwell()
+        assertEquals(listOf("A"), director.pending.value.map { it.id })
+
+        director.reopen("A")
+        assertEquals("show CLAUDE · approve", glasses.log.last())
+        assertTrue(director.pending.value.isEmpty())
+
+        // Answered at the laptop while hidden: it leaves the list and cannot be reopened.
+        director.onBandShown()
+        fireDwell()
+        assertEquals(1, director.pending.value.size)
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("A", "acted")))
+        assertTrue(director.pending.value.isEmpty())
+        val shows = glasses.log.count { it.startsWith("show") }
+        director.reopen("A")
+        assertEquals(shows, glasses.log.count { it.startsWith("show") })
+    }
 }

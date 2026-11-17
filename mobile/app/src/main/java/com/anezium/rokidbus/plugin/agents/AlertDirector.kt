@@ -116,6 +116,17 @@ class AlertDirector(
 
     private val _waiting = MutableStateFlow(0)
 
+    private val _pending = MutableStateFlow<List<AgentdAction.Alert>>(emptyList())
+
+    /**
+     * The approvals and questions still pending whose card left the glasses. The board marks their sessions
+     * and the session's control menu offers to bring the card back ([reopen]).
+     */
+    val pending: StateFlow<List<AgentdAction.Alert>> = _pending.asStateFlow()
+
+    /** The wearer picked "Answer" on a session's menu: the hidden card of [alertId] comes back like a reminder. */
+    fun reopen(alertId: String) = post { apply(coordinator.reopen(alertId)) }
+
     /** The current alert's `+N waiting`, for the board's own row; it follows the coordinator after every change. */
     val waiting: StateFlow<Int> = _waiting.asStateFlow()
 
@@ -281,6 +292,7 @@ class AlertDirector(
         applyEffects(effects)
         history.pruneNow(historyPolicy())
         _waiting.value = coordinator.current?.waiting ?: 0
+        _pending.value = coordinator.hiddenAlerts()
         settle()
     }
 

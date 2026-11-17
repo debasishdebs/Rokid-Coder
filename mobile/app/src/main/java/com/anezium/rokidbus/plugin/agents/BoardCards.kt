@@ -90,6 +90,8 @@ internal object BoardCards {
         signedOut: List<SignedOut> = emptyList(),
         /** No computer is paired, one is signed out, or one was refused: the board offers Pair a computer. */
         pairing: Boolean = false,
+        /** Sessions with an approval or question pending whose card left the glasses. */
+        pendingSessions: Set<String> = emptySet(),
     ): Board {
         val waitingRow = BoardModel.waitingRow(waiting)
         // Monitoring that is off has nothing to pair with: that row says to set up a provider first.
@@ -139,7 +141,7 @@ internal object BoardCards {
                 if (!pairRow) add(emptyRow(config))
             } else {
                 sessions.drop(windowStart).take(windowSize).forEachIndexed { offset, session ->
-                    add(sessionRow(session, windowStart + offset == selectedIndex, now))
+                    add(sessionRow(session, windowStart + offset == selectedIndex, now, session.key in pendingSessions))
                 }
             }
             add(
@@ -170,12 +172,13 @@ internal object BoardCards {
     fun selectedIndexIn(sessions: List<AgentSession>, selectedKey: String?): Int =
         sessions.indexOfFirst { it.key == selectedKey }.takeIf { it >= 0 } ?: 0
 
-    fun sessionRow(session: AgentSession, selected: Boolean, now: Long): NexusCardLine =
+    fun sessionRow(session: AgentSession, selected: Boolean, now: Long, pending: Boolean = false): NexusCardLine =
         BoardModel.row(
             session,
             selected,
             now,
             fallbackSub = sessionSub(session),
+            pending = pending,
         )
 
     /** The line that says what this session is actually doing to you, or for you. */

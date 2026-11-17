@@ -673,4 +673,89 @@ class AlertCoordinatorTest {
         assertFalse(shown.sound)
         assertTrue(shown.wake)
     }
+
+    private fun question(id: String, reason: String) = AgentdProtocolCodec().parse(
+        JSONObject()
+            .put("type", "alert").put("v", 2).put("id", id).put("sessionKey", "claude:s1")
+            .put("kind", "question").put("title", "Question").put("body", "Pick?").put("waiting", 0).put("reason", reason)
+            .put(
+                "question",
+                JSONObject().put("requestRef", "ref").put("source", "claude_tool").put(
+                    "items",
+                    JSONArray().put(
+                        JSONObject().put("text", "Pick?").put("options", JSONArray())
+                            .put("multiSelect", false).put("allowFreeText", true),
+                    ),
+                ),
+            )
+            .toString(),
+    ) as AgentdAction.Alert
+
+    @Test
+    fun a_question_whose_card_left_can_be_reopened_from_the_menu_and_answered() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(question("Q", "new"))
+        coordinator.onShownEvidence("Q")
+        coordinator.onDwellElapsed("Q")
+
+        assertEquals("Q", coordinator.hiddenFor("claude:s1")?.id)
+        val shown = coordinator.reopen("Q").filterIsInstance<Effect.Show>().single()
+        assertFalse(shown.sound)
+        assertFalse(shown.wake)
+        assertNull(coordinator.hiddenFor("claude:s1"))
+        // The usual path: Answer opens the question card, which sends the answer frame.
+        assertTrue(coordinator.onAction("Q", AlertCoordinator.ANSWER, secure = true).any { it is Effect.OpenQuestion })
+        val sent = coordinator.onQuestionConfirm("Q", mapOf("Pick?" to "yes"), secure = true)
+            .filterIsInstance<Effect.Send>().single()
+        assertEquals("question_answer", JSONObject(sent.line).getString("type"))
+    }
+
+    @Test
+    fun an_approval_whose_card_left_can_be_reopened_and_decided() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(frame("A", "new"))
+        coordinator.onShownEvidence("A")
+        coordinator.onDwellElapsed("A")
+        assertEquals("A", coordinator.hiddenFor("claude:s1")?.id)
+
+        coordinator.reopen("A")
+        val sent = coordinator.onAction("A", AlertCoordinator.ALLOW, secure = true)
+            .filterIsInstance<Effect.Send>().single { it.attempt != null }
+        assertEquals("alert_action", JSONObject(sent.line).getString("type"))
+    }
+
+    @Test
+    fun a_pending_item_leaves_the_menu_when_agentd_closes_it_or_the_link_returns() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        for (reason in listOf("acted", "expired", "withdrawn")) {
+            coordinator.onAlert(frame("A", "new"))
+            coordinator.onShownEvidence("A")
+            coordinator.onDwellElapsed("A")
+            assertEquals(reason, "A", coordinator.hiddenFor("claude:s1")?.id)
+            coordinator.onAlertClosed("A", reason)
+            assertNull(reason, coordinator.hiddenFor("claude:s1"))
+            // A reopen of a closed item says so and shows nothing.
+            assertTrue(coordinator.reopen("A").none { it is Effect.Show })
+        }
+        coordinator.onAlert(frame("A", "new"))
+        coordinator.onDwellElapsed("A")
+        coordinator.onLinkUp()
+        assertNull(coordinator.hiddenFor("claude:s1"))
+    }
+
+    @Test
+    fun a_reminder_or_the_wearers_close_moves_the_item_between_shown_and_hidden() {
+        val coordinator = AlertCoordinator(clock = { 0L })
+        coordinator.onAlert(frame("A", "new"))
+        coordinator.onBandClosed("A", NexusNoticeCloseReason.USER)
+        assertEquals("A", coordinator.hiddenFor("claude:s1")?.id)
+        // agentd's reminder shows it again: it is no longer hidden.
+        coordinator.onAlert(frame("A", "reminder"))
+        assertNull(coordinator.hiddenFor("claude:s1"))
+        // A Done has no answer to give, so nothing is kept for it.
+        coordinator.onAlert(frame("D", "new", kind = "done"))
+        coordinator.onShownEvidence("D")
+        coordinator.onDwellElapsed("D")
+        assertNull(coordinator.hiddenFor("claude:s1"))
+    }
 }

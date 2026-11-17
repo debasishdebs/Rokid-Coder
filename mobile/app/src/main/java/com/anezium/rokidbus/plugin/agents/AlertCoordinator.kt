@@ -80,6 +80,14 @@ class AlertCoordinator(
     private val seen = bounded<Seen>()
     private val cards = bounded<AgentdAction.Alert>()
 
+    /**
+     * Approvals and questions whose card left the glasses while agentd still holds them pending: the dwell
+     * ran out, or the wearer closed the band. The control menu offers them again ([hiddenFor], [reopen]), so
+     * a pending item never depends on the wearer catching its reminder. An entry ends with agentd's close of
+     * the id, its re-show, or a new link.
+     */
+    private val hidden = bounded<AgentdAction.Alert>()
+
     /** The alert whose band is up, or null. */
     val current: AgentdAction.Alert? get() = episode?.alert
 
@@ -94,8 +102,28 @@ class AlertCoordinator(
             } else {
                 show(alert, wake = unconfirmed(alert.id), sound = false)
             }
-            AlertReason.UPDATE -> if (up != null) refresh(up, alert) else emptyList()
+            AlertReason.UPDATE -> if (up != null) refresh(up, alert) else {
+                // A card that has left keeps the newest text and count for the menu.
+                if (alert.id in hidden) hidden[alert.id] = alert
+                emptyList()
+            }
         }
+    }
+
+    /** The hidden approval or question of [sessionKey], if one is still pending. */
+    fun hiddenFor(sessionKey: String): AgentdAction.Alert? = hidden.values.lastOrNull { it.sessionKey == sessionKey }
+
+    /** Every hidden item, for the board's marker. */
+    fun hiddenAlerts(): List<AgentdAction.Alert> = hidden.values.toList()
+
+    /**
+     * The wearer asked for a hidden item again, from the menu: the same card, through the normal path (so
+     * its dwell, its Allow/Deny or Answer, and its answer gate are the usual ones), without waking the
+     * display or sounding. An item that closed meanwhile says so.
+     */
+    fun reopen(id: String): List<Effect> {
+        val alert = hidden[id] ?: return listOf(noLongerWaiting())
+        return show(alert.copy(reason = AlertReason.RESUME), wake = false, sound = false)
     }
 
     /**
@@ -122,6 +150,7 @@ class AlertCoordinator(
     /** agentd closed the alert for a reason the glasses did not cause. */
     fun onAlertClosed(id: String, reason: String): List<Effect> {
         val effects = mutableListOf<Effect>(Effect.Closed(id, reason))
+        hidden.remove(id)
         if (episode?.alert?.id == id) {
             episode = null
             effects += Effect.Hide
@@ -139,6 +168,7 @@ class AlertCoordinator(
     fun onLinkUp(): List<Effect> {
         episode = null
         seen.clear()
+        hidden.clear()
         return listOf(Effect.Hide) + invalidateWhere { true }
     }
 
@@ -171,6 +201,7 @@ class AlertCoordinator(
                 effects += Effect.OpenQuestion(alert)
             }
             LATER -> {
+                keepForMenu(alert)
                 episode = null
                 effects += Effect.Hide
                 effects += Effect.Send(AgentdProtocolCodec.alertDismissed(id))
@@ -251,14 +282,19 @@ class AlertCoordinator(
      * agentd's own dwell), and the episode ends so a later `update` frame does not put the card back.
      */
     fun onDwellElapsed(id: String): List<Effect> {
-        if (episode?.alert?.id != id) return emptyList()
+        val alert = episode?.alert?.takeIf { it.id == id } ?: return emptyList()
+        keepForMenu(alert)
         episode = null
         return listOf(Effect.Hide)
     }
 
     /** The band for [id] closed. Only the wearer's close is evidence; any close ends the episode. */
     fun onBandClosed(id: String, reason: NexusNoticeCloseReason): List<Effect> {
-        if (episode?.alert?.id != id) return emptyList()
+        val closing = episode?.takeIf { it.alert.id == id } ?: return emptyList()
+        // Closed by the wearer, or timed out after the glasses showed it: gone from the display, still pending.
+        if (reason == NexusNoticeCloseReason.USER || reason == NexusNoticeCloseReason.TIMEOUT && closing.evidence) {
+            keepForMenu(closing.alert)
+        }
         val effects = if (reason == NexusNoticeCloseReason.USER) {
             // agentd parks an approval or question and brings it back as a reminder (R22).
             evidence(id) + Effect.Send(AgentdProtocolCodec.alertDismissed(id)) + Effect.Dismissed(id)
@@ -269,7 +305,13 @@ class AlertCoordinator(
         return effects
     }
 
+    /** Only what the wearer can still decide is worth a way back; the rest has no answer to give. */
+    private fun keepForMenu(alert: AgentdAction.Alert) {
+        if (alert.kind == AlertKind.APPROVAL || alert.kind == AlertKind.QUESTION) hidden[alert.id] = alert
+    }
+
     private fun show(alert: AgentdAction.Alert, wake: Boolean, sound: Boolean): List<Effect> {
+        hidden.remove(alert.id)
         episode = Episode(alert)
         if (wake) seenOf(alert.id).wokeAt = clock()
         return listOf(Effect.Show(alert, wake = wake, sound = sound))

@@ -510,4 +510,44 @@ class ControlMenuTest {
         assertEquals("rejected", ControlMenu.followupRejection(null, 120))
         assertEquals("Not applied: bad_text", ControlMenu.ackNotice(AgentdAction.Ack("m", "rejected", "bad_text"), followup = true))
     }
+
+    private fun pendingAlert(kind: AlertKind, body: String = "Pick one?") = AgentdAction.Alert(
+        id = "P1",
+        sessionKey = "claude:s1",
+        kind = kind,
+        title = "t",
+        body = body,
+        actions = emptyList(),
+        question = null,
+        waiting = 0,
+        reason = AlertReason.NEW,
+    )
+
+    @Test
+    fun a_hidden_question_or_approval_is_the_first_menu_line_with_its_text() {
+        val question = ControlMenu.items(session(), secure = true, pending = pendingAlert(AlertKind.QUESTION))
+        assertEquals("Answer question", question.first().label)
+        assertEquals("Pick one?", question.first().sub)
+        assertTrue(question.first().enabled)
+        val approval = ControlMenu.items(session(), secure = true, pending = pendingAlert(AlertKind.APPROVAL, "Bash: npm test"))
+        assertEquals("Answer approval", approval.first().label)
+        assertEquals("Bash: npm test", approval.first().sub)
+        // A session without v2 still offers it.
+        assertEquals(
+            listOf("Answer question", "Read output"),
+            ControlMenu.items(session(v2 = null), secure = true, pending = pendingAlert(AlertKind.QUESTION)).map { it.label },
+        )
+    }
+
+    @Test
+    fun picking_the_pending_line_raises_that_card_and_it_is_gone_once_answered() {
+        val state = ControlMenu.open("claude:s1")
+        val pending = pendingAlert(AlertKind.QUESTION)
+        assertEquals(ControlMenu.Step.Answer("P1"), ControlMenu.pick(state, session(), true, pending = pending))
+        // Offline it still raises the card: the answer is gated by the link, not the way back.
+        assertEquals(ControlMenu.Step.Answer("P1"), ControlMenu.pick(state, session(), false, pending = pending))
+        // No pending item (answered, dismissed or expired): no such line.
+        assertFalse(ControlMenu.items(session(), secure = true, pending = null).any { it is MenuItem.AnswerPending })
+        assertEquals(ControlMenu.Step.Reply, ControlMenu.pick(state, session(), true))
+    }
 }

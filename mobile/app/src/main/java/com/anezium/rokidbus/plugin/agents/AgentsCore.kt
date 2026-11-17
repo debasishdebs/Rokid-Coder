@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -296,6 +297,14 @@ class AgentsCore(
             // redraws the board by itself as soon as the count moves.
             AgentsRuntime.alertDirectors
                 .flatMapLatest { it?.waiting ?: flowOf(0) }
+                .distinctUntilChanged()
+                .collect { if (surfaceShown) render(show = false) }
+        }
+        serviceScope.launch {
+            // A pending item whose card left marks its board row and the menu line: they follow it.
+            AgentsRuntime.alertDirectors
+                .flatMapLatest { it?.pending ?: flowOf(emptyList()) }
+                .map { items -> items.map { it.id to it.sessionKey } }
                 .distinctUntilChanged()
                 .collect { if (surfaceShown) render(show = false) }
         }
@@ -761,7 +770,7 @@ class AgentsCore(
             retryArmed = controlSender.armed(state.sessionKey),
         )
         return BoardCards.menuCard(
-            ControlMenu.page(withNotice, session, secure = secureLink, now = System.currentTimeMillis()),
+            ControlMenu.page(withNotice, session, secure = secureLink, now = System.currentTimeMillis(), pending = pendingFor(session.key)),
         )
     }
 
@@ -783,11 +792,11 @@ class AgentsCore(
         val secure = secureLink
         when {
             event.keyCode in GlassesKeys.BACKWARD -> {
-                screen.menu = ControlMenu.move(state, -1, session, secure)
+                screen.menu = ControlMenu.move(state, -1, session, secure, pending = pendingFor(session.key))
                 render(show = false)
             }
             event.keyCode in GlassesKeys.FORWARD -> {
-                screen.menu = ControlMenu.move(state, +1, session, secure)
+                screen.menu = ControlMenu.move(state, +1, session, secure, pending = pendingFor(session.key))
                 render(show = false)
             }
             GlassesKeys.isEnter(event) -> onMenuPick(state, session, secure)
@@ -800,7 +809,7 @@ class AgentsCore(
     }
 
     private fun onMenuPick(state: ControlMenu.MenuState, session: AgentSession, secure: Boolean) {
-        when (val step = ControlMenu.pick(state, session, secure)) {
+        when (val step = ControlMenu.pick(state, session, secure, pending = pendingFor(session.key))) {
             is ControlMenu.Step.Go -> showMenu(step.state)
             is ControlMenu.Step.Send -> {
                 sendControl(step.command, session.key)
@@ -811,6 +820,11 @@ class AgentsCore(
                 screen.menuReading = step.title to step.text
                 render(show = false)
             }
+            is ControlMenu.Step.Answer -> {
+                // The same card, through the normal path; the menu is covered by it like by any alert.
+                screen.close(ActiveCard.Kind.MENU)
+                AgentsRuntime.alertDirector?.reopen(step.alertId)
+            }
             ControlMenu.Step.Reply -> answers.startVoice(VoiceTarget.Followup(session.key))
             ControlMenu.Step.Read -> openConversation(session)
             ControlMenu.Step.Close -> {
@@ -819,6 +833,10 @@ class AgentsCore(
             }
         }
     }
+
+    /** The approval or question of [sessionKey] whose card left the glasses and is still pending. */
+    private fun pendingFor(sessionKey: String): AgentdAction.Alert? =
+        AgentsRuntime.alertDirector?.pending?.value?.lastOrNull { it.sessionKey == sessionKey }
 
     private fun showMenu(state: ControlMenu.MenuState) {
         screen.showMenu(state)
@@ -1115,6 +1133,7 @@ class AgentsCore(
             config = configStore.load(),
             selectedKey = selectedKey,
             waiting = AgentsRuntime.alertDirector?.waiting?.value ?: 0,
+            pendingSessions = AgentsRuntime.alertDirector?.pending?.value.orEmpty().map { it.sessionKey }.toSet(),
             quiet = configStore.isQuiet(),
             now = System.currentTimeMillis(),
             signedOut = configStore.signedOut(),

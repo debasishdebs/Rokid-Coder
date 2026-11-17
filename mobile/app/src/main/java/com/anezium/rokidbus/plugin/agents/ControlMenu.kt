@@ -8,6 +8,19 @@ sealed interface MenuItem {
     val sub: String?
     val enabled: Boolean
 
+    /**
+     * A pending approval or question whose card left the glasses: picking it brings the same card back.
+     * [alertId] is the item; [sub] says what it is.
+     */
+    data class AnswerPending(
+        val alertId: String,
+        val kind: AlertKind,
+        override val sub: String?,
+        override val enabled: Boolean = true,
+    ) : MenuItem {
+        override val label: String get() = if (kind == AlertKind.QUESTION) "Answer question" else "Answer approval"
+    }
+
     data class ReplyByVoice(override val sub: String?, override val enabled: Boolean) : MenuItem {
         override val label: String get() = "Reply by voice"
     }
@@ -105,8 +118,16 @@ object ControlMenu {
         secure: Boolean,
         notApplied: String? = null,
         replyNotSent: String? = null,
+        pending: AgentdAction.Alert? = null,
     ): List<MenuItem> {
-        val v2 = session.v2 ?: return listOf(MenuItem.ReadOutput())
+        val answer = pending?.let {
+            MenuItem.AnswerPending(
+                it.id,
+                it.kind,
+                it.body.ifBlank { it.title }.singleLine(SUB_PART_CHARS).takeIf(String::isNotBlank),
+            )
+        }
+        val v2 = session.v2 ?: return listOfNotNull(answer, MenuItem.ReadOutput())
         fun steer(sub: String?, enabled: Boolean = true): Pair<String?, Boolean> =
             if (!secure) NOT_CONNECTED to false else sub to enabled
         // `needs rk claude` is the way out for a Claude session only (R95).
@@ -130,6 +151,7 @@ object ControlMenu {
         val effort = capability(v2.canModel, v2.pendingEffort)
         val compact = capability(v2.canCompact, null)
         return buildList {
+            answer?.let(::add)
             add(MenuItem.ReplyByVoice(reply.first, reply.second))
             add(MenuItem.ApprovalMode(approval.first, approval.second))
             add(MenuItem.Model(model.first, model.second))
@@ -243,6 +265,9 @@ object ControlMenu {
         /** [text] is too long for a row: it opens in a reader. */
         data class ReadText(val title: String, val text: String) : Step
 
+        /** The wearer picked a pending item's menu line: its card comes back on the glasses. */
+        data class Answer(val alertId: String) : Step
+
         /** Start a voice reply; it is sent as the v2 `followup` after the heard card's Send. */
         data object Reply : Step
 
@@ -279,8 +304,9 @@ object ControlMenu {
         session: AgentSession,
         secure: Boolean,
         now: Long = System.currentTimeMillis(),
+        pending: AgentdAction.Alert? = null,
     ): Page {
-        val entries = entries(state, session, secure, now)
+        val entries = entries(state, session, secure, now, pending)
         val selectable = entries.indices.filter { entries[it].act != null }
         val selected = selectable.getOrNull(state.index.coerceIn(0, (selectable.size - 1).coerceAtLeast(0))) ?: -1
         val heading = headingOf(session)
@@ -308,8 +334,9 @@ object ControlMenu {
         session: AgentSession,
         secure: Boolean,
         now: Long = System.currentTimeMillis(),
+        pending: AgentdAction.Alert? = null,
     ): MenuState {
-        val count = entries(state, session, secure, now).count { it.act != null }
+        val count = entries(state, session, secure, now, pending).count { it.act != null }
         if (count == 0) return state
         return state.copy(index = ((state.index + delta) % count + count) % count)
     }
@@ -331,26 +358,39 @@ object ControlMenu {
         session: AgentSession,
         secure: Boolean,
         now: Long = System.currentTimeMillis(),
+        pending: AgentdAction.Alert? = null,
     ): Step {
         if (!secure && state.screen != Screen.Main) return Step.Go(state.copy(screen = Screen.Main, index = 0))
-        val entries = entries(state, session, secure, now).filter { it.act != null }
+        val entries = entries(state, session, secure, now, pending).filter { it.act != null }
         val entry = entries.getOrNull(state.index.coerceIn(0, (entries.size - 1).coerceAtLeast(0)))
         return entry?.act?.invoke() ?: Step.Close
     }
 
     // ---------------------------------------------------------------- screens
 
-    private fun entries(state: MenuState, session: AgentSession, secure: Boolean, now: Long): List<Entry> =
+    private fun entries(
+        state: MenuState,
+        session: AgentSession,
+        secure: Boolean,
+        now: Long,
+        pending: AgentdAction.Alert?,
+    ): List<Entry> =
         when (val screen = state.screen) {
-            Screen.Main -> mainEntries(state, session, secure, now)
+            Screen.Main -> mainEntries(state, session, secure, now, pending)
             Screen.Modes -> modeEntries(state, session)
             is Screen.Choose -> chooseEntries(state, session, screen.setting, now)
             is Screen.Confirm -> confirmEntries(state, screen)
         }
 
-    private fun mainEntries(state: MenuState, session: AgentSession, secure: Boolean, now: Long): List<Entry> {
+    private fun mainEntries(
+        state: MenuState,
+        session: AgentSession,
+        secure: Boolean,
+        now: Long,
+        pending: AgentdAction.Alert?,
+    ): List<Entry> {
         val codex = session.provider == AgentProvider.CODEX
-        return items(session, secure, state.notApplied, state.replyNotSent).map { item ->
+        return items(session, secure, state.notApplied, state.replyNotSent, pending).map { item ->
             val tone = if (item.enabled) NexusRowTone.NORMAL else NexusRowTone.DIM
             val armed = item is MenuItem.Compact && item.enabled && !codex && Command.LauncherCompact in state.retryArmed
             val row = Row(
@@ -365,6 +405,9 @@ object ControlMenu {
                         if (item.sub == NOT_CONNECTED) Step.Say(AlertCoordinator.NOT_SENT, NOT_CONNECTED)
                         else Step.Say(NOTICE_TITLE, item.sub ?: "not available")
                     }
+                }
+                item is MenuItem.AnswerPending -> {
+                    { Step.Answer(item.alertId) }
                 }
                 item is MenuItem.ReplyByVoice -> {
                     { Step.Reply }
