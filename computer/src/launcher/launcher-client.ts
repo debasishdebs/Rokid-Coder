@@ -22,13 +22,14 @@ export interface LauncherClientOptions {
 }
 
 function asTypeCommand(frame: Frame): TypeCommand | undefined {
-  const { cmdId, gen, notBefore, command, model, text } = frame;
+  const { cmdId, gen, notBefore, viaHooks, command, model, text } = frame;
   if (
     typeof cmdId !== "string" ||
     !Number.isInteger(gen) ||
     typeof command !== "string" ||
     !COMMANDS.has(command) ||
     (notBefore !== undefined && (typeof notBefore !== "number" || !Number.isFinite(notBefore))) ||
+    (viaHooks !== undefined && typeof viaHooks !== "boolean") ||
     (model !== undefined && typeof model !== "string") ||
     (text !== undefined && typeof text !== "string")
   ) {
@@ -39,6 +40,7 @@ function asTypeCommand(frame: Frame): TypeCommand | undefined {
     gen: gen as number,
     command: command as TypeCommand["command"],
     ...(notBefore !== undefined ? { notBefore } : {}),
+    ...(viaHooks === true ? { viaHooks } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(text !== undefined ? { text } : {}),
   };

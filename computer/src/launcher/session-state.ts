@@ -11,6 +11,17 @@ import type { CommandResult, SendError, TypeCommand } from "./launcher-hub";
  */
 export type LaunchState = "busy" | "held" | "ready";
 
+/**
+ * The one exception to "ready comes from Claude's file alone". While a
+ * background subagent runs, Claude's sessions file says `busy` for as long as
+ * the subagent lives (an hour, say), though the main prompt is free and the
+ * wearer can type at the laptop. Such a session is also ready on hook evidence:
+ * the file says `busy`, a `Stop` hook came after the last sign of main-thread
+ * work, and the session store counts a running subagent. See `backgroundReady`.
+ * The evidence is bounded by this age, so a missed hook cannot leave it ready.
+ */
+export const BACKGROUND_STOP_FRESH_MS = 6 * 60 * 60_000;
+
 /** The brief's windows. */
 export const READY_WAIT_MS = 60_000;
 export const COMPACT_LIMIT_MS = 180_000;
@@ -42,6 +53,8 @@ export interface StateSources {
   held(key: SessionKey): boolean;
   /** An approval or a question is waiting on the session. */
   asking(key: SessionKey): boolean;
+  /** Subagents the session store counts as running (SubagentStart seen, SubagentStop not yet). */
+  subagents?(key: SessionKey): number;
   /** Ends the binding's uncertainty; the launcher is told. */
   clearUncertain(key: SessionKey): void;
 }
@@ -63,6 +76,13 @@ interface Entry {
   passedLatchAt?: number;
   inFlight: boolean;
   compact?: CompactWatch;
+  /**
+   * When agentd saw a `Stop` hook with no sign of main-thread work since: a
+   * UserPromptSubmit, a main-thread PreToolUse or PermissionRequest, a
+   * permission Notification, a SubagentStop (the main thread wakes for its
+   * result), a typed command's write or a delivered Stop all clear it.
+   */
+  stopAt?: number;
 }
 
 export class SessionStates {
@@ -81,6 +101,8 @@ export class SessionStates {
    */
   latch(key: SessionKey, at: number): void {
     const entry = this.entry(key);
+    // Whatever the latch stands for (a write, a delivered Stop) starts main-thread work.
+    entry.stopAt = undefined;
     entry.latchAt = entry.latchAt === undefined ? at : Math.max(entry.latchAt, at);
   }
 
@@ -112,7 +134,31 @@ export class SessionStates {
   /** The hooks that tell agentd something the file cannot. */
   onHook(key: SessionKey, event: string, payload: Record<string, unknown>): void {
     switch (event) {
+      case "Stop":
+        this.entry(key).stopAt = this.clock();
+        break;
+      case "SessionStart":
+        this.entry(key).stopAt = undefined;
+        break;
+      case "PreToolUse":
+      case "PermissionRequest":
+        // A subagent's own tool calls reach the same session; they are not the main thread.
+        if (!isSubagentHook(payload)) {
+          this.clearStop(key);
+        }
+        break;
+      case "Notification":
+        // The idle-prompt notice says the prompt is free; a permission one says it is not.
+        if (typeof payload.message === "string" && payload.message.toLowerCase().includes("permission")) {
+          this.clearStop(key);
+        }
+        break;
+      case "SubagentStop":
+        // A background subagent's result wakes the main thread.
+        this.clearStop(key);
+        break;
       case "UserPromptSubmit":
+        this.clearStop(key);
         // Nothing is typed while uncertain, so a prompt now is the wearer's own:
         // whatever was left on the screen, they have dealt with it.
         if (this.sources.binding(key)?.uncertain) {
@@ -141,6 +187,13 @@ export class SessionStates {
         }
         break;
       }
+    }
+  }
+
+  private clearStop(key: SessionKey): void {
+    const entry = this.entries.get(key);
+    if (entry) {
+      entry.stopAt = undefined;
     }
   }
 
@@ -195,34 +248,69 @@ export class SessionStates {
   }
 
   state(key: SessionKey): LaunchState {
+    return this.evaluate(key).state;
+  }
+
+  /**
+   * `viaHooks` marks the exception: the state is `ready` though Claude's file
+   * says `busy`, on the hook evidence of `backgroundReady`. A command typed on
+   * that basis cannot wait for the file to go idle, ever.
+   */
+  evaluate(key: SessionKey, allowBackground = true): { state: LaunchState; viaHooks: boolean } {
+    const busy = { state: "busy" as const, viaHooks: false };
     if (this.sources.held(key)) {
-      return "held";
+      return { state: "held", viaHooks: false };
     }
     const binding = this.sources.binding(key);
     const entry = this.entries.get(key);
     // A running command keeps the latch it set: only an idle seen after the
     // command is over may clear it.
     if (!binding || entry?.inFlight || this.sources.asking(key) || binding.claudePid === undefined) {
-      return "busy";
+      return busy;
     }
     const id = key.slice(key.indexOf(":") + 1);
     const file = this.readSession(binding.claudePid);
-    if (!file || file.status !== "idle" || (file.sessionId !== undefined && file.sessionId !== id)) {
-      return "busy";
+    if (!file || (file.sessionId !== undefined && file.sessionId !== id)) {
+      return busy;
+    }
+    if (file.status !== "idle") {
+      return allowBackground && file.status === "busy" && this.backgroundReady(key, entry, binding.uncertain)
+        ? { state: "ready", viaHooks: true }
+        : busy;
     }
     if (entry?.latchAt !== undefined) {
       if (!(file.statusUpdatedAt > entry.latchAt)) {
-        return "busy";
+        return busy;
       }
       entry.passedLatchAt = entry.latchAt;
       entry.latchAt = undefined;
       // R141: Claude has been seen idle since the write that left it uncertain.
       if (binding.uncertain) {
         this.sources.clearUncertain(key);
-        return "ready";
+        return { state: "ready", viaHooks: false };
       }
     }
-    return binding.uncertain ? "busy" : "ready";
+    return binding.uncertain ? busy : { state: "ready", viaHooks: false };
+  }
+
+  /**
+   * The file says `busy` but the main prompt may be free: a background
+   * subagent keeps the file busy for its whole life. Ready only when agentd
+   * has seen a Stop after the last prompt or other main-thread activity
+   * (`stopAt`, cleared by each), within BACKGROUND_STOP_FRESH_MS, the store
+   * counts a running subagent, no write of ours is newer than that Stop, and
+   * nothing is uncertain. Anything else keeps the file's word, so a missed
+   * Stop or SubagentStop leaves the session busy, never wrongly typed into.
+   */
+  private backgroundReady(key: SessionKey, entry: Entry | undefined, uncertain: boolean): boolean {
+    const stopAt = entry?.stopAt;
+    if (uncertain || stopAt === undefined || this.clock() - stopAt > BACKGROUND_STOP_FRESH_MS) {
+      return false;
+    }
+    if (entry?.latchAt !== undefined && stopAt < entry.latchAt) {
+      return false;
+    }
+    return (this.sources.subagents?.(key) ?? 0) > 0;
   }
 
   private entry(key: SessionKey): Entry {
@@ -233,6 +321,11 @@ export class SessionStates {
     }
     return entry;
   }
+}
+
+/** A hook fired inside a subagent carries that subagent's id. */
+function isSubagentHook(payload: Record<string, unknown>): boolean {
+  return typeof payload.agent_id === "string" && payload.agent_id.length > 0;
 }
 
 /** What the router needs of the launcher hub. */
@@ -262,6 +355,8 @@ export interface RouterTimings {
   pollMs: number;
   /** R165: how long a cancel waits to hear whether the launcher typed the command anyway. */
   cancelSettleMs: number;
+  /** How long past the readiness window a model or text command may still take. */
+  resultSlackMs: number;
 }
 
 export const CANCEL_SETTLE_MS = 500;
@@ -285,6 +380,8 @@ interface Running {
   abort: (error: string) => void;
   /** Set while a cancel waits to settle: the launcher has answered for the command. */
   settled?: () => void;
+  /** A `viaHooks` text command: called when a UserPromptSubmit hook arrives after its write. */
+  accepted?: () => void;
 }
 
 /**
@@ -320,6 +417,7 @@ export class LauncherRouter {
       compactLimitMs: options.timings?.compactLimitMs ?? COMPACT_LIMIT_MS,
       pollMs: options.timings?.pollMs ?? READY_POLL_MS,
       cancelSettleMs: options.timings?.cancelSettleMs ?? CANCEL_SETTLE_MS,
+      resultSlackMs: options.timings?.resultSlackMs ?? RESULT_SLACK_MS,
     };
     this.onStateChange = options.onStateChange ?? (() => undefined);
     this.port.onCommandWritten((key, cmdId, at) => {
@@ -398,6 +496,26 @@ export class LauncherRouter {
     return state === "ready" && !this.port.laptopDraft(key) ? "ready" : "unavailable";
   }
 
+  /**
+   * Why `followupState` is "unavailable", for the phone to say: "draft" when
+   * only text at the laptop prompt is in the way, "busy" for everything else
+   * (Claude working, a pending approval, an uncertain write). Undefined when
+   * the follow-up is available, or the session is not bound.
+   */
+  followupWhy(key: SessionKey): "busy" | "draft" | undefined {
+    if (!this.port.binding(key)) {
+      return undefined;
+    }
+    const state = this.states.state(key);
+    if (state === "held") {
+      return undefined;
+    }
+    if (state !== "ready") {
+      return "busy";
+    }
+    return this.port.laptopDraft(key) ? "draft" : undefined;
+  }
+
   /** A Stop hook just carried a follow-up: Claude carries on, so the session is busy before the hook returns. */
   onStopDelivered(key: SessionKey): void {
     this.states.latch(key, this.clock());
@@ -407,9 +525,18 @@ export class LauncherRouter {
   onHook(key: SessionKey, event: string, payload: Record<string, unknown>): void {
     this.states.onHook(key, event, payload);
     if (event === "UserPromptSubmit" && this.port.binding(key)) {
+      // A typed command's own prompt (any text), seen after its write.
+      const running = this.running.get(key);
+      if (running?.written) {
+        running.accepted?.();
+      }
       // R163: a laptop turn started; a reply queued before it is not for it.
       this.cancelUnwritten(key);
       this.port.promptSubmitted(key, this.clock());
+    }
+    if (this.port.binding(key)) {
+      // A Stop or the like changes what the phone may show; the file never would.
+      this.look(key, false);
     }
   }
 
@@ -455,11 +582,12 @@ export class LauncherRouter {
       return fail("not_launcher");
     }
     const epoch = this.epoch(key);
-    const ready = await this.waitForReady(key, start.gen, epoch, false);
-    if (ready !== "ready") {
+    // Compact and model never take the hook-evidence exception: they need the file's own idle.
+    const ready = await this.waitForReady(key, start.gen, epoch, false, false);
+    if (ready !== "ready" && ready !== "ready_hooks") {
       return fail(ready);
     }
-    return this.run(key, start.gen, epoch, cmd);
+    return this.run(key, start.gen, epoch, cmd, false);
   }
 
   /**
@@ -472,28 +600,36 @@ export class LauncherRouter {
       return fail("not_launcher");
     }
     const epoch = this.epoch(key);
-    const ready = await this.waitForReady(key, start.gen, epoch, true);
+    const ready = await this.waitForReady(key, start.gen, epoch, true, true);
     if (ready === "held") {
       return deliverHeld();
     }
-    if (ready !== "ready") {
+    if (ready !== "ready" && ready !== "ready_hooks") {
       return fail(ready);
     }
-    return this.run(key, start.gen, epoch, { command: "text", text });
+    return this.run(key, start.gen, epoch, { command: "text", text }, ready === "ready_hooks");
   }
 
   /**
    * Waits up to the readiness window. Resolves "ready" with the session
-   * claimed, "held" (only when `takeHeld`), or the error to reject with.
+   * claimed ("ready_hooks" when that readiness is the background-subagent
+   * exception, only for `background` callers, i.e. text), "held" (only when
+   * `takeHeld`), or the error to reject with.
    */
-  private async waitForReady(key: SessionKey, gen: number, epoch: number, takeHeld: boolean): Promise<string> {
+  private async waitForReady(
+    key: SessionKey,
+    gen: number,
+    epoch: number,
+    takeHeld: boolean,
+    background: boolean,
+  ): Promise<string> {
     const deadline = this.clock() + this.timings.readyWaitMs;
     for (;;) {
       const problem = this.interrupted(key, gen, epoch);
       if (problem) {
         return problem;
       }
-      const state = this.states.state(key);
+      const { state, viaHooks } = this.states.evaluate(key, background);
       // A command still in flight finishes first; a delivery beside it would race it.
       if (state === "held" && takeHeld && !this.states.claimed(key)) {
         return "held";
@@ -505,7 +641,11 @@ export class LauncherRouter {
       // waiting here keeps what agentd dispatches in line with what it shows.
       const draft = this.port.laptopDraft(key);
       if (state === "ready" && !draft && this.states.claim(key)) {
-        return "ready";
+        if (viaHooks) {
+          // The Stop after the last write is the barrier here (see backgroundReady).
+          this.states.clearLatch(key);
+        }
+        return viaHooks ? "ready_hooks" : "ready";
       }
       if (this.clock() >= deadline) {
         return state === "ready" && draft ? "laptop_draft" : "busy";
@@ -515,11 +655,30 @@ export class LauncherRouter {
   }
 
   /** Runs a claimed command to its end; the claim is released whatever happens. */
-  private async run(key: SessionKey, gen: number, epoch: number, cmd: LauncherCommand): Promise<RouteOutcome> {
+  private async run(
+    key: SessionKey,
+    gen: number,
+    epoch: number,
+    cmd: LauncherCommand,
+    viaHooks: boolean,
+  ): Promise<RouteOutcome> {
     const cmdId = randomUUID();
     let timer: NodeJS.Timeout | undefined;
     let compactDone: Promise<string> | undefined;
     const running: Running = { cmdId, written: false, gen, abort: () => undefined };
+    // The background-subagent exception (see `backgroundReady`): Claude's file
+    // stays `busy` for as long as the subagent lives, so a text command cannot
+    // be judged by it going idle. It is accepted when a UserPromptSubmit hook
+    // arrives after its write (the text need not match) and finished when the
+    // next Stop does; nothing makes the session ready again before that Stop,
+    // and without one it stays busy. If no prompt shows in the window the
+    // command fails exactly like any other that ran out of time: it was typed,
+    // so it is consumed and never retyped, and success is never claimed unseen.
+    const promptSeen = viaHooks
+      ? new Promise<string>((resolve) => {
+          running.accepted = () => resolve("accepted");
+        })
+      : undefined;
     // Typed, then failed: the msgId is spent, so a resend is a duplicate, never a retype.
     const failed = (error: string): RouteOutcome => (running.written ? { ok: false, error, consumed: true } : fail(error));
     const interrupt = new Promise<string>((resolve) => {
@@ -527,7 +686,7 @@ export class LauncherRouter {
       this.running.set(key, running);
       const limit = cmd.command === "compact"
         ? this.timings.compactLimitMs
-        : this.timings.readyWaitMs + RESULT_SLACK_MS;
+        : this.timings.readyWaitMs + this.timings.resultSlackMs;
       timer = setTimeout(() => resolve("timeout"), limit);
     });
     try {
@@ -538,7 +697,12 @@ export class LauncherRouter {
         compactDone = new Promise<string>((resolve) => this.states.armCompact(key, gen, () => resolve("done")));
       }
       const notBefore = this.states.notBefore(key);
-      const sent = this.port.send(key, { cmdId, ...cmd, ...(notBefore !== undefined ? { notBefore } : {}) });
+      const sent = this.port.send(key, {
+        cmdId,
+        ...cmd,
+        ...(notBefore !== undefined ? { notBefore } : {}),
+        ...(viaHooks ? { viaHooks: true } : {}),
+      });
       const result: CommandResult | string = await Promise.race([sent, interrupt]);
       if (typeof result === "string") {
         // The launcher has not answered in time, or the session went away:
@@ -561,6 +725,12 @@ export class LauncherRouter {
         return OK;
       }
       if (cmd.command === "text") {
+        if (promptSeen) {
+          const end = await Promise.race([promptSeen, interrupt]);
+          if (end !== "accepted") {
+            return failed(end);
+          }
+        }
         return OK;
       }
       const end = await Promise.race([compactDone as Promise<string>, interrupt]);
@@ -645,7 +815,8 @@ export class LauncherRouter {
       }
       return;
     }
-    const seen = this.followupState(key);
+    // What the phone shows is the follow-up state and, when unavailable, why.
+    const seen = `${this.followupState(key)}/${this.followupWhy(key) ?? ""}`;
     if (always || this.shown.get(key) !== seen) {
       this.shown.set(key, seen);
       this.onStateChange(key);
