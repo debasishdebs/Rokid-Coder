@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import type { PluginRecord, PriorRegistration, Tool } from "./manifest";
 
@@ -310,12 +310,54 @@ export function createDriver(tool: Tool, cliPath: string, options: DriverOptions
   return new CliPluginDriver(tool, cliPath, options);
 }
 
-function digestOf(file: string): string | undefined {
-  return existsSync(file) ? createHash("sha256").update(readFileSync(file)).digest("hex") : undefined;
+/** Directory entries never part of a plugin's content: dependencies, VCS data, Finder droppings. */
+const SKIPPED_NAMES = new Set(["node_modules", ".git", ".DS_Store"]);
+
+/** A plugin's files by relative path (`/`-separated) to the SHA-256 of their bytes. */
+export type PluginFiles = Record<string, string>;
+
+/**
+ * Every regular file under `dir`, by relative path and content hash, in a deterministic (sorted) order.
+ * Symlinks, `node_modules`, `.git` and `.DS_Store` are skipped. A missing dir has no files.
+ */
+export function pluginFiles(dir: string): PluginFiles {
+  const files: PluginFiles = {};
+  const visit = (relative: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(path.join(dir, relative)).sort();
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (SKIPPED_NAMES.has(name)) continue;
+      const child = relative === "" ? name : `${relative}/${name}`;
+      const stat = lstatSync(path.join(dir, child));
+      if (stat.isDirectory()) {
+        visit(child);
+      } else if (stat.isFile()) {
+        files[child] = createHash("sha256").update(readFileSync(path.join(dir, child))).digest("hex");
+      }
+    }
+  };
+  visit("");
+  return files;
 }
 
-/** What a marketplace dir offers for our plugin: its dir, version and `bin/hook-forward.js` digest. */
-export function offeredPlugin(tool: Tool, marketplaceDir: string): { dir: string; version: string; digest?: string } {
+/** One digest of a plugin's whole content: the SHA-256 of its sorted `path NUL hash` lines. */
+export function contentDigest(files: PluginFiles): string {
+  const hash = createHash("sha256");
+  for (const name of Object.keys(files).sort()) {
+    hash.update(`${name}\0${files[name]}\n`);
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * What a marketplace dir offers for our plugin: its dir, version, every file's hash and the digest of
+ * them all. A change to hooks.json, a command or the manifest changes the digest with the version unchanged.
+ */
+export function offeredPlugin(tool: Tool, marketplaceDir: string): { dir: string; version: string; files: PluginFiles; digest: string } {
   const manifest = JSON.parse(readFileSync(path.join(marketplaceDir, ...LAYOUT[tool].marketplace), "utf8")) as {
     plugins?: Array<{ name?: string; source?: string | { path?: string } }>;
   };
@@ -326,13 +368,32 @@ export function offeredPlugin(tool: Tool, marketplaceDir: string): { dir: string
   }
   const dir = path.resolve(marketplaceDir, relative);
   const { version } = JSON.parse(readFileSync(path.join(dir, ...LAYOUT[tool].manifest), "utf8")) as { version: string };
-  return { dir, version, digest: digestOf(path.join(dir, "bin", "hook-forward.js")) };
+  const files = pluginFiles(dir);
+  return { dir, version, files, digest: contentDigest(files) };
 }
 
-/** The forwarder digest of the copy the CLI installed, when it says where that is. */
-export function installedDigest(status: PluginStatus): string | undefined {
+/**
+ * The offered files the CLI's installed copy lacks or holds with other bytes, when the CLI says where that copy
+ * is and it exists; `undefined` when that is unknown (the version is then trusted). Extra files in the
+ * installed copy, such as the CLI's own cache files, are fine.
+ */
+export function installedDifferences(status: PluginStatus, offered: PluginFiles): string[] | undefined {
   const installPath = status.plugin?.installPath;
-  return installPath ? digestOf(path.join(installPath, "bin", "hook-forward.js")) : undefined;
+  if (!installPath || !existsSync(installPath)) {
+    return undefined;
+  }
+  const differing: string[] = [];
+  for (const [name, hash] of Object.entries(offered)) {
+    const file = path.join(installPath, ...name.split("/"));
+    let same = false;
+    try {
+      same = lstatSync(file).isFile() && createHash("sha256").update(readFileSync(file)).digest("hex") === hash;
+    } catch {
+      // Missing or unreadable: differs.
+    }
+    if (!same) differing.push(name);
+  }
+  return differing;
 }
 
 function realOrSelf(file: string): string {
@@ -353,16 +414,22 @@ export function isUnder(file: string, root: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function matches(status: PluginStatus, want: { version?: string; digest?: string }): boolean {
+/** What a plugin must be: its version and, when known, the files (and bytes) its installed copy must hold. */
+interface Want {
+  version?: string;
+  files?: PluginFiles;
+}
+
+/** The installed plugin has the wanted version and (when the CLI says where it is) every wanted file, byte for byte. */
+function matches(status: PluginStatus, want: Want): boolean {
   if (!status.plugin || status.plugin.version !== want.version) {
     return false;
   }
-  const have = installedDigest(status);
-  return want.digest === undefined || have === undefined || have === want.digest;
+  return !want.files || (installedDifferences(status, want.files) ?? []).length === 0;
 }
 
 /** Installs, updates, or (with no update verb, or when update keeps the same version) uninstalls and reinstalls. */
-async function converge(driver: PluginDriver, status: PluginStatus, want: { version?: string; digest?: string }): Promise<void> {
+async function converge(driver: PluginDriver, status: PluginStatus, want: Want): Promise<void> {
   if (!status.plugin) {
     await driver.installPlugin();
     return;
@@ -401,8 +468,10 @@ export interface SyncOutcome {
 
 /**
  * The idempotent provisioning: marketplace `rokid-coder` at `marketplaceDir`,
- * plugin `rokid` at the version and forwarder that dir offers. A second run
- * only reads.
+ * plugin `rokid` at the version and content that dir offers: every file of the
+ * plugin, not only its version, so a release that changes hooks.json or a
+ * command without bumping the version still refreshes the installed copy. A
+ * second run only reads.
  */
 export async function syncPlugin(driver: PluginDriver, marketplaceDir: string): Promise<SyncOutcome> {
   let prior: PriorRegistration = {};
@@ -413,7 +482,8 @@ export async function syncPlugin(driver: PluginDriver, marketplaceDir: string): 
     ...(detail ? { detail } : {}),
   });
   try {
-    const want = offeredPlugin(driver.tool, marketplaceDir);
+    const offered = offeredPlugin(driver.tool, marketplaceDir);
+    const want: Want = { version: offered.version, files: offered.files };
     let status = await driver.status();
     prior = {
       ...(status.marketplace ? { source: status.marketplace.source } : {}),
@@ -431,7 +501,11 @@ export async function syncPlugin(driver: PluginDriver, marketplaceDir: string): 
       status = await driver.status();
     }
     if (!matches(status, want)) {
-      const reason = `${driver.tool} reports plugin version ${status.plugin?.version ?? "none"}, expected ${want.version}`;
+      const differing = status.plugin?.version === want.version ? want.files ? installedDifferences(status, want.files) ?? [] : [] : [];
+      const reason =
+        differing.length > 0
+          ? `${driver.tool}'s installed plugin differs from the offered one in ${differing.slice(0, 5).join(", ")}${differing.length > 5 ? ", ..." : ""}`
+          : `${driver.tool} reports plugin version ${status.plugin?.version ?? "none"}, expected ${want.version}`;
       return { result: "failed", prior, record: record("failed", reason) };
     }
     return { result: "ok", prior, record: record("ok", undefined, want.version) };
@@ -443,7 +517,7 @@ export async function syncPlugin(driver: PluginDriver, marketplaceDir: string): 
 /**
  * Puts a recorded registration back [6b-R11]: the marketplace at its old
  * source, then the plugin at its old version, verified by the version and the
- * forwarder digest the CLI's installed copy holds. Throws when it cannot.
+ * file contents the CLI's installed copy holds. Throws when it cannot.
  */
 export async function restorePlugin(driver: PluginDriver, prior: PriorRegistration, ourRoots: string[]): Promise<void> {
   if (!prior.source) {
@@ -461,7 +535,7 @@ export async function restorePlugin(driver: PluginDriver, prior: PriorRegistrati
     return;
   }
   const offered = offeredPlugin(driver.tool, prior.source);
-  const want = { version: prior.pluginVersion, digest: offered.version === prior.pluginVersion ? offered.digest : undefined };
+  const want: Want = { version: prior.pluginVersion, files: offered.version === prior.pluginVersion ? offered.files : undefined };
   if (!matches(status, want)) {
     await converge(driver, status, want);
     status = await driver.status();
