@@ -14,7 +14,19 @@ data class AgentdConfig(
     val fp: String? = null,
     /** The steering secret (R44). Kept only with [fp], sent only in a pinned wss hello, never shown. */
     val steer: String? = null,
+    /**
+     * Other addresses of the same computer, tried after [host] (its LAN address at pairing; these are
+     * typically its Tailscale one). Where to dial only: [fp] still decides who answers.
+     */
+    val altHosts: List<String> = emptyList(),
 ) {
+    /** [host] first, then [altHosts], each once. */
+    val dialHosts: List<String>
+        get() = (listOf(host) + altHosts).distinctBy { it.lowercase() }
+
+    /** Whether the running client would dial the same computer the same way: [altHosts] are read fresh each round. */
+    fun sameDialAs(other: AgentdConfig?): Boolean = other != null && copy(altHosts = emptyList()) == other.copy(altHosts = emptyList())
+
     val configured: Boolean
         get() = host.isNotBlank() && port in 1..65535 && token.isNotBlank()
 
@@ -42,6 +54,22 @@ internal object PairingCopy {
 
     /** The outbound dial that the usage TTL stopped; the Computers card says which computer and how long. */
     const val SIGNED_OUT = "Signed out — not used for too long. Add it again."
+
+    private const val CANT_REACH = "Can't reach "
+    private const val AWAY_WITH_TAILSCALE =
+        "Away from home? Turn on Tailscale on this phone and make sure your computer is on it too."
+    private const val LAN_ONLY = "If you're away from home, your computer needs Tailscale too."
+
+    /** Why the dial found nothing at any of [hosts]: the user's own addresses, and what usually fixes it. */
+    fun cantReach(hosts: List<String>): String {
+        val named = hosts.take(4)
+        val list = if (named.size == 1) named[0] else named.dropLast(1).joinToString(", ") + " or " + named.last()
+        val lanOnly = named.size == 1 && !isTailnetAddress(named[0])
+        return "$CANT_REACH$list. ${if (lanOnly) LAN_ONLY else AWAY_WITH_TAILSCALE}"
+    }
+
+    /** Whether [detail] is a [cantReach] sentence, for a screen that wants it under the computer's name. */
+    fun isUnreachable(detail: String?): Boolean = detail?.startsWith(CANT_REACH) == true
 }
 
 /** A computer the phone signed out because it went unused past the pairing TTL (U7). */
@@ -59,7 +87,13 @@ data class AgentsConfig(
 }
 
 /** Where a v2 pairing line says agentd's wss is, and which cert to expect there. Nothing secret. */
-data class PairLineTarget(val host: String, val port: Int, val fp: String)
+data class PairLineTarget(
+    val host: String,
+    val port: Int,
+    val fp: String,
+    /** The line's optional full list of addresses (LAN first, Tailscale last); [host] stays the primary. */
+    val hosts: List<String> = emptyList(),
+)
 
 sealed interface AgentdPairingParseResult {
     data class Valid(val target: PairLineTarget) : AgentdPairingParseResult
@@ -67,7 +101,7 @@ sealed interface AgentdPairingParseResult {
 }
 
 /**
- * The pairing line and QR, v2: `{v:2, kind:"rokid-coder", host, port, fp}`. It only says where to
+ * The pairing line and QR, v2: `{v:2, kind:"rokid-coder", host, hosts?, port, fp}`. It only says where to
  * dial; the phone still runs the SAS code check there, and the credentials come after it.
  */
 object AgentdPairingParser {
@@ -90,7 +124,9 @@ object AgentdPairingParser {
         if (port !in 1..65535) return AgentdPairingParseResult.Invalid("Port is invalid.")
         val fp = (CertPins.parse(json.opt("fp") as? String) as? PinParse.Valid)?.fp
             ?: return AgentdPairingParseResult.Invalid(PairingCopy.BAD_FINGERPRINT)
-        return AgentdPairingParseResult.Valid(PairLineTarget(host, port, fp))
+        // An old line has none; a malformed list is ignored whole, never a reason to refuse the line.
+        val hosts = EndpointHosts.clean(json.optJSONArray("hosts"))
+        return AgentdPairingParseResult.Valid(PairLineTarget(host, port, fp, hosts))
     }
 }
 
@@ -168,6 +204,7 @@ class AgentsConfigStore internal constructor(
                     // As stored: a pin that no longer parses is refused by the client, not dropped here.
                     fp = prefs.getString(KEY_AGENTD_FP, null),
                     steer = prefs.getString(KEY_AGENTD_STEER, null),
+                    altHosts = EndpointHosts.without(EndpointHosts.decode(prefs.getString(KEY_AGENTD_ALT_HOSTS, null)), it),
                 )
             }?.takeIf(AgentdConfig::configured)
             return AgentsConfig(
@@ -218,6 +255,7 @@ class AgentsConfigStore internal constructor(
                     remove(KEY_AGENTD_NAME)
                     remove(KEY_AGENTD_FP)
                     remove(KEY_AGENTD_STEER)
+                    remove(KEY_AGENTD_ALT_HOSTS)
                     remove(KEY_AGENTD_LAST_USED)
                     remove(KEY_AGENTD_MACHINE_ID)
                     forgottenName?.let { removeSignedOut(this, it) }
@@ -230,6 +268,8 @@ class AgentsConfigStore internal constructor(
                     putString(KEY_AGENTD_NAME, config.name)
                     if (config.fp != null) putString(KEY_AGENTD_FP, config.fp) else remove(KEY_AGENTD_FP)
                     if (config.steer != null) putString(KEY_AGENTD_STEER, config.steer) else remove(KEY_AGENTD_STEER)
+                    EndpointHosts.encode(EndpointHosts.without(config.altHosts, config.host))
+                        ?.let { putString(KEY_AGENTD_ALT_HOSTS, it) } ?: remove(KEY_AGENTD_ALT_HOSTS)
                 }
             }.apply()
             return true
@@ -572,6 +612,7 @@ class AgentsConfigStore internal constructor(
             .remove(KEY_AGENTD_TOKEN)
             .remove(KEY_AGENTD_FP)
             .remove(KEY_AGENTD_STEER)
+            .remove(KEY_AGENTD_ALT_HOSTS)
             .remove(KEY_AGENTD_LAST_USED)
             .remove(KEY_AGENTD_MACHINE_ID)
             .remove(v2SeenKey(DIALLED))
@@ -625,6 +666,29 @@ class AgentsConfigStore internal constructor(
     /** The sticky v2-seen flags (R92) went with the monitor-only link; their keys are only cleared now. */
     private fun v2SeenKey(key: String) = "$KEY_V2_SEEN_PREFIX$key"
 
+    /**
+     * The computer, over a pinned link that [fp] names, says where else it can be reached. Replaces
+     * only the alternate addresses of the pairing that pin belongs to: never the primary host, the
+     * pin or any credential. False, with nothing written, when nothing changed or it is not that pairing.
+     *
+     * A frame naming another [port] is dropped whole: the saved port stays what we dial, so hosts
+     * learned for a different port would only add addresses that cannot answer.
+     */
+    fun learnAltHosts(fp: String, hosts: List<String>, port: Int?): Boolean {
+        synchronized(STORE_LOCK) {
+            val current = load().agentd ?: return false
+            val pin = (CertPins.parse(fp) as? PinParse.Valid)?.fp ?: return false
+            if ((CertPins.parse(current.fp) as? PinParse.Valid)?.fp != pin) return false
+            if (port != null && port != current.port) return false
+            val learned = EndpointHosts.without(EndpointHosts.clean(hosts), current.host)
+            if (learned == current.altHosts) return false
+            val edit = prefs.edit()
+            EndpointHosts.encode(learned)?.let { edit.putString(KEY_AGENTD_ALT_HOSTS, it) } ?: edit.remove(KEY_AGENTD_ALT_HOSTS)
+            edit.apply()
+            return true
+        }
+    }
+
     // ------------------------------------------------------------ one pairing per computer (6a-R3)
 
     /**
@@ -648,6 +712,7 @@ class AgentsConfigStore internal constructor(
                 KEY_AGENTD_NAME to record.machineName,
                 KEY_AGENTD_FP to record.agentdFp,
                 KEY_AGENTD_STEER to record.steer,
+                KEY_AGENTD_ALT_HOSTS to EndpointHosts.encode(EndpointHosts.without(record.wsHosts, record.wsHost)),
                 KEY_AGENTD_MACHINE_ID to id,
                 KEY_AGENTD_LAST_USED to now,
                 v2SeenKey(DIALLED) to null,
@@ -816,6 +881,7 @@ class AgentsConfigStore internal constructor(
         const val KEY_AGENTD_NAME = "agentd.name"
         const val KEY_AGENTD_FP = "agentd.fp"
         const val KEY_AGENTD_STEER = "agentd.steer"
+        const val KEY_AGENTD_ALT_HOSTS = "agentd.alt_hosts"
         const val KEY_AGENTD_LAST_USED = "agentd.last_used_at"
         const val KEY_AGENTD_MACHINE_ID = "agentd.machine_id"
         const val KEY_PAIRING_RECORD_PREFIX = "pairing.record."

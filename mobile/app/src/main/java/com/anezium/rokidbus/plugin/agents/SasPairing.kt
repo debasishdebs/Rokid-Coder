@@ -403,7 +403,11 @@ internal class SasWssDialer(
     private val commit: (PairingRecord) -> Boolean,
     private val onPaired: (PairingRecord) -> Unit,
 ) {
-    fun dial(host: String, port: Int, expectedFp: String?, peerName: String) {
+    /**
+     * [lineHosts] are the pairing line's own list of addresses: they stand in for the credentials' `wsHosts` when
+     * the computer sent none, and never replace a list it did send.
+     */
+    fun dial(host: String, port: Int, expectedFp: String?, peerName: String, lineHosts: List<String> = emptyList()) {
         val pin = expectedFp?.let { (CertPins.parse(it) as? PinParse.Valid)?.fp }
         val trust = sessionTrust(pin)
         val context = SSLContext.getInstance("TLS").apply { init(arrayOf(identity.keyManager()), arrayOf(trust), null) }
@@ -431,9 +435,9 @@ internal class SasWssDialer(
                     phoneFp = identity.fingerprint256(),
                     peerName = peerName,
                     send = { line -> webSocket.send(line) },
-                    store = commit,
+                    store = { record -> commit(record.withLineHosts(lineHosts)) },
                     close = { webSocket.close(1000, null) },
-                    onPaired = onPaired,
+                    onPaired = { record -> onPaired(record.withLineHosts(lineHosts)) },
                 )
             }
 
@@ -465,3 +469,6 @@ internal class SasWssDialer(
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
     }
 }
+
+private fun PairingRecord.withLineHosts(lineHosts: List<String>): PairingRecord =
+    if (wsHosts.isNotEmpty() || lineHosts.isEmpty()) this else copy(wsHosts = lineHosts)

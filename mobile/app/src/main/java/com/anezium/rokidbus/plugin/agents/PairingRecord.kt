@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.plugin.agents
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -20,6 +21,8 @@ data class PairingRecord(
     val wsPort: Int,
     /** The SAS attempt that made it: a PhoneLink commit proof is bound to it (6a-R4″). */
     val attempt: String,
+    /** The computer's other addresses (LAN first, Tailscale last) when it listed them; empty from an older one. */
+    val wsHosts: List<String> = emptyList(),
 ) {
     internal fun toJson(): String = JSONObject()
         .put("machineId", machineId)
@@ -29,12 +32,16 @@ data class PairingRecord(
         .put("steer", steer)
         .put("wsHost", wsHost)
         .put("wsPort", wsPort)
+        .apply { EndpointHosts.encode(wsHosts)?.let { put("wsHosts", JSONArray(it)) } }
         .put("attempt", attempt)
         .toString()
 
     /** The outbound slot this record dials. */
     internal fun outbound(): AgentdConfig =
-        AgentdConfig(host = wsHost, port = wsPort, token = token, name = machineName, fp = agentdFp, steer = steer)
+        AgentdConfig(
+            host = wsHost, port = wsPort, token = token, name = machineName, fp = agentdFp, steer = steer,
+            altHosts = EndpointHosts.without(wsHosts, wsHost),
+        )
 
     // The secrets, and the whole pin, stay out of every string this record becomes.
     override fun toString(): String = "PairingRecord(machineId=$machineId, name=$machineName, ws=$wsHost:$wsPort)"
@@ -64,7 +71,9 @@ data class PairingRecord(
             val port = json.optInt("wsPort", -1).takeIf { it in 1..65535 } ?: return null
             val name = json.optString("machineName").take(MAX_HUD_LABEL_CHARS).ifBlank { machineId }
             if (attempt.isBlank()) return null
-            return PairingRecord(machineId, name, fp, token, steer, host, port, attempt)
+            // Optional and additive: a computer from before alternate hosts sends none.
+            val hosts = EndpointHosts.clean(json.optJSONArray("wsHosts"))
+            return PairingRecord(machineId, name, fp, token, steer, host, port, attempt, hosts)
         }
     }
 }
