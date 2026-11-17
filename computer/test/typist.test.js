@@ -1133,3 +1133,29 @@ test("unbound_launcher_clears_uncertainty_from_its_polled_session_file", async (
     }
   });
 });
+
+test("a_text_command_on_hook_evidence_types_while_the_file_stays_busy", async () => {
+  const t = setup();
+  t.session.status = "busy";
+  t.session.statusUpdatedAt = t.clock.now();
+  // Without the flag the busy file keeps it waiting, as ever.
+  const plain = await t.run({ command: "text", text: "plain" }, 600);
+  assert.equal(plain.result, undefined);
+  assert.deepEqual(t.pty.writes, []);
+  t.typist.cancel("c1");
+  t.pty.writes.length = 0;
+  // agentd judged the prompt free from hooks: the file is not waited on, notBefore included.
+  const box = await t.run({ cmdId: "c2", command: "text", text: "from the glasses", notBefore: t.clock.now(), viaHooks: true }, 600);
+  assert.deepEqual(t.pty.writes, [PASTE("from the glasses") + "\r"]);
+  assert.deepEqual(box.result, { ok: true });
+  t.typist.dispose();
+});
+
+test("viaHooks_never_lets_compact_or_model_skip_the_file", async () => {
+  const t = setup();
+  t.session.status = "busy";
+  const box = await t.run({ command: "compact", viaHooks: true }, 60_100);
+  assert.deepEqual(box.result, { ok: false, error: "busy" });
+  assert.deepEqual(t.pty.writes, []);
+  t.typist.dispose();
+});

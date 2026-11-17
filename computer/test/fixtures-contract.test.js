@@ -242,7 +242,8 @@ const HANDLERS = {
 
   async session_input({ phone }, fixture) {
     phone.send(fixture);
-    const result = await phone.waitFor("session_input_result", (frame) => frame.id === fixture.id);
+    // The first frame a fresh daemon handles can take longer than the default 2 s on a loaded machine.
+    const result = await phone.waitFor("session_input_result", (frame) => frame.id === fixture.id, 10_000);
     // Typing into a terminal is off unless the owner turned it on: the reply says so.
     assert.equal(result.ok, false);
     assert.equal(result.error, "Typing from the glasses is turned off");
@@ -526,7 +527,8 @@ test("the_snapshot_and_upserts_agentd_sends_match_the_fixtures", async () => {
       const upsertFields = Object.keys(FROM_AGENT.session_upsert.session);
       const claude = snapshot.sessions.find((session) => session.id === CLAUDE);
       for (const session of snapshot.sessions) {
-        const extra = Object.keys(session).filter((key) => !upsertFields.includes(key));
+        // `followupWhy` is additive and present only while a follow-up is unavailable, which the fixture's own session is not.
+        const extra = Object.keys(session).filter((key) => !upsertFields.includes(key) && key !== "followupWhy");
         assert.deepEqual(extra, [], "snapshot session fields the fixture lacks");
       }
       const missing = Object.keys(FROM_AGENT.snapshot.sessions[0]).filter((key) => !(key in claude));

@@ -1199,3 +1199,18 @@ test("real_error_still_alerts", async () => {
     },
   );
 });
+
+test("followupWhy_says_not_launcher_for_a_plugin_session", async () => {
+  await withDaemon(
+    { transport: "wshub", tls: true, attached: [{ provider: "claude", id: "s1" }] },
+    async ({ phone, httpPort }) => {
+      await postHook(httpPort, { hook_event_name: "SessionStart", session_id: "s1", cwd: "/work/demo" });
+      const frame = await upsertOf(phone, "s1", () => true);
+      assert.equal(frame.session.capabilities.followup, "unavailable");
+      assert.equal(frame.session.followupWhy, "not_launcher");
+      // An old phone reads the fields it knows and never sees the new one matter.
+      const { id, capabilities } = JSON.parse(JSON.stringify(frame.session));
+      assert.deepEqual([id, capabilities.followup], ["s1", "unavailable"]);
+    },
+  );
+});
