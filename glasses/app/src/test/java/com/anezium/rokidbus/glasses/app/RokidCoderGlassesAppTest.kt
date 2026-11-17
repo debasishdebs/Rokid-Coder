@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.glasses.app
 
 import com.anezium.rokidbus.glasses.GlassesCoreConfig
+import com.anezium.rokidbus.glasses.R as CoreR
 import com.anezium.rokidbus.shared.AppIdentity
 import com.anezium.rokidbus.shared.GlassesClasses
 import org.junit.Assert.assertEquals
@@ -89,5 +90,21 @@ class RokidCoderGlassesAppTest {
             "Rokid Coder is setting itself up. Please keep the glasses on.",
             app.getString(com.anezium.rokidbus.glasses.R.string.setup_status_line, app.getString(com.anezium.rokidbus.glasses.R.string.product_name)),
         )
+    }
+
+    /** Opening the app lands on the one plugin instead of a list of one, and nothing on that way says Nexus. */
+    @Test
+    fun launcher_is_single_plugin_and_names_rokid_coder() {
+        assertTrue(app.resources.getBoolean(CoreR.bool.launcher_single_plugin_app))
+        for (id in listOf(CoreR.string.product_name, CoreR.string.launcher_title, CoreR.string.launcher_section_plugins, CoreR.string.launcher_empty)) {
+            val text = app.getString(id)
+            assertTrue(text, !text.contains("Nexus", ignoreCase = true) && !text.contains("Agents", ignoreCase = true))
+        }
+        assertEquals("ROKID CODER", app.getString(CoreR.string.product_name).uppercase())
+        // Upstream's own hub keeps the list: the core defaults off and :glasses-hub never turns it on.
+        assertTrue(File("../../vendor/nexus/glasses-core/src/main/res/values/bools.xml").readText()
+            .contains("name=\"launcher_single_plugin_app\">false<"))
+        assertTrue(File("../../vendor/nexus/glasses-hub/src/main/res").walkTopDown()
+            .none { it.isFile && it.readText().contains("launcher_single_plugin_app") })
     }
 }

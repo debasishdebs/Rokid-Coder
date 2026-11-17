@@ -20,6 +20,9 @@ object BoardModel {
     private const val TRAIL_ITEMS = 8
     private const val TRAIL_ITEM_CHARS = 24
 
+    /** The marker on a session whose hidden approval or question still waits for the wearer. */
+    const val PENDING_TAG = "1 waiting"
+
     /**
      * The provider's own approval modes that run things without asking, so the
      * wearer can see that a session is loose even when agentd's temporary mode
@@ -38,10 +41,13 @@ object BoardModel {
         selected: Boolean,
         now: Long,
         fallbackSub: String? = null,
+        /** An approval or question of this session is pending though its card left the glasses. */
+        pending: Boolean = false,
     ): NexusCardLine {
         val v2 = session.v2
         val approveAll = v2?.tempMode == TempMode.APPROVE_ALL
         val trail = buildList {
+            if (pending) add(PENDING_TAG)
             when (session.status) {
                 AgentStatus.NEEDS_YOU -> add("ASK")
                 AgentStatus.WORKING -> add("RUN")

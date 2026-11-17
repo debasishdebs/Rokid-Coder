@@ -56,7 +56,7 @@ class AlertNoticesTest {
     private fun NexusNotice.actionIds() = actions.map { it.id }
 
     @Test
-    fun approval_band_wakes_with_allow_deny_more_and_45s_ttl() {
+    fun approval_band_wakes_with_allow_deny_and_more() {
         val notice = AlertNotices.build(alert(), wake = true)
 
         assertEquals("CLAUDE · approve", notice.title)
@@ -65,11 +65,25 @@ class AlertNoticesTest {
         assertEquals(listOf("allow", "deny", "more"), notice.actionIds())
         assertEquals(listOf("Allow", "Deny", "More"), notice.actions.map { it.label })
         assertEquals(listOf("check", "close", "dot"), notice.actions.map { it.glyph })
-        assertEquals(45_000L, notice.ttlMs)
+        assertEquals(10_000L, notice.ttlMs)
         assertEquals(
             "CODEX · approve",
             AlertNotices.build(alert(sessionKey = "codex:s9"), wake = true).title,
         )
+    }
+
+    @Test
+    fun every_kind_lives_as_long_as_the_dwell_setting_plus_a_grace_and_never_past_the_hub_ttl() {
+        for (kind in AlertKind.values()) {
+            assertEquals("$kind 8 s", 10_000L, AlertNotices.build(alert(kind = kind), wake = true, dwellMs = 8_000L).ttlMs)
+            assertEquals("$kind 20 s", 22_000L, AlertNotices.build(alert(kind = kind), wake = true, dwellMs = 20_000L).ttlMs)
+            // 60 s outlives one hub ttl: the band starts at the ceiling and is extended once.
+            assertEquals("$kind 60 s", 45_000L, AlertNotices.build(alert(kind = kind), wake = true, dwellMs = 60_000L).ttlMs)
+        }
+        assertEquals(62_000L, AlertNotices.lifetimeMs(60_000L))
+        assertEquals(22_000L, AlertNotices.keepAlive(60_000L).ttlMs)
+        // A setting past what the hub can hold is read as the most it can.
+        assertEquals(82_000L, AlertNotices.lifetimeMs(3_600_000L))
     }
 
     @Test
@@ -84,17 +98,17 @@ class AlertNoticesTest {
         assertEquals(listOf("answer", "later"), notice.actionIds())
         assertEquals(listOf("Answer", "Later"), notice.actions.map { it.label })
         assertTrue(notice.wakeDisplay)
-        assertEquals(45_000L, notice.ttlMs)
+        assertEquals(10_000L, notice.ttlMs)
     }
 
     @Test
-    fun done_band_is_interactive_without_actions_and_12s() {
+    fun done_band_is_interactive_without_actions() {
         for (kind in listOf(AlertKind.DONE, AlertKind.ERROR)) {
             val notice = AlertNotices.build(alert(kind = kind), wake = true)
 
             assertTrue("$kind", notice.interactive)
             assertTrue("$kind", notice.actions.isEmpty())
-            assertEquals(12_000L, notice.ttlMs)
+            assertEquals(10_000L, notice.ttlMs)
             assertEquals("TAP read", notice.footer)
             assertTrue(notice.wakeDisplay)
         }
@@ -105,7 +119,7 @@ class AlertNoticesTest {
         val notice = AlertNotices.build(alert(kind = AlertKind.NOTICE), wake = true)
 
         assertFalse(notice.wakeDisplay)
-        assertEquals(8_000L, notice.ttlMs)
+        assertEquals(10_000L, notice.ttlMs)
         assertTrue(notice.actions.isEmpty())
         assertFalse(notice.interactive)
     }
@@ -166,7 +180,7 @@ class AlertNoticesTest {
         assertEquals(listOf("allow", "deny", "more"), notice.actionIds())
         assertEquals("Run npm test", notice.body)
         assertTrue(notice.wakeDisplay)
-        assertEquals(45_000L, notice.ttlMs)
+        assertEquals(10_000L, notice.ttlMs)
 
         // Only a command agentd had to cut loses Allow (R128).
         assertEquals(listOf("deny", "more"), AlertNotices.build(alert().copy(truncated = true), wake = true).actionIds())

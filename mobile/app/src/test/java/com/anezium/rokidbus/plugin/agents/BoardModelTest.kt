@@ -396,4 +396,12 @@ class BoardModelTest {
         val bare = session(v2 = null).copy(subagents = Subagents(1, now - 45_000L))
         assertEquals("1 subagent running · 0:45", BoardModel.row(bare, false, now).sub)
     }
+
+    @Test
+    fun a_session_with_a_hidden_pending_item_says_so_first_in_its_trail() {
+        val plain = BoardModel.row(session(), false, now = 1_000_000L)
+        val marked = BoardModel.row(session(), false, now = 1_000_000L, pending = true)
+        assertEquals(listOf(BoardModel.PENDING_TAG) + plain.trail, marked.trail)
+        assertEquals("1 waiting", BoardModel.PENDING_TAG)
+    }
 }

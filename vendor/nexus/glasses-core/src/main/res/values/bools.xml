@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- True in a shell whose phone app registers exactly one plugin: the launcher then opens
+         that plugin's surface directly and leaves the app when it closes, instead of listing it. -->
+    <bool name="launcher_single_plugin_app">false</bool>
+</resources>

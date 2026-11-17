@@ -12,6 +12,11 @@
     <string name="remote_input_method_label" translatable="false">Rokid Coder Remote Keyboard</string>
     <string name="remote_input_method_description">Type on the glasses from your paired phone. Text is never saved by Rokid Coder.</string>
 
+    <!-- The core's launcher, which this app only shows for a moment before it opens the one plugin. -->
+    <string name="launcher_title">Home</string>
+    <string name="launcher_section_plugins">SESSIONS</string>
+    <string name="launcher_empty">Waiting for the Rokid Coder phone app</string>
+
     <string name="onb_accessibility_title">Turn on Rokid Coder</string>
     <string name="onb_accessibility_body">Find “Rokid Coder” in the Settings list and switch it on.\n\nRokid Coder comes straight back here and finishes the rest on its own.</string>
     <string name="onb_running_title">Rokid Coder is finishing up</string>

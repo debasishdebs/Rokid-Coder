@@ -6,6 +6,10 @@
          strings below that spell it out are overridden with them. -->
     <string name="product_name" translatable="false">Rokid Nexus</string>
     <string name="product_short_name" translatable="false">Nexus</string>
+    <!-- The launcher's own words. A shell that hosts one plugin overrides them with launcher_single_plugin_app. -->
+    <string name="launcher_title">Launcher</string>
+    <string name="launcher_section_plugins">PLUGINS</string>
+    <string name="launcher_empty">No phone plugins synced</string>
     <string name="accessibility_service_label" translatable="false">Rokid Nexus Glasses</string>
     <string name="accessibility_service_description">Runs Nexus controls and guides secure Wireless Debugging pairing during first-run setup.</string>
     <string name="accessibility_service_summary">Nexus controls and secure first-run setup</string>

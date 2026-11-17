@@ -95,4 +95,83 @@ class ComputerRowsTest {
         assertEquals(2, rows.size)
         assertNull(rows[1].machineId)
     }
+
+    private fun status(
+        machineId: String = "m1",
+        inbound: LinkMachine? = null,
+        slot: DialledSlot? = null,
+        belongs: Set<String> = emptySet(),
+        reason: String? = null,
+    ) = ComputerRows.status(machineId, listOf(mac, other), inbound, slot, { it in belongs }, reason, now)
+
+    @Test
+    fun the_page_says_connected_over_tailscale_for_a_computer_the_phone_dialled() {
+        val status = status(slot = DialledSlot(config, "m1", link("100.101.102.103")), belongs = setOf("m1"))
+        assertTrue(status.connected)
+        assertEquals("CONNECTED · OVER TAILSCALE", status.line)
+        assertNull(status.reason)
+    }
+
+    @Test
+    fun the_page_says_connected_same_wifi_for_a_dialled_lan_link() {
+        val status = status(slot = DialledSlot(config, "m1", link("192.168.68.104")))
+        assertTrue(status.connected)
+        assertEquals("CONNECTED · SAME WI-FI", status.line)
+    }
+
+    @Test
+    fun the_page_says_connected_for_the_inbound_link_too() {
+        assertEquals("CONNECTED · OVER TAILSCALE", status(inbound = LinkMachine("m1", "Mac", true)).line)
+        assertEquals("CONNECTED · SAME WI-FI", status(inbound = LinkMachine("m1", "Mac", false)).line)
+    }
+
+    @Test
+    fun the_page_and_the_settings_row_agree_for_every_link_combination() {
+        val links = listOf<Pair<LinkMachine?, String?>>(
+            null to null, LinkMachine("m1", "Mac", false) to null, null to "100.64.0.9", null to "192.168.68.104",
+            LinkMachine("m2", "Desk", false) to null,
+        )
+        for ((inbound, address) in links) {
+            val slot = DialledSlot(config, "m1", address?.let(::link))
+            val row = build(trusted = listOf(mac, other), inbound = inbound, slot = slot, belongs = setOf("m1"))
+                .single { it.machineId == "m1" }
+            val page = status(inbound = inbound, slot = slot, belongs = setOf("m1"))
+            assertEquals("$inbound $address", row.connected, page.connected)
+            if (row.connected) assertEquals(row.sub.uppercase(), page.line)
+        }
+    }
+
+    @Test
+    fun a_link_to_another_computer_does_not_light_this_page() {
+        val status = status(inbound = LinkMachine("m2", "Desk", false), slot = DialledSlot(config, "m2", link("192.168.68.104")))
+        assertFalse(status.connected)
+        assertEquals("LAST SEEN 19 H AGO", status.line)
+    }
+
+    @Test
+    fun an_unreachable_dialled_computer_says_why_and_keeps_last_seen() {
+        val status = status(slot = DialledSlot(config, "m1", null), reason = unreachable)
+        assertFalse(status.connected)
+        assertEquals(unreachable, status.reason)
+        assertEquals("LAST SEEN 19 H AGO", status.line)
+    }
+
+    @Test
+    fun the_unreachable_reason_is_only_for_the_computer_the_phone_dials() {
+        assertNull(status(machineId = "m2", slot = DialledSlot(config, "m1", null), belongs = setOf("m1"), reason = unreachable).reason)
+        // Once it is connected there is nothing to explain, whatever the connection's last detail says.
+        assertNull(status(slot = DialledSlot(config, "m1", link("192.168.68.104")), reason = unreachable).reason)
+    }
+
+    @Test
+    fun dialled_slot_takes_the_outbound_link_to_its_machine_only() {
+        val links = mapOf(
+            LinkKey(LinkTransport.INBOUND, 1) to SecureLink("m1", "Mac", "192.168.68.104"),
+            LinkKey(LinkTransport.OUTBOUND, 2) to SecureLink("m2", "Desk", "100.64.0.9"),
+        )
+        assertNull(ComputerRows.dialledSlot(config, "m1", links)!!.link)
+        assertEquals("m2", ComputerRows.dialledSlot(config, "m2", links)!!.link!!.machineId)
+        assertEquals("m2", ComputerRows.dialledSlot(config, null, links)!!.link!!.machineId)
+        assertNull(ComputerRows.dialledSlot(null, "m1", links))
+    }
 }

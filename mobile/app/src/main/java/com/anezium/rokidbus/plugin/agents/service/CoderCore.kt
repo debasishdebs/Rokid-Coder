@@ -9,6 +9,7 @@ import com.anezium.rokidbus.phone.HubForegroundHost
 import com.anezium.rokidbus.phone.HubShellApi
 import com.anezium.rokidbus.phone.InProcessApp
 import com.anezium.rokidbus.plugin.agents.BuildConfig
+import com.anezium.rokidbus.plugin.agents.PRODUCT_TITLE
 import com.anezium.rokidbus.shared.AppIdentity
 import com.anezium.rokidbus.shared.plugin.PluginCapability
 
@@ -47,7 +48,7 @@ internal class HubCoderCore(private val hub: HubCore) : CoderCore {
     override fun close() = hub.close()
 
     companion object {
-        /** The core's configuration: this service promotes, and Agents is the one in-process app. */
+        /** The core's configuration: this service promotes, and the Rokid Coder app is the one in-process app. */
         fun config(host: HubForegroundHost) = HubCoreConfig(
             foreground = host,
             identity = AppIdentity(BuildConfig.PHONE_APPLICATION_ID, BuildConfig.GLASSES_APPLICATION_ID),
@@ -57,7 +58,7 @@ internal class HubCoderCore(private val hub: HubCore) : CoderCore {
         /** What the hub knows the Agents app as: the grants and prefixes its plugin manifest declared. */
         val AGENTS_APP = InProcessApp(
             pluginId = "agents",
-            displayName = "Agents",
+            displayName = PRODUCT_TITLE,
             iconKey = "terminal",
             capabilities = setOf(PluginCapability.SURFACES, PluginCapability.STT, PluginCapability.TTS),
             receivePrefixes = listOf("/plugin/agents", "/system/plugin", "/stt", "/tts/started", "/tts/done"),

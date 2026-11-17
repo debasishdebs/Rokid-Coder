@@ -52,6 +52,7 @@ class AlertDirectorTest {
     private val history = AlertHistory(clock = { now })
     private var keepAfterSession = true
     private var soundPrefs = SoundPrefs()
+    private var dwell = 8_000L
 
     private class Timer(val delayMs: Long, val work: () -> Unit) {
         var cancelled = false
@@ -81,6 +82,7 @@ class AlertDirectorTest {
         historyPolicy = { HistoryPolicy(windowMs = 24 * 3_600_000L, keepAfterSession = keepAfterSession) },
         headingOf = { "my-repo" },
         soundPrefs = { soundPrefs },
+        dwellMs = { dwell },
     )
 
     private fun alert(
@@ -988,5 +990,175 @@ class AlertDirectorTest {
 
         assertEquals("Start the session with rk claude to send prompts from the glasses.", entry("D").lastError)
         assertEquals("Not sent: Start the session with rk claude to send prompts from the glasses.", outcomeText(entry("D")))
+    }
+
+    // Card lifetime: "Alert stays on screen" counts from the glasses' shown report.
+
+    private fun live(delayMs: Long) = timers.filter { !it.cancelled && it.delayMs == delayMs }
+
+    private fun fireDwell(delayMs: Long = dwell) {
+        val timer = live(delayMs).last()
+        timer.cancelled = true
+        timer.work()
+    }
+
+    @Test
+    fun an_approval_card_leaves_after_the_dwell_without_telling_agentd_and_comes_back_as_a_reminder() {
+        up()
+        feed(alert(kind = "approval"))
+        // Nothing runs until the glasses say the band was shown.
+        assertTrue(live(8_000L).isEmpty())
+        director.onBandShown()
+        assertEquals(1, live(8_000L).size)
+        assertEquals(listOf("alert_shown"), types())
+
+        fireDwell()
+        assertEquals("hide", glasses.log.last())
+        // The alert is pending: no dismiss, nothing for agentd to settle.
+        assertEquals(listOf("alert_shown"), types())
+
+        // A waiting-count refresh of a card that has left does not put it back.
+        val before = glasses.log.size
+        feed(alert(kind = "approval", reason = "update", waiting = 1))
+        assertEquals(before, glasses.log.size)
+
+        // agentd's reminder does, silently, and the wearer can still answer it.
+        feed(alert(kind = "approval", reason = "reminder"))
+        assertEquals("show CLAUDE · approve", glasses.log.last())
+        director.onBandAction(AlertCoordinator.ALLOW)
+        assertEquals("alert_action", types().last())
+    }
+
+    @Test
+    fun a_done_card_leaves_after_the_dwell_and_agentd_is_not_asked_to_close_it() {
+        up()
+        feed(alert(kind = "done"))
+        director.onBandShown()
+        fireDwell()
+
+        assertEquals("hide", glasses.log.last())
+        assertEquals(listOf("alert_shown"), types())
+    }
+
+    @Test
+    fun a_question_and_an_error_card_leave_the_same_way() {
+        for (kind in listOf("question", "error")) {
+            glasses.log.clear()
+            up()
+            feed(alert(id = kind, kind = kind))
+            director.onBandShown()
+            fireDwell()
+            assertEquals(kind, "hide", glasses.log.last())
+        }
+        assertFalse(types().contains("alert_dismissed"))
+    }
+
+    @Test
+    fun the_dwell_follows_the_setting() {
+        for (setting in listOf(8_000L, 60_000L)) {
+            dwell = setting
+            up()
+            feed(alert(id = "A$setting", kind = "approval"))
+            director.onBandShown()
+            assertEquals("$setting", 1, live(setting).size)
+            fireDwell()
+            assertEquals("hide", glasses.log.last())
+        }
+    }
+
+    @Test
+    fun a_dwell_longer_than_one_hub_ttl_stretches_the_ttl_once_and_still_hides_at_the_setting() {
+        dwell = 60_000L
+        up()
+        feed(alert(kind = "approval"))
+        assertEquals(45_000L, glasses.bands.single().ttlMs)
+        director.onBandShown()
+
+        val hidesBefore = glasses.log.count { it == "hide" }
+        fireDwell(40_000L)
+        assertEquals(22_000L, glasses.updates.single().ttlMs)
+        assertEquals(hidesBefore, glasses.log.count { it == "hide" })
+        fireDwell(60_000L)
+        assertEquals("hide", glasses.log.last())
+    }
+
+    @Test
+    fun a_card_the_wearer_works_with_is_not_taken_down_under_them() {
+        up()
+        feed(alert(kind = "approval"))
+        director.onBandShown()
+        director.onBandAction(AlertCoordinator.MORE)
+        assertTrue(live(8_000L).isEmpty())
+    }
+
+    @Test
+    fun a_newer_band_takes_over_the_dwell_of_the_one_it_replaced() {
+        up()
+        feed(alert(id = "A", kind = "question"))
+        director.onBandShown()
+        feed(alert(id = "B", kind = "approval"))
+        assertTrue(live(8_000L).isEmpty())
+        director.onBandShown()
+        assertEquals(1, live(8_000L).size)
+        fireDwell()
+        assertEquals("hide", glasses.log.last())
+    }
+
+    @Test
+    fun a_band_the_hub_timed_out_after_it_was_shown_is_not_put_back_by_a_refresh() {
+        up()
+        feed(alert(kind = "approval"))
+        director.onBandShown()
+        director.onBandClosed(NexusNoticeCloseReason.TIMEOUT)
+        val before = glasses.log.size
+        feed(alert(kind = "approval", reason = "update", waiting = 1))
+        assertEquals(before, glasses.log.size)
+    }
+
+    @Test
+    fun a_band_the_hub_timed_out_unseen_is_shown_again_by_the_next_frame() {
+        up()
+        feed(alert(kind = "approval"))
+        director.onBandClosed(NexusNoticeCloseReason.TIMEOUT)
+        feed(alert(kind = "approval", reason = "update", waiting = 1))
+        assertEquals("show CLAUDE · approve", glasses.log.last())
+    }
+
+    @Test
+    fun a_hidden_pending_item_is_published_and_reopened_like_a_reminder() {
+        up()
+        feed(alert(kind = "approval"))
+        director.onBandShown()
+        fireDwell()
+        assertEquals(listOf("A"), director.pending.value.map { it.id })
+
+        director.reopen("A")
+        assertEquals("show CLAUDE · approve", glasses.log.last())
+        assertTrue(director.pending.value.isEmpty())
+
+        // Answered at the laptop while hidden: it leaves the list and cannot be reopened.
+        director.onBandShown()
+        fireDwell()
+        assertEquals(1, director.pending.value.size)
+        director.onEvent(AgentdEvent.Action(AgentdAction.AlertClosed("A", "acted")))
+        assertTrue(director.pending.value.isEmpty())
+        val shows = glasses.log.count { it.startsWith("show") }
+        director.reopen("A")
+        assertEquals(shows, glasses.log.count { it.startsWith("show") })
+    }
+
+    @Test
+    fun a_reopen_the_glasses_refuse_keeps_the_item_in_the_menu() {
+        up()
+        feed(alert(kind = "approval"))
+        director.onBandShown()
+        fireDwell()
+        glasses.takesBand = false
+        director.reopen("A")
+        assertEquals(listOf("A"), director.pending.value.map { it.id })
+        glasses.takesBand = true
+        director.reopen("A")
+        assertEquals("show CLAUDE · approve", glasses.log.last())
+        assertTrue(director.pending.value.isEmpty())
     }
 }

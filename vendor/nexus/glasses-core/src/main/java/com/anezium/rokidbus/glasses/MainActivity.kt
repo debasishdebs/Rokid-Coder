@@ -43,6 +43,8 @@ class MainActivity : Activity() {
         detail = "",
     )
     private var unsubscribeLauncher: (() -> Unit)? = null
+    private var unsubscribeSurface: (() -> Unit)? = null
+    private lateinit var singlePluginHome: SinglePluginHome
     private var insetUnsubscribe: (() -> Unit)? = null
     private var onboardingReceiverRegistered = false
     private var confirmationShownForSession = ""
@@ -56,6 +58,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         liveInstance = this
+        singlePluginHome = SinglePluginHome(resources.getBoolean(R.bool.launcher_single_plugin_app))
         window.statusBarColor = BusTheme.glassesBg
         window.navigationBarColor = BusTheme.glassesBg
         buildUi()
@@ -70,9 +73,19 @@ class MainActivity : Activity() {
                 launcherEntries = entries
                 selectedIndex = selectedIndex.coerceIn(0, (entries.size - 1).coerceAtLeast(0))
                 renderLauncher()
+                openSinglePlugin()
             }
         }
+        unsubscribeSurface = SurfaceController.observe { surface ->
+            runOnUiThread { if (singlePluginHome.onSurface(surface != null)) finish() }
+        }
         log("Launcher activity opened")
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        // The wearer opened the app again while this task was still alive.
+        singlePluginHome.reset()
     }
 
     override fun onStart() {
@@ -95,6 +108,11 @@ class MainActivity : Activity() {
         SelfArmOnboardingStore.refreshNetworkPosture(applicationContext)
         RokidBusAccessibilityService.resumeSetupSessionIfNeeded(applicationContext)
         renderScreen()
+        // A single-plugin app's surface closed while this task sat paused behind it.
+        if (singlePluginHome.leaving) {
+            finish()
+            return
+        }
         // The completed launcher view is not a setup screen; only the onboarding view counts as
         // the owner looking at setup, which resets the bridge-liveness attempt budget.
         if (onboardingState.stage != SelfArmOnboardingState.Stage.COMPLETE) {
@@ -120,6 +138,8 @@ class MainActivity : Activity() {
         if (liveInstance === this) liveInstance = null
         unsubscribeLauncher?.invoke()
         unsubscribeLauncher = null
+        unsubscribeSurface?.invoke()
+        unsubscribeSurface = null
         insetUnsubscribe?.invoke()
         insetUnsubscribe = null
         super.onDestroy()
@@ -177,7 +197,7 @@ class MainActivity : Activity() {
 
     private fun buildUi() {
         emptyView = text(17f, BusTheme.dim).apply {
-            text = "No phone plugins synced"
+            setText(R.string.launcher_empty)
             gravity = Gravity.CENTER
         }
         listContainer = LinearLayout(this).apply {
@@ -204,17 +224,17 @@ class MainActivity : Activity() {
             setBackgroundColor(BusTheme.glassesBg)
             setPadding(dp(22), dp(20), dp(22), dp(16))
             addView(text(12f, BusTheme.phosphor, bold = true).apply {
-                text = "ROKID NEXUS"
+                text = getString(R.string.product_name).uppercase()
                 gravity = Gravity.CENTER_HORIZONTAL
             })
             addView(gap(20))
             addView(text(24f, BusTheme.text, bold = true).apply {
-                text = "Launcher"
+                setText(R.string.launcher_title)
                 gravity = Gravity.CENTER_HORIZONTAL
             })
             addView(gap(22))
             addView(text(10.5f, BusTheme.dim).apply {
-                text = "PLUGINS"
+                setText(R.string.launcher_section_plugins)
                 gravity = Gravity.CENTER_HORIZONTAL
             }, matchWrap())
             addView(gap(10))
@@ -305,6 +325,7 @@ class MainActivity : Activity() {
             if (showSetupConfirmation()) return
             launcherView.visibility = View.VISIBLE
             onboardingView.visibility = View.GONE
+            openSinglePlugin()
             return
         }
         confirmationShownForSession = ""
@@ -528,6 +549,15 @@ class MainActivity : Activity() {
         val entry = launcherEntries.getOrNull(selectedIndex) ?: return
         val result = GlassesHub.openLauncherEntry(entry.id)
         log("Launcher open result: $result")
+    }
+
+    /** In a single-plugin app, goes straight to the plugin once setup is done and the phone lists it. */
+    private fun openSinglePlugin() {
+        if (onboardingState.stage != SelfArmOnboardingState.Stage.COMPLETE || resumedInstance !== this) return
+        val entry = singlePluginHome.entryToOpen(launcherEntries) ?: return
+        val result = GlassesHub.openLauncherEntry(entry.id)
+        log("Launcher single plugin open result: $result")
+        if (result.startsWith("launcherOpen=true")) singlePluginHome.opened(entry)
     }
 
     private fun performOnboardingAction() {

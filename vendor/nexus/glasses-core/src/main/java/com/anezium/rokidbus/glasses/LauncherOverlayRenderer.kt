@@ -293,12 +293,12 @@ object LauncherOverlayRenderer {
             setPadding(dp(18), dp(16), dp(18), dp(12))
 
             addView(monoText(12f, BusTheme.phosphor, bold = true).apply {
-                text = "ROKID NEXUS"
+                text = context.getString(R.string.product_name).uppercase()
                 gravity = Gravity.CENTER_HORIZONTAL
             }, matchWrap())
             addView(gap(14))
             addView(monoText(24f, BusTheme.text, bold = true).apply {
-                text = "Launcher"
+                text = context.getString(R.string.launcher_title)
                 gravity = Gravity.CENTER_HORIZONTAL
             }, matchWrap())
             addView(gap(8))
@@ -325,7 +325,7 @@ object LauncherOverlayRenderer {
             var previousSection: String? = null
             entries.forEachIndexed { index, entry ->
                 val section = when (entry) {
-                    is LauncherMenuEntry.Plugin -> "PLUGINS"
+                    is LauncherMenuEntry.Plugin -> context.getString(R.string.launcher_section_plugins)
                     is LauncherMenuEntry.NativeApp -> "GLASSES APPS"
                 }
                 if (section != previousSection) {

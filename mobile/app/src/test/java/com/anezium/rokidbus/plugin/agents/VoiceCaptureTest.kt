@@ -303,7 +303,7 @@ class VoiceCaptureTest {
     fun not_granted_vs_still_stopping_copy() {
         val notGranted = VoiceCapture().also { it.onStartRefused(NexusSdkResult.CAPABILITY_NOT_GRANTED) }
         assertEquals(State.Failed("Voice unavailable"), notGranted.state)
-        assertEquals("allow Speech to text in Nexus settings", VoiceCard.hint(notGranted.state))
+        assertEquals("allow Speech to text in Rokid Coder settings", VoiceCard.hint(notGranted.state))
 
         // The earlier session is still stopping: the SDK refuses a second one.
         val stopping = VoiceCapture().also { it.onStartRefused(NexusSdkResult.CAPABILITY_NOT_AVAILABLE) }

@@ -39,9 +39,26 @@ object AlertNotices {
     private const val LINE_CHARS = 44
     private const val BODY_CHARS = BODY_LINES * LINE_CHARS
 
-    private const val ACTION_TTL_MS = 45_000L
-    private const val DONE_TTL_MS = 12_000L
     private const val NOTICE_TTL_MS = 8_000L
+
+    /** The hub's ceiling for one notice ttl (`NoticeSurfaceContract.MAX_TTL_MS`). */
+    const val MAX_TTL_MS = 45_000L
+
+    /**
+     * The longest "Alert stays on screen" the glasses can honour: the hub drops a notice 90 s after its
+     * first show whatever updates it gets, and the ttl is stretched once at [KEEP_ALIVE_AT_MS]. agentd's
+     * queue reads a longer setting as this too (`MAX_BAND_DWELL_MS`).
+     */
+    const val MAX_DWELL_MS = 80_000L
+
+    /** The ttl outlives the phone's own dwell timer by this much; it is the backstop, not the clock. */
+    private const val TTL_GRACE_MS = 2_000L
+
+    /** When a band whose lifetime exceeds one ttl gets its ttl extended, before the first one runs out. */
+    const val KEEP_ALIVE_AT_MS = 40_000L
+
+    /** Before the settings are read: agentd's own default. */
+    const val DEFAULT_DWELL_MS = 8_000L
 
     private const val READER_SEGMENT_CHARS = 4_000
     private const val READER_MAX_SEGMENTS = 240
@@ -49,14 +66,21 @@ object AlertNotices {
     private const val READER_TITLE_CHARS = 110
     private const val READER_LINE_CHARS = 120
 
-    fun build(alert: AgentdAction.Alert, wake: Boolean): NexusNotice =
+    /** How long the glasses may keep a band for [dwellMs]: the wearer's setting, never past the hub's ceiling. */
+    fun lifetimeMs(dwellMs: Long): Long = dwellMs.coerceIn(1_000L, MAX_DWELL_MS) + TTL_GRACE_MS
+
+    /**
+     * Every kind lives as long as the wearer's "Alert stays on screen" ([dwellMs]); the phone's own timer
+     * takes the band down at that moment, and the ttl only covers a phone that cannot.
+     */
+    fun build(alert: AgentdAction.Alert, wake: Boolean, dwellMs: Long = DEFAULT_DWELL_MS): NexusNotice =
         NexusNotice(
             title = title(alert),
             body = body(alert),
             footer = footer(alert),
             interactive = alert.kind == AlertKind.DONE || alert.kind == AlertKind.ERROR,
             actions = actions(alert),
-            ttlMs = ttl(alert.kind),
+            ttlMs = lifetimeMs(dwellMs).coerceAtMost(MAX_TTL_MS),
             wakeDisplay = wake && alert.kind != AlertKind.NOTICE,
         )
 
@@ -70,16 +94,20 @@ object AlertNotices {
         footer = footer(alert) ?: "",
     )
 
+    /** The ttl stretched for a band that must outlive one ttl: only the remaining lifetime, nothing else changes. */
+    fun keepAlive(dwellMs: Long): NexusNoticeUpdate =
+        NexusNoticeUpdate(ttlMs = (lifetimeMs(dwellMs) - KEEP_ALIVE_AT_MS).coerceIn(1_000L, MAX_TTL_MS))
+
     /** A one-line message about what the wearer just did or could not do. */
     fun brief(title: String, body: String): NexusNotice = NexusNotice(
-        title = title.line(TITLE_CHARS).ifEmpty { "Agents" },
+        title = title.line(TITLE_CHARS).ifEmpty { PRODUCT_TITLE },
         body = body.line(BRIEF_BODY_CHARS).ifEmpty { null },
         ttlMs = NOTICE_TTL_MS,
     )
 
     /** Several safety briefs in one band, one per line. */
     fun briefLines(title: String, lines: List<String>): NexusNotice = NexusNotice(
-        title = title.line(TITLE_CHARS).ifEmpty { "Agents" },
+        title = title.line(TITLE_CHARS).ifEmpty { PRODUCT_TITLE },
         lines = lines.map { it.line(BRIEF_BODY_CHARS) }.filter(String::isNotEmpty).take(BRIEF_MAX_LINES),
         ttlMs = NOTICE_TTL_MS,
     )
@@ -106,7 +134,7 @@ object AlertNotices {
             listOf(header) + fitOldest(session?.lastAssistantText?.let(::proseSegments).orEmpty(), room)
         }
         return NexusReader(
-            title = (session?.displayTitle ?: alert.title).line(READER_TITLE_CHARS).ifEmpty { "Agents" },
+            title = (session?.displayTitle ?: alert.title).line(READER_TITLE_CHARS).ifEmpty { PRODUCT_TITLE },
             subtitle = "${providerLabel(alert)} · ${alert.kind.wire}".take(READER_LINE_CHARS),
             footer = "swipe scroll · 2-tap back",
             contentKey = digest(alert.id + segments.joinToString("\u0000") { it.text }),
@@ -205,12 +233,6 @@ object AlertNotices {
             )
             AlertKind.DONE, AlertKind.ERROR, AlertKind.NOTICE -> emptyList()
         }
-
-    private fun ttl(kind: AlertKind): Long = when (kind) {
-        AlertKind.APPROVAL, AlertKind.QUESTION -> ACTION_TTL_MS
-        AlertKind.DONE, AlertKind.ERROR -> DONE_TTL_MS
-        AlertKind.NOTICE -> NOTICE_TTL_MS
-    }
 
     private fun proseSegments(text: String): List<NexusReaderSegment> =
         text.trim().chunked(READER_SEGMENT_CHARS)
