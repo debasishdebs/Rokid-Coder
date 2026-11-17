@@ -352,6 +352,9 @@ export class WsHub {
         }
       }
       this.clients.delete(socket);
+      if (state) {
+        this.options.v2?.channelClosed?.(state.channel);
+      }
       state?.sas?.disconnected();
       if (state?.authenticated) {
         this.options.onClientDisconnected?.();
