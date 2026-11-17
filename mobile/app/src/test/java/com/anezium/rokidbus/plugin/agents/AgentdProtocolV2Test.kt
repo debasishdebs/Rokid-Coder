@@ -480,6 +480,7 @@ class AgentdProtocolV2Test {
         assertNull(why(14, "unavailable", "teleport"))
         assertNull(why(15, "unavailable", 7))
         assertNull(why(16, "ready", "busy"))
+        assertEquals("background", why(17, "unavailable", "background"))
     }
 
     @Test

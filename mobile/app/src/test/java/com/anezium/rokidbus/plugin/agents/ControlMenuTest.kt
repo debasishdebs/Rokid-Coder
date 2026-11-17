@@ -149,6 +149,7 @@ class ControlMenuTest {
             session(v2 = v2(followup = FollowupState.UNAVAILABLE, followupWhy = why)),
         ).one<MenuItem.ReplyByVoice>().let { assertFalse(it.enabled); it.sub }
         assertEquals("Claude is working — try again when it is idle", sub("busy"))
+        assertEquals("background work is running — wait for it, or reply at the laptop", sub("background"))
         assertEquals("text typed at the laptop prompt — clear it first", sub("draft"))
         assertEquals("start the session with rk claude", sub("not_launcher"))
         assertEquals("session not waiting", sub(null))

@@ -745,7 +745,7 @@ private fun JSONObject.toSessionV2(fallbackHeading: String): SessionV2? {
     )
 }
 
-private val FOLLOWUP_WHY = setOf("busy", "draft", "not_launcher")
+private val FOLLOWUP_WHY = setOf("busy", "background", "draft", "not_launcher")
 
 /** Only meaningful while the follow-up is unavailable; an absent or unknown reason is null. */
 private fun JSONObject.followupWhy(capabilities: JSONObject): String? {

@@ -60,6 +60,7 @@ object ControlMenu {
     const val FOLLOWUP_CAP_REACHED = "continue on laptop or rk claude"
     const val FOLLOWUP_UNAVAILABLE = "session not waiting"
     const val FOLLOWUP_BUSY = "Claude is working — try again when it is idle"
+    const val FOLLOWUP_BACKGROUND = "background work is running — wait for it, or reply at the laptop"
     const val FOLLOWUP_DRAFT = "text typed at the laptop prompt — clear it first"
     const val FOLLOWUP_NOT_LAUNCHER = "start the session with rk claude"
     const val MODEL_WARNING = "This also changes the default for new sessions"
@@ -598,6 +599,7 @@ object ControlMenu {
     /** The row's text for an unavailable reply, by agentd's `followupWhy`; none or unknown keeps the old line. */
     fun followupUnavailable(why: String?): String = when (why) {
         "busy" -> FOLLOWUP_BUSY
+        "background" -> FOLLOWUP_BACKGROUND
         "draft" -> FOLLOWUP_DRAFT
         NOT_LAUNCHER -> FOLLOWUP_NOT_LAUNCHER
         else -> FOLLOWUP_UNAVAILABLE
