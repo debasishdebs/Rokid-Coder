@@ -32,17 +32,19 @@ const MANUAL_STEP: Record<Tool, string> = {
 
 /**
  * Each CLI's own plugin verbs. claude 2.1.285: `plugin install|list|uninstall|update`;
- * codex-cli 0.169.0: `plugin add|list|remove`, with no update. Both have
+ * codex-cli 0.169.0: `plugin add|list|remove`, with no update or disable. Both have
  * `plugin marketplace add|list|remove`.
  */
 interface CliAdapter {
   install: string;
   uninstall: string;
   update?: string;
+  /** Turns an installed plugin off without removing it. */
+  disable?: string;
 }
 
 const ADAPTERS: Record<Tool, CliAdapter> = {
-  claude: { install: "install", uninstall: "uninstall", update: "update" },
+  claude: { install: "install", uninstall: "uninstall", update: "update", disable: "disable" },
   codex: { install: "add", uninstall: "remove" },
 };
 
@@ -50,13 +52,15 @@ export interface CliVerbs {
   install: boolean;
   update: boolean;
   uninstall: boolean;
+  disable: boolean;
 }
 
 export interface PluginStatus {
   /** The `rokid-coder` marketplace, when the CLI lists one. */
   marketplace?: { source: string };
   /** Our plugin, when the CLI lists it as installed. */
-  plugin?: { version?: string; installPath?: string };
+  /** `enabled` is what the CLI's list says; absent when it does not say. */
+  plugin?: { version?: string; installPath?: string; enabled?: boolean };
   verbs: CliVerbs;
 }
 
@@ -68,6 +72,7 @@ export interface PluginDriver {
   installPlugin(): Promise<void>;
   updatePlugin(): Promise<void>;
   removePlugin(): Promise<void>;
+  disablePlugin(): Promise<void>;
 }
 
 export interface DriverOptions {
@@ -250,8 +255,13 @@ class CliPluginDriver implements PluginDriver {
       if (!commands.has("marketplace") || !commands.has("list")) {
         throw new Error(`${this.tool} has no plugin marketplace or list command`);
       }
-      const { install, uninstall, update } = this.adapter;
-      this.verbs = { install: commands.has(install), update: update !== undefined && commands.has(update), uninstall: commands.has(uninstall) };
+      const { install, uninstall, update, disable } = this.adapter;
+      this.verbs = {
+        install: commands.has(install),
+        update: update !== undefined && commands.has(update),
+        uninstall: commands.has(uninstall),
+        disable: disable !== undefined && commands.has(disable),
+      };
     }
     return this.verbs;
   }
@@ -277,6 +287,7 @@ class CliPluginDriver implements PluginDriver {
       status.plugin = {
         version: typeof found.version === "string" ? found.version : undefined,
         installPath: stringOf(found.installPath, found.path),
+        ...(typeof found.enabled === "boolean" ? { enabled: found.enabled } : {}),
       };
     }
     return status;
@@ -303,6 +314,13 @@ class CliPluginDriver implements PluginDriver {
 
   async removePlugin(): Promise<void> {
     await this.run([this.adapter.uninstall, PLUGIN_ID]);
+  }
+
+  async disablePlugin(): Promise<void> {
+    if (!this.adapter.disable) {
+      throw new Error(`${this.tool} has no plugin disable command`);
+    }
+    await this.run([this.adapter.disable, PLUGIN_ID]);
   }
 }
 
@@ -374,12 +392,12 @@ export function offeredPlugin(tool: Tool, marketplaceDir: string): { dir: string
 
 /**
  * The offered files the CLI's installed copy lacks or holds with other bytes, when the CLI says where that copy
- * is and it exists; `undefined` when that is unknown (the version is then trusted). Extra files in the
- * installed copy, such as the CLI's own cache files, are fine.
+ * is; `undefined` only when it says nothing (the version is then trusted). A reported path that does not exist
+ * holds none of the files. Extra files in the installed copy, such as the CLI's own cache files, are fine.
  */
 export function installedDifferences(status: PluginStatus, offered: PluginFiles): string[] | undefined {
   const installPath = status.plugin?.installPath;
-  if (!installPath || !existsSync(installPath)) {
+  if (!installPath) {
     return undefined;
   }
   const differing: string[] = [];
@@ -394,6 +412,38 @@ export function installedDifferences(status: PluginStatus, offered: PluginFiles)
     if (!same) differing.push(name);
   }
   return differing;
+}
+
+/** A registration as an undo puts it back, with whether the user had the plugin turned off. */
+export type PriorState = PriorRegistration & { enabled?: false };
+
+/** What a CLI has registered: the marketplace, the plugin's version and, when the user disabled it, that. */
+export function priorOf(status: PluginStatus): PriorState {
+  return {
+    ...(status.marketplace ? { source: status.marketplace.source } : {}),
+    ...(status.plugin?.version ? { pluginVersion: status.plugin.version } : {}),
+    ...(status.plugin?.enabled === false ? { enabled: false } : {}),
+  };
+}
+
+/**
+ * A reinstall enables the plugin again, so one the user had disabled is disabled again through the CLI's own
+ * verb. Returns the manual step to tell the user when that cannot be done (no disable verb, or it failed).
+ */
+async function keepDisabled(driver: PluginDriver): Promise<string | undefined> {
+  const status = await driver.status();
+  if (!status.plugin || status.plugin.enabled === false) {
+    return undefined;
+  }
+  if (status.verbs.disable) {
+    try {
+      await driver.disablePlugin();
+      return undefined;
+    } catch {
+      // Falls through to the manual step.
+    }
+  }
+  return `The Rokid plugin was disabled before this update; it is enabled again - disable it in ${driver.tool === "claude" ? "/plugin" : "/plugins"} if you want it off`;
 }
 
 function realOrSelf(file: string): string {
@@ -461,8 +511,10 @@ async function pointMarketplaceAt(driver: PluginDriver, status: PluginStatus, di
 
 export interface SyncOutcome {
   result: "ok" | "manual_step_required" | "failed";
+  /** A step for the user that does not fail the sync, such as a plugin that is enabled again. */
+  warning?: string;
   /** The registration before this sync: what an undo puts back. */
-  prior: PriorRegistration;
+  prior: PriorState;
   record: PluginRecord;
 }
 
@@ -474,7 +526,7 @@ export interface SyncOutcome {
  * second run only reads.
  */
 export async function syncPlugin(driver: PluginDriver, marketplaceDir: string): Promise<SyncOutcome> {
-  let prior: PriorRegistration = {};
+  let prior: PriorState = {};
   const record = (status: PluginRecord["status"], detail?: string, pluginVersion?: string): PluginRecord => ({
     source: marketplaceDir,
     status,
@@ -485,10 +537,7 @@ export async function syncPlugin(driver: PluginDriver, marketplaceDir: string): 
     const offered = offeredPlugin(driver.tool, marketplaceDir);
     const want: Want = { version: offered.version, files: offered.files };
     let status = await driver.status();
-    prior = {
-      ...(status.marketplace ? { source: status.marketplace.source } : {}),
-      ...(status.plugin?.version ? { pluginVersion: status.plugin.version } : {}),
-    };
+    prior = priorOf(status);
     if (await pointMarketplaceAt(driver, status, marketplaceDir)) {
       status = await driver.status();
     }
@@ -508,7 +557,8 @@ export async function syncPlugin(driver: PluginDriver, marketplaceDir: string): 
           : `${driver.tool} reports plugin version ${status.plugin?.version ?? "none"}, expected ${want.version}`;
       return { result: "failed", prior, record: record("failed", reason) };
     }
-    return { result: "ok", prior, record: record("ok", undefined, want.version) };
+    const warning = prior.enabled === false ? await keepDisabled(driver) : undefined;
+    return { result: "ok", prior, ...(warning ? { warning } : {}), record: record("ok", undefined, want.version) };
   } catch (error) {
     return { result: "failed", prior, record: record("failed", error instanceof Error ? error.message : String(error)) };
   }
@@ -519,7 +569,7 @@ export async function syncPlugin(driver: PluginDriver, marketplaceDir: string): 
  * source, then the plugin at its old version, verified by the version and the
  * file contents the CLI's installed copy holds. Throws when it cannot.
  */
-export async function restorePlugin(driver: PluginDriver, prior: PriorRegistration, ourRoots: string[]): Promise<void> {
+export async function restorePlugin(driver: PluginDriver, prior: PriorState, ourRoots: string[]): Promise<void> {
   if (!prior.source) {
     await removePlugin(driver, ourRoots);
     return;
@@ -542,6 +592,9 @@ export async function restorePlugin(driver: PluginDriver, prior: PriorRegistrati
   }
   if (!matches(status, want)) {
     throw new Error(`${driver.tool} still reports plugin version ${status.plugin?.version ?? "none"} after restoring ${prior.pluginVersion}`);
+  }
+  if (prior.enabled === false && (await keepDisabled(driver))) {
+    throw new Error(`${driver.tool} plugin restored, but it was disabled before setup and is enabled now: disable it in ${driver.tool === "claude" ? "/plugin" : "/plugins"}`);
   }
 }
 
