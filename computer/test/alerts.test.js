@@ -688,3 +688,17 @@ test("a_dwell_longer_than_the_glasses_can_hold_a_band_is_read_as_the_band_ceilin
   env.advance(MAX_BAND_DWELL_MS);
   assert.equal(env.queue.get(id), undefined);
 });
+
+test("a_reminder_due_at_or_past_the_wait_limit_is_still_sent_before_the_alert_expires", () => {
+  for (const reminderMs of [300_000, 600_000, 3_600_000]) {
+    // Wait limit 5 min, the reminder choice at or past it.
+    const env = setup({ ...TIMINGS, expireMs: 300_000, reminderMs });
+    const id = env.queue.push(alert("question", { createdAt: env.now() }));
+    env.queue.onShown(id);
+    env.advance(149_999);
+    assert.deepEqual(frameReasons(env), ["new"]);
+    env.advance(1);
+    assert.deepEqual(frameReasons(env), ["new", "reminder"], `reminderMs ${reminderMs}`);
+    assert.equal(env.queue.get(id).kind, "question");
+  }
+});

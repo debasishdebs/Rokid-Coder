@@ -262,6 +262,16 @@ export class AlertQueue {
   }
 
   /**
+   * `reminderMs`, but never so late that the alert expires first: an alert lives
+   * `expireMs` (the wait limit) from its first show, so a reminder due at or past
+   * that point would never be sent and the wearer would lose the item silently.
+   * Half the limit leaves at least one reminder inside it.
+   */
+  private reminderMs(): number {
+    return Math.min(this.timings.reminderMs, this.timings.expireMs / 2);
+  }
+
+  /**
    * A shown alert whose card has left the glasses: a Done or notice is over, and
    * the rest come back as a reminder `reminderMs` after they were shown.
    */
@@ -276,7 +286,7 @@ export class AlertQueue {
       }
       if (entry.alert.kind === "done" || entry.alert.kind === "notice") {
         this.close(entry, "dismissed", "dismissed");
-      } else if (onScreenFor >= this.timings.reminderMs) {
+      } else if (onScreenFor >= this.reminderMs()) {
         this.requeue(entry, false, "reminder");
       }
     }
