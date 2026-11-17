@@ -482,9 +482,11 @@ class AgentdProtocolV2Test {
         assertNull(why(16, "ready", "busy"))
         assertEquals("background", why(17, "unavailable", "background"))
         assertEquals("bg_off", why(18, "unavailable", "bg_off"))
-        assertEquals("needs_auto_mode", why(19, "unavailable", "needs_auto_mode"))
+        assertEquals("mode_not_allowed", why(19, "unavailable", "mode_not_allowed"))
         assertNull(why(20, "ready", "bg_off"))
         assertNull(why(21, "unavailable", "bg-off"))
+        // needs_auto_mode was dropped before release; it is an unknown reason now.
+        assertNull(why(22, "unavailable", "needs_auto_mode"))
     }
 
     @Test
@@ -525,11 +527,6 @@ class AgentdProtocolV2Test {
         // Each steering frame carries a real id of its own; the monitor frames carry none.
         assertEquals("$type msgId presence", expected.has("msgId"), actual.has("msgId"))
         if (actual.has("msgId")) assertEquals(MSG_ID, actual.getString("msgId"))
-        // bgReplies is additive and always sent; a fixture that predates it must see it off.
-        if (!expected.has("bgReplies") && actual.has("bgReplies")) {
-            assertFalse("$type: bgReplies without a fixture value must be false", actual.getBoolean("bgReplies"))
-            actual.remove("bgReplies")
-        }
         assertEquals("$type: built $actual vs fixture $expected", withoutMsgId(expected), withoutMsgId(actual))
     }
 
@@ -618,7 +615,7 @@ class AgentdProtocolV2Test {
                 ),
                 f("settings_sync").getLong("waitLimitMs"),
                 MSG_ID,
-                bgReplies = f("settings_sync").optBoolean("bgReplies", false),
+                bgReplies = f("settings_sync").getBoolean("bgReplies"),
             ),
             "models_request" to AgentdProtocolCodec.modelsRequest(codex),
         )

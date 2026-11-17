@@ -64,7 +64,7 @@ object ControlMenu {
     const val FOLLOWUP_DRAFT = "text typed at the laptop prompt — clear it first"
     const val FOLLOWUP_NOT_LAUNCHER = "start the session with rk claude"
     const val FOLLOWUP_BG_OFF = "background replies are off — turn them on in Settings"
-    const val FOLLOWUP_NEEDS_AUTO_MODE = "background replies need Claude in auto mode"
+    const val FOLLOWUP_MODE_NOT_ALLOWED = "Background replies aren't supported in this mode"
     const val MODEL_WARNING = "This also changes the default for new sessions"
     const val NOTICE_TITLE = "Session control"
 
@@ -75,9 +75,9 @@ object ControlMenu {
     const val NOT_LAUNCHER = "not_launcher"
     const val NOT_LAUNCHER_FOLLOWUP = "Start the session with rk claude to send prompts from the glasses."
 
-    /** agentd typed nothing: Claude was busy when a background-work reply was about to go in. */
+    /** agentd typed nothing and kept the reply open: Claude was busy when it was about to go in, so the wearer may retry. */
     const val NOT_SENT = "not_sent"
-    const val NOT_SENT_FOLLOWUP = "Reply not sent — Claude was busy; try again"
+    const val NOT_SENT_FOLLOWUP = "Claude is busy with something else, wait a moment and try again"
 
     /** R152: typed into the session, then the launcher failed; the id stays spent. */
     const val SENT_MAYBE_UNFINISHED = "Sent, but may not have finished — check laptop"
@@ -616,7 +616,7 @@ object ControlMenu {
         "draft" -> FOLLOWUP_DRAFT
         NOT_LAUNCHER -> FOLLOWUP_NOT_LAUNCHER
         "bg_off" -> FOLLOWUP_BG_OFF
-        "needs_auto_mode" -> FOLLOWUP_NEEDS_AUTO_MODE
+        "mode_not_allowed" -> FOLLOWUP_MODE_NOT_ALLOWED
         else -> FOLLOWUP_UNAVAILABLE
     }
 

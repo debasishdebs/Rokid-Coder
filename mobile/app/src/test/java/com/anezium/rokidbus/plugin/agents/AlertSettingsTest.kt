@@ -185,18 +185,12 @@ class AlertSettingsTest {
             retryBackoffMs = timings.getJSONArray("retryBackoffMs").let { a -> List(a.length()) { a.getLong(it) } },
             defaultClaude = TempMode.fromWire(modes.getString("claude"))!!,
             defaultCodex = TempMode.fromWire(modes.getString("codex"))!!,
-            bgReplies = sync.optBoolean("bgReplies", false),
+            bgReplies = sync.getBoolean("bgReplies"),
         )
         val ids = ArrayDeque(listOf("id-1", "id-2"))
         val (syncLine, defaultsLine) = settings.syncFrames { ids.removeFirst() }
 
-        // bgReplies is additive and always sent; a fixture that predates it must see it off.
-        val actual = JSONObject(syncLine)
-        if (!sync.has("bgReplies")) {
-            assertFalse(actual.getBoolean("bgReplies"))
-            actual.remove("bgReplies")
-        }
-        assertEquals(withoutMsgId(sync), withoutMsgId(actual))
+        assertEquals(withoutMsgId(sync), withoutMsgId(JSONObject(syncLine)))
         assertEquals(withoutMsgId(fixtures.getJSONObject("defaults_set")), withoutMsgId(JSONObject(defaultsLine)))
         assertEquals("id-1", JSONObject(syncLine).getString("msgId"))
         assertEquals("id-2", JSONObject(defaultsLine).getString("msgId"))

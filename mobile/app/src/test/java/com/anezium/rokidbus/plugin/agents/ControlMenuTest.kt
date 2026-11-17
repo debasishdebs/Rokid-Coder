@@ -153,7 +153,8 @@ class ControlMenuTest {
         assertEquals("text typed at the laptop prompt — clear it first", sub("draft"))
         assertEquals("start the session with rk claude", sub("not_launcher"))
         assertEquals("background replies are off — turn them on in Settings", sub("bg_off"))
-        assertEquals("background replies need Claude in auto mode", sub("needs_auto_mode"))
+        assertEquals("Background replies aren't supported in this mode", sub("mode_not_allowed"))
+        assertEquals("session not waiting", sub("needs_auto_mode"))
         assertEquals("session not waiting", sub(null))
         assertEquals("session not waiting", sub("something_new"))
     }
@@ -502,7 +503,7 @@ class ControlMenuTest {
 
     @Test
     fun a_background_reply_agentd_did_not_type_says_to_try_again() {
-        val hint = "Reply not sent — Claude was busy; try again"
+        val hint = "Claude is busy with something else, wait a moment and try again"
         val ack = AgentdAction.Ack("m", "rejected", "not_sent")
         assertEquals(hint, ControlMenu.ackNotice(ack, followup = true))
         assertEquals(hint, ControlMenu.followupRejection("not_sent", 120))
