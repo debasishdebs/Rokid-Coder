@@ -26,6 +26,8 @@ export interface PluginRecord {
 export interface PriorRegistration {
   source?: string;
   pluginVersion?: string;
+  /** `false` when the user had the plugin disabled: setup keeps it that way, and a rollback restores it. */
+  enabled?: false;
 }
 
 export interface PathPair {
