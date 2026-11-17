@@ -212,3 +212,115 @@ test("plugin_list_garbage_is_refused", async (t) => {
   }
   await assert.rejects(() => statusOf(t, { plugins: "[]", marketplaces: '{"error":"boom"}' }), /unexpected/);
 });
+
+// The offered plugin's whole content decides whether the installed copy is current, not its version alone.
+
+const SOURCES = { claude: "claude-code", codex: "codex" };
+const HOOKS_OLD = `${JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "node hook-forward.js" }] }] } })}\n`;
+const HOOKS_NEW = `${JSON.stringify({ hooks: { SessionStart: [{ hooks: [] }], SubagentStart: [{ hooks: [] }] } })}\n`;
+
+/** A synced world: both tools' plugin sources hold hooks.json and commands/on.md, and both are installed at one version. */
+async function installedWorld(t, tool, fixture = tool === "codex" ? "codex-withpath" : tool) {
+  const world = makeWorld(t);
+  const marketplace = path.join(world.bundle("1.0.0"), "plugins");
+  const source = path.join(marketplace, SOURCES[tool]);
+  fs.mkdirSync(path.join(source, "hooks"), { recursive: true });
+  fs.mkdirSync(path.join(source, "commands"), { recursive: true });
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_OLD);
+  fs.writeFileSync(path.join(source, "commands", "on.md"), "turn on\n");
+  const cli = world.cli(tool, { fixture });
+  const sync = () => syncPlugin(createDriver(tool, cli, options(world)), marketplace);
+  assert.equal((await sync()).result, "ok");
+  const installed = () => path.join(world.cliState(tool).plugins["rokid@rokid-coder"].installPath);
+  return { world, source, sync, installed };
+}
+
+for (const tool of ["claude", "codex"]) {
+  test(`plugins_${tool}_same_version_changed_hooks_json_reinstalls`, async (t) => {
+    const { world, source, sync, installed } = await installedWorld(t, tool);
+    fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+    assert.ok(!fs.readFileSync(path.join(installed(), "hooks", "hooks.json"), "utf8").includes("SubagentStart"));
+    world.clearCliCalls(tool);
+    const outcome = await sync();
+    assert.equal(outcome.result, "ok", JSON.stringify(outcome));
+    const verbs = world.mutatingCalls(tool).map((args) => args.slice(1).join(" "));
+    assert.deepEqual(verbs, [`${tool === "claude" ? "uninstall" : "remove"} rokid@rokid-coder`, `${tool === "claude" ? "install" : "add"} rokid@rokid-coder`]);
+    assert.ok(fs.readFileSync(path.join(installed(), "hooks", "hooks.json"), "utf8").includes("SubagentStart"), "the installed copy has the new event");
+    // Settled: the next run only reads.
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.deepEqual(world.mutatingCalls(tool), []);
+  });
+
+  test(`plugins_${tool}_same_version_identical_content_does_not_churn`, async (t) => {
+    const { world, sync } = await installedWorld(t, tool);
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.equal((await sync()).result, "ok");
+    assert.deepEqual(world.mutatingCalls(tool), [], "no uninstall, install or update");
+  });
+
+  test(`plugins_${tool}_extra_file_in_installed_copy_is_not_a_difference`, async (t) => {
+    const { world, sync, installed } = await installedWorld(t, tool);
+    fs.writeFileSync(path.join(installed(), ".cache-note"), "added by the CLI\n");
+    fs.mkdirSync(path.join(installed(), "node_modules", "x"), { recursive: true });
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.deepEqual(world.mutatingCalls(tool), []);
+    assert.ok(fs.existsSync(path.join(installed(), ".cache-note")), "left alone");
+  });
+
+  test(`plugins_${tool}_changed_command_file_reinstalls`, async (t) => {
+    const { world, source, sync, installed } = await installedWorld(t, tool);
+    fs.writeFileSync(path.join(source, "commands", "on.md"), "turn on, louder\n");
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.equal(world.mutatingCalls(tool).length, 2, "uninstall then install");
+    assert.equal(fs.readFileSync(path.join(installed(), "commands", "on.md"), "utf8"), "turn on, louder\n");
+  });
+
+  test(`plugins_${tool}_new_and_removed_offered_files_reinstall`, async (t) => {
+    const { world, source, sync, installed } = await installedWorld(t, tool);
+    fs.writeFileSync(path.join(source, "commands", "off.md"), "turn off\n");
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.equal(world.mutatingCalls(tool).length, 2);
+    assert.ok(fs.existsSync(path.join(installed(), "commands", "off.md")));
+    // A file the installed copy lacks (deleted behind the CLI's back) also reinstalls.
+    fs.rmSync(path.join(installed(), "commands", "off.md"));
+    world.clearCliCalls(tool);
+    assert.equal((await sync()).result, "ok");
+    assert.equal(world.mutatingCalls(tool).length, 2);
+    assert.ok(fs.existsSync(path.join(installed(), "commands", "off.md")));
+  });
+}
+
+test("plugins_codex_without_install_path_trusts_the_version", async (t) => {
+  // The recorded codex list says where the marketplace is, not where the installed copy is.
+  const { world, source, sync } = await installedWorld(t, "codex", "codex");
+  fs.writeFileSync(path.join(source, "hooks", "hooks.json"), HOOKS_NEW);
+  world.clearCliCalls("codex");
+  assert.equal((await sync()).result, "ok");
+  assert.deepEqual(world.mutatingCalls("codex"), [], "no installed path to compare, so the version is trusted");
+});
+
+test("plugin_content_digest_covers_every_file_and_skips_noise", (t) => {
+  const { pluginFiles, contentDigest } = require("../dist/setup/plugins.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rokid-digest-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, "a"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "a", "x.json"), "1");
+  fs.writeFileSync(path.join(dir, "y.md"), "2");
+  const base = contentDigest(pluginFiles(dir));
+  assert.deepEqual(Object.keys(pluginFiles(dir)), ["a/x.json", "y.md"]);
+  // Skipped: node_modules, .git, .DS_Store, symlinks.
+  fs.mkdirSync(path.join(dir, "node_modules", "m"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "node_modules", "m", "i.js"), "3");
+  fs.mkdirSync(path.join(dir, ".git"));
+  fs.writeFileSync(path.join(dir, ".git", "HEAD"), "4");
+  fs.writeFileSync(path.join(dir, ".DS_Store"), "5");
+  fs.symlinkSync(path.join(dir, "y.md"), path.join(dir, "link.md"));
+  assert.equal(contentDigest(pluginFiles(dir)), base);
+  fs.writeFileSync(path.join(dir, "a", "x.json"), "changed");
+  assert.notEqual(contentDigest(pluginFiles(dir)), base);
+});
