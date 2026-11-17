@@ -21,16 +21,26 @@ export type LaunchState = "busy" | "held" | "ready";
 export const BACKGROUND_STOP_FRESH_MS = 6 * 60 * 60_000;
 
 /**
- * The permission modes (the `permission_mode` of a hook payload) in which a
- * background reply may be typed. Only modes where Claude never stops to ask:
- * - `auto`, `bypassPermissions`: allowed;
- * - `acceptEdits`: refused, it still asks for every shell command and other tool;
- * - `dontAsk`: refused although it does not ask (it denies what is not
- *   pre-approved), because "nothing can open a dialog" is the whole reason a
- *   reply may be pasted into a busy session, and that is a claim about
- *   `auto` and `bypassPermissions`; widening it is a decision for the wearer;
- * - `default`, `plan` and anything unknown or missing: refused.
+ * The permission modes (the `permission_mode` of a hook payload; the official
+ * reference names `default`, `plan`, `acceptEdits`, `auto`, `dontAsk` and
+ * `bypassPermissions`) in which a background reply may be typed. A reply typed
+ * while Claude works only queues, and a finishing subagent never writes into
+ * the prompt box; the one hazard is a modal dialog taking the keys.
+ * - `auto`, `bypassPermissions`: no dialog opens (AUTO_APPROVING_MODES);
+ * - `acceptEdits`, `dontAsk`, `default`: a dialog may open, so the evidence
+ *   gains one guard, no approval pending of any origin (see `bgPicture`), and
+ *   the screen checks around the paste stand between a dialog and the Enter;
+ * - `plan`: refused, its plan-approval dialog is a modal that takes any keys;
+ * - anything unknown or missing: refused.
  */
+export const BG_ALLOWED_MODES: ReadonlySet<string> = new Set([
+  "auto",
+  "bypassPermissions",
+  "acceptEdits",
+  "dontAsk",
+  "default",
+]);
+/** The modes in which Claude never stops to ask; every other allowed mode takes the extra approval guard. */
 export const AUTO_APPROVING_MODES: ReadonlySet<string> = new Set(["auto", "bypassPermissions"]);
 
 /** The brief's windows. */
@@ -70,6 +80,12 @@ export interface StateSources {
   clearUncertain(key: SessionKey): void;
   /** Subagents the session store counts as running (SubagentStart seen, SubagentStop not yet). Absent: none. */
   subagents?(key: SessionKey): number;
+  /**
+   * An approval of any origin (a subagent's included) is pending on the
+   * session. Outside the auto-approving modes a background reply needs this to
+   * exist and to say no; absent, such a mode is refused.
+   */
+  approvalPending?(key: SessionKey): boolean;
 }
 
 interface CompactWatch {
@@ -102,7 +118,7 @@ interface Entry {
 export interface BgPicture {
   /** Every item of evidence but the permission mode holds. */
   eligible: boolean;
-  /** The main thread's latest known permission mode is an auto-approving one. */
+  /** The main thread's latest known permission mode is one a reply may be typed in, and its extra guard holds. */
   modeOk: boolean;
 }
 
@@ -265,8 +281,11 @@ export class SessionStates {
    * uncertain or (unless `ownsClaim`, for the command that holds it) in flight;
    * a main-thread Stop, not a continued one, is no older than
    * BACKGROUND_STOP_FRESH_MS with no main-thread work since; and the store
-   * counts a running subagent. `modeOk` is the permission-mode item, kept apart
-   * so the phone can be told that one is what is missing. The laptop draft and
+   * counts a running subagent. `modeOk` is the permission-mode item (an allowed
+   * mode, and outside `auto` and `bypassPermissions` no pending approval of any
+   * origin), kept apart so the phone can be told that one is what is missing.
+   * A PermissionRequest or an elicitation or permission notification, from any
+   * agent, has already taken the Stop away (`trackMainThread`). The laptop draft and
    * the phone's switch are the router's.
    */
   bgPicture(key: SessionKey, ownsClaim = false): BgPicture {
@@ -294,7 +313,14 @@ export class SessionStates {
     if ((this.sources.subagents?.(key) ?? 0) < 1) {
       return no;
     }
-    return { eligible: true, modeOk: entry?.mode !== undefined && AUTO_APPROVING_MODES.has(entry.mode) };
+    const mode = entry?.mode;
+    if (mode === undefined || !BG_ALLOWED_MODES.has(mode)) {
+      return { eligible: true, modeOk: false };
+    }
+    // Where a dialog may open nothing may be waiting on the wearer, and that
+    // has to be known, not assumed.
+    const guarded = AUTO_APPROVING_MODES.has(mode) || this.sources.approvalPending?.(key) === false;
+    return { eligible: true, modeOk: guarded };
   }
 
   /**
@@ -595,17 +621,17 @@ export class LauncherRouter {
   /**
    * The background-reply decision for a session whose file says `busy`:
    * "ready" only when all of `SessionStates.bgPicture`, no laptop draft and
-   * the phone's switch hold; "needs_auto_mode" or "bg_off" when everything else
+   * the phone's switch hold; "mode_not_allowed" or "bg_off" when everything else
    * would allow it and that one item is what is missing (the mode first);
    * "no" otherwise. Never says "ready" for a session whose file is not busy.
    */
-  private bgAssess(key: SessionKey, ownsClaim = false): "ready" | "bg_off" | "needs_auto_mode" | "no" {
+  private bgAssess(key: SessionKey, ownsClaim = false): "ready" | "bg_off" | "mode_not_allowed" | "no" {
     const picture = this.states.bgPicture(key, ownsClaim);
     if (!picture.eligible || this.port.laptopDraft(key)) {
       return "no";
     }
     if (!picture.modeOk) {
-      return "needs_auto_mode";
+      return "mode_not_allowed";
     }
     let on = false;
     try {
@@ -618,7 +644,7 @@ export class LauncherRouter {
 
   /**
    * Why `followupState` is "unavailable", for the phone to say, never for
-   * deciding anything: "draft" (text at the laptop prompt), "needs_auto_mode"
+   * deciding anything: "draft" (text at the laptop prompt), "mode_not_allowed"
    * or "bg_off" (a background reply would be allowed but for the permission
    * mode, or but for the phone's switch), "background" (Claude's file is busy
    * while `subagentsRunning` subagents run, so the main prompt may well be
@@ -628,7 +654,7 @@ export class LauncherRouter {
   followupWhy(
     key: SessionKey,
     subagentsRunning = 0,
-  ): "busy" | "draft" | "background" | "bg_off" | "needs_auto_mode" | undefined {
+  ): "busy" | "draft" | "background" | "bg_off" | "mode_not_allowed" | undefined {
     if (!this.port.binding(key)) {
       return undefined;
     }
@@ -646,7 +672,7 @@ export class LauncherRouter {
     if (bg === "ready") {
       return undefined;
     }
-    if (bg === "bg_off" || bg === "needs_auto_mode") {
+    if (bg === "bg_off" || bg === "mode_not_allowed") {
       return bg;
     }
     return subagentsRunning > 0 && this.states.fileBusy(key) ? "background" : "busy";

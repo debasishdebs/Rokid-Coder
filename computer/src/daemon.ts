@@ -265,6 +265,8 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
       clearUncertain: (key) => launchers.setUncertain(key, false),
       // SubagentStart seen and SubagentStop not yet, as the store counts them.
       subagents: (key) => sessions.get(key.slice(key.indexOf(":") + 1))?.subagents?.running ?? 0,
+      // Every pending approval counts, a subagent's included; an unknown manager is not "none".
+      approvalPending: (key) => approvals?.hasPendingForSession(key.slice(key.indexOf(":") + 1)) !== false,
     },
   );
   // The environment overrides exist only so tests need not wait the windows out.

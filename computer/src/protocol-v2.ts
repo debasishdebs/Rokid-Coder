@@ -47,13 +47,14 @@ export type FollowupState = "waiting" | "unavailable" | "cap_reached" | "ready";
 
 /**
  * Why a follow-up is "unavailable", for the phone to say (never a readiness
- * decision). Precedence: draft, needs_auto_mode, bg_off, background, busy.
+ * decision). Precedence: draft, mode_not_allowed, bg_off, background, busy.
  * - `draft`: text sits at the laptop's prompt, so typing would mix with it;
- * - `needs_auto_mode`: the main prompt looks free while a background subagent
+ * - `mode_not_allowed`: the main prompt looks free while a background subagent
  *   runs (a main-thread Stop and no work since, Claude's file `busy`), but the
- *   session is not in an auto-approving permission mode (`auto` or
- *   `bypassPermissions`), or agentd does not know its mode, so a reply could
- *   land in a permission dialog and is not typed;
+ *   session's permission mode is `plan` (its plan-approval dialog would take
+ *   the keys), is not known to agentd, or is one where a dialog may open
+ *   (`default`, `acceptEdits`, `dontAsk`) while agentd cannot say that no
+ *   approval is pending;
  * - `bg_off`: everything else would allow a reply while a background subagent
  *   runs, but the phone's `bgReplies` switch (settings_sync) is off: the
  *   glasses say "turn on background replies in Settings";
@@ -70,7 +71,7 @@ export type FollowupWhy =
   | "draft"
   | "background"
   | "bg_off"
-  | "needs_auto_mode"
+  | "mode_not_allowed"
   | "not_launcher";
 
 // agent -> phone
@@ -340,7 +341,7 @@ export interface SettingsSyncFrame {
   /**
    * Additive and optional (absent is false): the wearer allows glasses replies
    * to be typed into a launcher-bound session while a background subagent keeps
-   * Claude's file `busy`, in an auto-approving permission mode only. agentd
+   * Claude's file `busy`, in any permission mode but `plan`. agentd
    * keeps it in memory for the connected link, forgets it when the link goes,
    * and the phone sends it again on every connect. Anything but a boolean
    * rejects the frame.
