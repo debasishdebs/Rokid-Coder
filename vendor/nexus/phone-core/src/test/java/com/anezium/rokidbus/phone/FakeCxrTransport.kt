@@ -37,7 +37,10 @@ internal class FakeCxrTransport : CxrTransport {
     override fun setCXRLinkCbk(cbk: ICXRLinkCbk?) { linkCallback = cbk }
     override fun setCXRCustomCmdCbk(cbk: ICustomCmdCbk?) { customCmdCallback = cbk }
     override fun setCXRAudioCbk(cbk: IAudioStreamCbk?) { audioCallback = cbk }
+    /** Every token the core connected with. */
+    val connectTokens = CopyOnWriteArrayList<String>()
     override fun connect(token: String): Boolean {
+        connectTokens += token
         serviceConnected = true
         return true
     }

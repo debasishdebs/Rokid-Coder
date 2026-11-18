@@ -3173,6 +3173,22 @@ class HubCore internal constructor(
 
     @HubShellApi fun cxrLinkOrNull(): CXRLink? = (cxrLink as? CxrLinkTransport)?.link
 
+    /**
+     * Main thread. Connects CXR again with the stored token, the same call the first start and the
+     * Glass app screen make. Nothing in the core does it on its own after the link drops, so a shell
+     * that wants the link kept up calls this. False, and nothing done, when the hub is stopped, the
+     * link is already up or no token is stored.
+     */
+    @HubShellApi @MainThread
+    fun reconnectCxr(): Boolean {
+        if (!hubEnabled || closed || isCxrUp()) return false
+        val token = prefs().getString(PREF_TOKEN, "").orEmpty()
+        if (token.isBlank()) return false
+        log("CXR-L reconnect requested")
+        startCxr(token)
+        return true
+    }
+
     /** Main thread. Persists the CXR token, then start(). */
     @HubShellApi @MainThread
     fun startWithToken(token: String) {
