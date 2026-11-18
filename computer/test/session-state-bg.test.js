@@ -788,16 +788,44 @@ test("a_restore_leaves_a_latch_somebody_else_moved_alone", async () => {
   assert.equal(plain.states.latchAt(KEY), undefined);
 });
 
-test("a_cancel_after_the_paste_and_before_the_enter_does_not_consume_the_msgId", async () => {
-  // The launcher cleared the paste when asked to stop and says so: cancelled, Enter never pressed.
+test("a_cancel_after_the_paste_began_consumes_the_msgId_so_a_reply_is_never_sent_twice", async () => {
+  // A cancel can come before the paste, between it and the Enter, or after the Enter, and agentd cannot
+  // tell which: a text reply cancelled once its paste began is presumed sent. It can cost a re-spoken
+  // reply, never a duplicate.
   const t = idleSession();
   const result = t.router.followup(KEY, "hi", () => ({ ok: true }));
   await until(() => t.port.sent.length === 1, 500, "the dispatch");
   t.port.wrote();
   t.port.settle({ ok: false, error: "cancelled" });
-  const outcome = await result;
-  assert.deepEqual(outcome, { ok: false, error: "cancelled" });
-  assert.equal(ready(t), true, "and the readiness state is back");
+  assert.deepEqual(await result, { ok: false, error: "cancelled", consumed: true });
+  assert.equal(ready(t), false, "and the barrier of the paste stays");
+  // A cancel before anything was written is not spent.
+  const early = idleSession();
+  const e = early.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => early.port.sent.length === 1, 500, "the dispatch");
+  early.port.settle({ ok: false, error: "cancelled" });
+  assert.deepEqual(await e, { ok: false, error: "cancelled" });
+  // A background reply whose Enter was allowed and which Claude has not taken yet: a cancel in that wait
+  // is spent too, since the Enter was pressed.
+  const waiting = setup();
+  const { result: pending } = await dispatch(waiting);
+  waiting.port.check("paste");
+  waiting.port.wrote();
+  waiting.port.check("enter");
+  waiting.port.settle({ ok: true });
+  await settle(30);
+  waiting.router.endSession(KEY);
+  const cancelledWaiting = await pending;
+  assert.equal(cancelledWaiting.ok, false);
+  assert.equal(cancelledWaiting.consumed, true);
+  // The same cancel through the hub's own synthetic result.
+  const synthetic = setup();
+  const { result: pending2 } = await dispatch(synthetic);
+  synthetic.port.check("paste");
+  synthetic.port.wrote();
+  synthetic.port.check("enter");
+  synthetic.port.settle({ ok: false, error: "cancelled" });
+  assert.deepEqual(await pending2, { ok: false, error: "cancelled", consumed: true });
   // A compact that was cancelled after it was typed stays spent.
   const compact = idleSession();
   const c = compact.router.command(KEY, { command: "compact" });
@@ -805,22 +833,27 @@ test("a_cancel_after_the_paste_and_before_the_enter_does_not_consume_the_msgId",
   compact.port.wrote();
   compact.port.settle({ ok: false, error: "cancelled" });
   assert.deepEqual(await c, { ok: false, error: "cancelled", consumed: true });
-  // Agentd stopped waiting first: the launcher's late result is what says whether the Enter was pressed.
+  // Agentd stops waiting first: it does not wait for the launcher's word, and a late one changes nothing.
   const unheard = idleSession();
   const u = unheard.router.followup(KEY, "hi", () => ({ ok: true }));
   await until(() => unheard.port.sent.length === 1, 500, "the dispatch");
   unheard.port.wrote();
   const cmdId = unheard.port.pending.cmdId;
+  const started = Date.now();
   unheard.router.endSession(KEY);
-  unheard.port.late(cmdId, false, "cancelled");
-  assert.deepEqual(await u, { ok: false, error: "cancelled" });
-  const silent = idleSession();
-  const s = silent.router.followup(KEY, "hi", () => ({ ok: true }));
-  await until(() => silent.port.sent.length === 1, 500, "the dispatch");
-  silent.port.wrote();
-  silent.router.endSession(KEY);
-  const heard = await s;
-  assert.deepEqual([heard.error, heard.consumed], ["typed_after_cancel", true], "no word from the launcher: presumed pressed");
+  const heard = await u;
+  assert.deepEqual([heard.ok, heard.error, heard.consumed], [false, "typed_after_cancel", true]);
+  assert.equal(Date.now() - started < 200, true, "no wait for a late result");
+  unheard.port.late(cmdId, false, "not_sent");
+  // A command_written that arrives while a cancel waits ends that wait, and the reply is presumed sent
+  // whatever the launcher's result says 40 ms later.
+  const delayed = idleSession();
+  const d = delayed.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => delayed.port.sent.length === 1, 500, "the dispatch");
+  delayed.router.endSession(KEY);
+  delayed.port.wrote();
+  const late = await d;
+  assert.deepEqual([late.error, late.consumed], ["typed_after_cancel", true]);
 });
 
 test("only_a_write_that_pressed_enter_consumes_the_msgId", async () => {

@@ -287,7 +287,11 @@ Limits to know about:
   between the paste and the Enter are held and replayed once, in order, right after the Enter or after
   the cleanup, never waiting on Claude's status; after a clear nobody could see they are dropped
   instead. A reply cleared away (`not_sent`, `laptop_draft`, or Esc before the Enter, `taken_over`)
-  never consumed its message id and leaves the readiness state as it was before the paste.
+  never consumed its message id and leaves the readiness state as it was before the paste. Only the
+  launcher's own word that the Enter was never pressed counts for that. A cancel (the wearer's, a
+  rebind, a timeout, the link going) once the paste began is presumed sent and consumes the id, because
+  agentd cannot tell a cancel before the Enter from one after it: it can cost you a re-spoken reply,
+  never a duplicate one.
 - Every glasses reply, idle or background, is typed in the same two phases, and a draft is what the
   screen shows, not what your keys suggest. Before a byte is written the prompt box must be visibly empty
   on two looks (a faint or gray placeholder or suggestion is empty; `Try "..."` only when drawn faint),

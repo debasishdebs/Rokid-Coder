@@ -607,7 +607,7 @@ export interface LauncherPort {
   onChange(cb: (key: SessionKey) => void): void;
   onCommandWritten(cb: (key: SessionKey, cmdId: string, at: number) => void): void;
   /** R165: the launcher's own result for a command agentd had already cancelled. */
-  onLateResult(cb: (cmdId: string, ok: boolean, error?: string) => void): void;
+  onLateResult(cb: (cmdId: string, ok: boolean) => void): void;
   /** A launcher asks, mid-command, whether a background reply may write now (`paste`, then `enter`). */
   onWriteCheck?(cb: (key: SessionKey, cmdId: string, phase: WriteCheckPhase) => boolean): void;
 }
@@ -652,8 +652,6 @@ interface Running {
   accept?: (prompt: string | undefined) => void;
   /** `latchVersion` right after this command's own first write: a restore is only for a latch nobody has moved since. */
   latchMark?: number;
-  /** The launcher's own error for a command agentd had already cancelled, once it arrived. */
-  lateError?: string;
 }
 
 /**
@@ -715,10 +713,9 @@ export class LauncherRouter {
         running.settled?.();
       }
     });
-    this.port.onLateResult((cmdId, _ok, error) => {
+    this.port.onLateResult((cmdId) => {
       for (const running of this.running.values()) {
         if (running.cmdId === cmdId) {
-          running.lateError = error;
           running.settled?.();
         }
       }
@@ -1045,14 +1042,16 @@ export class LauncherRouter {
     // the launcher clears the paste away, and the same msgId may be sent again.
     const spent = (): boolean => (bg ? running.enterGranted === true : running.written);
     // Typed, then failed: the msgId is spent, so a resend is a duplicate, never a retype.
-    // For a text reply the launcher's `not_sent`, `laptop_draft` and `taken_over` all say the Enter was
-    // never pressed (it cleared its paste away, or made none): nothing was submitted, so the same msgId
-    // may be sent again and the readiness state is what it was before the paste. A compact or a model
-    // change that was taken over had been typed, and stays spent.
-    // `cancelled` is the launcher's too: it cleared the paste when asked to stop, and nothing was entered.
+    // For a text reply only the launcher's `not_sent`, `laptop_draft` and `taken_over` positively say the
+    // Enter was never pressed (it cleared its paste away, or made none): nothing was submitted, so the same
+    // msgId may be sent again and the latch goes back to before the paste. A compact or a model change that
+    // was taken over had been typed, and stays spent.
+    // A `cancelled` is NOT such a word, nor is a timeout or the loss of the link: a cancel can arrive
+    // before the paste, between it and the Enter, or after the Enter, and agentd cannot tell which. So a
+    // text reply cancelled after its paste began is presumed sent and its msgId consumed. The trade-off
+    // is deliberate: a cancel can cost the wearer a re-spoken reply, and never a duplicate.
     const unsent = (error: string): boolean =>
-      cmd.command === "text" &&
-      (error === "not_sent" || error === "laptop_draft" || error === "taken_over" || error === "cancelled");
+      cmd.command === "text" && (error === "not_sent" || error === "laptop_draft" || error === "taken_over");
     const before = this.states.snapshotLatch(key);
     // Puts the latch back for a paste that was never entered, if nobody has moved it since that write.
     const putBack = (): void => {
@@ -1103,20 +1102,18 @@ export class LauncherRouter {
         // The launcher has not answered in time, or the session went away:
         // cancel whatever it is still doing, and say so.
         this.port.cancelCommand(cmdId);
-        await this.settleCancel(key, running, cmd.command === "text");
+        await this.settleCancel(key, running);
         this.noteFailure(key, gen, cmd, result);
         // R165: it was typed before the cancel reached the launcher. The msgId
-        // is spent, so a resend is a duplicate and never typed twice.
+        // is spent, so a resend is a duplicate and never typed twice. A text reply whose paste had
+        // begun is treated the same, Enter pressed or not (see `unsent`); the one exception is a
+        // background reply whose Enter agentd never allowed: the launcher presses it only after
+        // agentd's yes, so agentd knows it was not pressed.
         if (bg && !spent()) {
           if (running.written) {
             putBack();
             return fail("not_sent");
           }
-          return fail(result);
-        }
-        // The launcher's own word that it cleared a pasted reply and never pressed the Enter.
-        if (running.written && running.lateError !== undefined && unsent(running.lateError)) {
-          putBack();
           return fail(result);
         }
         return running.written ? { ok: false, error: "typed_after_cancel", consumed: true } : failed(result);
@@ -1177,10 +1174,8 @@ export class LauncherRouter {
    * been typed, its `command_written` already on the way. The answer waits
    * until the launcher says either way, or the settle window passes.
    */
-  private settleCancel(key: SessionKey, running: Running, text = false): Promise<void> {
-    // A text reply that was pasted may still be waiting for its Enter: the launcher's own result says
-    // whether it was pressed (`not_sent`, `cancelled`, `taken_over`: no), so that is waited for too.
-    if ((running.written && !text) || this.port.binding(key)?.gen !== running.gen) {
+  private settleCancel(key: SessionKey, running: Running): Promise<void> {
+    if (running.written || this.port.binding(key)?.gen !== running.gen) {
       return Promise.resolve();
     }
     return new Promise((resolve) => {

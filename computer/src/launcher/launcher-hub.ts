@@ -218,7 +218,7 @@ export class LauncherHub {
   private readonly byKey = new Map<SessionKey, Connection>();
   private readonly listeners: Array<(key: SessionKey) => void> = [];
   private readonly writtenListeners: Array<(key: SessionKey, cmdId: string, at: number) => void> = [];
-  private readonly lateResultListeners: Array<(cmdId: string, ok: boolean, error?: string) => void> = [];
+  private readonly lateResultListeners: Array<(cmdId: string, ok: boolean) => void> = [];
   private writeChecker?: (key: SessionKey, cmdId: string, phase: WriteCheckPhase) => boolean;
   /** Why each key's last binding ended: `exited` when its launcher went away, `cancelled` when it moved on. */
   private readonly unbound = new Map<SessionKey, CommandError>();
@@ -395,7 +395,7 @@ export class LauncherHub {
   }
 
   /** R165: the launcher's own result for a command agentd had already cancelled on its connection. */
-  onLateResult(cb: (cmdId: string, ok: boolean, error?: string) => void): void {
+  onLateResult(cb: (cmdId: string, ok: boolean) => void): void {
     this.lateResultListeners.push(cb);
   }
 
@@ -639,7 +639,7 @@ export class LauncherHub {
           pending.resolve(frame.ok ? { ok: true } : { ok: false, error: frame.error as CommandError });
         } else if (connection.cancelledCmdId === frame.cmdId) {
           connection.cancelledCmdId = undefined;
-          this.emitLateResult(frame.cmdId, frame.ok, typeof frame.error === "string" ? frame.error : undefined);
+          this.emitLateResult(frame.cmdId, frame.ok);
         }
         return undefined;
       }
@@ -1075,10 +1075,10 @@ export class LauncherHub {
     }
   }
 
-  private emitLateResult(cmdId: string, ok: boolean, error?: string): void {
+  private emitLateResult(cmdId: string, ok: boolean): void {
     for (const listener of [...this.lateResultListeners]) {
       try {
-        listener(cmdId, ok, error);
+        listener(cmdId, ok);
       } catch (error) {
         this.options.logger.error("launcher_listener_failed", { reason: errorCode(error) });
       }
