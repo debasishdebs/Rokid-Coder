@@ -56,6 +56,12 @@ internal class VoiceQuestionWiring(
 
         /** Words of a long voice reply the glasses show before condensing it (U4/U13). */
         val voiceWordLimit: Int get() = VoiceCondense.DEFAULT_WORD_LIMIT
+
+        /**
+         * A speech start was denied for want of the glasses link: one reconnect now, and [onResult] with
+         * whether the link was up a moment later. The default has nothing to reconnect.
+         */
+        fun healLink(onResult: (Boolean) -> Unit) = onResult(false)
     }
 
     // ------------------------------------------------------------------ voice
@@ -66,7 +72,14 @@ internal class VoiceQuestionWiring(
      * that arrives after the card was closed or restarted is dropped. Nothing the
      * wearer says is logged, and nothing is sent until ENTER on the heard card.
      */
-    fun startVoice(target: VoiceTarget) {
+    fun startVoice(target: VoiceTarget) = startVoice(target, healed = false)
+
+    /**
+     * [healed]: this is the one retry after a link-denied start, so a second denial is the wearer's to see.
+     * The first denial is not shown: the link is reconnected and, if it is up within a moment, the start
+     * runs again on a card of its own.
+     */
+    private fun startVoice(target: VoiceTarget, healed: Boolean) {
         // A restart gives the screen back to the card that asked, then covers it again.
         screen.stopVoice()
         val run = VoiceRun(target)
@@ -80,6 +93,10 @@ internal class VoiceQuestionWiring(
             }
             override fun onFinal(text: String) = onVoiceEvent(run) { it.onFinal(text) }
             override fun onStopped(reason: NexusSpeechStopReason, error: NexusSpeechError?) {
+                if (reason == NexusSpeechStopReason.DENIED_NO_LINK && !healed && screen.voice === run) {
+                    healAndRetry(run, reason, error)
+                    return
+                }
                 onVoiceEvent(run) { it.onStopped(reason, error) }
             }
         })
@@ -90,6 +107,17 @@ internal class VoiceQuestionWiring(
             run.capture.onStartRefused(session.result)
         }
         voiceChanged(run)
+    }
+
+    private fun healAndRetry(run: VoiceRun, reason: NexusSpeechStopReason, error: NexusSpeechError?) {
+        host.healLink { up ->
+            when {
+                // The wearer left the card, or started another utterance, while the link was coming back.
+                screen.voice !== run -> onVoiceEvent(run) { it.onStopped(reason, error) }
+                up -> startVoice(run.target, healed = true)
+                else -> onVoiceEvent(run) { it.onStopped(reason, error) }
+            }
+        }
     }
 
     private fun onVoiceEvent(run: VoiceRun, event: (VoiceCapture) -> Unit) {

@@ -5,6 +5,15 @@ import com.anezium.rokidbus.client.plugin.NexusCard
 import com.anezium.rokidbus.client.plugin.NexusNotice
 import com.anezium.rokidbus.client.plugin.NexusNoticeUpdate
 import com.anezium.rokidbus.client.plugin.NexusSdkResult
+import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
+import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
+import com.anezium.rokidbus.plugin.agents.service.FakeLinkCore
+import com.anezium.rokidbus.plugin.agents.service.GlassesLinkHealer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import java.util.concurrent.TimeUnit
 import com.anezium.rokidbus.phone.GlassesDeviceInfo
 import com.anezium.rokidbus.shared.LinkStateBits
 import com.anezium.rokidbus.shared.plugin.NexusInputEvent
@@ -40,6 +49,8 @@ class AgentsCoreTest {
 
     @After
     fun tearDown() {
+        CoderRuntime.attachHealer(null)
+        healerScope.cancel()
         core.close()
         idle()
         AgentsRuntime.hudOpen = false
@@ -174,6 +185,103 @@ class AgentsCoreTest {
         core.invalidate("a1")
 
         assertEquals(1, run.stops)
+    }
+
+    // ------------------------------------------------------- a voice start denied for want of the glasses link
+
+    private val linkCore = FakeLinkCore().apply { state = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED }
+    private val healerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private fun attachHealer(): GlassesLinkHealer =
+        GlassesLinkHealer(healerScope, linkCore, settleMs = 2_000).also(CoderRuntime::attachHealer)
+
+    private fun denyNoLink(run: FakeGlassesSurface.Handle) =
+        run.listener.onStopped(NexusSpeechStopReason.DENIED_NO_LINK, null)
+
+    @Test
+    fun a_voice_start_denied_for_no_link_reconnects_and_runs_again_when_the_link_comes_up() {
+        glasses.open()
+        val healer = attachHealer()
+        core.startVoice(VoiceTarget.Approval("a1"))
+
+        denyNoLink(glasses.speech.single())
+        idle()
+
+        assertEquals("one reconnect, at once", 1, linkCore.reconnects)
+        assertEquals("the denial is not shown while the link is coming back", 1, glasses.speech.size)
+        assertFalse(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+
+        linkCore.state = linkCore.state or LinkStateBits.CXR_CONTROL_UP
+        healer.onLinkState(linkCore.state)
+        idle()
+
+        assertEquals("the start ran once more", 2, glasses.speech.size)
+        glasses.speech.last().listener.onStarted(true)
+        assertTrue(text(lastCard()).isNotBlank())
+        assertFalse(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+        CoderRuntime.attachHealer(null)
+    }
+
+    @Test
+    fun a_link_that_stays_down_shows_the_loss_after_the_wait() {
+        glasses.open()
+        attachHealer()
+        core.startVoice(VoiceTarget.Approval("a1"))
+
+        denyNoLink(glasses.speech.single())
+        idle()
+        ShadowLooper.idleMainLooper(2_500, TimeUnit.MILLISECONDS)
+
+        assertEquals(1, glasses.speech.size)
+        assertTrue(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+        CoderRuntime.attachHealer(null)
+    }
+
+    @Test
+    fun the_retry_is_one_only_and_a_second_denial_is_shown() {
+        glasses.open()
+        val healer = attachHealer()
+        core.startVoice(VoiceTarget.Approval("a1"))
+        denyNoLink(glasses.speech.single())
+        linkCore.state = linkCore.state or LinkStateBits.CXR_CONTROL_UP
+        healer.onLinkState(linkCore.state)
+        idle()
+        assertEquals(2, glasses.speech.size)
+
+        denyNoLink(glasses.speech.last())
+        idle()
+        ShadowLooper.idleMainLooper(5, TimeUnit.SECONDS)
+
+        assertEquals("no second retry", 2, glasses.speech.size)
+        assertEquals(1, linkCore.reconnects)
+        assertTrue(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+        CoderRuntime.attachHealer(null)
+    }
+
+    @Test
+    fun with_no_service_to_reconnect_the_denial_is_shown_at_once() {
+        glasses.open()
+        CoderRuntime.attachHealer(null)
+        core.startVoice(VoiceTarget.Approval("a1"))
+
+        denyNoLink(glasses.speech.single())
+        idle()
+
+        assertTrue(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+    }
+
+    @Test
+    fun other_denials_are_not_retried() {
+        glasses.open()
+        attachHealer()
+        core.startVoice(VoiceTarget.Approval("a1"))
+
+        glasses.speech.single().listener.onStopped(NexusSpeechStopReason.DENIED_BUSY, null)
+        idle()
+
+        assertEquals(0, linkCore.reconnects)
+        assertTrue(text(lastCard()).contains(VoiceCapture.MIC_BUSY))
+        CoderRuntime.attachHealer(null)
     }
 
     @Test

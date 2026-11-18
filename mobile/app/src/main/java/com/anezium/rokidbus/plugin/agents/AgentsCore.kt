@@ -185,6 +185,7 @@ class AgentsCore(
                 override fun brief(title: String, body: String, safety: Boolean) =
                     showBriefNotice(title, body, safety)
                 override val voiceWordLimit: Int get() = configStore.voiceWordLimit()
+                override fun healLink(onResult: (Boolean) -> Unit) = CoderRuntime.healGlassesLink(onResult)
             },
         )
     }
