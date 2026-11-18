@@ -680,11 +680,12 @@ export class LauncherHub {
         this.write(connection, { type: "write_verdict", cmdId: frame.cmdId, phase, ok });
         return undefined;
       }
-      case "draft_check": {
-        // The launcher's own look at the screen when the key stream said "draft": lengths and flags only.
+      case "screen_check": {
+        // The launcher's own look at the screen around a reply: names, lengths and flags only.
         const word = /^[a-z_]{1,40}$/;
         if (
-          !hasShape(frame, ["type", "probe", "reason", "textLen", "tainted", "before", "after", "decision"]) ||
+          !hasShape(frame, ["type", "phase", "probe", "reason", "textLen", "tainted", "outcome"]) ||
+          (frame.phase !== "pre" && frame.phase !== "post" && frame.phase !== "clear") ||
           typeof frame.probe !== "string" ||
           !word.test(frame.probe) ||
           typeof frame.reason !== "string" ||
@@ -692,21 +693,18 @@ export class LauncherHub {
           !Number.isInteger(frame.textLen) ||
           (frame.textLen as number) < 0 ||
           typeof frame.tainted !== "boolean" ||
-          typeof frame.before !== "boolean" ||
-          typeof frame.after !== "boolean" ||
-          (frame.decision !== "kept" && frame.decision !== "cleared")
+          (frame.outcome !== "ok" && frame.outcome !== "refused")
         ) {
           return "bad_frame";
         }
-        this.options.logger.info("launcher_draft_check", {
+        this.options.logger.info("launcher_screen_check", {
           session: connection.binding?.key,
+          phase: frame.phase,
           probe: frame.probe,
           reason: frame.reason,
           textLen: frame.textLen,
           tainted: frame.tainted,
-          draftBefore: frame.before,
-          draftAfter: frame.after,
-          decision: frame.decision,
+          outcome: frame.outcome,
         });
         return undefined;
       }

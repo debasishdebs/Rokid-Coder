@@ -1,7 +1,7 @@
 import { readClaudeSession, type ClaudeSessionFile } from "./claude-sessions";
 import type { TypeCommand } from "./launcher-hub";
 import type { PtyChild } from "./pty";
-import { ScreenModel, probe, showsEmptyPrompt } from "./screen-probe";
+import { ScreenModel, probe } from "./screen-probe";
 import { LaptopInput, sessionBusySince } from "./laptop-input";
 import { Typist, sessionReady, systemClock, type BindingView, type Clock } from "./typist";
 
@@ -12,30 +12,11 @@ const COMMANDS: ReadonlySet<string> = new Set(["compact", "model", "text"]);
 /** `laptop_state` goes out on change, at most this often. */
 const DRAFT_REPORT_MS = 250;
 /**
- * The key stream alone says a draft exists after any key that might type, but
- * never sees the prompt. While it says so the screen is looked at this often,
- * and the draft is let go only when the prompt box is visibly empty on two
- * looks, no sooner than DRAFT_SETTLE_MS after the last key (a typed character
- * is on screen well within that, and a stray Esc or Tab never is).
+ * What agentd is told as `laptop_state.draft` is what the screen shows, not
+ * what the keys suggest: the framed prompt box visibly has text in it. The
+ * screen is looked at once the output has paused this long.
  */
-const DRAFT_LOOK_MS = 250;
-const DRAFT_SETTLE_MS = 1000;
-/**
- * A look at the screen proves nothing unless the screen has had the chance to
- * show the key. Two kinds of evidence, and the trade-off between them:
- * - Claude drew something after the last key (any output reaching the model
- *   since), and the box is still empty after that. A key Claude echoes (a
- *   printable one, a Backspace) needs this and nothing else: no output after
- *   it means the echo may still be coming, however long that takes.
- * - A key Claude never echoes (Esc, Tab, an arrow) draws nothing, so there is
- *   no output to wait for. It is let go after DRAFT_QUIET_MS without a key, and
- *   only while Claude's own sessions file says `idle`: a busy or unknown
- *   session might still be about to draw. The cost is that a stray Esc in a
- *   busy session with nothing being drawn keeps the false draft until Claude
- *   draws something or goes idle; the alternative is a reply queued behind
- *   text the wearer typed.
- */
-const DRAFT_QUIET_MS = 5000;
+const SCREEN_LOOK_MS = 150;
 
 export interface LauncherClientOptions {
   child: PtyChild;
@@ -47,15 +28,6 @@ export interface LauncherClientOptions {
   clock?: Clock;
   /** The terminal's size, which the screen model needs to read Claude's layout. */
   size?: { cols: number; rows: number };
-}
-
-/**
- * Whether keys put something on Claude's screen: a printable character or a
- * Backspace outside any escape sequence. Esc, Tab, arrows and the like draw nothing.
- */
-function keyEchoes(data: string): boolean {
-  const plain = data.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b[O\]P^_X][^\x1b]*?(?:\x07|\x1b\\|[@-~])|\x1b./g, "");
-  return /[\x20-\x7e\x7f -￿]/.test(plain);
 }
 
 function asTypeCommand(frame: Frame): TypeCommand | undefined {
@@ -104,20 +76,11 @@ export class LauncherClient {
   private running?: { cmdId: string; epoch: number };
   private readonly screen: ScreenModel;
   private reportedDraft = false;
+  /** The screen shows text in the prompt box, as of the last look; this, never the keys, is what agentd hears. */
+  private visibleDraft = false;
   private lastReportAt = Number.NEGATIVE_INFINITY;
   private reportTimer?: unknown;
-  private lastKeyAt = Number.NEGATIVE_INFINITY;
-  /** Claude drew something after the last key, so the screen has had its chance to show it. */
-  private outputAfterKey = false;
-  /** A key of this draft is one Claude echoes (printable, Backspace), so only a redraw can show it gone. */
-  private echoingKey = false;
-  /** Claude's own sessions-file status for the bound session, or undefined when unknown. */
-  private readonly fileStatus: () => string | undefined;
-  private draftTimer?: unknown;
-  /** When the screen first showed the prompt box visibly empty during this draft; a second look must agree. */
-  private emptySeenAt?: number;
-  /** The last decision sent to the log, so a poll that finds the same thing says nothing. */
-  private draftLogged?: string;
+  private screenTimer?: unknown;
 
   constructor(options: LauncherClientOptions) {
     this.child = options.child;
@@ -129,10 +92,9 @@ export class LauncherClient {
       const file = owned ? readClaudeSession(options.sessionsDir, owned.pid) : undefined;
       return file?.sessionId === owned?.sessionId ? file : undefined;
     };
-    this.fileStatus = () => readOwned()?.status;
-    options.child.onData(() => {
-      this.outputAfterKey = true;
-    });
+    // The screen model is fed Claude's output for the whole session (the typist subscribes
+    // in its constructor); each pause in the output is a moment to look at the prompt box.
+    options.child.onData(() => this.scheduleScreenLook());
     const ready = (after?: number): boolean => sessionReady(readOwned(), after);
     this.input = new LaptopInput({ clock: this.clock, busySince: (at) => sessionBusySince(readOwned(), at) });
     this.screen = new ScreenModel(options.size?.cols ?? 80, options.size?.rows ?? 24);
@@ -153,119 +115,51 @@ export class LauncherClient {
           this.send({ type: "command_written", cmdId, at });
         }
       },
-    });
-    this.input.onDraftChange(() => {
-      this.reportDraft();
-      this.watchDraft();
+      // What the screen check decided, for agentd's log: names and lengths, never prompt text.
+      onCheck: (check) => this.send({ type: "screen_check", ...check }),
     });
   }
 
   /** The terminal was resized. */
   resize(cols: number, rows: number): void {
     this.screen.resize(cols, rows);
+    this.scheduleScreenLook();
   }
 
   /** Bytes from the user's terminal. */
   onStdin(data: string): void {
     // After a takeover the typist replays the held keys, a gap after this one (R151).
-    this.lastKeyAt = this.clock.now();
-    this.outputAfterKey = false;
-    this.echoingKey ||= keyEchoes(data);
-    this.emptySeenAt = undefined;
     const now = this.input.key(data);
     if (now) {
       this.child.write(now);
     }
   }
 
-  /**
-   * While the key stream says there is a draft, looks at the screen on a timer.
-   * The screen model is fed Claude's output for the whole session (the typist
-   * subscribes in its constructor), not only while a reply is in flight.
-   */
-  private watchDraft(): void {
-    if (!this.input.draft) {
-      this.emptySeenAt = undefined;
-      this.draftLogged = undefined;
-      this.echoingKey = false;
-      return;
-    }
-    if (this.draftTimer === undefined) {
-      this.draftTimer = this.clock.setTimeout(() => {
-        this.draftTimer = undefined;
-        this.reviewDraft();
-      }, DRAFT_LOOK_MS);
+  private scheduleScreenLook(): void {
+    if (this.screenTimer === undefined) {
+      this.screenTimer = this.clock.setTimeout(() => {
+        this.screenTimer = undefined;
+        this.lookAtScreen();
+      }, SCREEN_LOOK_MS);
     }
   }
 
   /**
-   * Lets a draft go only on positive evidence that the prompt box is empty: the
-   * screen model is not tainted, the probe finds the framed box with nothing on
-   * its input line but muted text (a placeholder or a suggestion), no dialog is
-   * up, and a second look agrees. Anything else, a failure to read the screen
-   * included, keeps the draft as the key stream had it.
+   * Whether the prompt box visibly has text in it, which is what agentd calls a
+   * laptop draft. The keys never say so: a stray Esc or Tab is not text, and a
+   * draft the keys never saw (a restored one, a paste) still is. While a command
+   * of ours has the prompt, the box holds our own paste, which is no draft.
    */
-  private reviewDraft(): void {
-    if (!this.input.draft) {
-      this.watchDraft();
-      return;
-    }
-    const now = this.clock.now();
-    if (now - this.lastKeyAt < DRAFT_SETTLE_MS || this.input.holding) {
-      this.emptySeenAt = undefined;
-      this.watchDraft();
-      return;
-    }
-    // A screen drawn before the key cannot show the key: no evidence yet, so the draft stands.
-    const evidence =
-      this.outputAfterKey ||
-      (!this.echoingKey && now - this.lastKeyAt >= DRAFT_QUIET_MS && this.fileStatus() === "idle");
-    if (!evidence) {
-      this.emptySeenAt = undefined;
-      this.logDraft(
-        { probe: "none", reason: this.echoingKey ? "awaiting_echo" : "awaiting_quiet_idle", textLen: 0, tainted: this.screen.tainted },
-        "kept",
-      );
-      this.watchDraft();
-      return;
+  private lookAtScreen(): void {
+    if (this.typist.busy) {
+      return; // looked at again when the command ends
     }
     const seen = probe(this.screen);
-    const empty = showsEmptyPrompt(seen);
-    const look = {
-      probe: seen.kind,
-      reason: seen.kind === "prompt" ? (seen.empty ? "empty" : "text") : seen.reason,
-      textLen: seen.kind === "prompt" ? seen.text.length : 0,
-      tainted: this.screen.tainted,
-    };
-    if (!empty) {
-      this.emptySeenAt = undefined;
-      this.logDraft(look, "kept");
-    } else if (this.emptySeenAt === undefined) {
-      this.emptySeenAt = now;
-    } else if (this.input.clearDraftFromScreen()) {
-      this.emptySeenAt = undefined;
-      this.logDraft(look, "cleared");
+    const text = seen.kind === "prompt" && !seen.empty;
+    if (text !== this.visibleDraft) {
+      this.visibleDraft = text;
+      this.reportDraft();
     }
-    this.watchDraft();
-  }
-
-  /** One line for agentd's log when the decision changes: lengths and flags, never prompt text. */
-  private logDraft(
-    look: { probe: string; reason: string; textLen: number; tainted: boolean },
-    decision: "kept" | "cleared",
-  ): void {
-    const signature = `${decision}|${look.probe}|${look.reason}|${look.textLen > 0}|${look.tainted}`;
-    if (signature === this.draftLogged) {
-      return;
-    }
-    this.draftLogged = signature;
-    this.send({
-      type: "draft_check",
-      ...look,
-      before: true,
-      after: decision === "kept",
-      decision,
-    });
   }
 
   /** R161: agentd says the binding is uncertain; the launcher keeps that until it sees proof otherwise. */
@@ -352,8 +246,8 @@ export class LauncherClient {
     this.typist.dispose();
     this.input.dispose();
     this.clock.clearTimeout(this.reportTimer);
-    this.clock.clearTimeout(this.draftTimer);
-    this.draftTimer = undefined;
+    this.clock.clearTimeout(this.screenTimer);
+    this.screenTimer = undefined;
   }
 
   /** R160: whatever was in flight, past its result too, is abandoned with the link that sent it. */
@@ -382,6 +276,7 @@ export class LauncherClient {
       if (epoch === this.epoch) {
         this.send({ type: "command_result", cmdId: cmd.cmdId, ok: result.ok, ...(result.error ? { error: result.error } : {}) });
       }
+      this.scheduleScreenLook();
     });
   }
 
@@ -397,7 +292,7 @@ export class LauncherClient {
       }, wait);
       return;
     }
-    const draft = this.input.draft;
+    const draft = this.visibleDraft;
     if (draft !== this.reportedDraft) {
       this.reportedDraft = draft;
       this.lastReportAt = this.clock.now();

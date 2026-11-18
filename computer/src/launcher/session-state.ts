@@ -877,7 +877,10 @@ export class LauncherRouter {
     // the launcher clears the paste away, and the same msgId may be sent again.
     const spent = (): boolean => (bg ? running.enterGranted === true : running.written);
     // Typed, then failed: the msgId is spent, so a resend is a duplicate, never a retype.
-    const failed = (error: string): RouteOutcome => (spent() ? { ok: false, error, consumed: true } : fail(error));
+    // `not_sent` and `laptop_draft` say the launcher cleared its paste away (or never made one): the
+    // reply was not submitted, so the same msgId may be sent again.
+    const failed = (error: string): RouteOutcome =>
+      spent() && error !== "not_sent" && error !== "laptop_draft" ? { ok: false, error, consumed: true } : fail(error);
     const promptSeen = bg && cmd.command === "text"
       ? new Promise<string>((resolve) => {
           const want = squash(cmd.text);

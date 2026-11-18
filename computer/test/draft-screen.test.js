@@ -1,10 +1,11 @@
 "use strict";
 /**
- * The key stream alone says "draft" after a stray Esc, Tab or arrow (it never
- * sees the prompt). The launcher lets the draft go only when the screen model
- * positively shows the prompt box empty (a muted suggestion is empty), on two
- * looks, and keeps it whenever the screen shows text, is tainted, is not a
- * prompt box or has a dialog up. A fake pty and clock; the screen is drawn by the test.
+ * What the launcher tells agentd is a laptop draft is what its screen model shows
+ * in the prompt box (visible text), never what the key stream suggests: a stray
+ * Esc or Tab is no draft, and a draft the keys never saw still is one. Replies
+ * are checked on the screen by the typist (typist-bg.test.js); here the client
+ * reports the draft, forwards the checks, and agentd logs them.
+ * A fake pty and clock; the screen is drawn by the test.
  */
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -72,12 +73,15 @@ function repaint({ above = ["● Resumed."], input = "", footer = [FOOTER] } = {
   return `\x1b[2J\x1b[H${[...above, RULE, `> ${input}`, RULE, ...footer].join("\r\n")}`;
 }
 
-/** `status` is what Claude's own sessions file says for the bound session; "none" means there is no such file. */
-function setup({ status = "idle" } = {}) {
+function setup() {
   const pty = new FakePty();
   const clock = new FakeClock();
   const frames = [];
   const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), "rk-draft-"));
+  fs.writeFileSync(
+    path.join(sessionsDir, "4242.json"),
+    JSON.stringify({ pid: 4242, sessionId: "s1", status: "idle", statusUpdatedAt: 1 }),
+  );
   const client = new LauncherClient({
     child: pty,
     send: (frame) => frames.push(frame),
@@ -85,226 +89,113 @@ function setup({ status = "idle" } = {}) {
     sessionsDir,
     clock,
   });
-  const t = { pty, clock, frames, client, sessionsDir };
-  t.setStatus = (value) => {
-    const file = path.join(sessionsDir, "4242.json");
-    if (value === "none") {
-      fs.rmSync(file, { force: true });
-    } else {
-      fs.writeFileSync(file, JSON.stringify({ pid: 4242, sessionId: "s1", status: value, statusUpdatedAt: 1 }));
-    }
-  };
-  t.setStatus(status);
   client.setSession({ sessionId: "s1", pid: 4242 });
   client.onBound("s1");
+  const t = { pty, clock, frames, client };
   t.draw = (chunk) => pty.emit(chunk);
   t.wait = (ms) => clock.advance(ms);
-  t.checks = () => frames.filter((f) => f.type === "draft_check");
+  t.drafts = () => frames.filter((f) => f.type === "laptop_state").map((f) => f.draft);
+  t.checks = () => frames.filter((f) => f.type === "screen_check");
   return t;
 }
 
-// Keys the tracker treats as possibly typing that Claude never echoes (Right and Ctrl-K only move or erase, so they never set a draft).
-for (const key of ["\x1b", "\t", "\x1b[A", "\x1b[B", "\x1b[3~"]) {
-  test(`a_stray_${JSON.stringify(key).replace(/\W/g, "_")}_then_an_empty_box_with_a_faint_suggestion_clears_the_draft`, () => {
+test("a_stray_key_with_nothing_in_the_box_is_never_a_draft", () => {
+  for (const key of ["\x1b", "\t", "\x1b[A", "\x7f", "\x1b[3~"]) {
     const t = setup();
     t.draw(repaint({ input: "\x1b[2mrun the test suite\x1b[22m" }));
     t.client.onStdin(key);
-    assert.equal(t.client.input.draft, true, "the key stream says draft");
-    // Nothing is drawn for such a key, so only a long quiet with Claude idle lets it go.
-    t.wait(600);
-    assert.equal(t.client.input.draft, true);
-    t.wait(3500);
-    assert.equal(t.client.input.draft, true, "not yet 5 s since the key");
-    t.wait(1500);
-    assert.equal(t.client.input.draft, false);
-    const [waiting, check, ...more] = t.checks();
-    assert.deepEqual(more, []);
-    assert.deepEqual([waiting.decision, waiting.reason], ["kept", "awaiting_quiet_idle"]);
-    assert.deepEqual(
-      [check.decision, check.probe, check.reason, check.textLen, check.tainted, check.before, check.after],
-      // The length counts the faint suggestion too: what is on the line, not what is solid.
-      ["cleared", "prompt", "empty", "run the test suite".length, false, true, false],
-    );
-    // agentd is told the draft is gone.
-    assert.deepEqual(t.frames.filter((f) => f.type === "laptop_state").map((f) => f.draft), [true, false]);
-  });
-}
-
-test("a_gray_placeholder_or_the_try_hint_counts_as_empty_too", () => {
-  for (const input of ["\x1b[90msuggestion\x1b[39m", "\x1b[38;5;245msuggestion\x1b[0m", '\x1b[2mTry "fix lint errors"\x1b[22m']) {
-    const t = setup();
-    t.draw(repaint({ input }));
-    t.client.onStdin("\x1b");
-    t.wait(6000);
-    assert.equal(t.client.input.draft, false, input);
+    t.wait(5000);
+    assert.deepEqual(t.drafts(), [], JSON.stringify(key));
   }
 });
 
-test("real_typed_text_visible_in_the_box_keeps_the_draft", () => {
+test("text_visible_in_the_box_is_the_draft_and_it_ends_when_the_box_is_empty_again", () => {
+  const t = setup();
+  t.draw(repaint());
+  t.wait(500);
+  assert.deepEqual(t.drafts(), []);
+  t.draw(repaint({ input: "half a thou" }));
+  t.wait(500);
+  assert.deepEqual(t.drafts(), [true]);
+  t.draw(repaint());
+  t.wait(500);
+  assert.deepEqual(t.drafts(), [true, false]);
+});
+
+test("a_draft_the_keys_never_saw_is_still_a_draft", () => {
+  const t = setup();
+  // A restored or pasted draft: no key of the wearer's went through.
+  t.draw(repaint({ input: "restored from the last session" }));
+  t.wait(500);
+  assert.deepEqual(t.drafts(), [true]);
+});
+
+test("a_faint_suggestion_a_dialog_and_a_tainted_screen_are_no_draft", () => {
+  const faint = setup();
+  faint.draw(repaint({ input: "\x1b[2mTry \"fix lint errors\"\x1b[22m" }));
+  faint.wait(500);
+  assert.deepEqual(faint.drafts(), []);
+  const dialog = setup();
+  dialog.draw(`Do you want to proceed?\r\n${RULE}\r\n> yes\r\n${RULE}\r\n  esc to cancel`);
+  dialog.wait(500);
+  assert.deepEqual(dialog.drafts(), [], "a dialog is not text at the laptop prompt; the reply is refused for it elsewhere");
+  const tainted = setup();
+  tainted.draw(repaint());
+  tainted.draw("\x1b[1;20r");
+  tainted.draw(`\x1b[H${["● Resumed.", RULE, "> typed", RULE, FOOTER].map((row) => `${row}\x1b[K`).join("\r\n")}`);
+  tainted.wait(500);
+  assert.deepEqual(tainted.drafts(), []);
+});
+
+test("the_wearers_keys_alone_never_report_a_draft_and_what_is_reported_is_throttled", () => {
   const t = setup();
   t.draw(repaint());
   t.client.onStdin("hello");
+  t.wait(500);
+  assert.deepEqual(t.drafts(), [], "the key stream says draft; the screen has not shown it");
   t.draw(repaint({ input: "hello" }));
-  t.wait(5000);
-  assert.equal(t.client.input.draft, true);
-  const checks = t.checks();
-  assert.equal(checks.length, 1, "said once, not on every look");
+  t.draw(repaint({ input: "hello w" }));
+  t.wait(500);
+  assert.deepEqual(t.drafts(), [true]);
+});
+
+test("our_own_paste_is_no_draft_while_a_reply_is_in_flight", async () => {
+  const t = setup();
+  t.draw(repaint());
+  t.client.onFrame({ type: "type_command", cmdId: "c1", gen: 1, command: "text", text: "yes do it" });
+  t.wait(100);
+  assert.equal(t.pty.writes.at(-1), "\x1b[200~yes do it\x1b[201~", "pasted after the two looks");
+  t.draw(repaint({ input: "yes do it" }));
+  t.wait(100);
+  assert.deepEqual(t.drafts(), [], "the box shows our own text; agentd must not think it a draft");
+  t.wait(100);
+  assert.equal(t.pty.writes.at(-1), "\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(t.frames.some((f) => f.type === "command_result" && f.ok === true), true);
+  // Enter was pressed, and Claude clears the box.
+  t.draw(repaint());
+  t.wait(500);
+  assert.deepEqual(t.drafts(), []);
+});
+
+test("the_screen_checks_are_forwarded_to_agentd_as_names_and_lengths", async () => {
+  const t = setup();
+  t.draw(repaint({ input: "the wearer's own words" }));
+  t.client.onFrame({ type: "type_command", cmdId: "c1", gen: 1, command: "text", text: "yes do it" });
+  t.wait(200);
+  await new Promise((resolve) => setImmediate(resolve));
+  const result = t.frames.find((f) => f.type === "command_result");
+  assert.deepEqual([result.ok, result.error], [false, "laptop_draft"]);
   assert.deepEqual(
-    [checks[0].decision, checks[0].reason, checks[0].textLen, checks[0].after],
-    ["kept", "text", 5, true],
+    t.checks().map((c) => [c.phase, c.probe, c.reason, c.textLen, c.tainted, c.outcome]),
+    [["pre", "prompt", "text", "the wearer's own words".length, false, "refused"]],
   );
-  assert.equal(JSON.stringify(checks).includes("hello"), false, "lengths only, never the prompt text");
+  assert.equal(JSON.stringify(t.checks()).includes("wearer"), false, "lengths only, never prompt text");
+  assert.equal(t.pty.writes.length, 0, "nothing was written, so the wearer's text is untouched");
 });
 
-test("a_character_not_yet_echoed_is_not_mistaken_for_an_empty_box_however_slow_the_echo", () => {
-  const t = setup();
-  t.draw(repaint());
-  t.client.onStdin("a");
-  // Claude takes far longer than the settle time to draw it: both looks read the pre-key screen.
-  t.wait(3000);
-  assert.equal(t.client.input.draft, true);
-  t.wait(30_000);
-  assert.equal(t.client.input.draft, true, "a key Claude echoes needs a redraw, however long that takes");
-  assert.equal(t.checks().at(-1).reason, "awaiting_echo");
-  // The echo arrives and shows the character: handled, the draft is real.
-  t.draw(repaint({ input: "a" }));
-  t.wait(5000);
-  assert.equal(t.client.input.draft, true);
-  assert.deepEqual([t.checks().at(-1).decision, t.checks().at(-1).reason], ["kept", "text"]);
-});
-
-test("an_echo_that_shows_the_box_empty_again_lets_a_backspaced_draft_go", () => {
-  const t = setup();
-  t.draw(repaint({ input: "a" }));
-  t.client.onStdin("\x7f");
-  t.wait(5000);
-  assert.equal(t.client.input.draft, true, "no redraw yet");
-  t.draw(repaint());
-  t.wait(300);
-  assert.equal(t.client.input.draft, true, "settle time not yet over since the key");
-  t.wait(1500);
-  assert.equal(t.client.input.draft, false);
-});
-
-test("output_drawn_after_the_key_is_the_evidence_for_a_key_that_draws_nothing_too", () => {
-  // Claude is busy, so the file is no evidence, but it drew after the Esc and the box is still empty.
-  const t = setup({ status: "busy" });
-  t.draw(repaint({ input: "\x1b[2msuggestion\x1b[22m" }));
-  t.client.onStdin("\x1b");
-  t.draw("\x1b[s\x1b[1;1H\x1b[2K● Working…\x1b[u");
-  t.wait(2500);
-  assert.equal(t.client.input.draft, false);
-});
-
-test("a_key_that_draws_nothing_is_let_go_only_after_5_s_and_only_with_claude_idle", () => {
-  for (const [what, status] of [["busy", "busy"], ["waiting", "waiting"], ["unknown", "none"]]) {
-    const t = setup({ status });
-    t.draw(repaint({ input: "\x1b[2msuggestion\x1b[22m" }));
-    t.client.onStdin("\x1b");
-    t.wait(60_000);
-    assert.equal(t.client.input.draft, true, what);
-    assert.equal(t.checks().at(-1).reason, "awaiting_quiet_idle", what);
-    // Claude goes idle: now it is let go.
-    t.setStatus("idle");
-    t.wait(1000);
-    assert.equal(t.client.input.draft, false, `${what} then idle`);
-  }
-  const quick = setup();
-  quick.draw(repaint({ input: "\x1b[2msuggestion\x1b[22m" }));
-  quick.client.onStdin("\x1b");
-  quick.wait(4900);
-  assert.equal(quick.client.input.draft, true);
-  quick.wait(1000);
-  assert.equal(quick.client.input.draft, false);
-});
-
-test("each_new_key_starts_the_wait_again", () => {
-  const t = setup();
-  t.draw(repaint());
-  t.client.onStdin("\x1b");
-  t.wait(4500);
-  t.client.onStdin("\t");
-  t.wait(4500);
-  assert.equal(t.client.input.draft, true);
-  t.wait(1000);
-  assert.equal(t.client.input.draft, false);
-});
-
-test("a_tainted_screen_keeps_the_draft_and_says_why", () => {
-  const t = setup();
-  t.draw(repaint());
-  t.draw("\x1b[1;20r");
-  // Redrawn in place with nothing erased: the stale grid would read as an empty box.
-  t.draw(`\x1b[H${["● Resumed.", RULE, "> ", RULE, FOOTER].map((row) => `${row}\x1b[K`).join("\r\n")}`);
-  t.client.onStdin("\x1b");
-  t.wait(6000);
-  assert.equal(t.client.input.draft, true);
-  assert.deepEqual(
-    t.checks().map((c) => [c.decision, c.probe, c.tainted]),
-    [["kept", "none", true], ["kept", "unknown", true]],
-  );
-  // A whole-screen erase and redraw heals the model, and the draft goes at the next looks.
-  t.draw(repaint());
-  t.wait(1000);
-  assert.equal(t.client.input.draft, false);
-});
-
-test("a_dialog_or_a_question_keeps_the_draft", () => {
-  for (const screen of [
-    `Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`,
-    `Which suite?\r\n${RULE}\r\n❯ 1. unit\r\n  2. contract\r\n${RULE}`,
-    repaint({ above: ["✻ Thinking… (3s · esc to interrupt)"] }),
-    repaint({ footer: ["  Enter to select · ↑/↓ to navigate"] }),
-  ]) {
-    const t = setup();
-    t.draw(screen);
-    t.client.onStdin("\x1b");
-    t.wait(6000);
-    assert.equal(t.client.input.draft, true, screen.slice(0, 30));
-    assert.equal(t.checks().at(-1).decision, "kept");
-    assert.equal(t.checks().at(-1).probe, "blocked");
-  }
-});
-
-test("no_box_at_all_or_an_incomplete_sequence_keeps_the_draft", () => {
-  const none = setup();
-  none.draw("Welcome back\r\nResuming…");
-  none.client.onStdin("\x1b");
-  none.wait(6000);
-  assert.equal(none.client.input.draft, true);
-  assert.equal(none.checks().at(-1).probe, "unknown");
-  const cut = setup();
-  cut.draw(`${repaint()}\x1b[`);
-  cut.client.onStdin("\x1b");
-  cut.wait(6000);
-  assert.equal(cut.client.input.draft, true);
-});
-
-test("the_screen_is_followed_for_the_whole_session_not_only_while_a_reply_is_in_flight", () => {
-  const t = setup();
-  // Output long before any key or command, and a resume's repaint in between.
-  t.draw(repaint({ input: "old" }));
-  t.wait(10_000);
-  t.draw(repaint({ input: "\x1b[2mrun it\x1b[22m" }));
-  t.client.onStdin("\x1b");
-  t.wait(6000);
-  assert.equal(t.client.input.draft, false);
-});
-
-test("a_draft_the_keys_hold_for_a_glasses_command_is_never_cleared_from_the_screen", () => {
-  const t = setup();
-  t.draw(repaint());
-  t.client.onStdin("\x1b");
-  t.client.input.hold();
-  t.wait(5000);
-  assert.equal(t.client.input.draft, true);
-  assert.deepEqual(t.checks(), []);
-});
-
-test("agentd_logs_the_decision_as_flags_and_lengths_and_refuses_a_malformed_one", async () => {
+test("agentd_logs_a_screen_check_as_flags_and_lengths_and_refuses_a_malformed_one", async () => {
   const net = require("node:net");
-  const path = require("node:path");
-  const fs = require("node:fs");
   const { LauncherHub } = require("../dist/launcher/launcher-hub.js");
   const { AttachRegistry } = require("../dist/attach-registry.js");
   const { withTempDir } = require("./helpers/daemon.js");
@@ -325,25 +216,22 @@ test("agentd_logs_the_decision_as_flags_and_lengths_and_refuses_a_malformed_one"
       await new Promise((resolve) => socket.once("connect", resolve));
       const send = (frame) => socket.write(`${JSON.stringify(frame)}\n`);
       send({ type: "launcher_hello", v: 1, launcherId: "L-draft", provider: "claude", childPid: 4242 });
-      const good = {
-        type: "draft_check", probe: "prompt", reason: "empty", textLen: 18, tainted: false,
-        before: true, after: false, decision: "cleared",
-      };
+      const good = { type: "screen_check", phase: "pre", probe: "prompt", reason: "text", textLen: 18, tainted: false, outcome: "refused" };
       send(good);
-      for (let i = 0; i < 100 && !logs.some((l) => l.event === "launcher_draft_check"); i += 1) {
+      for (let i = 0; i < 100 && !logs.some((l) => l.event === "launcher_screen_check"); i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      const line = logs.find((l) => l.event === "launcher_draft_check");
+      const line = logs.find((l) => l.event === "launcher_screen_check");
       assert.deepEqual(
         { ...line.meta },
-        { session: undefined, probe: "prompt", reason: "empty", textLen: 18, tainted: false, draftBefore: true, draftAfter: false, decision: "cleared" },
+        { session: undefined, phase: "pre", probe: "prompt", reason: "text", textLen: 18, tainted: false, outcome: "refused" },
       );
-      // A frame that carries anything more, or a reason that is not a word, is dropped with the connection.
+      // A frame that carries anything more is dropped with the connection.
       send({ ...good, text: "the prompt text" });
       for (let i = 0; i < 100 && !logs.some((l) => l.event === "launcher_connection_dropped"); i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      assert.equal(logs.filter((l) => l.event === "launcher_draft_check").length, 1);
+      assert.equal(logs.filter((l) => l.event === "launcher_screen_check").length, 1);
       assert.equal(logs.some((l) => l.event === "launcher_connection_dropped"), true);
       socket.destroy();
     } finally {

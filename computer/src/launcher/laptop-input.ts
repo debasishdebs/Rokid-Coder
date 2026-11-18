@@ -343,23 +343,6 @@ export class LaptopInput {
     this.notify(before);
   }
 
-  /**
-   * The screen shows the prompt box empty, so the draft the key stream implied
-   * (a stray Esc, Tab or arrow at startup or in a resume) is not there. Never
-   * while automation holds the keyboard, where the held keys are the draft.
-   * True when the draft was set and is now clear.
-   */
-  clearDraftFromScreen(): boolean {
-    if (this.projected || !this.delivered.draft) {
-      return false;
-    }
-    const before = this.draft;
-    this.delivered.clear();
-    this.stopSubmitWatch();
-    this.notify(before);
-    return true;
-  }
-
   /** R151: while `when` says so, a held key is dropped rather than kept for replay. */
   dropHeldWhile(when: () => boolean): void {
     this.dropping = when;

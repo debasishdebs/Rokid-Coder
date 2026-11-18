@@ -5,6 +5,7 @@ const path = require("node:path");
 const { Typist, sessionReady } = require("../dist/launcher/typist.js");
 const { LaptopInput, sessionBusySince } = require("../dist/launcher/laptop-input.js");
 const { readClaudeSession } = require("../dist/launcher/claude-sessions.js");
+const { ScreenModel } = require("../dist/launcher/screen-probe.js");
 const { LauncherClient } = require("../dist/launcher/launcher-client.js");
 const { spawnPty } = require("../dist/launcher/pty.js");
 const { withTempDir } = require("./helpers/daemon.js");
@@ -99,10 +100,25 @@ function setup({ gen = 1 } = {}) {
   const input = new LaptopInput({ clock, busySince: (at) => sessionBusySince(session, at) });
   const binding = { gen, uncertain: false };
   const written = [];
-  const typist = new Typist(pty, input, (after) => sessionReady(session, after), clock, {
-    binding,
-    onWritten: (cmdId, at) => written.push({ cmdId, at }),
-  });
+  const screen = new ScreenModel(80, 24);
+  const reads = { n: 0 };
+  const typist = new Typist(
+    pty,
+    input,
+    (after) => {
+      reads.n += 1;
+      return sessionReady(session, after);
+    },
+    clock,
+    {
+      binding,
+      onWritten: (cmdId, at) => written.push({ cmdId, at }),
+      // Text replies are pasted, looked for on the input line and only then entered.
+      bg: { screen, fileStatus: () => session.status, askWrite: () => undefined },
+    },
+  );
+  // The prompt is up, empty, as Claude draws it.
+  pty.emit(repaint());
   // rk's stdin path: what passes goes to the child; the typist replays what a takeover released.
   const type = (data) => {
     const now = input.key(data);
@@ -121,7 +137,26 @@ function setup({ gen = 1 } = {}) {
     clock.advance(ms);
     await flush();
   };
-  return { pty, clock, input, session, binding, written, typist, type, run, advance };
+  const draw = (chunk) => pty.emit(chunk);
+  /**
+   * A text reply from start to Enter: the paste goes out after the two looks at the empty box, Claude
+   * echoes it, and after two more looks the Enter goes. Returns the tracked result.
+   */
+  const reply = async ({ shown, ...cmd }) => {
+    const box = track(typist.run({ cmdId: "c1", gen, command: "text", ...cmd }));
+    await advance(200);
+    pty.emit(repaint({ input: shown ?? cmd.text }));
+    await advance(200);
+    return box;
+  };
+  return { pty, clock, input, session, binding, written, typist, type, run, advance, draw, reply, reads, screen };
+}
+
+const RULE = "─".repeat(60);
+
+/** A full repaint of Claude's idle screen. */
+function repaint({ input = "" } = {}) {
+  return `\x1b[2J\x1b[H${["● Ready.", "", RULE, `> ${input}`, RULE, "  ? for shortcuts"].join("\r\n")}`;
 }
 
 /** Moves the session through busy to a fresh idle, as Claude's own file would. */
@@ -130,18 +165,28 @@ function freshIdle(t) {
   t.session.statusUpdatedAt = t.clock.now();
 }
 
-test("never_types_over_laptop_draft_and_fails_laptop_draft_after_60s", async () => {
+test("never_types_over_text_the_screen_shows_in_the_box_and_fails_laptop_draft", async () => {
   const t = setup();
   t.type("half a thou");
+  t.draw(repaint({ input: "half a thou" }));
   t.pty.writes.length = 0;
   const box = await t.run({ command: "text", text: "from the glasses" });
-  await t.advance(59_900);
-  assert.equal(box.result, undefined, "still waiting for the draft");
-  assert.deepEqual(t.pty.writes, [], "nothing typed over the draft");
-  await t.advance(200);
+  await t.advance(300);
   assert.deepEqual(box.result, { ok: false, error: "laptop_draft" });
-  assert.deepEqual(t.pty.writes, []);
+  assert.deepEqual(t.pty.writes, [], "nothing typed, and the wearer's text is never touched: no Ctrl+U either");
   assert.equal(t.input.draft, true);
+  t.typist.dispose();
+});
+
+test("a_draft_only_the_keys_guessed_at_does_not_block_a_reply_when_the_box_is_empty", async () => {
+  const t = setup();
+  t.type("\x1b");
+  t.type("\t");
+  assert.equal(t.input.draft, true, "the key stream says draft");
+  t.pty.writes.length = 0;
+  const box = await t.reply({ text: "from the glasses" });
+  assert.deepEqual(t.pty.writes, [PASTE("from the glasses"), "\r"]);
+  assert.deepEqual(box.result, { ok: true });
   t.typist.dispose();
 });
 
@@ -189,9 +234,11 @@ test("draft_cleared_by_enter_or_ctrl_c_then_command_runs", async () => {
   for (const clear of ["\r", "\x03"]) {
     const t = setup();
     t.type("draft");
+    t.draw(repaint({ input: "draft" }));
     const box = await t.run({ command: "compact" }, 5000);
     assert.equal(box.result, undefined);
     t.type(clear);
+    t.draw(repaint());
     if (clear === "\r") {
       // R145: the Enter counts once Claude's file shows the submit.
       assert.equal(t.input.draft, true, "not before the proof");
@@ -312,9 +359,11 @@ test("backslash_enter_keeps_draft", async () => {
   t.type("second");
   await t.advance(2000);
   assert.equal(t.input.draft, true);
-  const box = await t.run({ command: "text", text: "glasses" }, 60_100);
-  assert.deepEqual(box.result, { ok: false, error: "laptop_draft" });
-  assert.deepEqual(t.pty.writes.filter((w) => w.includes("glasses")), []);
+  t.draw(repaint({ input: "first line second" }));
+  // The same draft on screen, and a compact (which is typed unseen) still waits for it.
+  const compact = await t.run({ command: "compact" }, 60_100);
+  assert.deepEqual(compact.result, { ok: false, error: "laptop_draft" });
+  assert.deepEqual(t.pty.writes.filter((w) => w.includes("/compact")), []);
   t.typist.dispose();
 });
 
@@ -383,29 +432,26 @@ test("output_quiet_500ms_required_before_first_write", async () => {
 
 test("readiness_rechecked_before_each_commands_first_write", async () => {
   const t = setup();
-  let reads = 0;
-  const ready = (after) => {
-    reads += 1;
-    return sessionReady(t.session, after);
-  };
-  const typist = new Typist(t.pty, t.input, ready, t.clock, { binding: t.binding });
-  const first = track(typist.run({ cmdId: "a", gen: 1, command: "text", text: "one" }));
-  await t.advance(600);
+  const typist = t.typist;
+  const first = await t.reply({ cmdId: "a", text: "one" });
   assert.deepEqual(first.result, { ok: true });
+  assert.equal(t.pty.writes.length, 2, "the paste and the Enter");
   // The first command left the session busy; the second waits for a fresh idle.
   t.session.status = "busy";
   t.session.statusUpdatedAt = t.clock.now();
-  const before = reads;
+  t.draw(repaint());
+  const before = t.reads.n;
   const second = track(typist.run({ cmdId: "b", gen: 1, command: "text", text: "two", notBefore: t.clock.now() }));
   await t.advance(3000);
-  assert.ok(reads > before, "the file is read again for the second command");
-  assert.equal(t.pty.writes.length, 1);
+  assert.ok(t.reads.n > before, "the file is read again for the second command");
+  assert.equal(t.pty.writes.length, 2);
   assert.equal(second.result, undefined);
   freshIdle(t);
-  await t.advance(600);
-  assert.equal(t.pty.writes.length, 2);
+  await t.advance(200);
+  t.draw(repaint({ input: "two" }));
+  await t.advance(200);
+  assert.equal(t.pty.writes.length, 4);
   assert.deepEqual(second.result, { ok: true });
-  typist.dispose();
   t.typist.dispose();
 });
 
@@ -477,16 +523,20 @@ test("child_exit_fails_the_pending_command_exited", async () => {
 
 test("text_is_one_bracketed_paste_then_enter_and_cannot_break_out", async () => {
   const t = setup();
-  const box = await t.run({ command: "text", text: "line one\r\nline two\x1b[201~\x03 tail" }, 600);
+  const box = await t.reply({ text: "line one\x1b[201~\x03 tail", shown: "line one[201~ tail" });
   assert.deepEqual(box.result, { ok: true });
-  assert.deepEqual(t.pty.writes, [`${PASTE("line one\nline two[201~ tail")}\r`]);
+  // Pasted, with nothing in it that ends the paste or acts as a key, and only then entered.
+  assert.deepEqual(t.pty.writes, [PASTE("line one[201~ tail"), "\r"]);
   t.typist.dispose();
 
-  const u = setup();
-  const long = await u.run({ command: "text", text: "x".repeat(16 * 1024 + 1) }, 600);
-  assert.deepEqual(long.result, { ok: false, error: "not_ready" });
-  assert.deepEqual(u.pty.writes, []);
-  u.typist.dispose();
+  // A reply is one short line Claude echoes whole: anything else is refused before a byte is written.
+  for (const text of ["line one\r\nline two", "x".repeat(601), "   "]) {
+    const u = setup();
+    const refused = await u.run({ command: "text", text }, 600);
+    assert.deepEqual(refused.result, { ok: false, error: "not_ready" });
+    assert.deepEqual(u.pty.writes, []);
+    u.typist.dispose();
+  }
 });
 
 test("model_outside_the_offered_aliases_is_never_typed", async () => {
@@ -535,10 +585,12 @@ test("scanner_starts_at_first_write", async () => {
 test("stale_marker_before_write_not_accepted", async () => {
   const t = setup();
   t.type("x");
+  t.draw(repaint({ input: "x" }));
   const box = await t.run({ command: "model", model: "haiku" }, 1000);
   // A dialog from earlier, seen while the command waits for the draft.
   t.pty.emit("Switch model?\r\nSet model to opus\r\n");
   t.type("\x03");
+  t.draw(repaint());
   t.pty.writes.length = 0;
   await t.advance(600);
   assert.deepEqual(t.pty.writes, ["/model haiku\r"]);
@@ -684,14 +736,14 @@ test("input_free_after_model_ok_without_status_bump_and_dialog_keys_dropped", as
 
 test("text_command_does_not_freeze_laptop_keys", async () => {
   const t = setup();
-  const box = await t.run({ command: "text", text: "from the glasses" }, 600);
+  const box = await t.reply({ text: "from the glasses" });
   assert.deepEqual(box.result, { ok: true });
   // Claude's turn: the file reads busy. The user answers a prompt at the laptop.
   t.session.status = "busy";
   t.session.statusUpdatedAt = t.clock.now();
   assert.equal(t.type("1"), "pass");
   assert.equal(t.type("\r"), "pass");
-  assert.deepEqual(t.pty.writes.slice(1), ["1", "\r"]);
+  assert.deepEqual(t.pty.writes.slice(2), ["1", "\r"]);
   t.typist.dispose();
 });
 
@@ -785,17 +837,20 @@ test("held_keys_not_replayed_after_compact_timeout_until_idle_or_takeover", asyn
     const next = await t.run({ cmdId: "c2", command: "text", text: "glasses" }, 2000);
     assert.equal(next.result, undefined);
     assert.deepEqual(t.pty.writes, ["/compact\r"]);
+    // The replayed keys are on screen as a draft the moment they land, so the waiting command never types over them.
     if (release === "idle") {
+      t.draw(repaint({ input: "queuedmore" }));
       freshIdle(t);
       await t.advance(200);
       assert.deepEqual(t.pty.writes, ["/compact\r", "queuedmore"]);
     } else {
+      t.draw(repaint({ input: "queuedmore" }));
       assert.equal(t.type("\x03"), "pass");
       await t.advance(100);
       assert.deepEqual(t.pty.writes, ["/compact\r", "\x03", "queuedmore"]);
+      freshIdle(t);
     }
-    // The replayed keys are a draft, so the waiting command never types over them.
-    await t.advance(60_000);
+    await t.advance(1000);
     assert.deepEqual(next.result, { ok: false, error: "laptop_draft" });
     t.typist.dispose();
   }

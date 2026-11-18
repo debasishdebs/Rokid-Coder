@@ -96,16 +96,18 @@ function setup({ file = "busy" } = {}) {
   const screen = new ScreenModel(80, 24);
   const asked = [];
   const written = [];
+  const checks = [];
   const typist = new Typist(pty, input, (after) => sessionReady(session, after), clock, {
     binding,
     onWritten: (cmdId, at) => written.push({ cmdId, at }),
+    onCheck: (check) => checks.push(check),
     bg: {
       screen,
       fileStatus: () => session.status,
       askWrite: (cmdId, phase) => asked.push({ cmdId, phase }),
     },
   });
-  const t = { pty, clock, input, session, binding, screen, asked, written, typist };
+  const t = { pty, clock, input, session, binding, screen, asked, written, typist, checks };
   t.draw = (chunk) => pty.emit(chunk);
   t.advance = async (ms) => {
     // A poll's worth at a time, as the typist's own timer would run.
@@ -389,14 +391,26 @@ test("a_spinner_animating_every_200ms_does_not_starve_a_ready_write", async () =
   assert.deepEqual(box.result, { ok: true });
 });
 
-test("a_laptop_draft_or_held_keys_keep_the_paste_back", async () => {
+test("keys_the_screen_does_not_show_are_no_draft_and_held_keys_keep_the_paste_back", async () => {
   const t = setup();
   t.draw(repaint());
+  t.input.key("\x1b");
   t.input.key("half a thou");
+  assert.equal(t.input.draft, true, "the key stream says draft");
   const box = t.run();
-  await t.advance(3000);
-  assert.deepEqual(t.asked, []);
-  assert.deepEqual(box.result, undefined);
+  await t.advance(150);
+  assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], "the box is empty, so the guess blocks nothing");
+  t.typist.cancel("c1");
+  await t.advance(0);
+  assert.equal(box.result.error, "cancelled");
+  // Keys held for another command's paste keep a new reply back.
+  const u = setup();
+  u.draw(repaint());
+  u.input.hold();
+  const held = u.run();
+  await u.advance(3000);
+  assert.deepEqual(u.asked, []);
+  assert.deepEqual(held.result, undefined);
 });
 
 test("a_text_that_is_not_one_short_line_is_refused_before_anything_is_written", async () => {
@@ -437,33 +451,118 @@ test("the_keyboard_is_not_frozen_after_the_enter_though_the_file_stays_busy", as
   assert.equal(t.pty.writes.at(-1), "a", "the held key was replayed after the Enter");
 });
 
-test("an_ordinary_text_command_is_typed_exactly_as_before", async () => {
+test("an_idle_reply_takes_the_same_two_phases_without_asking_agentd", async () => {
   const t = setup({ file: "idle" });
   t.session.statusUpdatedAt = t.clock.now() - 10_000;
+  t.draw(repaint({ input: "\x1b[2mrun the suite\x1b[22m" }));
   const box = track(t.typist.run({ cmdId: "c2", gen: 1, command: "text", text: "plain" }));
-  await t.advance(700);
-  assert.deepEqual(t.pty.writes, [`${PASTE("plain")}\r`]);
+  await t.advance(200);
+  assert.deepEqual(t.pty.writes, [PASTE("plain")], "the paste, and no Enter yet");
+  assert.deepEqual(t.asked, [], "an idle reply needs no word from agentd");
+  t.draw(repaint({ input: "plain" }));
+  await t.advance(200);
+  assert.deepEqual(t.pty.writes, [PASTE("plain"), "\r"]);
   assert.deepEqual(box.result, { ok: true });
 });
 
-test("a_box_that_is_not_visibly_empty_gets_no_paste_and_a_retryable_not_sent", async () => {
-  for (const [what, screenDraw] of [
-    ["text in the box", repaint({ input: "something half typed" })],
-    ["a queued follow-up", repaint({ input: "\x1b[38;2;215;119;87mfollow up on the failing test\x1b[0m" })],
-    ["typed text that looks like the hint", repaint({ input: 'Try "do not overwrite this"' })],
-    ["a draft after a reset into an unreadable colour", repaint({ input: "\x1b[2mhint\x1b[0;38:2::255:0:0mprivate draft\x1b[0m" })],
-    ["a question beside it", repaint({ above: ["Which suite should I run?"], input: "x", footer: ["  Enter to select · ↑/↓ to navigate"] })],
-    ["a dialog", `Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`],
-    ["a running turn", repaint({ above: ["✻ Thinking… (3s · esc to interrupt)"] })],
+test("an_idle_reply_with_the_wearers_text_appearing_during_the_paste_window_is_cleared_and_not_sent", async () => {
+  const t = setup({ file: "idle" });
+  t.session.statusUpdatedAt = t.clock.now() - 10_000;
+  t.draw(repaint());
+  const box = track(t.typist.run({ cmdId: "c2", gen: 1, command: "text", text: "plain" }));
+  await t.advance(200);
+  assert.deepEqual(t.pty.writes, [PASTE("plain")]);
+  // The wearer's own character landed beside the paste.
+  t.draw(repaint({ input: "xplain" }));
+  await t.advance(1700);
+  assert.deepEqual(t.pty.writes, [PASTE("plain"), CTRL_U]);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+});
+
+test("an_idle_reply_is_refused_for_a_tainted_screen_and_a_dialog_and_never_pastes", async () => {
+  for (const [what, draw] of [
+    ["tainted", (t) => t.draw("\x1b[1;20r")],
+    ["a dialog", (t) => t.draw(`Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`)],
+  ]) {
+    const t = setup({ file: "idle" });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(repaint());
+    draw(t);
+    const box = track(t.typist.run({ cmdId: "c2", gen: 1, command: "text", text: "plain" }));
+    await t.advance(300);
+    assert.deepEqual(t.pty.writes, [], what);
+    assert.deepEqual(box.result, { ok: false, error: "not_sent" }, what);
+  }
+});
+
+test("an_idle_reply_waits_for_the_file_to_read_idle", async () => {
+  const t = setup({ file: "busy" });
+  t.draw(repaint());
+  const box = track(t.typist.run({ cmdId: "c2", gen: 1, command: "text", text: "plain" }));
+  await t.advance(3000);
+  assert.deepEqual(t.pty.writes, [], "a busy file lets no ordinary reply through");
+  assert.equal(box.result, undefined);
+});
+
+test("every_look_of_the_screen_check_is_reported_as_names_and_lengths_only", async () => {
+  const t = setup();
+  t.draw(repaint({ input: "\x1b[2mrun the suite\x1b[22m" }));
+  t.run({ text: "secret words" });
+  await t.advance(150);
+  t.typist.verdict("c1", "paste", true);
+  await t.advance(0);
+  t.draw(repaint({ input: "secret words" }));
+  await t.advance(100);
+  t.typist.verdict("c1", "enter", true);
+  await t.advance(0);
+  assert.deepEqual(
+    t.checks.map((c) => [c.phase, c.probe, c.reason, c.textLen, c.outcome]),
+    [
+      ["pre", "prompt", "empty", "run the suite".length, "ok"],
+      ["post", "prompt", "text", "secret words".length, "ok"],
+    ],
+  );
+  assert.equal(JSON.stringify(t.checks).includes("secret"), false);
+  const refused = setup();
+  refused.draw(repaint({ input: "typed by the wearer" }));
+  refused.run();
+  await refused.advance(150);
+  assert.deepEqual(
+    refused.checks.map((c) => [c.phase, c.reason, c.textLen, c.outcome]),
+    [["pre", "text", "typed by the wearer".length, "refused"]],
+  );
+});
+
+test("a_box_that_is_not_visibly_empty_gets_no_paste_and_the_wearers_text_is_never_touched", async () => {
+  for (const [what, screenDraw, error] of [
+    ["text in the box", repaint({ input: "something half typed" }), "laptop_draft"],
+    ["a queued follow-up", repaint({ input: "\x1b[38;2;215;119;87mfollow up on the failing test\x1b[0m" }), "laptop_draft"],
+    ["typed text that looks like the hint", repaint({ input: 'Try "do not overwrite this"' }), "laptop_draft"],
+    ["a draft after a reset into an unreadable colour", repaint({ input: "\x1b[2mhint\x1b[0;38:2::255:0:0mprivate draft\x1b[0m" }), "laptop_draft"],
+    ["a question beside it", repaint({ above: ["Which suite should I run?"], input: "x", footer: ["  Enter to select · ↑/↓ to navigate"] }), "not_sent"],
+    ["a dialog", `Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`, "not_sent"],
+    ["a running turn", repaint({ above: ["✻ Thinking… (3s · esc to interrupt)"] }), "not_sent"],
   ]) {
     const t = setup();
     t.draw(screenDraw);
     const box = t.run();
     await t.advance(300);
+    // Nothing was pasted, so there is nothing to clear: no Ctrl+U, which would take the wearer's text with it.
     assert.deepEqual(t.pty.writes, [], what);
     assert.deepEqual(t.asked, [], `${what}: agentd is not even asked`);
-    assert.deepEqual(box.result, { ok: false, error: "not_sent" }, what);
+    assert.deepEqual(box.result, { ok: false, error }, what);
   }
+});
+
+test("a_screen_the_model_cannot_read_is_refused_after_5_s_not_waited_on_for_a_minute", async () => {
+  const t = setup();
+  t.draw("Welcome back\r\nResuming…");
+  const box = t.run();
+  await t.advance(4800);
+  assert.equal(box.result, undefined);
+  await t.advance(400);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+  assert.deepEqual(t.pty.writes, []);
 });
 
 test("a_muted_placeholder_or_suggestion_is_an_empty_box_and_the_paste_goes", async () => {

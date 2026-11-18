@@ -3,7 +3,7 @@ import type { CommandError, TypeCommand } from "./launcher-hub";
 import { OutputScanner } from "./output-scanner";
 import { bgReplyText, pasteText } from "./paste-text";
 import type { PtyChild } from "./pty";
-import { probe, showsCleared, showsEmptyPrompt, showsText, type ScreenModel } from "./screen-probe";
+import { probe, showsCleared, showsEmptyPrompt, showsText, type ProbeResult, type ScreenModel } from "./screen-probe";
 
 export interface Clock {
   now(): number;
@@ -59,6 +59,11 @@ const BG_CONFIRM_MS = 1500;
 const BG_STABLE_MS = 40;
 /** After Ctrl+U the input line is looked at for this long to see the text gone. */
 const BG_CLEAR_MS = 1500;
+/**
+ * A screen in which the model finds no prompt box this long is one it cannot
+ * read (another layout, a screen not drawn): the reply is refused, not waited on for a minute.
+ */
+const UNREADABLE_MS = 5000;
 
 /**
  * The readiness rule for one read of Claude's sessions file: it says idle and,
@@ -99,18 +104,35 @@ interface Active {
   seenAt?: number;
   /** `screen.taints` when the paste went out (or the clearing began); a later one fails closed. */
   mark?: number;
+  /** The last look of the screen check, for the log. */
+  look?: ProbeResult;
+  /** Since when the model has seen no prompt box at all. */
+  unreadableSince?: number;
+}
+
+/** What one look of the screen check found, for agentd's log: names and lengths, never prompt text. */
+export interface ScreenCheck {
+  /** `pre`: the box before the paste; `post`: the pasted text; `clear`: the line after Ctrl+U. */
+  phase: "pre" | "post" | "clear";
+  probe: string;
+  reason: string;
+  textLen: number;
+  tainted: boolean;
+  outcome: "ok" | "refused";
 }
 
 export interface TypistOptions {
   binding: BindingView;
   /** Right after a command's first write; `at` is the clock's time of the write. */
   onWritten?: (cmdId: string, at: number) => void;
+  /** Told what each decision of the screen check found. */
+  onCheck?: (check: ScreenCheck) => void;
   /**
-   * What a background reply (`bgReply`) needs and nothing else supplies: the
-   * screen model of Claude's terminal, Claude's own file status right now, and
-   * the question to agentd, which alone holds the evidence the reply rests on,
-   * "may I write?" before the paste and again before the Enter (answered by
-   * `verdict`). Without them a background reply is never typed.
+   * What every glasses text reply needs and nothing else supplies: the screen
+   * model of Claude's terminal and Claude's own file status right now. A
+   * background reply (`bgReply`) also needs the question to agentd, which alone
+   * holds the evidence it rests on, "may I write?" before the paste and again
+   * before the Enter (answered by `verdict`). Without them no text is typed.
    */
   bg?: {
     screen: ScreenModel;
@@ -158,6 +180,11 @@ export class Typist {
     pty.onExit(() => this.onExit());
     input.onTakeover(() => this.onTakeover());
     input.dropHeldWhile(() => this.dialogMayBeOpen());
+  }
+
+  /** A command has the prompt: its own paste may be what the box shows. */
+  get busy(): boolean {
+    return this.active !== undefined;
   }
 
   run(cmd: TypeCommand): Promise<TypistResult> {
@@ -274,10 +301,9 @@ export class Typist {
       case "model":
         return typeof cmd.model === "string" && CLAUDE_MODELS.has(cmd.model);
       case "text":
-        if (cmd.bgReply) {
-          return this.options.bg !== undefined && bgReplyText(cmd.text) !== undefined;
-        }
-        return typeof cmd.text === "string" && Buffer.byteLength(pasteText(cmd.text)) <= MAX_TEXT_BYTES;
+        // Every reply is pasted, looked for on the input line and only then entered, so it must be
+        // one Claude echoes whole, and there must be a screen to look at.
+        return this.options.bg !== undefined && bgReplyText(cmd.text) !== undefined;
       default:
         return false;
     }
@@ -377,21 +403,32 @@ export class Typist {
       this.end(active);
       return;
     }
-    if (active.cmd.bgReply) {
-      this.stepBgWaiting(active, now);
+    if (active.cmd.command === "text") {
+      this.stepTextWaiting(active, now);
       return;
     }
+    // Compact and model are typed as ever, but a draft the keys only guessed at no longer blocks
+    // them when the screen positively shows the box empty.
     if (
       !this.input.holding &&
-      !this.input.draft &&
+      !this.draftBlocks() &&
       now - this.lastOutputAt >= OUTPUT_QUIET_MS &&
       this.ready(active.cmd.notBefore)
     ) {
       this.firstWrite(active, now);
     } else if (now >= active.deadline) {
-      this.settle(active, this.input.draft ? "laptop_draft" : "busy");
+      this.settle(active, this.draftBlocks() ? "laptop_draft" : "busy");
       this.end(active);
     }
+  }
+
+  /** The key stream says draft and the screen does not positively say the box is empty. */
+  private draftBlocks(): boolean {
+    if (!this.input.draft) {
+      return false;
+    }
+    const bg = this.options.bg;
+    return !(bg && !bg.screen.tainted && showsEmptyPrompt(probe(bg.screen)));
   }
 
   private firstWrite(active: Active, now: number): void {
@@ -412,73 +449,117 @@ export class Typist {
         active.phase = "dialog";
         active.deadline = now + DIALOG_MS;
         break;
-      case "text":
-        this.pty.write(`${PASTE_START}${pasteText(cmd.text ?? "")}${PASTE_END}\r`);
-        this.settle(active);
-        // R143: the keyboard is never frozen for the turn this text starts.
-        this.end(active, "unless_held");
-        break;
     }
     this.options.onWritten?.(cmd.cmdId, now);
   }
 
   /**
-   * A background reply is not waited on by Claude's file going idle (it stays
-   * busy for as long as the subagent lives) and not by the output going quiet
-   * (a spinner never lets it). It is allowed only while Claude's file reads
-   * `busy` and the screen positively shows the framed input box VISIBLY EMPTY,
-   * with no dialog, question, follow-up text or running-turn sign, on two looks
-   * 40 ms apart; then agentd, which alone holds the rest of the evidence, is
-   * asked to allow the paste. A box that shows anything else, on two looks, gets
-   * nothing sent and the retryable `not_sent`.
+   * Every glasses text reply is typed the same way. It is not waited on by the
+   * output going quiet (a spinner never lets it) but by the screen: the file
+   * allows it (idle, or `busy` for a background reply, which agentd has also
+   * vouched for) and the screen positively shows the framed input box VISIBLY
+   * EMPTY, with no dialog, question, running-turn sign or text of the wearer's,
+   * on two looks 40 ms apart. A background reply then asks agentd, which alone
+   * holds the rest of its evidence, to allow the paste. A box with the wearer's
+   * text in it gets nothing sent and `laptop_draft`; any other screen that is
+   * not the empty box, or one the model cannot read for 5 s, gets nothing sent
+   * and the retryable `not_sent`. The wearer's text is never touched.
    */
-  private stepBgWaiting(active: Active, now: number): void {
-    const boundary = this.bgBoundary();
-    if (boundary === "open" || boundary === "full") {
+  private stepTextWaiting(active: Active, now: number): void {
+    const boundary = this.textBoundary(active);
+    if (boundary === "unreadable") {
+      active.seenAt = undefined;
+      active.unreadableSince ??= now;
+      if (now - active.unreadableSince >= UNREADABLE_MS) {
+        this.refuse(active, "not_sent");
+        return;
+      }
+    } else {
+      active.unreadableSince = undefined;
+    }
+    if (boundary === "open" || boundary === "text" || boundary === "full") {
       active.seenAt ??= now;
       if (now - active.seenAt >= BG_STABLE_MS) {
         active.seenAt = undefined;
-        if (boundary === "full") {
-          this.settle(active, "not_sent");
-          this.end(active);
+        if (boundary !== "open") {
+          this.refuse(active, boundary === "text" ? "laptop_draft" : "not_sent");
           return;
         }
-        active.phase = "bg_ask_paste";
-        active.deadline = now + BG_VERDICT_MS;
-        this.options.bg?.askWrite(active.cmd.cmdId, "paste");
+        this.check("pre", active, "ok", active.look);
+        if (active.cmd.bgReply) {
+          active.phase = "bg_ask_paste";
+          active.deadline = now + BG_VERDICT_MS;
+          this.options.bg?.askWrite(active.cmd.cmdId, "paste");
+        } else {
+          this.bgPaste(active, now);
+        }
         return;
       }
     } else {
       active.seenAt = undefined;
     }
     if (now >= active.deadline) {
-      this.settle(active, this.input.draft ? "laptop_draft" : "busy");
+      this.settle(active, "busy");
       this.end(active);
     }
   }
 
+  /** Nothing was typed: the box is not free, say why and fail. */
+  private refuse(active: Active, error: CommandError): void {
+    this.check("pre", active, "refused", active.look);
+    this.settle(active, error);
+    this.end(active);
+  }
+
+  /** The file lets this command's text be typed now: idle after its barrier, or `busy` for a background reply. */
+  private fileAllows(active: Active): boolean {
+    return active.cmd.bgReply ? this.options.bg?.fileStatus() === "busy" : this.ready(active.cmd.notBefore);
+  }
+
   /**
-   * Whether the first byte may go. "open": nothing of the laptop's is in the
-   * way, Claude's file reads busy and the screen shows the prompt box visibly
-   * empty. "full": all of that but the screen shows something else, a
-   * dialog, a menu, a running turn or text in the box. "closed": anything else.
+   * Whether the first byte may go. "open": the keyboard is ours to type on, the
+   * file allows it and the screen shows the prompt box visibly empty. "text":
+   * all of that but the box holds text. "full": a dialog, a menu, a running turn,
+   * or a screen the model has lost track of (a resize, a sequence it cannot
+   * follow), which no earlier baseline excuses: nothing is pasted until the
+   * child has erased and redrawn the whole screen. "unreadable": the model sees
+   * no prompt box (yet). "closed": the file or the keyboard is not ready.
    */
-  private bgBoundary(): "open" | "full" | "closed" {
+  private textBoundary(active: Active): "open" | "text" | "full" | "unreadable" | "closed" {
     const bg = this.options.bg;
-    if (!bg || this.input.holding || this.input.draft || bg.fileStatus() !== "busy") {
+    if (!bg || this.input.holding || !this.fileAllows(active)) {
       return "closed";
     }
-    // A screen the model lost track of (a resize, a sequence it cannot follow) is
-    // refused outright: no baseline excuses earlier taint, and nothing is pasted
-    // until the child has erased and redrawn the whole screen.
     if (bg.screen.tainted) {
+      active.look = undefined;
       return "full";
     }
     const seen = probe(bg.screen);
+    active.look = seen;
     if (seen.kind === "unknown") {
-      return "closed";
+      return "unreadable";
     }
-    return showsEmptyPrompt(seen) ? "open" : "full";
+    if (seen.kind === "prompt") {
+      return seen.empty ? "open" : "text";
+    }
+    return "full";
+  }
+
+  /** The screen check's finding, for agentd's log. */
+  private check(phase: ScreenCheck["phase"], active: Active, outcome: ScreenCheck["outcome"], seen?: ProbeResult): void {
+    const bg = this.options.bg;
+    if (!bg) {
+      return;
+    }
+    const look = seen ?? probe(bg.screen);
+    this.options.onCheck?.({
+      phase,
+      probe: look.kind,
+      reason: look.kind === "prompt" ? (look.empty ? "empty" : "text") : look.reason,
+      textLen: look.kind === "prompt" ? look.text.length : 0,
+      tainted: bg.screen.tainted,
+      outcome,
+    });
   }
 
   /** agentd's answer to a write check. Anything but a clear yes, or a yes for a phase not being asked, is a no. */
@@ -488,7 +569,7 @@ export class Typist {
       return;
     }
     if (phase === "paste" && active.phase === "bg_ask_paste") {
-      if (ok === true && !this.stale(active) && !this.uncertain() && this.bgBoundary() === "open") {
+      if (ok === true && !this.stale(active) && !this.uncertain() && this.textBoundary(active) === "open") {
         this.bgPaste(active, this.clock.now());
       } else {
         // Agentd's no is a busy; its yes against a boundary that has since closed is a reply not sent.
@@ -497,18 +578,20 @@ export class Typist {
       }
     } else if (phase === "enter" && active.phase === "bg_ask_enter") {
       if (ok === true && !this.stale(active) && this.bgStillShows(active)) {
+        this.check("post", active, "ok");
         this.bgEnter(active);
       } else {
+        this.check("post", active, "refused");
         this.bgAbort(active, "not_sent");
       }
     }
     this.step();
   }
 
-  /** The text, whole, on the input line; nothing disturbed the screen since it was pasted; Claude's file still busy. */
+  /** The text, whole, on the input line; nothing disturbed the screen since it was pasted; Claude's file still allowing it. */
   private bgStillShows(active: Active): boolean {
     const bg = this.options.bg;
-    if (!bg || active.bgText === undefined || bg.fileStatus() !== "busy") {
+    if (!bg || active.bgText === undefined || !this.fileAllows(active)) {
       return false;
     }
     return showsText(probe(bg.screen, { sinceTaints: active.mark }), active.bgText);
@@ -547,15 +630,25 @@ export class Typist {
       active.seenAt ??= now;
       if (now - active.seenAt >= BG_STABLE_MS) {
         active.seenAt = undefined;
-        active.phase = "bg_ask_enter";
-        active.deadline = now + BG_VERDICT_MS;
-        this.options.bg?.askWrite(active.cmd.cmdId, "enter");
+        active.look = seen;
+        if (active.cmd.bgReply) {
+          active.phase = "bg_ask_enter";
+          active.deadline = now + BG_VERDICT_MS;
+          this.options.bg?.askWrite(active.cmd.cmdId, "enter");
+        } else if (this.bgStillShows(active)) {
+          this.check("post", active, "ok", seen);
+          this.bgEnter(active);
+        } else {
+          this.check("post", active, "refused", seen);
+          this.bgAbort(active, "not_sent");
+        }
       }
       return;
     }
     active.seenAt = undefined;
     const lost = seen.kind === "blocked" || (seen.kind === "unknown" && seen.reason === "screen_disturbed");
     if (lost || now >= active.deadline) {
+      this.check("post", active, "refused", seen);
       this.bgAbort(active, "not_sent");
     }
   }
@@ -563,8 +656,9 @@ export class Typist {
   private bgEnter(active: Active): void {
     this.pty.write("\r");
     this.settle(active);
-    // Held keys go on now: Claude's file may stay busy for hours, so waiting for it to read idle would freeze the keyboard.
-    this.end(active, "now");
+    // A background reply's Claude file may stay busy for hours, so waiting for it to read idle would
+    // freeze the keyboard. An idle one keeps R143: the keyboard is never frozen for the turn this starts.
+    this.end(active, active.cmd.bgReply ? "now" : "unless_held");
   }
 
   /**
@@ -589,8 +683,10 @@ export class Typist {
       active.bgText !== undefined &&
       showsCleared(probe(bg.screen, { sinceTaints: active.mark }), active.bgText);
     if (cleared) {
+      this.check("clear", active, "ok");
       this.end(active, "now");
     } else if (now >= active.deadline) {
+      this.check("clear", active, "refused");
       this.markUncertain(active.writtenAt);
       this.end(active);
     }
