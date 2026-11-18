@@ -277,9 +277,12 @@ Limits to know about:
   when Claude's UserPromptSubmit for it arrives, and is never retyped. The screen model is deliberately
   small: an incomplete or unknown escape sequence, a switch to the alternate screen, a resize, or a
   character of uncertain width on the input line make it unsure, and unsure never presses Enter or
-  pastes. After a resize or a sequence it cannot follow, replies stay `not_sent` until the screen is
-  erased and drawn whole again (Ctrl+L, or `/clear`). The reply must match word for word: a missing or
-  extra space in the box counts as altered text.
+  pastes. After any of them, replies stay `not_sent` until the child erases and draws the whole screen
+  again. Claude Code 2.1.285 does that by itself: it runs on the alternate screen, which the model holds
+  as a buffer of its own, and erases it right after entering it and after a resize (checked against the
+  real program at 80x24 and 207x50: the framed box, the muted placeholder, a typed character, Ctrl+U and
+  a bracketed paste were all read correctly, and the model stayed untainted). The reply must match word
+  for word: a missing or extra space in the box counts as altered text.
 - Every glasses reply, idle or background, is typed in the same two phases, and a draft is what the
   screen shows, not what your keys suggest. Before a byte is written the prompt box must be visibly empty
   on two looks (a faint or gray placeholder or suggestion is empty; `Try "..."` only when drawn faint),

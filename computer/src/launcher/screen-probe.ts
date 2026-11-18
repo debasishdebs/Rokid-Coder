@@ -33,6 +33,8 @@ type ParseState ="text" | "esc" | "esc_intermediate" | "csi" | "string" | "strin
 const BENIGN_PRIVATE_MODES: ReadonlySet<number> = new Set([
   7, // autowrap on; switching it off is a taint, since the model always wraps
   12, 25, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 2004, 2026,
+  // Seen from the real Claude Code 2.1.285 at startup: colour-scheme reports and pixel mouse.
+  1016, 2031,
 ]);
 const ALT_SCREEN_MODES: ReadonlySet<number> = new Set([47, 1047, 1049]);
 
@@ -86,6 +88,8 @@ export class ScreenModel {
   private intermediates = "";
   private stringLength = 0;
   private alt = false;
+  /** The main screen's cells while the alternate one is shown. */
+  private mainBuffer?: { grid: string[][]; dubious: boolean[]; row: number; col: number; saved: { row: number; col: number } };
   private taintCount = 0;
   /** The taint count when the whole screen was last erased: what happened before it no longer matters. */
   private cleanFrom = 0;
@@ -119,9 +123,14 @@ export class ScreenModel {
     return this.taintCount > this.cleanFrom;
   }
 
-  /** Right now: the child is mid-sequence, or on the alternate screen. */
+  /** Whether the alternate screen is the one showing (the model follows it as it does the main one). */
+  get alternate(): boolean {
+    return this.alt;
+  }
+
+  /** Right now: the child is in the middle of an escape sequence. */
   get unsettled(): boolean {
-    return this.state !== "text" || this.alt;
+    return this.state !== "text";
   }
 
   resize(cols: number, rows: number): void {
@@ -132,6 +141,13 @@ export class ScreenModel {
     this.dubious = Array.from({ length: this.rows }, (_, i) => this.dubious[i] ?? false);
     this.row = Math.min(this.row, this.rows - 1);
     this.col = Math.min(this.col, this.cols - 1);
+    const main = this.mainBuffer;
+    if (main) {
+      main.grid = Array.from({ length: this.rows }, (_, i) => this.fit(main.grid[i] ?? []));
+      main.dubious = Array.from({ length: this.rows }, (_, i) => main.dubious[i] ?? false);
+      main.row = Math.min(main.row, this.rows - 1);
+      main.col = Math.min(main.col, this.cols - 1);
+    }
   }
 
   /** The visible rows, trailing blanks removed. */
@@ -261,8 +277,10 @@ export class ScreenModel {
           this.col = Math.max(0, Math.min(this.col, this.cols - 1) - 1);
         } else if (ch === "\t") {
           this.col = Math.min(this.cols - 1, (Math.floor(this.col / 8) + 1) * 8);
-        } else if (ch === "\x0e" || ch === "\x0f") {
-          this.taint(); // a shifted character set draws other glyphs
+        } else if (ch === "\x0e") {
+          this.taint(); // shift out: the other character set draws other glyphs
+        } else if (ch === "\x0f") {
+          // Shift in selects the default set, which is what the model draws; Claude sends it after `ESC ( B`.
         } else if (ch >= " " && ch !== "\x7f" && !(ch >= "\x80" && ch <= "\x9f")) {
           this.put(ch);
         }
@@ -354,6 +372,7 @@ export class ScreenModel {
         // A full reset also resets modes and character sets the model does not track.
         this.clear();
         this.alt = false;
+        this.mainBuffer = undefined;
         this.taint();
         break;
       case "D":
@@ -441,10 +460,9 @@ export class ScreenModel {
         if (mode === 2 || mode === 3) {
           this.grid = Array.from({ length: this.rows }, () => this.blankRow());
           this.dubious = Array.from({ length: this.rows }, () => false);
-          if (!this.alt) {
-            // Every cell is now what the child draws next, whatever the model lost track of before.
-            this.cleanFrom = this.taintCount;
-          }
+          // Every cell is now what the child draws next, whatever the model lost track of before.
+          // On the alternate screen too: that buffer is the child's alone, and Claude erases it on entry.
+          this.cleanFrom = this.taintCount;
         } else if (mode === 1) {
           for (let r = 0; r < this.row; r += 1) {
             this.grid[r] = this.blankRow();
@@ -508,6 +526,13 @@ export class ScreenModel {
       case "n":
       case "c":
         break; // status and attribute requests to the terminal: they draw nothing
+      case "r":
+        // `CSI r` with nothing in it resets the scroll region to the whole screen, which is what the
+        // model always has (Claude sends it at startup). Setting a region changes where text scrolls.
+        if (raw !== "") {
+          this.taint();
+        }
+        break;
       case "m":
         this.sgr(raw);
         break;
@@ -573,15 +598,40 @@ export class ScreenModel {
     }
   }
 
+  /**
+   * The real Claude Code runs on the alternate screen: it enters with `?1049h`
+   * and clears at once. The model holds the two buffers as a terminal does (the
+   * alternate one starts blank, the main one comes back as it was), and a
+   * switch is still a taint: only a whole-screen erase drawn after it, which
+   * Claude sends right away, makes what the model holds the child's own again.
+   * A switch that does not match (leaving a screen not entered) is a taint too.
+   */
+  private switchScreen(enter: boolean): void {
+    this.taint();
+    if (enter && !this.alt) {
+      this.mainBuffer = {
+        grid: this.grid,
+        dubious: this.dubious,
+        row: this.row,
+        col: this.col,
+        saved: this.saved,
+      };
+      this.clear();
+      this.alt = true;
+    } else if (!enter && this.alt && this.mainBuffer) {
+      ({ grid: this.grid, dubious: this.dubious, row: this.row, col: this.col, saved: this.saved } = this.mainBuffer);
+      this.mainBuffer = undefined;
+      this.alt = false;
+    }
+  }
+
   private privateMode(set: boolean, args: number[], prefix: string): void {
     if (prefix !== "?") {
       return;
     }
     for (const mode of args) {
       if (ALT_SCREEN_MODES.has(mode)) {
-        // Switching screens swaps in a buffer this model does not hold.
-        this.alt = set;
-        this.taint();
+        this.switchScreen(set);
       } else if (mode === 7 && !set) {
         this.taint(); // no autowrap: the model wraps
       } else if (!BENIGN_PRIVATE_MODES.has(mode)) {

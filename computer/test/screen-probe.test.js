@@ -132,9 +132,14 @@ test("a_tainted_screen_is_refused_without_a_baseline_and_a_whole_screen_erase_he
   resized.resize(100, 30);
   assert.equal(resized.tainted, true);
   assert.equal(probe(resized).kind, "unknown");
-  // A sequence inside the alternate screen is not healed by an erase there.
+  // The alternate screen is a buffer of its own that Claude erases on entry, so that erase heals the switch;
+  // what comes back when it is left is the main screen as it was, trusted again only after an erase of its own.
   const alt = screen(repaint());
-  alt.push("\x1b[?1049h\x1b[2J");
+  alt.push("\x1b[?1049h");
+  assert.equal(alt.tainted, true);
+  alt.push("\x1b[2J");
+  assert.equal(alt.tainted, false);
+  alt.push("\x1b[?1049l");
   assert.equal(alt.tainted, true);
 });
 
