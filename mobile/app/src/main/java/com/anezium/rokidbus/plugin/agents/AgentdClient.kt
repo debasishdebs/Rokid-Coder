@@ -64,6 +64,8 @@ class AgentdClient(
         { _, _, _, _ -> },
     /** That connection ended, however it ended. */
     private val onSecureLinkClosed: (LinkKey) -> Unit = {},
+    /** Whether one saved address answers a bare TCP connect; the dial tries the first to answer first. */
+    private val reachable: suspend (host: String, port: Int) -> Boolean = ::tcpReachable,
     onEvent: (AgentdEvent) -> Unit = AgentsRuntime::emitEvent,
 ) {
     private var loopJob: Job? = null
@@ -137,7 +139,23 @@ class AgentdClient(
     @Synchronized
     fun start(config: AgentdConfig) = begin(config, keepRepair = false)
 
+    /**
+     * The phone's default network changed (Wi-Fi to mobile data, a tailnet coming up): whatever this client
+     * was waiting on, or holding, belonged to the old one. Dial every saved address again now with a fresh
+     * backoff. A stopped client, and a pairing refused for good, are left alone.
+     */
+    @Synchronized
+    fun redialNow() {
+        val config = running ?: return
+        if (loopJob == null || _needsRepair.value) return
+        begin(config, keepRepair = false)
+    }
+
+    /** The config of the loop [start] began, until [stop]. */
+    private var running: AgentdConfig? = null
+
     private fun begin(config: AgentdConfig, keepRepair: Boolean) {
+        running = config
         loopJob?.cancel()
         val advance = sockets.advance()
         if (!keepRepair) _needsRepair.value = false
@@ -190,6 +208,7 @@ class AgentdClient(
     fun stop(clearSessions: Boolean) {
         loopJob?.cancel()
         loopJob = null
+        running = null
         val advance = sockets.advance()
         _needsRepair.value = false
         link.downCurrent()
@@ -227,7 +246,10 @@ class AgentdClient(
             val shown = (listOf(config.host) + (freshAltHosts?.invoke() ?: config.altHosts))
                 .distinctBy { it.lowercase() }
             val result = try {
-                dialRound(dialOrder.order(shown), shown) { host ->
+                val order = reachableFirst(dialOrder.order(shown)) { host ->
+                    dialTarget(host, config.port)?.let { (name, port) -> reachable(name, port) } ?: false
+                }
+                dialRound(order, shown) { host ->
                     try {
                         connectOnce(config, host, steer, http, generation, backoff)
                     } finally {

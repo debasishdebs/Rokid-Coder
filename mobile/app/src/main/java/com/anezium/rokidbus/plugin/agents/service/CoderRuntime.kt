@@ -77,6 +77,23 @@ object CoderRuntime : CoderCommands {
         _linkState.value = state
     }
 
+    @Volatile private var healer: GlassesLinkHealer? = null
+
+    @MainThread
+    internal fun attachHealer(healer: GlassesLinkHealer?) {
+        this.healer = healer
+    }
+
+    /**
+     * One reconnect of the glasses link now, for a request the wearer just made that it denied; [onResult]
+     * says whether the link was up a moment later. With no service running there is nothing to reconnect.
+     */
+    @MainThread
+    fun healGlassesLink(onResult: (Boolean) -> Unit) {
+        val current = healer
+        if (current == null) onResult(false) else current.healNow(onResult)
+    }
+
     /**
      * Runs [command] now if the service is up; otherwise starts it from this visible activity and
      * runs the command once it is. A start Android would not allow drops the command.
@@ -114,6 +131,7 @@ object CoderRuntime : CoderCommands {
         pending.clear()
         _ready.value = false
         attachCore(null)
+        attachHealer(null)
     }
 
     override fun reconcile() {

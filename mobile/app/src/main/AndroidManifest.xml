@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Only to hear that the default network changed, so the link to the computer is dialled again at once. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!--
         POST_NOTIFICATIONS is a documented Agents exception to plugins/AGENTS.md
         section 3.5 (R32). It is for one thing only: the visible, low-importance

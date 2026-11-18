@@ -83,6 +83,10 @@ internal class AgentdLinks(context: Context) : CoderCommands {
             onSecureLinkClosed = AgentsRuntime::announceSecureLinkClosed,
         )
     }
+    // The client belongs to the main thread's reconcile, so the changes are delivered there.
+    private val networkWatcher by lazy {
+        DefaultNetworkWatcher(applicationContext, DefaultNetworkChanges(alertScope) { agentdClient.redialNow() })
+    }
     private val linkServer by lazy {
         AgentdLinkServer(
             AgentsRuntime.store, configStore, serviceScope, tlsIdentity,
@@ -167,6 +171,8 @@ internal class AgentdLinks(context: Context) : CoderCommands {
             door || line
         }
         startAlerts()
+        // A new default network is a reason to dial now, not after the backoff the old one earned.
+        networkWatcher.start()
         serviceScope.launch {
             combine(agentdClient.linkSecure, linkServer.linkSecure) { dialled, listened ->
                 dialled || listened
@@ -210,6 +216,7 @@ internal class AgentdLinks(context: Context) : CoderCommands {
     /** The monitor service's onDestroy. */
     @MainThread
     fun close() {
+        networkWatcher.stop()
         temporaryAgentd?.cancel()
         windowWatch?.cancel()
         agentdClient.stop(clearSessions = true)

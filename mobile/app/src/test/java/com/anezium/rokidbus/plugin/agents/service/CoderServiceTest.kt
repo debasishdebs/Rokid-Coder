@@ -15,6 +15,8 @@ import com.anezium.rokidbus.phone.GlassesSurface
 import com.anezium.rokidbus.plugin.agents.AgentsConfigStore
 import com.anezium.rokidbus.plugin.agents.AgentsRuntime
 import com.anezium.rokidbus.plugin.agents.FakeGlassesSurface
+import com.anezium.rokidbus.shared.LinkStateBits
+import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -62,7 +64,18 @@ class CoderServiceTest {
         override fun close() {
             coreCloses += 1
         }
+        override fun linkState(): Int = linkBits
+        override fun reconnectLink(): Boolean {
+            reconnects += 1
+            reconnectLog += "${android.os.SystemClock.uptimeMillis()} ${Thread.currentThread().name} linkBits=$linkBits"
+            return true
+        }
     }
+    private val reconnectLog = mutableListOf<String>()
+
+    /** The glasses link the fake core reports, and how often the service connected it again. */
+    private var linkBits = 0
+    private var reconnects = 0
 
     @Before
     fun setUp() {
@@ -156,6 +169,84 @@ class CoderServiceTest {
         assertEquals(VoiceAvailability.NEEDS_APP_OPEN, CoderService.voice.value)
         assertEquals(1, coreStarts)
         assertTrue(CoderRuntime.ready.value)
+    }
+
+    @Test
+    fun a_dropped_glasses_link_is_connected_again_while_monitoring_and_not_after_the_service_ends() {
+        AgentsConfigStore(app).setAgentdEnabled(true)
+        linkBits = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED
+
+        val service = deliver(bootIntent())
+        ShadowLooper.idleMainLooper(11, TimeUnit.SECONDS)
+        assertTrue("the first try, after the first pause: $reconnectLog", reconnects >= 1)
+
+        // The link comes back; the tries end.
+        linkBits = linkBits or LinkStateBits.CXR_CONTROL_UP
+        service.onLinkStateChanged(linkBits)
+        val whenUp = reconnects
+        ShadowLooper.idleMainLooper(10, TimeUnit.MINUTES)
+        assertEquals(whenUp, reconnects)
+
+        // It drops again, and the service ends before the pause does.
+        linkBits = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED
+        service.onLinkStateChanged(linkBits)
+        running.single().destroy()
+        ShadowLooper.idleMainLooper(10, TimeUnit.MINUTES)
+        assertEquals(whenUp, reconnects)
+    }
+
+    @Test
+    fun the_monitoring_switch_alone_stops_and_restarts_the_tries() {
+        val config = AgentsConfigStore(app)
+        config.setAgentdEnabled(true)
+        linkBits = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED
+        deliver(bootIntent())
+        ShadowLooper.idleMainLooper(11, TimeUnit.SECONDS)
+        assertTrue("tries while monitoring: $reconnectLog", reconnects >= 1)
+
+        // Off for long enough that the retry loop ends by itself; the link state never moves.
+        config.setAgentdEnabled(false)
+        ShadowLooper.idleMainLooper(30, TimeUnit.MINUTES)
+        val whileOff = reconnects
+        ShadowLooper.idleMainLooper(30, TimeUnit.MINUTES)
+        assertEquals("nothing while off", whileOff, reconnects)
+
+        // On again, with no other event: the tries start over from the short pause.
+        config.setAgentdEnabled(true)
+        ShadowLooper.idleMainLooper(11, TimeUnit.SECONDS)
+        assertTrue("tries again once on: $reconnectLog", reconnects > whileOff)
+    }
+
+    @Test
+    fun the_notifications_stop_ends_the_tries_for_good() {
+        AgentsConfigStore(app).setAgentdEnabled(true)
+        linkBits = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED
+        val service = deliver(bootIntent())
+        ShadowLooper.idleMainLooper(5, TimeUnit.SECONDS)
+
+        val atStop = reconnects
+        service.onStartCommand(Intent(app, CoderService::class.java).setAction(CoderService.ACTION_STOP), 0, 9)
+        idle()
+        ShadowLooper.idleMainLooper(10, TimeUnit.MINUTES)
+        assertEquals("not even the try that was already waiting", atStop, reconnects)
+
+        // Nothing the app does afterwards brings them back: the monitoring switch, a link state.
+        AgentsConfigStore(app).setAgentdEnabled(false)
+        AgentsConfigStore(app).setAgentdEnabled(true)
+        service.onLinkStateChanged(LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED)
+        ShadowLooper.idleMainLooper(10, TimeUnit.MINUTES)
+        assertEquals(atStop, reconnects)
+    }
+
+    @Test
+    fun monitoring_off_leaves_a_dropped_glasses_link_alone() {
+        AgentsConfigStore(app).setAgentdEnabled(false)
+        linkBits = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED
+
+        deliver(bootIntent())
+        ShadowLooper.idleMainLooper(10, TimeUnit.MINUTES)
+
+        assertEquals(0, reconnects)
     }
 
     @Test

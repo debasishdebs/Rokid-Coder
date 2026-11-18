@@ -63,10 +63,12 @@ class CoderManifestTest {
         assertFalse(scanner.exported)
         assertEquals(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, scanner.screenOrientation)
 
-        // The camera is the one thing it adds, and nothing that reports usage: no network-state check, no log transport.
+        // The camera is the one thing it adds, and nothing that reports usage: no log transport. The app itself
+        // declares ACCESS_NETWORK_STATE, for one thing: hearing that the default network changed so the link to
+        // the computer is dialled again (AgentdLinks); the scanner brings none of its own.
         val permissions = info.requestedPermissions.orEmpty().toSet()
         assertTrue("android.permission.CAMERA" in permissions)
-        assertFalse("android.permission.ACCESS_NETWORK_STATE" in permissions)
+        assertTrue("android.permission.ACCESS_NETWORK_STATE" in permissions)
         val components = info.activities.orEmpty().map { it.name }
         assertTrue(components.none { it.startsWith("com.google.mlkit.") || it.startsWith("com.google.android.gms.") })
     }

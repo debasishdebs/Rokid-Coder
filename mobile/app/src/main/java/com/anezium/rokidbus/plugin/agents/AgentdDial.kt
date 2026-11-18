@@ -1,5 +1,16 @@
 package com.anezium.rokidbus.plugin.agents
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withTimeoutOrNull
+import java.net.InetSocketAddress
+import java.net.URI
+import java.nio.channels.SocketChannel
+
 /** How long one address gets to accept the connection before the next is tried. */
 internal const val DIAL_CONNECT_TIMEOUT_MS = 4_000L
 
@@ -8,6 +19,54 @@ internal const val DIAL_CONNECT_TIMEOUT_MS = 4_000L
  * timeout alone leaves a host that accepts TCP and never answers TLS holding the dial forever.
  */
 internal const val DIAL_DEADLINE_MS = 6_000L
+
+/** How long the addresses of one computer get to answer a bare TCP connect before the dial goes in saved order. */
+internal const val REACH_PROBE_MS = 1_500L
+
+/**
+ * [order] with the address that answers a bare TCP connect first moved to the front. Every address is
+ * probed at once, so a stale LAN address (a laptop that moved to another network) no longer holds the dial
+ * for its whole deadline before the tailnet address gets its turn. Only the order changes: the dial that
+ * follows is the same pinned wss dial, and an answer here proves nothing about who answered. With one
+ * address, or none answering within [timeoutMs], [order] comes back as it was.
+ */
+internal suspend fun reachableFirst(
+    order: List<String>,
+    timeoutMs: Long = REACH_PROBE_MS,
+    probe: suspend (host: String) -> Boolean,
+): List<String> {
+    if (order.size < 2) return order
+    val first = withTimeoutOrNull(timeoutMs) {
+        coroutineScope {
+            val answers = Channel<String?>(order.size)
+            order.forEach { host ->
+                launch { answers.trySend(if (runCatching { probe(host) }.getOrDefault(false)) host else null) }
+            }
+            var winner: String? = null
+            for (answered in order.indices) {
+                winner = answers.receive()
+                if (winner != null) break
+            }
+            coroutineContext.cancelChildren()
+            winner
+        }
+    } ?: return order
+    return listOf(first) + order.filterNot { it == first }
+}
+
+/** A bare TCP connect to [host]:[port] within [REACH_PROBE_MS]; nothing is written, so agentd sees only a closed connection. */
+internal suspend fun tcpReachable(host: String, port: Int): Boolean = runInterruptible(Dispatchers.IO) {
+    SocketChannel.open().use { channel ->
+        channel.socket().connect(InetSocketAddress(host, port), REACH_PROBE_MS.toInt())
+        true
+    }
+}
+
+/** The host and port a saved address and the pairing's port dial, as [webSocketUrl] reads them. */
+internal fun dialTarget(hostInput: String, port: Int): Pair<String, Int>? = runCatching {
+    val uri = URI(webSocketUrl(hostInput, port, secure = true))
+    uri.host.removeSurrounding("[", "]") to (uri.port.takeIf { it >= 0 } ?: port)
+}.getOrNull()
 
 /** Which of a computer's addresses answered last, so the next dial starts there. */
 internal class DialOrder {
