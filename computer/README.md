@@ -278,8 +278,11 @@ Limits to know about:
 - Nothing is typed over a half-written prompt. If you have text in the prompt, a command waits until you
   submit or clear it, and fails with `laptop_draft` after 60 s. `rk` infers the draft from your keys (a
   stray Esc or Tab counts), then looks at its model of Claude's screen: when the prompt box is visibly
-  empty on two looks (a faint or gray suggestion is empty), at least a second after your last key, with
-  no dialog and the model not unsure, the draft is let go. Any text, doubt or dialog keeps it. Each
+  empty on two looks (a faint or gray suggestion is empty; `Try "..."` only when drawn faint), at least a
+  second after your last key, with no dialog and the model not unsure, the draft is let go. A look only
+  counts once Claude has drawn something after your last key. A key Claude draws nothing for (Esc, Tab,
+  an arrow) is let go after 5 s without a key, and only while Claude's own file says `idle`; a typed
+  character is never let go until Claude has redrawn. Any text, doubt or dialog keeps the draft. Each
   decision is logged by agentd as `launcher_draft_check` with lengths and flags, never prompt text.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result
   cannot be seen, the session is marked uncertain and further commands are refused until you check it.

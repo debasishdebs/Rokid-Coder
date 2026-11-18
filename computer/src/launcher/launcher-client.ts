@@ -20,6 +20,22 @@ const DRAFT_REPORT_MS = 250;
  */
 const DRAFT_LOOK_MS = 250;
 const DRAFT_SETTLE_MS = 1000;
+/**
+ * A look at the screen proves nothing unless the screen has had the chance to
+ * show the key. Two kinds of evidence, and the trade-off between them:
+ * - Claude drew something after the last key (any output reaching the model
+ *   since), and the box is still empty after that. A key Claude echoes (a
+ *   printable one, a Backspace) needs this and nothing else: no output after
+ *   it means the echo may still be coming, however long that takes.
+ * - A key Claude never echoes (Esc, Tab, an arrow) draws nothing, so there is
+ *   no output to wait for. It is let go after DRAFT_QUIET_MS without a key, and
+ *   only while Claude's own sessions file says `idle`: a busy or unknown
+ *   session might still be about to draw. The cost is that a stray Esc in a
+ *   busy session with nothing being drawn keeps the false draft until Claude
+ *   draws something or goes idle; the alternative is a reply queued behind
+ *   text the wearer typed.
+ */
+const DRAFT_QUIET_MS = 5000;
 
 export interface LauncherClientOptions {
   child: PtyChild;
@@ -31,6 +47,15 @@ export interface LauncherClientOptions {
   clock?: Clock;
   /** The terminal's size, which the screen model needs to read Claude's layout. */
   size?: { cols: number; rows: number };
+}
+
+/**
+ * Whether keys put something on Claude's screen: a printable character or a
+ * Backspace outside any escape sequence. Esc, Tab, arrows and the like draw nothing.
+ */
+function keyEchoes(data: string): boolean {
+  const plain = data.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b[O\]P^_X][^\x1b]*?(?:\x07|\x1b\\|[@-~])|\x1b./g, "");
+  return /[\x20-\x7e\x7f -￿]/.test(plain);
 }
 
 function asTypeCommand(frame: Frame): TypeCommand | undefined {
@@ -82,6 +107,12 @@ export class LauncherClient {
   private lastReportAt = Number.NEGATIVE_INFINITY;
   private reportTimer?: unknown;
   private lastKeyAt = Number.NEGATIVE_INFINITY;
+  /** Claude drew something after the last key, so the screen has had its chance to show it. */
+  private outputAfterKey = false;
+  /** A key of this draft is one Claude echoes (printable, Backspace), so only a redraw can show it gone. */
+  private echoingKey = false;
+  /** Claude's own sessions-file status for the bound session, or undefined when unknown. */
+  private readonly fileStatus: () => string | undefined;
   private draftTimer?: unknown;
   /** When the screen first showed the prompt box visibly empty during this draft; a second look must agree. */
   private emptySeenAt?: number;
@@ -98,6 +129,10 @@ export class LauncherClient {
       const file = owned ? readClaudeSession(options.sessionsDir, owned.pid) : undefined;
       return file?.sessionId === owned?.sessionId ? file : undefined;
     };
+    this.fileStatus = () => readOwned()?.status;
+    options.child.onData(() => {
+      this.outputAfterKey = true;
+    });
     const ready = (after?: number): boolean => sessionReady(readOwned(), after);
     this.input = new LaptopInput({ clock: this.clock, busySince: (at) => sessionBusySince(readOwned(), at) });
     this.screen = new ScreenModel(options.size?.cols ?? 80, options.size?.rows ?? 24);
@@ -134,6 +169,8 @@ export class LauncherClient {
   onStdin(data: string): void {
     // After a takeover the typist replays the held keys, a gap after this one (R151).
     this.lastKeyAt = this.clock.now();
+    this.outputAfterKey = false;
+    this.echoingKey ||= keyEchoes(data);
     this.emptySeenAt = undefined;
     const now = this.input.key(data);
     if (now) {
@@ -150,6 +187,7 @@ export class LauncherClient {
     if (!this.input.draft) {
       this.emptySeenAt = undefined;
       this.draftLogged = undefined;
+      this.echoingKey = false;
       return;
     }
     if (this.draftTimer === undefined) {
@@ -175,6 +213,19 @@ export class LauncherClient {
     const now = this.clock.now();
     if (now - this.lastKeyAt < DRAFT_SETTLE_MS || this.input.holding) {
       this.emptySeenAt = undefined;
+      this.watchDraft();
+      return;
+    }
+    // A screen drawn before the key cannot show the key: no evidence yet, so the draft stands.
+    const evidence =
+      this.outputAfterKey ||
+      (!this.echoingKey && now - this.lastKeyAt >= DRAFT_QUIET_MS && this.fileStatus() === "idle");
+    if (!evidence) {
+      this.emptySeenAt = undefined;
+      this.logDraft(
+        { probe: "none", reason: this.echoingKey ? "awaiting_echo" : "awaiting_quiet_idle", textLen: 0, tainted: this.screen.tainted },
+        "kept",
+      );
       this.watchDraft();
       return;
     }

@@ -8,6 +8,9 @@
  */
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { LauncherClient } = require("../dist/launcher/launcher-client.js");
 
 const RULE = "─".repeat(60);
@@ -69,38 +72,54 @@ function repaint({ above = ["● Resumed."], input = "", footer = [FOOTER] } = {
   return `\x1b[2J\x1b[H${[...above, RULE, `> ${input}`, RULE, ...footer].join("\r\n")}`;
 }
 
-function setup() {
+/** `status` is what Claude's own sessions file says for the bound session; "none" means there is no such file. */
+function setup({ status = "idle" } = {}) {
   const pty = new FakePty();
   const clock = new FakeClock();
   const frames = [];
+  const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), "rk-draft-"));
   const client = new LauncherClient({
     child: pty,
     send: (frame) => frames.push(frame),
     binding: { gen: 1, uncertain: false },
-    sessionsDir: "/nonexistent",
+    sessionsDir,
     clock,
   });
-  const t = { pty, clock, frames, client };
+  const t = { pty, clock, frames, client, sessionsDir };
+  t.setStatus = (value) => {
+    const file = path.join(sessionsDir, "4242.json");
+    if (value === "none") {
+      fs.rmSync(file, { force: true });
+    } else {
+      fs.writeFileSync(file, JSON.stringify({ pid: 4242, sessionId: "s1", status: value, statusUpdatedAt: 1 }));
+    }
+  };
+  t.setStatus(status);
+  client.setSession({ sessionId: "s1", pid: 4242 });
+  client.onBound("s1");
   t.draw = (chunk) => pty.emit(chunk);
   t.wait = (ms) => clock.advance(ms);
   t.checks = () => frames.filter((f) => f.type === "draft_check");
   return t;
 }
 
-// Keys the tracker treats as possibly typing (Right and Ctrl-K only move or erase, so they never set a draft).
-for (const key of ["\x1b", "\t", "\x1b[A", "\x1b[B", "\x7f", "\x1b[3~"]) {
+// Keys the tracker treats as possibly typing that Claude never echoes (Right and Ctrl-K only move or erase, so they never set a draft).
+for (const key of ["\x1b", "\t", "\x1b[A", "\x1b[B", "\x1b[3~"]) {
   test(`a_stray_${JSON.stringify(key).replace(/\W/g, "_")}_then_an_empty_box_with_a_faint_suggestion_clears_the_draft`, () => {
     const t = setup();
     t.draw(repaint({ input: "\x1b[2mrun the test suite\x1b[22m" }));
     t.client.onStdin(key);
     assert.equal(t.client.input.draft, true, "the key stream says draft");
-    // Too soon after the key: a typed character might not be on screen yet.
+    // Nothing is drawn for such a key, so only a long quiet with Claude idle lets it go.
     t.wait(600);
     assert.equal(t.client.input.draft, true);
+    t.wait(3500);
+    assert.equal(t.client.input.draft, true, "not yet 5 s since the key");
     t.wait(1500);
     assert.equal(t.client.input.draft, false);
-    const [check, ...more] = t.checks();
+    const [waiting, check, ...more] = t.checks();
     assert.deepEqual(more, []);
+    assert.deepEqual([waiting.decision, waiting.reason], ["kept", "awaiting_quiet_idle"]);
     assert.deepEqual(
       [check.decision, check.probe, check.reason, check.textLen, check.tainted, check.before, check.after],
       // The length counts the faint suggestion too: what is on the line, not what is solid.
@@ -116,7 +135,7 @@ test("a_gray_placeholder_or_the_try_hint_counts_as_empty_too", () => {
     const t = setup();
     t.draw(repaint({ input }));
     t.client.onStdin("\x1b");
-    t.wait(3000);
+    t.wait(6000);
     assert.equal(t.client.input.draft, false, input);
   }
 });
@@ -137,26 +156,77 @@ test("real_typed_text_visible_in_the_box_keeps_the_draft", () => {
   assert.equal(JSON.stringify(checks).includes("hello"), false, "lengths only, never the prompt text");
 });
 
-test("a_character_not_yet_echoed_is_not_mistaken_for_an_empty_box", () => {
+test("a_character_not_yet_echoed_is_not_mistaken_for_an_empty_box_however_slow_the_echo", () => {
   const t = setup();
   t.draw(repaint());
   t.client.onStdin("a");
-  // Claude is slow to draw it, but not slower than the settle time.
-  t.wait(900);
-  t.draw(repaint({ input: "a" }));
+  // Claude takes far longer than the settle time to draw it: both looks read the pre-key screen.
   t.wait(3000);
   assert.equal(t.client.input.draft, true);
+  t.wait(30_000);
+  assert.equal(t.client.input.draft, true, "a key Claude echoes needs a redraw, however long that takes");
+  assert.equal(t.checks().at(-1).reason, "awaiting_echo");
+  // The echo arrives and shows the character: handled, the draft is real.
+  t.draw(repaint({ input: "a" }));
+  t.wait(5000);
+  assert.equal(t.client.input.draft, true);
+  assert.deepEqual([t.checks().at(-1).decision, t.checks().at(-1).reason], ["kept", "text"]);
+});
+
+test("an_echo_that_shows_the_box_empty_again_lets_a_backspaced_draft_go", () => {
+  const t = setup();
+  t.draw(repaint({ input: "a" }));
+  t.client.onStdin("\x7f");
+  t.wait(5000);
+  assert.equal(t.client.input.draft, true, "no redraw yet");
+  t.draw(repaint());
+  t.wait(300);
+  assert.equal(t.client.input.draft, true, "settle time not yet over since the key");
+  t.wait(1500);
+  assert.equal(t.client.input.draft, false);
+});
+
+test("output_drawn_after_the_key_is_the_evidence_for_a_key_that_draws_nothing_too", () => {
+  // Claude is busy, so the file is no evidence, but it drew after the Esc and the box is still empty.
+  const t = setup({ status: "busy" });
+  t.draw(repaint({ input: "\x1b[2msuggestion\x1b[22m" }));
+  t.client.onStdin("\x1b");
+  t.draw("\x1b[s\x1b[1;1H\x1b[2K● Working…\x1b[u");
+  t.wait(2500);
+  assert.equal(t.client.input.draft, false);
+});
+
+test("a_key_that_draws_nothing_is_let_go_only_after_5_s_and_only_with_claude_idle", () => {
+  for (const [what, status] of [["busy", "busy"], ["waiting", "waiting"], ["unknown", "none"]]) {
+    const t = setup({ status });
+    t.draw(repaint({ input: "\x1b[2msuggestion\x1b[22m" }));
+    t.client.onStdin("\x1b");
+    t.wait(60_000);
+    assert.equal(t.client.input.draft, true, what);
+    assert.equal(t.checks().at(-1).reason, "awaiting_quiet_idle", what);
+    // Claude goes idle: now it is let go.
+    t.setStatus("idle");
+    t.wait(1000);
+    assert.equal(t.client.input.draft, false, `${what} then idle`);
+  }
+  const quick = setup();
+  quick.draw(repaint({ input: "\x1b[2msuggestion\x1b[22m" }));
+  quick.client.onStdin("\x1b");
+  quick.wait(4900);
+  assert.equal(quick.client.input.draft, true);
+  quick.wait(1000);
+  assert.equal(quick.client.input.draft, false);
 });
 
 test("each_new_key_starts_the_wait_again", () => {
   const t = setup();
   t.draw(repaint());
   t.client.onStdin("\x1b");
-  t.wait(900);
+  t.wait(4500);
   t.client.onStdin("\t");
-  t.wait(900);
+  t.wait(4500);
   assert.equal(t.client.input.draft, true);
-  t.wait(1500);
+  t.wait(1000);
   assert.equal(t.client.input.draft, false);
 });
 
@@ -167,11 +237,11 @@ test("a_tainted_screen_keeps_the_draft_and_says_why", () => {
   // Redrawn in place with nothing erased: the stale grid would read as an empty box.
   t.draw(`\x1b[H${["● Resumed.", RULE, "> ", RULE, FOOTER].map((row) => `${row}\x1b[K`).join("\r\n")}`);
   t.client.onStdin("\x1b");
-  t.wait(5000);
+  t.wait(6000);
   assert.equal(t.client.input.draft, true);
   assert.deepEqual(
     t.checks().map((c) => [c.decision, c.probe, c.tainted]),
-    [["kept", "unknown", true]],
+    [["kept", "none", true], ["kept", "unknown", true]],
   );
   // A whole-screen erase and redraw heals the model, and the draft goes at the next looks.
   t.draw(repaint());
@@ -189,10 +259,10 @@ test("a_dialog_or_a_question_keeps_the_draft", () => {
     const t = setup();
     t.draw(screen);
     t.client.onStdin("\x1b");
-    t.wait(5000);
+    t.wait(6000);
     assert.equal(t.client.input.draft, true, screen.slice(0, 30));
-    assert.equal(t.checks()[0].decision, "kept");
-    assert.equal(t.checks()[0].probe, "blocked");
+    assert.equal(t.checks().at(-1).decision, "kept");
+    assert.equal(t.checks().at(-1).probe, "blocked");
   }
 });
 
@@ -200,13 +270,13 @@ test("no_box_at_all_or_an_incomplete_sequence_keeps_the_draft", () => {
   const none = setup();
   none.draw("Welcome back\r\nResuming…");
   none.client.onStdin("\x1b");
-  none.wait(5000);
+  none.wait(6000);
   assert.equal(none.client.input.draft, true);
-  assert.equal(none.checks()[0].probe, "unknown");
+  assert.equal(none.checks().at(-1).probe, "unknown");
   const cut = setup();
   cut.draw(`${repaint()}\x1b[`);
   cut.client.onStdin("\x1b");
-  cut.wait(5000);
+  cut.wait(6000);
   assert.equal(cut.client.input.draft, true);
 });
 
@@ -217,7 +287,7 @@ test("the_screen_is_followed_for_the_whole_session_not_only_while_a_reply_is_in_
   t.wait(10_000);
   t.draw(repaint({ input: "\x1b[2mrun it\x1b[22m" }));
   t.client.onStdin("\x1b");
-  t.wait(3000);
+  t.wait(6000);
   assert.equal(t.client.input.draft, false);
 });
 
