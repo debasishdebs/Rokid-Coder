@@ -25,7 +25,7 @@ function screen(chunk, cols = 80, rows = 24) {
 }
 
 test("an_empty_or_placeholder_box_is_a_prompt_whose_text_is_not_ours", () => {
-  const model = screen(repaint({ input: 'Try "fix lint errors"' }));
+  const model = screen(repaint({ input: '\x1b[2mTry "fix lint errors"\x1b[22m' }));
   const result = probe(model);
   assert.equal(result.kind, "prompt");
   assert.equal(showsText(result, "yes do it"), false);
@@ -35,8 +35,10 @@ test("a_box_is_visibly_empty_only_when_nothing_in_it_is_solid_text", () => {
   const empty = (input) => showsEmptyPrompt(probe(screen(repaint({ input }))));
   assert.equal(empty(""), true);
   assert.equal(empty("   "), true);
-  // Claude's own hint in an empty box.
-  assert.equal(empty('Try "fix lint errors"'), true);
+  // Claude's own hint in an empty box, drawn muted like any placeholder; typed text that looks like it is text.
+  assert.equal(empty('\x1b[2mTry "fix lint errors"\x1b[22m'), true);
+  assert.equal(empty('Try "do not overwrite this"'), false);
+  assert.equal(empty('\x1b[0mTry "do not overwrite this"'), false);
   // Placeholders and suggestions are drawn faint or in gray, whatever the way.
   assert.equal(empty("\x1b[2mrun the tests\x1b[22m"), true);
   assert.equal(empty("\x1b[2mrun the tests\x1b[0m"), true);
@@ -54,6 +56,37 @@ test("a_box_is_visibly_empty_only_when_nothing_in_it_is_solid_text", () => {
   // A dialog is not an empty prompt.
   assert.equal(showsEmptyPrompt({ kind: "blocked", reason: "dialog" }), false);
   assert.equal(showsEmptyPrompt({ kind: "unknown", reason: "no_box" }), false);
+});
+
+test("a_style_the_model_cannot_read_is_never_muted_and_a_reset_is_honoured_wherever_it_stands", () => {
+  const empty = (input) => showsEmptyPrompt(probe(screen(repaint({ input }))));
+  // The exact sequence from the review: it resets faint and sets red, so what follows is text.
+  assert.equal(empty("\x1b[2mhint\x1b[0;38:2::255:0:0mprivate draft"), false);
+  assert.equal(empty("\x1b[2m\x1b[0;38:2::255:0:0mprivate draft"), false);
+  // A reset is honoured wherever it stands in the sequence, and an empty parameter is a reset.
+  assert.equal(empty("\x1b[2m\x1b[1;0mprivate draft"), false);
+  assert.equal(empty("\x1b[2m\x1b[mprivate draft"), false);
+  assert.equal(empty("\x1b[2m\x1b[;mprivate draft"), false);
+  assert.equal(empty("\x1b[2m\x1b[0;2mrun the tests"), true, "reset first, then faint again");
+  // Anything unrecognised in the sequence makes the style unknown, faint or not.
+  for (const seq of ["\x1b[2;38:5:245m", "\x1b[2;12m", "\x1b[2;38;9m", "\x1b[2;38;5m", "\x1b[2;38;2;1;2m", "\x1b[2;abcm", "\x1b[2;999m"]) {
+    assert.equal(empty(`${seq}private draft`), false, JSON.stringify(seq));
+  }
+  // The plain suggestions and harmless extra attributes still read as muted.
+  assert.equal(empty("\x1b[2mrun the tests\x1b[22m"), true);
+  assert.equal(empty("\x1b[2;3mrun the tests\x1b[0m"), true);
+  assert.equal(empty("\x1b[2;48;5;17mrun the tests\x1b[0m"), true);
+  assert.equal(empty("\x1b[1;90mrun the tests\x1b[0m"), true);
+  assert.equal(empty("\x1b[38;5;245;4mrun the tests\x1b[0m"), true);
+});
+
+test("a_multi_line_draft_that_looks_like_the_hint_is_text", () => {
+  const model = screen(
+    `${["● Resumed.", RULE, '> Try "first line', '  second line"', RULE, FOOTER].join("\r\n")}`,
+  );
+  const result = probe(model);
+  assert.equal(result.kind, "prompt");
+  assert.equal(result.empty, false);
 });
 
 test("the_pasted_text_alone_on_the_input_line_inside_the_box_is_shown", () => {
@@ -236,7 +269,7 @@ test("a_spinner_redrawn_every_frame_does_not_disturb_the_screen", () => {
 });
 
 test("a_cleared_line_is_shown_cleared_and_a_still_present_text_is_not", () => {
-  const cleared = probe(screen(repaint({ input: 'Try "fix lint errors"' })));
+  const cleared = probe(screen(repaint({ input: '\x1b[2mTry "fix lint errors"\x1b[22m' })));
   assert.equal(showsCleared(cleared, "yes do it"), true);
   assert.equal(showsCleared(probe(screen(repaint({ input: "yes do it" }))), "yes do it"), false);
   assert.equal(showsCleared({ kind: "unknown", reason: "no_box" }, "yes do it"), false);

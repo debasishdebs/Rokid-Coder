@@ -112,7 +112,7 @@ for (const key of ["\x1b", "\t", "\x1b[A", "\x1b[B", "\x7f", "\x1b[3~"]) {
 }
 
 test("a_gray_placeholder_or_the_try_hint_counts_as_empty_too", () => {
-  for (const input of ["\x1b[90msuggestion\x1b[39m", "\x1b[38;5;245msuggestion\x1b[0m", 'Try "fix lint errors"']) {
+  for (const input of ["\x1b[90msuggestion\x1b[39m", "\x1b[38;5;245msuggestion\x1b[0m", '\x1b[2mTry "fix lint errors"\x1b[22m']) {
     const t = setup();
     t.draw(repaint({ input }));
     t.client.onStdin("\x1b");

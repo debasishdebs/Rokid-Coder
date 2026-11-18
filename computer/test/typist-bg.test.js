@@ -178,7 +178,7 @@ test("an_unconfirmed_paste_is_cleared_after_the_confirm_window_and_not_sent", as
   const t = setup();
   const box = await t.toPasted();
   // The screen never shows the text (still the placeholder).
-  t.draw(repaint({ input: 'Try "fix lint errors"' }));
+  t.draw(repaint({ input: '\x1b[2mTry "fix lint errors"\x1b[22m' }));
   await t.advance(1400);
   assert.equal(box.result, undefined);
   await t.advance(300);
@@ -450,6 +450,8 @@ test("a_box_that_is_not_visibly_empty_gets_no_paste_and_a_retryable_not_sent", a
   for (const [what, screenDraw] of [
     ["text in the box", repaint({ input: "something half typed" })],
     ["a queued follow-up", repaint({ input: "\x1b[38;2;215;119;87mfollow up on the failing test\x1b[0m" })],
+    ["typed text that looks like the hint", repaint({ input: 'Try "do not overwrite this"' })],
+    ["a draft after a reset into an unreadable colour", repaint({ input: "\x1b[2mhint\x1b[0;38:2::255:0:0mprivate draft\x1b[0m" })],
     ["a question beside it", repaint({ above: ["Which suite should I run?"], input: "x", footer: ["  Enter to select · ↑/↓ to navigate"] })],
     ["a dialog", `Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`],
     ["a running turn", repaint({ above: ["✻ Thinking… (3s · esc to interrupt)"] })],
@@ -465,7 +467,7 @@ test("a_box_that_is_not_visibly_empty_gets_no_paste_and_a_retryable_not_sent", a
 });
 
 test("a_muted_placeholder_or_suggestion_is_an_empty_box_and_the_paste_goes", async () => {
-  for (const input of ['Try "fix lint errors"', "\x1b[2mrun the test suite\x1b[22m", "\x1b[90msuggestion\x1b[39m"]) {
+  for (const input of ['\x1b[2mTry "fix lint errors"\x1b[22m', "\x1b[2mrun the test suite\x1b[22m","\x1b[90msuggestion\x1b[39m"]) {
     const t = setup();
     t.draw(repaint({ input }));
     t.run();

@@ -21,6 +21,9 @@ const STATUS_ROWS = 8;
 /** The most rows the input line may wrap over. */
 const MAX_INPUT_ROWS = 10;
 
+/** SGR attributes that change nothing about whether text is muted (bold, italic, underline, blink, inverse, strike and their resets). */
+const KNOWN_SGR: ReadonlySet<number> = new Set([1, 3, 4, 5, 6, 7, 8, 9, 21, 23, 24, 25, 27, 28, 29, 53, 55, 59]);
+
 /** Prefixes the cell of a muted character; never a character a terminal would draw. */
 const MUTED = "\u0001";
 
@@ -506,7 +509,7 @@ export class ScreenModel {
       case "c":
         break; // status and attribute requests to the terminal: they draw nothing
       case "m":
-        this.sgr(args, raw.includes(":"));
+        this.sgr(raw);
         break;
       default:
         // Scroll regions, insert and delete of characters, modes, reports: not modelled.
@@ -518,19 +521,23 @@ export class ScreenModel {
   /**
    * Only one thing about styles matters: whether text is muted (faint, or a
    * gray foreground), which is how Claude draws a placeholder or a suggestion
-   * in an input box that holds nothing of the wearer's. A style the model
-   * cannot read (colon sub-parameters) is not muted, so such text counts as
-   * text and an input line holding it is not empty.
+   * in an input box that holds nothing of the wearer's. The parameters are
+   * split on `;` and applied in order, so a reset (`0` or an empty parameter)
+   * is honoured wherever it stands. A parameter the model cannot read (colon
+   * sub-parameters, a malformed colour, a code it does not know) makes the
+   * style unknown: text drawn under it is NOT muted, so it counts as text and
+   * an input line holding it is not empty.
    */
-  private sgr(args: number[], colon: boolean): void {
-    if (colon) {
-      this.grayFg = false;
-      return;
-    }
-    const list = args.length === 0 || (args.length === 1 && Number.isNaN(args[0])) ? [0] : args;
-    for (let i = 0; i < list.length; i += 1) {
-      const code = Number.isNaN(list[i]) ? 0 : list[i];
-      if (code === 0) {
+  private sgr(raw: string): void {
+    const tokens = raw === "" ? ["0"] : raw.split(";");
+    let unknown = false;
+    const number = (token: string | undefined): number | undefined =>
+      token !== undefined && /^\d{1,3}$/.test(token) ? Number(token) : undefined;
+    for (let i = 0; i < tokens.length; i += 1) {
+      const code = tokens[i] === "" ? 0 : number(tokens[i]);
+      if (code === undefined) {
+        unknown = true;
+      } else if (code === 0) {
         this.faint = false;
         this.grayFg = false;
       } else if (code === 2) {
@@ -541,20 +548,28 @@ export class ScreenModel {
         this.grayFg = false;
       } else if (code === 90) {
         this.grayFg = true;
-      } else if (code === 38) {
-        if (list[i + 1] === 5) {
-          const n = list[i + 2];
-          this.grayFg = n === 8 || (n >= 232 && n <= 255);
-          i += 2;
-        } else if (list[i + 1] === 2) {
-          const [r, g, b] = [list[i + 2], list[i + 3], list[i + 4]];
-          this.grayFg = [r, g, b].every(Number.isFinite) && Math.max(r, g, b) - Math.min(r, g, b) <= 8;
-          i += 4;
+      } else if (code === 38 || code === 48 || code === 58) {
+        // An extended colour: 5;n or 2;r;g;b. Only a foreground can make text gray.
+        const kind = number(tokens[i + 1]);
+        const width = kind === 5 ? 1 : kind === 2 ? 3 : 0;
+        const values = tokens.slice(i + 2, i + 2 + width).map(number);
+        if (width === 0 || values.length < width || values.some((value) => value === undefined)) {
+          unknown = true;
+          i = tokens.length;
         } else {
-          this.grayFg = false;
-          i = list.length;
+          if (code === 38) {
+            const [a, b, c] = values as number[];
+            this.grayFg = kind === 5 ? a === 8 || (a >= 232 && a <= 255) : Math.max(a, b, c) - Math.min(a, b, c) <= 8;
+          }
+          i += 1 + width;
         }
+      } else if (!KNOWN_SGR.has(code) && !(code >= 40 && code <= 49) && !(code >= 100 && code <= 107)) {
+        unknown = true;
       }
+    }
+    if (unknown) {
+      this.faint = false;
+      this.grayFg = false;
     }
   }
 
@@ -611,8 +626,7 @@ export type ProbeResult =
   /**
    * The framed prompt box, with what is on its input line (whitespace removed),
    * and whether that line is visibly empty: nothing on it but muted text (the
-   * placeholder or a suggestion Claude draws in faint or gray) or Claude's own
-   * `Try "..."` hint.
+   * placeholder, a suggestion or the `Try "..."` hint, all drawn faint or gray).
    */
   | { kind: "prompt"; text: string; empty: boolean };
 
@@ -693,11 +707,11 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   }
   const text = normalise(inputContent(inputRows));
   const solid = normalise(inputContent(screen.solidLines().slice(top + 1, bottom)));
-  return { kind: "prompt", text, empty: solid === "" || TRY_HINT.test(text) };
+  // Claude's own `Try "..."` hint is no exception: it is empty only when drawn muted, like any
+  // placeholder. Typed text that looks like it is text, and so is a multi-line draft that begins
+  // and ends the same way.
+  return { kind: "prompt", text, empty: solid === "" };
 }
-
-/** Claude's own hint in an empty box, `Try "fix lint errors"`. */
-const TRY_HINT = /^Try\s*["“'‘].*["”'’]$/;
 
 /**
  * What the input rows hold after the prompt character and the box's side
