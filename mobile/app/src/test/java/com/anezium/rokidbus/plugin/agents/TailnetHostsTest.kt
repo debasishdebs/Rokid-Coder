@@ -318,11 +318,15 @@ class TailnetHostsTest {
         val endpoints = CopyOnWriteArrayList<Triple<String, List<String>, Int?>>()
         var beforeOpenClaim: () -> Unit = {}
         var beforeExpiryClaim: () -> Unit = {}
+
+        /** Which addresses answer the reachability probe; none by default, so the dial keeps the saved order. */
+        var answering: (String) -> Boolean = { false }
         val client = AgentdClient(
             OkHttpClient(), sessions, test, "test", FixturePhoneTlsIdentity(),
             pinnedClient = { wss },
             freshAltHosts = { alts() },
             connectDeadlineMs = deadlineMs,
+            reachable = { host, _ -> answering(host) },
             beforeOpenClaim = { beforeOpenClaim() },
             beforeExpiryClaim = { beforeExpiryClaim() },
             onSecureConnected = { _, _, _, address -> connected += address },
@@ -488,6 +492,68 @@ class TailnetHostsTest {
     }
 
     @Test
+    fun the_address_that_answers_the_probe_is_dialled_before_a_stale_saved_one() {
+        // At home the LAN address was saved first; away from it, only the tailnet one answers.
+        val harness = Harness()
+        harness.answering = { it == tailnet }
+        harness.client.start(config())
+        harness.settle()
+        // The stale LAN address is not given its whole deadline first.
+        assertEquals(listOf(tailnet), harness.dialled())
+        harness.accept(0)
+        assertEquals(ConnectionState.CONNECTED, harness.state().state)
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun a_network_change_dials_every_address_now_instead_of_after_the_backoff() {
+        val harness = Harness()
+        harness.client.start(config())
+        harness.fail(0)
+        harness.fail(1)
+        assertEquals(listOf(lan, tailnet), harness.dialled())
+        // The round failed and the loop is waiting out its backoff.
+        harness.client.redialNow()
+        harness.settle()
+        assertEquals(listOf(lan, tailnet, lan), harness.dialled())
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun a_network_change_ends_a_link_that_belonged_to_the_old_network() {
+        val harness = Harness()
+        harness.client.start(config(emptyList()))
+        harness.accept(0)
+        assertEquals(ConnectionState.CONNECTED, harness.state().state)
+        harness.client.redialNow()
+        harness.settle()
+        assertEquals(listOf(lan, lan), harness.dialled())
+        harness.client.stop(clearSessions = true)
+    }
+
+    @Test
+    fun a_network_change_leaves_a_stopped_client_and_a_refused_pairing_alone() {
+        val stopped = Harness()
+        stopped.client.start(config())
+        stopped.settle()
+        stopped.client.stop(clearSessions = true)
+        stopped.client.redialNow()
+        stopped.settle()
+        assertEquals(listOf(lan), stopped.dialled())
+
+        // Final until re-paired: another certificate answered everywhere.
+        val refused = Harness()
+        refused.client.start(config())
+        refused.fail(0, PinMismatchException())
+        refused.fail(1, PinMismatchException())
+        assertTrue(refused.client.needsRepair.value)
+        refused.client.redialNow()
+        refused.settle()
+        assertEquals(listOf(lan, tailnet), refused.dialled())
+        refused.client.stop(clearSessions = true)
+    }
+
+    @Test
     fun an_address_that_never_finishes_connecting_is_abandoned_for_the_next_one() {
         val harness = Harness()
         harness.client.start(config())
@@ -572,6 +638,8 @@ class TailnetHostsTest {
                 val base = OkHttpClient.Builder().readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS).build()
                 val client = AgentdClient(
                     base, AgentSessionStore(), scope, "test", FixturePhoneTlsIdentity(), connectDeadlineMs = 400,
+                    // The probe would itself be the second accept this test counts.
+                    reachable = { _, _ -> false },
                 ) {}
                 client.start(AgentdConfig("127.0.0.1", silent.localPort, "tok", "Desk", FP, STEER, altHosts = listOf("localhost")))
                 val deadline = System.currentTimeMillis() + 5_000
