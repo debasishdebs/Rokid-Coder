@@ -511,9 +511,17 @@ export class Typist {
     this.end(active);
   }
 
-  /** The file lets this command's text be typed now: idle after its barrier, or `busy` for a background reply. */
+  /**
+   * The file lets this command's text be typed now: idle after its barrier, or
+   * for a background reply `busy` or `shell` (the status a live file showed at an
+   * idle-looking prompt while background agents ran); nothing else, unknown included.
+   */
   private fileAllows(active: Active): boolean {
-    return active.cmd.bgReply ? this.options.bg?.fileStatus() === "busy" : this.ready(active.cmd.notBefore);
+    if (!active.cmd.bgReply) {
+      return this.ready(active.cmd.notBefore);
+    }
+    const status = this.options.bg?.fileStatus();
+    return status === "busy" || status === "shell";
   }
 
   /**

@@ -76,7 +76,7 @@ function fakePort() {
 }
 
 /** A session at the point a background reply could be typed: file busy, a Stop, a subagent, auto mode, switch on. */
-function setup({ mode = "auto", switchOn = true, subagents = 1, stop = true, hookMode, approvalSource = true } = {}) {
+function setup({ mode = "auto", switchOn = true, subagents = 1, stop = true, hookMode, approvalSource = true, log } = {}) {
   const port = fakePort();
   // Real time, but movable: a frozen clock would never reach the readiness deadline.
   const clock = {
@@ -109,6 +109,7 @@ function setup({ mode = "auto", switchOn = true, subagents = 1, stop = true, hoo
     clock: () => clock.t,
     timings: TIMINGS,
     bgReplies: () => flags.bg,
+    ...(log ? { log } : {}),
   });
   const hook = (event, extra = {}) =>
     router.onHook(KEY, event, { permission_mode: hookMode ?? mode, ...extra });
@@ -276,16 +277,17 @@ test("an_idle_file_takes_the_release_path_and_stays_ready_without_any_hook_evide
 test("main_thread_work_and_non_quiet_notifications_take_the_stop_away", () => {
   const takes = [
     ["UserPromptSubmit", { prompt: "x" }],
-    ["PreToolUse", { tool_name: "Bash" }],
-    ["PostToolUse", {}],
     ["PermissionRequest", { tool_name: "Bash" }],
     ["PermissionRequest", { tool_name: "Bash", agent_id: "bg1" }],
+    ["Elicitation", { server: "x" }],
+    ["PermissionDenied", { tool_name: "Bash" }],
     ["Notification", { notification_type: "permission_prompt" }],
     ["Notification", { notification_type: "elicitation_dialog" }],
+    ["Notification", { notification_type: "elicitation_url_dialog" }],
     ["Notification", { notification_type: "agent_needs_input", agent_id: "bg1" }],
+    ["Notification", { notification_type: "a_type_nobody_knew" }],
     ["Notification", {}],
     ["Notification", { message: "Claude is waiting for your input" }],
-    ["SubagentStop", { agent_id: "bg1" }],
     ["Stop", { stop_hook_active: true }],
     ["Stop", { stop_hook_active: "yes" }],
     ["PreCompact", { trigger: "auto" }],
@@ -294,24 +296,192 @@ test("main_thread_work_and_non_quiet_notifications_take_the_stop_away", () => {
     const t = setup();
     assert.equal(ready(t), true, event);
     t.hook(event, extra);
-    // SubagentStop also ends the subagent in the store; the count stays in this fake.
     assert.equal(ready(t), false, `${event} ${JSON.stringify(extra)}`);
   }
 });
 
-test("quiet_notifications_and_subagent_work_leave_the_stop_alone", () => {
+test("background_agents_finishing_and_benign_notifications_leave_the_stop_alone", () => {
   const leaves = [
+    ["SubagentStop", { agent_id: "bg1" }],
+    ["SubagentStop", {}],
     ["Notification", { notification_type: "idle_prompt" }],
     ["Notification", { notification_type: "auth_success" }],
+    ["Notification", { notification_type: "agent_completed" }],
+    ["Notification", { notification_type: "plugin_notification" }],
+    ["Notification", { notification_type: "elicitation_complete" }],
+    ["Notification", { notification_type: "quota_auto_resume_fired" }],
     ["PreToolUse", { tool_name: "Bash", agent_id: "bg1" }],
     ["PostToolUse", { agent_id: "bg1" }],
     ["SubagentStart", { agent_id: "bg2" }],
   ];
-  for (const [event, extra] of leaves) {
-    const t = setup();
-    t.hook(event, extra);
-    assert.equal(ready(t), true, event);
+  for (const mode of ["auto", "default"]) {
+    for (const [event, extra] of leaves) {
+      const t = setup({ mode });
+      t.hook(event, extra);
+      assert.equal(ready(t), true, `${mode} ${event} ${JSON.stringify(extra)}`);
+    }
   }
+});
+
+test("main_thread_tool_use_revokes_only_where_a_tool_can_open_a_dialog", () => {
+  for (const [mode, revokes] of [
+    ["auto", false],
+    ["bypassPermissions", false],
+    ["default", true],
+    ["acceptEdits", true],
+    ["dontAsk", true],
+  ]) {
+    for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
+      const t = setup({ mode });
+      t.hook(event, { tool_name: "Bash" });
+      assert.equal(ready(t), !revokes, `${mode} ${event}`);
+    }
+  }
+  // A turn of the main thread revokes in every mode, tool use or not.
+  for (const mode of ["auto", "bypassPermissions", "default"]) {
+    const t = setup({ mode });
+    t.hook("UserPromptSubmit", { prompt: "a background task finished" });
+    assert.equal(ready(t), false, mode);
+  }
+});
+
+test("the_file_may_say_busy_or_shell_and_nothing_else", () => {
+  for (const status of ["busy", "shell"]) {
+    const t = setup();
+    t.file.status = status;
+    assert.equal(ready(t), true, status);
+    assert.equal(t.router.followupWhy(KEY, 1), undefined, status);
+  }
+  for (const status of ["waiting", "starting", "SHELL", "", "mystery", "idle_busy"]) {
+    const t = setup();
+    t.file.status = status;
+    assert.equal(ready(t), false, JSON.stringify(status));
+    assert.equal(t.states.bgPicture(KEY).eligible, false, JSON.stringify(status));
+  }
+  // No status at all (an unreadable or missing file) is unknown, and unknown is refused.
+  const t = setup();
+  delete t.file.status;
+  assert.equal(ready(t), false);
+  // `idle` is the ordinary path, which needs no hook evidence.
+  const idle = setup({ stop: false, switchOn: false, mode: "plan" });
+  idle.file.status = "idle";
+  assert.equal(idle.router.followupState(KEY), "ready");
+});
+
+test("a_session_sitting_in_shell_takes_a_background_reply_end_to_end", async () => {
+  const t = setup();
+  t.file.status = "shell";
+  const { result, cmd } = await dispatch(t);
+  assert.equal(cmd.bgReply, true);
+  assert.equal(t.port.check("paste"), true);
+  t.port.wrote();
+  // The file moves from shell to busy while the reply waits for its Enter: still allowed.
+  t.file.status = "busy";
+  assert.equal(t.port.check("enter"), true);
+  t.port.settle({ ok: true });
+  t.hook("UserPromptSubmit", { prompt: "yes do it" });
+  assert.deepEqual(await result, { ok: true });
+});
+
+test("bg_decision_is_logged_once_per_change_with_the_first_failing_rule_and_the_raw_status", () => {
+  const logs = [];
+  const t = setup({ stop: false, log: (event, meta) => logs.push({ event, ...meta }) });
+  const rules = () => logs.filter((l) => l.event === "bg_decision").map((l) => `${l.rule}|${l.fileStatus}`);
+  t.router.bgRepliesChanged();
+  // The prompt the setup began with took any Stop away, and the log says so.
+  assert.equal(rules().at(-1), "stop_revoked_by:UserPromptSubmit|busy");
+  // Looking again at the same answer says nothing: not per poll.
+  const lines = logs.length;
+  t.router.bgRepliesChanged();
+  t.router.bgRepliesChanged();
+  t.router.onHook(KEY, "Notification", { permission_mode: "auto", notification_type: "idle_prompt" });
+  assert.equal(logs.length, lines);
+  t.hook("Stop");
+  t.router.bgRepliesChanged();
+  assert.deepEqual(rules().at(-1), "ready|busy");
+  t.file.status = "shell";
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "ready|shell", "the raw status is in the line");
+  t.file.status = "starting_up";
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "file_status:starting_up|starting_up");
+  t.file.status = "busy";
+  t.hook("Notification", { notification_type: "permission_prompt" });
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "stop_revoked_by:Notification:permission_prompt|busy");
+  t.hook("Stop");
+  t.flags.bg = false;
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "switch_off|busy");
+  t.flags.bg = true;
+  t.flags.subagents = 0;
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "no_running_subagent|busy");
+  t.flags.subagents = 1;
+  t.flags.approvals = true;
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "approval_pending|busy");
+  const last = logs.at(-1);
+  assert.deepEqual(
+    [last.session, last.answer, last.mode, last.runningSubagents, typeof last.secondsSinceStop],
+    [KEY, "refused", "auto", 1, "number"],
+  );
+  assert.equal(JSON.stringify(logs).includes("go"), false, "names, a status and numbers; no prompt text");
+});
+
+test("bg_decision_names_each_rule_in_the_documented_order", () => {
+  const first = (build) => {
+    const logs = [];
+    const t = build((event, meta) => logs.push({ event, ...meta }));
+    t.router.bgRepliesChanged();
+    return logs.at(-1).rule;
+  };
+  assert.equal(first((log) => setup({ switchOn: false, mode: "plan", subagents: 0, stop: false, log })), "switch_off");
+  assert.equal(first((log) => setup({ mode: "plan", subagents: 0, stop: false, log })), "mode_not_allowed:plan");
+  assert.equal(first((log) => setup({ subagents: 0, stop: false, log })), "no_running_subagent");
+  assert.equal(
+    first((log) => {
+      const t = setup({ stop: false, log });
+      t.file.status = "waiting";
+      return t;
+    }),
+    "file_status:waiting",
+  );
+  assert.equal(first((log) => setup({ stop: false, log })), "stop_revoked_by:UserPromptSubmit");
+  assert.equal(
+    first((log) => {
+      // A session no hook has spoken for yet has seen no Stop at all.
+      const t = setup({ stop: false, log });
+      t.states.forget(KEY);
+      return t;
+    }),
+    "mode_not_allowed:unknown",
+  );
+  assert.equal(
+    first((log) => {
+      const t = setup({ log });
+      t.hook("UserPromptSubmit", { prompt: "x" });
+      return t;
+    }),
+    "stop_revoked_by:UserPromptSubmit",
+  );
+  assert.equal(
+    first((log) => {
+      const t = setup({ log });
+      t.clock.t += BACKGROUND_STOP_FRESH_MS + 1;
+      return t;
+    }),
+    "stop_too_old",
+  );
+  assert.equal(
+    first((log) => {
+      const t = setup({ log });
+      t.port.drafts.set(KEY, true);
+      return t;
+    }),
+    "laptop_draft",
+  );
+  assert.equal(first((log) => setup({ log })), "ready");
 });
 
 test("a_continued_stop_is_not_evidence_and_a_later_clean_one_is", () => {
@@ -374,9 +544,10 @@ test("an_enter_without_a_matching_prompt_times_out_consumed_and_is_never_retyped
 
 test("revocation_before_the_write_cancels_the_command_busy_and_unconsumed", async () => {
   for (const [what, revoke] of [
-    ["main-thread tool use", (t) => t.hook("PreToolUse", { tool_name: "Bash" })],
+    ["a permission request from a subagent", (t) => t.hook("PermissionRequest", { tool_name: "Bash", agent_id: "bg1" })],
     ["permission notification", (t) => t.hook("Notification", { notification_type: "permission_prompt" })],
-    ["subagent finished", (t) => t.hook("SubagentStop", { agent_id: "bg1" })],
+    ["elicitation", (t) => t.hook("Notification", { notification_type: "elicitation_dialog" })],
+    ["a prompt of the main thread", (t) => t.hook("UserPromptSubmit", { prompt: "a background task finished" })],
     ["another Stop hook continues", (t) => t.hook("Stop", { stop_hook_active: true })],
     [
       "mode changed",

@@ -252,16 +252,21 @@ Limits to know about:
   lets agentd type on hook evidence instead. All of it is required, and every item is checked again by
   agentd (`write_check`) right before the paste and right before the Enter; any loss cancels the reply as
   `busy` and it is never retyped:
-  - Claude's file says `busy` for this session (`idle` takes the ordinary path, `waiting` never types);
+  - Claude's file says `busy` or `shell` for this session (`shell` is what a live file showed at an
+    idle-looking prompt while background agents ran; `idle` takes the ordinary path, and `waiting` or any
+    other or unknown status never types);
   - the main thread's latest `permission_mode` is `auto`, `bypassPermissions`, `acceptEdits`, `dontAsk` or
     `default`. `plan` (its plan-approval dialog would take the keys) and an unknown or missing mode give
     `mode_not_allowed`. Outside `auto` and `bypassPermissions` a dialog may open, so agentd must also know
     that no approval of any origin, a subagent's included, is pending;
-  - a main-thread `Stop` with `stop_hook_active` not true, at most 6 hours old, and no main-thread work
-    since: a UserPromptSubmit, a main-thread PreToolUse, a PermissionRequest or an Elicitation from any
-    agent, a SubagentStop, any Notification whose `notification_type` is not `idle_prompt` or
-    `auth_success`, a typed write or a delivered Stop hold all take it away; a hook with an `agent_id` is a
-    subagent's and says nothing about the main thread;
+  - a main-thread `Stop` with `stop_hook_active` not true, at most 6 hours old, that nothing has taken
+    away since: a UserPromptSubmit (a background task's report included), a compact, a PermissionRequest or
+    an Elicitation from any agent, a Notification of a dialog type (`permission_prompt`,
+    `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input`) or of a type agentd does not know,
+    a typed write, a delivered Stop hold, and, only outside `auto` and `bypassPermissions`, main-thread tool
+    use. A SubagentStop and the benign notifications (`idle_prompt`, `auth_success`, `agent_completed`,
+    a plugin's own, ...) leave it alone: background agents finishing is normal. A hook with an `agent_id`
+    is a subagent's and says nothing about the main thread;
   - at least one running subagent; nothing pending, held, in flight or uncertain; no draft at the laptop;
   - the reply is one line of at most 600 characters.
 
@@ -275,15 +280,20 @@ Limits to know about:
   pastes. After a resize or a sequence it cannot follow, replies stay `not_sent` until the screen is
   erased and drawn whole again (Ctrl+L, or `/clear`). The reply must match word for word: a missing or
   extra space in the box counts as altered text.
-- Nothing is typed over a half-written prompt. If you have text in the prompt, a command waits until you
-  submit or clear it, and fails with `laptop_draft` after 60 s. `rk` infers the draft from your keys (a
-  stray Esc or Tab counts), then looks at its model of Claude's screen: when the prompt box is visibly
-  empty on two looks (a faint or gray suggestion is empty; `Try "..."` only when drawn faint), at least a
-  second after your last key, with no dialog and the model not unsure, the draft is let go. A look only
-  counts once Claude has drawn something after your last key. A key Claude draws nothing for (Esc, Tab,
-  an arrow) is let go after 5 s without a key, and only while Claude's own file says `idle`; a typed
-  character is never let go until Claude has redrawn. Any text, doubt or dialog keeps the draft. Each
-  decision is logged by agentd as `launcher_draft_check` with lengths and flags, never prompt text.
+- Every glasses reply, idle or background, is typed in the same two phases, and a draft is what the
+  screen shows, not what your keys suggest. Before a byte is written the prompt box must be visibly empty
+  on two looks (a faint or gray placeholder or suggestion is empty; `Try "..."` only when drawn faint),
+  with no dialog, question or running-turn sign and a screen model that is not unsure. Text of yours in the
+  box fails the reply with `laptop_draft` and nothing is sent, so your text is never touched. Then the reply
+  is pasted with no Enter, the box must show exactly it on two looks, and only then Enter is pressed;
+  anything else sends Ctrl+U (only after the paste) and fails `not_sent`. A screen in which no prompt box
+  is found for 5 s fails `not_sent`. Keys alone no longer block a reply (a stray Esc or Tab is not text);
+  `compact` and `model`, which are typed unseen, ignore a key-only guess only when the screen shows the box
+  empty. Replies are one line of at most 600 characters; anything else fails `not_ready`. Agentd logs each
+  check as `launcher_screen_check` (phase, probe, reason, lengths, never prompt text), and, once per change
+  of a session's background-reply answer, a `bg_decision` line naming the first rule that failed (switch,
+  mode, running subagent, file status with its raw value, main-thread Stop and what revoked it, approval
+  pending, in flight or uncertain, laptop draft) with the Stop's age in seconds.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result
   cannot be seen, the session is marked uncertain and further commands are refused until you check it.
 - A follow-up is one bracketed paste of at most 16 KiB.

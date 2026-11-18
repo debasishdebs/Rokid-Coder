@@ -683,3 +683,14 @@ test("text_that_differs_from_the_reply_by_a_word_space_is_cleared_and_never_sent
     assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], shown);
   }
 });
+
+test("a_background_reply_goes_on_a_shell_file_too_and_on_no_other_status_but_busy", async () => {
+  for (const [status, asks] of [["shell", true], ["busy", true], ["waiting", false], ["mystery", false], [undefined, false]]) {
+    const t = setup({ file: status ?? "busy" });
+    t.session.status = status;
+    t.draw(repaint());
+    t.run();
+    await t.advance(300);
+    assert.deepEqual(t.asked.map((a) => a.phase), asks ? ["paste"] : [], String(status));
+  }
+});

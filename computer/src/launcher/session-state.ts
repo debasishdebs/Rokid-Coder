@@ -110,6 +110,8 @@ interface Entry {
    * sign of main-thread work since: see `trackMainThread` for what clears it.
    */
   stopAt?: number;
+  /** Why `stopAt` is not set: the name of what took the Stop away, for the log. Absent before any Stop. */
+  stopCause?: string;
   /** The `permission_mode` of the latest main-thread hook; undefined when that hook carried none. */
   mode?: string;
 }
@@ -132,13 +134,14 @@ function isSubagentHook(payload: Record<string, unknown>): boolean {
   return payload.agent_id !== undefined && payload.agent_id !== null && payload.agent_id !== "";
 }
 
-/** Hooks whose main-thread firing is a sign the main thread is working. */
-const MAIN_THREAD_WORK: ReadonlySet<string> = new Set([
+/**
+ * Hooks whose main-thread firing takes the Stop away in every mode: a new turn
+ * (a prompt, a background task's report, a compact, a restart) or a tool the
+ * classifier refused.
+ */
+const MAIN_THREAD_TURN: ReadonlySet<string> = new Set([
   "UserPromptSubmit",
   "UserPromptExpansion",
-  "PreToolUse",
-  "PostToolUse",
-  "PostToolUseFailure",
   "PermissionDenied",
   "PreCompact",
   "PostCompact",
@@ -146,10 +149,44 @@ const MAIN_THREAD_WORK: ReadonlySet<string> = new Set([
   "SessionEnd",
   "StopFailure",
 ]);
-/** Hooks that mean something is, or may be, waiting on the wearer, whichever thread fired them. */
-const BLOCKING_HOOKS: ReadonlySet<string> = new Set(["PermissionRequest", "Elicitation", "ElicitationResult", "SubagentStop"]);
-/** Notifications that do not say the prompt is taken: the prompt is idle, a login finished. */
-const QUIET_NOTIFICATIONS: ReadonlySet<string> = new Set(["idle_prompt", "auth_success"]);
+/**
+ * Main-thread tool use takes the Stop away only where a tool can open a dialog.
+ * In `auto` and `bypassPermissions` none does, and a reply typed while the main
+ * thread works only queues, so tool use there is no reason to refuse; the turn
+ * hooks above still are.
+ */
+const MAIN_THREAD_TOOL: ReadonlySet<string> = new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure"]);
+/**
+ * Hooks that mean something is, or may be, waiting on the wearer, whichever
+ * thread fired them. A SubagentStop is not one: background agents finishing is
+ * normal and puts nothing on the main screen.
+ */
+const BLOCKING_HOOKS: ReadonlySet<string> = new Set(["PermissionRequest", "Elicitation", "ElicitationResult"]);
+/**
+ * Notifications that are not a dialog (idle, a login, a finished or resumed
+ * background agent, a plugin's own): they leave the Stop alone. Every other type,
+ * a dialog's (`permission_prompt`, `elicitation_dialog`, ...) or one agentd does
+ * not know or that has none, takes it away.
+ */
+const QUIET_NOTIFICATIONS: ReadonlySet<string> = new Set([
+  "idle_prompt",
+  "auth_success",
+  "auth_storage_failure",
+  "elicitation_complete",
+  "elicitation_response",
+  "agent_completed",
+  "quota_auto_resume_fired",
+  "quota_auto_resume_stale",
+  "quota_auto_resume_disabled",
+  "plugin_notification",
+]);
+/**
+ * What Claude's sessions file may say while a background reply is typed: `busy`,
+ * and `shell`, which the live file showed at an idle-looking prompt ("Waiting for
+ * background agents to finish") although no document defines it. `idle` takes the
+ * ordinary path; anything else or unknown is refused.
+ */
+export const BG_FILE_STATUSES: ReadonlySet<string> = new Set(["busy", "shell"]);
 
 export class SessionStates {
   private readonly entries = new Map<SessionKey, Entry>();
@@ -171,6 +208,7 @@ export class SessionStates {
     // work. A background reply's own paste keeps the evidence until its Enter is allowed.
     if (!keepStop) {
       entry.stopAt = undefined;
+      entry.stopCause = "typed_write_or_delivered_stop";
     }
     entry.latchAt = entry.latchAt === undefined ? at : Math.max(entry.latchAt, at);
   }
@@ -205,6 +243,7 @@ export class SessionStates {
     const entry = this.entries.get(key);
     if (entry) {
       entry.stopAt = undefined;
+      entry.stopCause = "used_by_a_reply";
     }
   }
 
@@ -262,16 +301,91 @@ export class SessionStates {
         ? payload.permission_mode
         : undefined;
     }
+    const revoke = (cause: string): void => {
+      entry.stopAt = undefined;
+      entry.stopCause = cause;
+    };
     if (event === "Stop") {
       const continued = payload.stop_hook_active !== undefined && payload.stop_hook_active !== false;
-      entry.stopAt = sub || continued ? undefined : this.clock();
-    } else if (event === "Notification") {
-      if (typeof payload.notification_type !== "string" || !QUIET_NOTIFICATIONS.has(payload.notification_type)) {
-        entry.stopAt = undefined;
+      if (sub || continued) {
+        revoke(continued ? "stop_hook_active" : "stop_from_subagent");
+      } else {
+        entry.stopAt = this.clock();
+        entry.stopCause = undefined;
       }
-    } else if (BLOCKING_HOOKS.has(event) || (!sub && MAIN_THREAD_WORK.has(event))) {
-      entry.stopAt = undefined;
+    } else if (event === "Notification") {
+      const type = payload.notification_type;
+      if (typeof type !== "string" || !QUIET_NOTIFICATIONS.has(type)) {
+        revoke(`Notification:${typeof type === "string" && /^[a-z_]{1,40}$/.test(type) ? type : "unknown"}`);
+      }
+    } else if (BLOCKING_HOOKS.has(event)) {
+      revoke(event);
+    } else if (!sub && MAIN_THREAD_TURN.has(event)) {
+      revoke(event);
+    } else if (!sub && MAIN_THREAD_TOOL.has(event) && !AUTO_APPROVING_MODES.has(entry.mode ?? "")) {
+      revoke(event);
     }
+  }
+
+  /**
+   * For the log only: the first rule of the background-reply evidence that fails
+   * for the session, by name, with the raw file status, the main-thread mode and
+   * the age of the Stop in seconds. The router adds the phone's switch and the
+   * laptop draft. Never a decision, and never anything typed or shown.
+   */
+  bgDiagnosis(
+    key: SessionKey,
+    ownsClaim = false,
+  ): { rule: string; status: string; mode: string; stopAgeSec: number | null; subagents: number } {
+    const binding = this.sources.binding(key);
+    const entry = this.entries.get(key);
+    const file = binding?.claudePid === undefined ? undefined : this.readSession(binding.claudePid);
+    const subagents = this.sources.subagents?.(key) ?? 0;
+    const stopAgeMs = entry?.stopAt === undefined ? null : this.clock() - entry.stopAt;
+    const stopAge = stopAgeMs === null ? null : Math.round(stopAgeMs / 1000);
+    const mode = entry?.mode !== undefined && /^[A-Za-z]{1,40}$/.test(entry.mode) ? entry.mode : "unknown";
+    const status = file && /^[a-z_]{1,20}$/.test(file.status) ? file.status : file ? "other" : "none";
+    const rule = (): string => {
+      if (!binding || binding.claudePid === undefined) {
+        return "not_bound";
+      }
+      if (!BG_ALLOWED_MODES.has(entry?.mode ?? "")) {
+        return `mode_not_allowed:${mode}`;
+      }
+      if (subagents < 1) {
+        return "no_running_subagent";
+      }
+      if (!file) {
+        return "file_status:none";
+      }
+      if (!BG_FILE_STATUSES.has(file.status)) {
+        return `file_status:${status}`;
+      }
+      if (file.sessionId !== key.slice(key.indexOf(":") + 1)) {
+        return "file_of_another_session";
+      }
+      if (entry?.stopAt === undefined) {
+        return entry?.stopCause === undefined ? "no_main_thread_stop" : `stop_revoked_by:${entry.stopCause}`;
+      }
+      if (stopAgeMs === null || stopAgeMs < 0 || stopAgeMs > BACKGROUND_STOP_FRESH_MS) {
+        return "stop_too_old";
+      }
+      if (this.sources.asking(key)) {
+        return "approval_pending";
+      }
+      if (this.sources.held(key)) {
+        return "stop_held";
+      }
+      if (binding.uncertain) {
+        return "uncertain";
+      }
+      if (entry?.inFlight === true && !ownsClaim) {
+        return "in_flight";
+      }
+      const picture = this.bgPicture(key, ownsClaim);
+      return picture.eligible && picture.modeOk ? "ok" : "mode_guard";
+    };
+    return { rule: rule(), status, mode, stopAgeSec: stopAge, subagents };
   }
 
   /**
@@ -303,7 +417,7 @@ export class SessionStates {
       return no;
     }
     const file = this.readSession(binding.claudePid);
-    if (!file || file.status !== "busy" || file.sessionId !== key.slice(key.indexOf(":") + 1)) {
+    if (!file || !BG_FILE_STATUSES.has(file.status) || file.sessionId !== key.slice(key.indexOf(":") + 1)) {
       return no;
     }
     const stopAge = entry?.stopAt === undefined ? undefined : this.clock() - entry.stopAt;
@@ -421,7 +535,7 @@ export class SessionStates {
       return false;
     }
     const file = this.readSession(binding.claudePid);
-    return file?.status === "busy" && (file.sessionId === undefined || file.sessionId === key.slice(key.indexOf(":") + 1));
+    return file !== undefined && BG_FILE_STATUSES.has(file.status) && (file.sessionId === undefined || file.sessionId === key.slice(key.indexOf(":") + 1));
   }
 
   private entry(key: SessionKey): Entry {
@@ -514,6 +628,9 @@ export class LauncherRouter {
   private readonly shown = new Map<SessionKey, string>();
   private watchTimer?: NodeJS.Timeout;
   private readonly bgSwitch: () => boolean;
+  private readonly log?: (event: string, meta: Record<string, unknown>) => void;
+  /** The last `bg_decision` logged for each session, so only a change says anything. */
+  private readonly bgLogged = new Map<SessionKey, string>();
 
   constructor(options: {
     port: LauncherPort;
@@ -524,7 +641,10 @@ export class LauncherRouter {
     onStateChange?: (key: SessionKey) => void;
     /** The phone's opt-in for background replies, read live; absent, off. */
     bgReplies?: () => boolean;
+    /** Where `bg_decision` lines go: names, a raw status and numbers, never prompt text. */
+    log?: (event: string, meta: Record<string, unknown>) => void;
   }) {
+    this.log = options.log;
     this.port = options.port;
     this.states = options.states;
     this.clock = options.clock ?? Date.now;
@@ -783,6 +903,7 @@ export class LauncherRouter {
     this.port.cancel(key, "cancelled");
     this.states.forget(key);
     this.shown.delete(key);
+    this.bgLogged.delete(key);
   }
 
   /** `compact` or `model`, from the glasses' launcher_command. */
@@ -1030,6 +1151,48 @@ export class LauncherRouter {
     return this.epochs.get(key) ?? 0;
   }
 
+  /**
+   * One `bg_decision` line when the background-reply answer for a session
+   * changes (not per poll): the first rule that fails, in the order switch, mode,
+   * running subagent, file status, main-thread Stop (and what revoked it),
+   * approval pending, in flight or uncertain, laptop draft; the raw file status,
+   * the mode name, the running subagents and the Stop's age in seconds. Lengths
+   * and names only. Diagnosis for a real session, never a decision.
+   */
+  private logBgDecision(key: SessionKey): void {
+    if (!this.log) {
+      return;
+    }
+    const diagnosis = this.states.bgDiagnosis(key);
+    let on = false;
+    try {
+      on = this.bgSwitch() === true;
+    } catch {
+      on = false;
+    }
+    const rule = !on
+      ? "switch_off"
+      : diagnosis.rule !== "ok"
+        ? diagnosis.rule
+        : this.port.laptopDraft(key)
+          ? "laptop_draft"
+          : "ready";
+    const signature = `${rule}|${diagnosis.status}`;
+    if (this.bgLogged.get(key) === signature) {
+      return;
+    }
+    this.bgLogged.set(key, signature);
+    this.log("bg_decision", {
+      session: key,
+      answer: rule === "ready" ? "ready" : "refused",
+      rule,
+      fileStatus: diagnosis.status,
+      mode: diagnosis.mode,
+      runningSubagents: diagnosis.subagents,
+      secondsSinceStop: diagnosis.stopAgeSec,
+    });
+  }
+
   /** Tells the phone when what it shows for a session would change; `always` for a binding change. */
   private look(key: SessionKey, always: boolean): void {
     if (!this.port.binding(key)) {
@@ -1039,6 +1202,7 @@ export class LauncherRouter {
       return;
     }
     this.revokeBg(key);
+    this.logBgDecision(key);
     // What the phone shows is the follow-up state and, when unavailable, why.
     const seen = `${this.followupState(key)}/${this.bgAssess(key)}`;
     if (always || this.shown.get(key) !== seen) {
