@@ -11,7 +11,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { ScreenModel, probe, showsEmptyPrompt, showsText, showsCleared } = require("../dist/launcher/screen-probe.js");
+const { ScreenModel, probe, showsEmptyPrompt, showsText, showsExactly, showsCleared } = require("../dist/launcher/screen-probe.js");
 
 const CAPTURE = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "claude-2.1.285-80x24.json"), "utf8"));
 
@@ -45,6 +45,10 @@ test("a_typed_character_a_ctrl_u_and_a_paste_are_each_seen_on_the_real_input_lin
   assert.equal(showsText(probe(pasted), "hello world"), true, "the bracketed paste shows whole on the input line");
   assert.equal(showsText(probe(pasted), "hello  world"), true, "runs of spaces are one");
   assert.equal(showsText(probe(pasted), "helloworld"), false);
+  // The check before an Enter is exact: the real line holds the paste with its one space.
+  assert.equal(showsExactly(probe(pasted), "hello world"), true);
+  assert.equal(showsExactly(probe(pasted), "hello  world"), false);
+  assert.equal(showsExactly(probe(pasted), "helloworld"), false);
   const after = probe(replay(at("ctrl-u after paste")));
   assert.equal(showsCleared(after, "hello world"), true);
   assert.equal(showsEmptyPrompt(after), true);

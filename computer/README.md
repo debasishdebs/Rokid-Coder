@@ -281,8 +281,13 @@ Limits to know about:
   again. Claude Code 2.1.285 does that by itself: it runs on the alternate screen, which the model holds
   as a buffer of its own, and erases it right after entering it and after a resize (checked against the
   real program at 80x24 and 207x50: the framed box, the muted placeholder, a typed character, Ctrl+U and
-  a bracketed paste were all read correctly, and the model stayed untainted). The reply must match word
-  for word: a missing or extra space in the box counts as altered text.
+  a bracketed paste were all read correctly, and the model stayed untainted). Before the Enter the line
+  must equal the paste exactly, interior whitespace included ("hello  world" is not "hello world");
+  only the terminal's own right padding and one space at a wrap are allowed to differ. Keys you type
+  between the paste and the Enter are held and replayed once, in order, right after the Enter or after
+  the cleanup, never waiting on Claude's status; after a clear nobody could see they are dropped
+  instead. A reply cleared away (`not_sent`, `laptop_draft`, or Esc before the Enter, `taken_over`)
+  never consumed its message id and leaves the readiness state as it was before the paste.
 - Every glasses reply, idle or background, is typed in the same two phases, and a draft is what the
   screen shows, not what your keys suggest. Before a byte is written the prompt box must be visibly empty
   on two looks (a faint or gray placeholder or suggestion is empty; `Try "..."` only when drawn faint),

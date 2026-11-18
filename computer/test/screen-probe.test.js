@@ -6,7 +6,7 @@
  */
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { ScreenModel, probe, showsText, showsCleared, showsEmptyPrompt } = require("../dist/launcher/screen-probe.js");
+const { ScreenModel, probe, showsText, showsExactly, showsCleared, showsEmptyPrompt } = require("../dist/launcher/screen-probe.js");
 const { bgReplyText } = require("../dist/launcher/paste-text.js");
 
 const RULE = "─".repeat(60);
@@ -92,7 +92,7 @@ test("a_multi_line_draft_that_looks_like_the_hint_is_text", () => {
 test("the_pasted_text_alone_on_the_input_line_inside_the_box_is_shown", () => {
   const model = screen(repaint({ input: "yes do it" }));
   const result = probe(model);
-  assert.deepEqual(result, { kind: "prompt", text: "yes do it", empty: false });
+  assert.deepEqual(result, { kind: "prompt", text: "yes do it", rows: ["yes do it"], empty: false });
   assert.equal(showsText(result, "yes do it"), true);
   assert.equal(showsText(result, "yes do it please"), false);
   // Text that is not alone is not what was pasted: a laptop draft in front of it.
@@ -112,6 +112,35 @@ test("altered_text_is_not_the_text_a_missing_or_extra_word_space_included", () =
   assert.equal(shows("yes do", "yes do it"), false);
   assert.equal(showsCleared(probe(screen(repaint({ input: "yesdo it" }))), "yes do it"), true);
   assert.equal(showsCleared(probe(screen(repaint({ input: "yes do it" }))), "yes do it"), false);
+});
+
+test("the_check_before_an_enter_is_exact_about_interior_whitespace", () => {
+  const exact = (input, expected = "hello world") => showsExactly(probe(screen(repaint({ input }))), expected);
+  assert.equal(exact("hello world"), true);
+  assert.equal(exact("hello  world"), false, "two spaces are not one");
+  assert.equal(exact("hello   world"), false);
+  assert.equal(exact("hello world"), false, "a no-break space is not a space");
+  assert.equal(exact("helloworld"), false);
+  assert.equal(exact("hello world "), true, "the terminal's trailing blank cells are padding");
+  assert.equal(exact("hello world", "hello world   "), true, "so is trailing whitespace of what was pasted");
+  assert.equal(exact("hello world!"), false);
+  assert.equal(exact("hello"), false);
+  assert.equal(exact(" hello world", " hello world"), true, "a leading space of the paste is on the line");
+  assert.equal(exact("hello world", " hello world"), false);
+  // The loose comparison still reads these as the text; it is not the one an Enter relies on.
+  assert.equal(showsText(probe(screen(repaint({ input: "hello  world" }))), "hello world"), true);
+  assert.equal(showsExactly({ kind: "blocked", reason: "dialog" }, "hello world"), false);
+  assert.equal(showsExactly(probe(screen(repaint({ input: "" }))), ""), false);
+});
+
+test("a_wrapped_line_is_exact_inside_each_row_and_lets_the_break_take_one_space", () => {
+  const text = "please run the full test suite and then summarise every failure you find in the logs";
+  const wrapped = (first, second) => probe(screen(repaint({ input: first, continuation: [`  ${second}`] })));
+  assert.equal(showsExactly(wrapped(text.slice(0, 40), text.slice(40)), text), true, "the break took the space");
+  assert.equal(showsExactly(wrapped(text.slice(0, 39), text.slice(40)), text), true, "the space is still at the end of a row");
+  assert.equal(showsExactly(wrapped(text.slice(0, 41), text.slice(41)), text), true, "mid-word break, no space lost");
+  assert.equal(showsExactly(wrapped(text.slice(0, 40), `x${text.slice(40)}`), text), false);
+  assert.equal(showsExactly(wrapped(text.slice(0, 40).replace("the full", "the  full"), text.slice(40)), text), false);
 });
 
 test("a_tainted_screen_is_refused_without_a_baseline_and_a_whole_screen_erase_heals_it", () => {

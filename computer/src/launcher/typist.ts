@@ -3,7 +3,7 @@ import type { CommandError, TypeCommand } from "./launcher-hub";
 import { OutputScanner } from "./output-scanner";
 import { bgReplyText, pasteText } from "./paste-text";
 import type { PtyChild } from "./pty";
-import { probe, showsCleared, showsEmptyPrompt, showsText, type ProbeResult, type ScreenModel } from "./screen-probe";
+import { probe, showsCleared, showsEmptyPrompt, showsExactly, type ProbeResult, type ScreenModel } from "./screen-probe";
 
 export interface Clock {
   now(): number;
@@ -102,6 +102,8 @@ interface Active {
   bgText?: string;
   /** When the screen first showed what the background reply waits for; a second look must agree. */
   seenAt?: number;
+  /** What the first of the two looks saw (its kind and the line's text); a different second look restarts the count. */
+  seenSignature?: string;
   /** `screen.taints` when the paste went out (or the clearing began); a later one fails closed. */
   mark?: number;
   /** The last look of the screen check, for the log. */
@@ -478,9 +480,16 @@ export class Typist {
       active.unreadableSince = undefined;
     }
     if (boundary === "open" || boundary === "text" || boundary === "full") {
-      active.seenAt ??= now;
+      // The two looks must be of the same thing: a change of kind (a draft, then an empty box) or of what
+      // the line holds starts the count again, so the first look at a new state never decides alone.
+      const signature = `${boundary}|${active.look?.kind === "prompt" ? active.look.text : (active.look?.kind ?? "")}`;
+      if (active.seenSignature !== signature || active.seenAt === undefined) {
+        active.seenSignature = signature;
+        active.seenAt = now;
+      }
       if (now - active.seenAt >= BG_STABLE_MS) {
         active.seenAt = undefined;
+        active.seenSignature = undefined;
         if (boundary !== "open") {
           this.refuse(active, boundary === "text" ? "laptop_draft" : "not_sent");
           return;
@@ -497,6 +506,7 @@ export class Typist {
       }
     } else {
       active.seenAt = undefined;
+      active.seenSignature = undefined;
     }
     if (now >= active.deadline) {
       this.settle(active, "busy");
@@ -602,7 +612,7 @@ export class Typist {
     if (!bg || active.bgText === undefined || !this.fileAllows(active)) {
       return false;
     }
-    return showsText(probe(bg.screen, { sinceTaints: active.mark }), active.bgText);
+    return showsExactly(probe(bg.screen, { sinceTaints: active.mark }), active.bgText);
   }
 
   /** One bracketed paste and no Enter. */
@@ -634,7 +644,8 @@ export class Typist {
       return;
     }
     const seen = probe(bg.screen, { sinceTaints: active.mark });
-    if (showsText(seen, active.bgText)) {
+    // Exact, interior whitespace included: an Enter goes only for what was pasted.
+    if (showsExactly(seen, active.bgText)) {
       active.seenAt ??= now;
       if (now - active.seenAt >= BG_STABLE_MS) {
         active.seenAt = undefined;
@@ -664,9 +675,10 @@ export class Typist {
   private bgEnter(active: Active): void {
     this.pty.write("\r");
     this.settle(active);
-    // A background reply's Claude file may stay busy for hours, so waiting for it to read idle would
-    // freeze the keyboard. An idle one keeps R143: the keyboard is never frozen for the turn this starts.
-    this.end(active, active.cmd.bgReply ? "now" : "unless_held");
+    // The hold ends with the command, whatever Claude's file says next: keys typed during the paste window
+    // are replayed once, in order, right after the Enter. Waiting for a status would leave the keyboard held
+    // (an idle reply's turn may wait on a permission dialog, a background one's file stays busy for hours).
+    this.end(active, "now");
   }
 
   /**
@@ -696,7 +708,7 @@ export class Typist {
     } else if (now >= active.deadline) {
       this.check("clear", active, "refused");
       this.markUncertain(active.writtenAt);
-      this.end(active);
+      this.end(active, "drop");
     }
   }
 
@@ -723,9 +735,10 @@ export class Typist {
    * The command no longer owns input. Holding then ends as `release` says:
    * - `when_ready`: once the prompt is positively ready (the brief's rule);
    * - `unless_held`: at once when no key was held, otherwise when ready;
-   * - `now`: at once, replaying the held keys.
+   * - `now`: at once, replaying the held keys;
+   * - `drop`: at once, the held keys discarded.
    */
-  private end(active: Active, release: "when_ready" | "unless_held" | "now" = "when_ready"): void {
+  private end(active: Active, release: "when_ready" | "unless_held" | "now" | "drop" = "when_ready"): void {
     if (this.active !== active) {
       return;
     }
@@ -733,10 +746,12 @@ export class Typist {
     if (active.writtenAt === undefined || !this.input.holding) {
       return;
     }
-    if (release === "now" || (release === "unless_held" && !this.input.hasHeld)) {
+    if (release === "now" || release === "drop" || (release === "unless_held" && !this.input.hasHeld)) {
       this.releaseAfter = undefined;
       const held = this.input.flushHeld();
-      if (held) {
+      // `drop`: the prompt may hold something nobody saw go (a clear that could not be seen), so what the
+      // wearer typed meanwhile is let go rather than replayed into it; the keyboard is theirs at once.
+      if (held && release !== "drop") {
         this.pty.write(held);
       }
       return;

@@ -124,6 +124,14 @@ export interface BgPicture {
   modeOk: boolean;
 }
 
+/** The parts of a session's readiness state that a write changes. */
+export interface LatchSnapshot {
+  latchAt?: number;
+  passedLatchAt?: number;
+  stopAt?: number;
+  stopCause?: string;
+}
+
 /** A prompt or a reply with every whitespace removed, so that it can be compared with the other. */
 function squash(text: string | undefined): string {
   return (text ?? "").replace(/\s+/g, "");
@@ -236,6 +244,32 @@ export class SessionStates {
   notBefore(key: SessionKey): number | undefined {
     const entry = this.entries.get(key);
     return entry?.latchAt ?? entry?.passedLatchAt;
+  }
+
+  /** What a write is about to change in the readiness state, so a write that never reached Enter can put it back. */
+  snapshotLatch(key: SessionKey): LatchSnapshot {
+    const entry = this.entries.get(key);
+    return {
+      latchAt: entry?.latchAt,
+      passedLatchAt: entry?.passedLatchAt,
+      stopAt: entry?.stopAt,
+      stopCause: entry?.stopCause,
+    };
+  }
+
+  /**
+   * A paste that was cleared away (a `not_sent`, a takeover before the Enter) submitted nothing: the
+   * barrier its first write set would wait for an idle that can never come, so the state from before
+   * the paste is put back.
+   */
+  restoreLatch(key: SessionKey, snapshot: LatchSnapshot): void {
+    const entry = this.entries.get(key);
+    if (entry) {
+      entry.latchAt = snapshot.latchAt;
+      entry.passedLatchAt = snapshot.passedLatchAt;
+      entry.stopAt = snapshot.stopAt;
+      entry.stopCause = snapshot.stopCause;
+    }
   }
 
   /** The evidence of a main-thread Stop is used up or gone. */
@@ -998,10 +1032,15 @@ export class LauncherRouter {
     // the launcher clears the paste away, and the same msgId may be sent again.
     const spent = (): boolean => (bg ? running.enterGranted === true : running.written);
     // Typed, then failed: the msgId is spent, so a resend is a duplicate, never a retype.
-    // `not_sent` and `laptop_draft` say the launcher cleared its paste away (or never made one): the
-    // reply was not submitted, so the same msgId may be sent again.
+    // For a text reply the launcher's `not_sent`, `laptop_draft` and `taken_over` all say the Enter was
+    // never pressed (it cleared its paste away, or made none): nothing was submitted, so the same msgId
+    // may be sent again and the readiness state is what it was before the paste. A compact or a model
+    // change that was taken over had been typed, and stays spent.
+    const unsent = (error: string): boolean =>
+      cmd.command === "text" && (error === "not_sent" || error === "laptop_draft" || error === "taken_over");
+    const before = this.states.snapshotLatch(key);
     const failed = (error: string): RouteOutcome =>
-      spent() && error !== "not_sent" && error !== "laptop_draft" ? { ok: false, error, consumed: true } : fail(error);
+      spent() && !unsent(error) ? { ok: false, error, consumed: true } : fail(error);
     const promptSeen = bg && cmd.command === "text"
       ? new Promise<string>((resolve) => {
           const want = squash(cmd.text);
@@ -1048,13 +1087,20 @@ export class LauncherRouter {
         // R165: it was typed before the cancel reached the launcher. The msgId
         // is spent, so a resend is a duplicate and never typed twice.
         if (bg && !spent()) {
-          return running.written ? fail("not_sent") : fail(result);
+          if (running.written) {
+            this.states.restoreLatch(key, before);
+            return fail("not_sent");
+          }
+          return fail(result);
         }
         return running.written ? { ok: false, error: "typed_after_cancel", consumed: true } : failed(result);
       }
       if (!result.ok) {
         const error: SendError = result.error ?? "not_ready";
         this.noteFailure(key, gen, cmd, error);
+        if (unsent(error)) {
+          this.states.restoreLatch(key, before);
+        }
         return failed(error);
       }
       if (cmd.command === "model") {

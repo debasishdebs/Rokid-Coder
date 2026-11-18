@@ -713,3 +713,88 @@ test("a_reply_waits_for_the_evidence_to_arrive_and_then_goes", async () => {
   t.router.endSession(KEY);
   await result;
 });
+
+// ---- Codex's findings on the latch and the msgId ---------------------------------------
+
+/** A session sitting idle at its prompt, long enough ago that only a write can make it busy. */
+function idleSession() {
+  const t = setup({ switchOn: false, mode: "plan" });
+  t.file.status = "idle";
+  t.file.statusUpdatedAt = t.clock.t - 60_000;
+  return t;
+}
+
+test("a_reply_the_launcher_cleared_away_puts_the_readiness_state_back", async () => {
+  for (const error of ["not_sent", "laptop_draft", "taken_over"]) {
+    const t = idleSession();
+    assert.equal(ready(t), true, "ready before");
+    const result = t.router.followup(KEY, "hi", () => ({ ok: true }));
+    await until(() => t.port.sent.length === 1, 500, "the dispatch");
+    t.port.wrote();
+    assert.equal(ready(t), false, "the paste set the barrier");
+    t.port.settle({ ok: false, error });
+    const outcome = await result;
+    assert.deepEqual([outcome.ok, outcome.error], [false, error]);
+    assert.equal(ready(t), true, `${error}: nothing was submitted, so a retry sees the state from before the paste`);
+    assert.equal(t.states.notBefore(KEY), undefined, error);
+  }
+});
+
+test("a_background_reply_that_never_reached_its_enter_also_puts_the_state_back", async () => {
+  const t = setup();
+  const before = t.states.snapshotLatch(KEY);
+  const { result } = await dispatch(t);
+  assert.equal(t.port.check("paste"), true);
+  t.port.wrote();
+  t.hook("Notification", { notification_type: "permission_prompt" });
+  const outcome = await result;
+  assert.deepEqual([outcome.ok, outcome.error, "consumed" in outcome], [false, "not_sent", false]);
+  assert.deepEqual(
+    { ...t.states.snapshotLatch(KEY), stopAt: undefined, stopCause: undefined },
+    { ...before, stopAt: undefined, stopCause: undefined },
+  );
+  assert.equal(t.states.notBefore(KEY), before.latchAt ?? before.passedLatchAt);
+});
+
+test("only_a_write_that_pressed_enter_consumes_the_msgId", async () => {
+  // Esc during the check: Ctrl+U and taken_over, Enter never pressed, so a retry of the same message is not a duplicate.
+  const idle = idleSession();
+  const a = idle.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => idle.port.sent.length === 1, 500, "the dispatch");
+  idle.port.wrote();
+  idle.port.settle({ ok: false, error: "taken_over" });
+  const outcome = await a;
+  assert.deepEqual(outcome, { ok: false, error: "taken_over" });
+  assert.equal("consumed" in outcome, false);
+  // The same for a background reply, whose Enter was never allowed.
+  const bg = setup();
+  const { result } = await dispatch(bg);
+  bg.port.check("paste");
+  bg.port.wrote();
+  bg.port.settle({ ok: false, error: "taken_over" });
+  assert.equal("consumed" in (await result), false);
+  // The launcher's own word wins over agentd's grant: it presses the Enter only after the verdict, so a
+  // takeover it reports after one means the Esc came first and the Enter was not pressed.
+  const granted = setup();
+  const { result: pressed } = await dispatch(granted);
+  granted.port.check("paste");
+  granted.port.wrote();
+  granted.port.check("enter");
+  granted.port.settle({ ok: false, error: "taken_over" });
+  assert.equal("consumed" in (await pressed), false);
+  // Without a word from the launcher the Enter is presumed pressed: a cancel after the grant is spent.
+  const cancelled = setup();
+  const { result: unheard } = await dispatch(cancelled);
+  cancelled.port.check("paste");
+  cancelled.port.wrote();
+  cancelled.port.check("enter");
+  cancelled.router.endSession(KEY);
+  assert.equal((await unheard).consumed, true);
+  // A compact or a model change that was taken over had been typed: it stays spent.
+  const model = idleSession();
+  const m = model.router.command(KEY, { command: "model", model: "opus" });
+  await until(() => model.port.sent.length === 1, 500, "the dispatch");
+  model.port.wrote();
+  model.port.settle({ ok: false, error: "taken_over" });
+  assert.deepEqual(await m, { ok: false, error: "taken_over", consumed: true });
+});

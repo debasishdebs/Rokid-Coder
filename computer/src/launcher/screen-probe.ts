@@ -674,11 +674,14 @@ export type ProbeResult =
   /** A dialog, a question, a permission prompt or a running-turn sign is on screen. */
   | { kind: "blocked"; reason: string }
   /**
-   * The framed prompt box, with what is on its input line (whitespace removed),
-   * and whether that line is visibly empty: nothing on it but muted text (the
+   * The framed prompt box, with what is on its input line (whitespace
+   * normalised: runs are one space, ends trimmed) and the same line row by row
+   * exactly as drawn (`rows`: after the prompt glyph and its one space, with
+   * only the terminal's right padding and a wrapped row's indent removed), and
+   * whether that line is visibly empty: nothing on it but muted text (the
    * placeholder, a suggestion or the `Try "..."` hint, all drawn faint or gray).
    */
-  | { kind: "prompt"; text: string; empty: boolean };
+  | { kind: "prompt"; text: string; rows: string[]; empty: boolean };
 
 export interface ProbeOptions {
   /**
@@ -760,7 +763,21 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   // Claude's own `Try "..."` hint is no exception: it is empty only when drawn muted, like any
   // placeholder. Typed text that looks like it is text, and so is a multi-line draft that begins
   // and ends the same way.
-  return { kind: "prompt", text, empty: solid === "" };
+  return { kind: "prompt", text, rows: exactRows(inputRows), empty: solid === "" };
+}
+
+/**
+ * The input rows as drawn, for an exact comparison: the box's side borders, the
+ * prompt glyph with the one space (or no-break space) the UI puts after it, a
+ * wrapped row's indent and every row's right padding are what the terminal adds
+ * and are removed; whitespace inside a row is kept as it is.
+ */
+function exactRows(rows: string[]): string[] {
+  return rows.map((row, index) => {
+    const withoutBorder = row.replace(BORDER_LEFT, index === 0 ? "" : " ").replace(BORDER_RIGHT, "");
+    const content = index === 0 ? withoutBorder.replace(/^\s*[>❯][  ]?/, "") : withoutBorder.replace(/^\s+/, "");
+    return content.replace(/\s+$/, "");
+  });
 }
 
 /**
@@ -782,7 +799,40 @@ export function showsEmptyPrompt(result: ProbeResult): boolean {
   return result.kind === "prompt" && result.empty;
 }
 
-/** Whether the probe shows `expected` (already sanitised) on the input line, and nothing but it. */
+/**
+ * Whether the input line holds exactly `expected` (the sanitised text that was
+ * pasted) and nothing else: interior whitespace must be the same, so "hello  world"
+ * is not "hello world". What is allowed to differ is only what the terminal adds:
+ * the right padding of the last row and, where the line wrapped over rows, one
+ * space at each break (the wrap may take it). Used before an Enter.
+ */
+export function showsExactly(result: ProbeResult, expected: string): boolean {
+  if (result.kind !== "prompt") {
+    return false;
+  }
+  const want = expected.replace(/\s+$/, "");
+  if (want.length === 0) {
+    return false;
+  }
+  let position = 0;
+  for (let i = 0; i < result.rows.length; i += 1) {
+    const row = result.rows[i];
+    if (!want.startsWith(row, position)) {
+      return false;
+    }
+    position += row.length;
+    if (i < result.rows.length - 1 && want[position] === " ") {
+      position += 1; // the break between wrapped rows may have taken one space
+    }
+  }
+  return position === want.length;
+}
+
+/**
+ * Whether the probe shows `expected` on the input line, whitespace normalised (runs
+ * of it one space, ends trimmed). The loose comparison, for the places that need
+ * no more than "this is the text": never the check before an Enter.
+ */
 export function showsText(result: ProbeResult, expected: string): boolean {
   return result.kind === "prompt" && expected.length > 0 && result.text === normalise(expected);
 }
