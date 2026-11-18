@@ -680,6 +680,36 @@ export class LauncherHub {
         this.write(connection, { type: "write_verdict", cmdId: frame.cmdId, phase, ok });
         return undefined;
       }
+      case "draft_check": {
+        // The launcher's own look at the screen when the key stream said "draft": lengths and flags only.
+        const word = /^[a-z_]{1,40}$/;
+        if (
+          !hasShape(frame, ["type", "probe", "reason", "textLen", "tainted", "before", "after", "decision"]) ||
+          typeof frame.probe !== "string" ||
+          !word.test(frame.probe) ||
+          typeof frame.reason !== "string" ||
+          !word.test(frame.reason) ||
+          !Number.isInteger(frame.textLen) ||
+          (frame.textLen as number) < 0 ||
+          typeof frame.tainted !== "boolean" ||
+          typeof frame.before !== "boolean" ||
+          typeof frame.after !== "boolean" ||
+          (frame.decision !== "kept" && frame.decision !== "cleared")
+        ) {
+          return "bad_frame";
+        }
+        this.options.logger.info("launcher_draft_check", {
+          session: connection.binding?.key,
+          probe: frame.probe,
+          reason: frame.reason,
+          textLen: frame.textLen,
+          tainted: frame.tainted,
+          draftBefore: frame.before,
+          draftAfter: frame.after,
+          decision: frame.decision,
+        });
+        return undefined;
+      }
       case "laptop_state":
         if (!hasShape(frame, ["type", "draft"]) || typeof frame.draft !== "boolean") {
           return "bad_frame";

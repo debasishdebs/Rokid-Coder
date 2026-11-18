@@ -276,7 +276,11 @@ Limits to know about:
   erased and drawn whole again (Ctrl+L, or `/clear`). The reply must match word for word: a missing or
   extra space in the box counts as altered text.
 - Nothing is typed over a half-written prompt. If you have text in the prompt, a command waits until you
-  submit or clear it, and fails with `laptop_draft` after 60 s.
+  submit or clear it, and fails with `laptop_draft` after 60 s. `rk` infers the draft from your keys (a
+  stray Esc or Tab counts), then looks at its model of Claude's screen: when the prompt box is visibly
+  empty on two looks (a faint or gray suggestion is empty), at least a second after your last key, with
+  no dialog and the model not unsure, the draft is let go. Any text, doubt or dialog keeps it. Each
+  decision is logged by agentd as `launcher_draft_check` with lengths and flags, never prompt text.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result
   cannot be seen, the session is marked uncertain and further commands are refused until you check it.
 - A follow-up is one bracketed paste of at most 16 KiB.

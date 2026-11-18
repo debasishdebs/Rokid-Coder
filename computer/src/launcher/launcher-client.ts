@@ -1,7 +1,7 @@
 import { readClaudeSession, type ClaudeSessionFile } from "./claude-sessions";
 import type { TypeCommand } from "./launcher-hub";
 import type { PtyChild } from "./pty";
-import { ScreenModel } from "./screen-probe";
+import { ScreenModel, probe, showsEmptyPrompt } from "./screen-probe";
 import { LaptopInput, sessionBusySince } from "./laptop-input";
 import { Typist, sessionReady, systemClock, type BindingView, type Clock } from "./typist";
 
@@ -11,6 +11,15 @@ const CMD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const COMMANDS: ReadonlySet<string> = new Set(["compact", "model", "text"]);
 /** `laptop_state` goes out on change, at most this often. */
 const DRAFT_REPORT_MS = 250;
+/**
+ * The key stream alone says a draft exists after any key that might type, but
+ * never sees the prompt. While it says so the screen is looked at this often,
+ * and the draft is let go only when the prompt box is visibly empty on two
+ * looks, no sooner than DRAFT_SETTLE_MS after the last key (a typed character
+ * is on screen well within that, and a stray Esc or Tab never is).
+ */
+const DRAFT_LOOK_MS = 250;
+const DRAFT_SETTLE_MS = 1000;
 
 export interface LauncherClientOptions {
   child: PtyChild;
@@ -72,6 +81,12 @@ export class LauncherClient {
   private reportedDraft = false;
   private lastReportAt = Number.NEGATIVE_INFINITY;
   private reportTimer?: unknown;
+  private lastKeyAt = Number.NEGATIVE_INFINITY;
+  private draftTimer?: unknown;
+  /** When the screen first showed the prompt box visibly empty during this draft; a second look must agree. */
+  private emptySeenAt?: number;
+  /** The last decision sent to the log, so a poll that finds the same thing says nothing. */
+  private draftLogged?: string;
 
   constructor(options: LauncherClientOptions) {
     this.child = options.child;
@@ -104,7 +119,10 @@ export class LauncherClient {
         }
       },
     });
-    this.input.onDraftChange(() => this.reportDraft());
+    this.input.onDraftChange(() => {
+      this.reportDraft();
+      this.watchDraft();
+    });
   }
 
   /** The terminal was resized. */
@@ -115,10 +133,88 @@ export class LauncherClient {
   /** Bytes from the user's terminal. */
   onStdin(data: string): void {
     // After a takeover the typist replays the held keys, a gap after this one (R151).
+    this.lastKeyAt = this.clock.now();
+    this.emptySeenAt = undefined;
     const now = this.input.key(data);
     if (now) {
       this.child.write(now);
     }
+  }
+
+  /**
+   * While the key stream says there is a draft, looks at the screen on a timer.
+   * The screen model is fed Claude's output for the whole session (the typist
+   * subscribes in its constructor), not only while a reply is in flight.
+   */
+  private watchDraft(): void {
+    if (!this.input.draft) {
+      this.emptySeenAt = undefined;
+      this.draftLogged = undefined;
+      return;
+    }
+    if (this.draftTimer === undefined) {
+      this.draftTimer = this.clock.setTimeout(() => {
+        this.draftTimer = undefined;
+        this.reviewDraft();
+      }, DRAFT_LOOK_MS);
+    }
+  }
+
+  /**
+   * Lets a draft go only on positive evidence that the prompt box is empty: the
+   * screen model is not tainted, the probe finds the framed box with nothing on
+   * its input line but muted text (a placeholder or a suggestion), no dialog is
+   * up, and a second look agrees. Anything else, a failure to read the screen
+   * included, keeps the draft as the key stream had it.
+   */
+  private reviewDraft(): void {
+    if (!this.input.draft) {
+      this.watchDraft();
+      return;
+    }
+    const now = this.clock.now();
+    if (now - this.lastKeyAt < DRAFT_SETTLE_MS || this.input.holding) {
+      this.emptySeenAt = undefined;
+      this.watchDraft();
+      return;
+    }
+    const seen = probe(this.screen);
+    const empty = showsEmptyPrompt(seen);
+    const look = {
+      probe: seen.kind,
+      reason: seen.kind === "prompt" ? (seen.empty ? "empty" : "text") : seen.reason,
+      textLen: seen.kind === "prompt" ? seen.text.length : 0,
+      tainted: this.screen.tainted,
+    };
+    if (!empty) {
+      this.emptySeenAt = undefined;
+      this.logDraft(look, "kept");
+    } else if (this.emptySeenAt === undefined) {
+      this.emptySeenAt = now;
+    } else if (this.input.clearDraftFromScreen()) {
+      this.emptySeenAt = undefined;
+      this.logDraft(look, "cleared");
+    }
+    this.watchDraft();
+  }
+
+  /** One line for agentd's log when the decision changes: lengths and flags, never prompt text. */
+  private logDraft(
+    look: { probe: string; reason: string; textLen: number; tainted: boolean },
+    decision: "kept" | "cleared",
+  ): void {
+    const signature = `${decision}|${look.probe}|${look.reason}|${look.textLen > 0}|${look.tainted}`;
+    if (signature === this.draftLogged) {
+      return;
+    }
+    this.draftLogged = signature;
+    this.send({
+      type: "draft_check",
+      ...look,
+      before: true,
+      after: decision === "kept",
+      decision,
+    });
   }
 
   /** R161: agentd says the binding is uncertain; the launcher keeps that until it sees proof otherwise. */
@@ -205,6 +301,8 @@ export class LauncherClient {
     this.typist.dispose();
     this.input.dispose();
     this.clock.clearTimeout(this.reportTimer);
+    this.clock.clearTimeout(this.draftTimer);
+    this.draftTimer = undefined;
   }
 
   /** R160: whatever was in flight, past its result too, is abandoned with the link that sent it. */
