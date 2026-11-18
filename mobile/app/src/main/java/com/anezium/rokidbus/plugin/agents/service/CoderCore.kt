@@ -26,6 +26,18 @@ internal interface CoderCore {
     /** The Rokid authorization's token: persisted by the core, which then connects CXR with it. */
     fun startWithToken(token: String) = Unit
 
+    /** The glasses link's [com.anezium.rokidbus.shared.LinkStateBits] right now. */
+    fun linkState(): Int = 0
+
+    /** True while Hi Rokid has closed its session on purpose: the core does not rebind into that, and neither do we on our own. */
+    val linkClosedByServer: Boolean get() = false
+
+    /**
+     * Connects CXR again with the stored token, as the Glass app screen does. False when there is
+     * nothing to do: the link is up, the hub is stopped or no token is stored.
+     */
+    fun reconnectLink(): Boolean = false
+
     /** Terminal: stops the hub and releases the radios. */
     fun close()
 }
@@ -44,6 +56,15 @@ internal class HubCoderCore(private val hub: HubCore) : CoderCore {
     // it reaches no part of the plugin bus.
     @OptIn(HubShellApi::class)
     override fun startWithToken(token: String) = hub.startWithToken(token)
+
+    @OptIn(HubShellApi::class)
+    override fun linkState(): Int = hub.linkState()
+
+    @OptIn(HubShellApi::class)
+    override val linkClosedByServer: Boolean get() = hub.cxrClosedByServer
+
+    @OptIn(HubShellApi::class)
+    override fun reconnectLink(): Boolean = hub.reconnectCxr()
 
     override fun close() = hub.close()
 

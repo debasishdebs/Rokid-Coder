@@ -15,6 +15,8 @@ import com.anezium.rokidbus.phone.GlassesSurface
 import com.anezium.rokidbus.plugin.agents.AgentsConfigStore
 import com.anezium.rokidbus.plugin.agents.AgentsRuntime
 import com.anezium.rokidbus.plugin.agents.FakeGlassesSurface
+import com.anezium.rokidbus.shared.LinkStateBits
+import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -62,7 +64,16 @@ class CoderServiceTest {
         override fun close() {
             coreCloses += 1
         }
+        override fun linkState(): Int = linkBits
+        override fun reconnectLink(): Boolean {
+            reconnects += 1
+            return true
+        }
     }
+
+    /** The glasses link the fake core reports, and how often the service connected it again. */
+    private var linkBits = 0
+    private var reconnects = 0
 
     @Before
     fun setUp() {
@@ -156,6 +167,40 @@ class CoderServiceTest {
         assertEquals(VoiceAvailability.NEEDS_APP_OPEN, CoderService.voice.value)
         assertEquals(1, coreStarts)
         assertTrue(CoderRuntime.ready.value)
+    }
+
+    @Test
+    fun a_dropped_glasses_link_is_connected_again_while_monitoring_and_not_after_the_service_ends() {
+        AgentsConfigStore(app).setAgentdEnabled(true)
+        linkBits = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED
+
+        val service = deliver(bootIntent())
+        ShadowLooper.idleMainLooper(11, TimeUnit.SECONDS)
+        assertEquals("the first try, after the first pause", 1, reconnects)
+
+        // The link comes back; the tries end.
+        linkBits = linkBits or LinkStateBits.CXR_CONTROL_UP
+        service.onLinkStateChanged(linkBits)
+        ShadowLooper.idleMainLooper(10, TimeUnit.MINUTES)
+        assertEquals(1, reconnects)
+
+        // It drops again, and the service ends before the pause does.
+        linkBits = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED
+        service.onLinkStateChanged(linkBits)
+        running.single().destroy()
+        ShadowLooper.idleMainLooper(10, TimeUnit.MINUTES)
+        assertEquals(1, reconnects)
+    }
+
+    @Test
+    fun monitoring_off_leaves_a_dropped_glasses_link_alone() {
+        AgentsConfigStore(app).setAgentdEnabled(false)
+        linkBits = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED
+
+        deliver(bootIntent())
+        ShadowLooper.idleMainLooper(10, TimeUnit.MINUTES)
+
+        assertEquals(0, reconnects)
     }
 
     @Test

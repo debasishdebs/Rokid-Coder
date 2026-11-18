@@ -14,6 +14,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.anezium.rokidbus.phone.ForegroundPromotion
 import com.anezium.rokidbus.phone.HubForegroundHost
+import com.anezium.rokidbus.plugin.agents.AgentsConfigStore
 import com.anezium.rokidbus.plugin.agents.AgentsCore
 import com.anezium.rokidbus.plugin.agents.AgentsRuntime
 import kotlinx.coroutines.CoroutineScope
@@ -49,6 +50,7 @@ class CoderService : Service(), HubForegroundHost {
     private var core: CoderCore? = null
     private var agents: AgentsCore? = null
     private var links: AgentdLinks? = null
+    private var healer: GlassesLinkHealer? = null
     private var sessionsWatch: Job? = null
 
     /** Whether some startForeground of this instance succeeded since it last stopped. */
@@ -119,6 +121,7 @@ class CoderService : Service(), HubForegroundHost {
     override fun onLinkStateChanged(linkState: Int) {
         this.linkState = linkState
         CoderRuntime.publishLinkState(linkState)
+        healer?.onLinkState(linkState)
         updateNotification()
     }
 
@@ -139,7 +142,13 @@ class CoderService : Service(), HubForegroundHost {
         val agentdLinks = AgentdLinks(this).also { links = it }
         agentdLinks.start()
         val hub = (coreFactory?.invoke(this, this) ?: HubCoderCore(this, this)).also { core = it }
+        // Before the hub starts, so the first link state it reports already reaches the healer.
+        val glassesHealer = GlassesLinkHealer(
+            mainScope, hub, enabled = { AgentsConfigStore(this).load().shouldMonitor },
+        ).also { healer = it }
         hub.start()
+        glassesHealer.onLinkState(hub.linkState())
+        CoderRuntime.attachHealer(glassesHealer)
         agents = AgentsCore(hub.surface, this).also(AgentsCore::start)
         CoderRuntime.attachCore(hub)
         CoderRuntime.attach(agentdLinks)
@@ -164,6 +173,9 @@ class CoderService : Service(), HubForegroundHost {
         sessionsWatch?.cancel()
         sessionsWatch = null
         links?.let(CoderRuntime::detach)
+        healer?.stop()
+        healer = null
+        CoderRuntime.attachHealer(null)
         if (core != null) CoderRuntime.attachCore(null)
         agents?.close()
         agents = null
