@@ -39,13 +39,19 @@ internal class FakeCxrTransport : CxrTransport {
     override fun setCXRAudioCbk(cbk: IAudioStreamCbk?) { audioCallback = cbk }
     /** Every token the core connected with. */
     val connectTokens = CopyOnWriteArrayList<String>()
+
+    /** What the library does inside `connect` before it binds: the closure of a bind it finishes first. */
+    @Volatile var beforeBind: () -> Unit = {}
     override fun connect(token: String): Boolean {
         connectTokens += token
+        beforeBind()
         serviceConnected = true
         return true
     }
+    @Volatile var disconnects = 0
     @Volatile var onDisconnect: () -> Unit = {}
     override fun disconnect() {
+        disconnects += 1
         onDisconnect()
         serviceConnected = false
     }

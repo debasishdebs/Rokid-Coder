@@ -2739,7 +2739,14 @@ class HubCore internal constructor(
         if (token.isNotBlank()) startCxr(token)
     }
 
-    private fun startCxr(token: String) {
+    /**
+     * [wearerAsked]: a start or the Glass app screen, for which a session Hi Rokid just closed is no
+     * reason to stay down. An automatic attempt (false) never binds into one: Hi Rokid closes the
+     * session on a binder thread and the closure reaches us on the main thread later, so the flag can
+     * still be clear when the attempt starts; `connect` then finishes the closed bind first, which
+     * sets it, and the new bind is let go. False when it was.
+     */
+    private fun startCxr(token: String, wearerAsked: Boolean = true): Boolean {
         val link = cxrLink ?: (seams.cxr ?: CxrLinkTransport(CXRLink(applicationContext))).apply {
             configCXRSession(
                 CxrDefs.CXRSession(
@@ -2753,6 +2760,12 @@ class HubCore internal constructor(
         val bound = runCatching { link.connect(token) }.getOrDefault(false)
         // After connect: it may first finish a bind Hi Rokid had just closed, setting the flag.
         if (bound && cxrClosedByServer) {
+            if (!wearerAsked) {
+                runCatching { link.disconnect() }
+                log("CXR-L reconnect dropped: Hi Rokid closed the session")
+                notifyLinkState()
+                return false
+            }
             cxrClosedByServer = false
             updateStatusNotification(linkState())
         }
@@ -2764,6 +2777,7 @@ class HubCore internal constructor(
             glassesWorn = false
             notifyLinkState()
         }
+        return true
     }
 
     private fun isPhoneWifiEnabled(): Boolean =
@@ -3177,16 +3191,16 @@ class HubCore internal constructor(
      * Main thread. Connects CXR again with the stored token, the same call the first start and the
      * Glass app screen make. Nothing in the core does it on its own after the link drops, so a shell
      * that wants the link kept up calls this. False, and nothing done, when the hub is stopped, the
-     * link is already up or no token is stored.
+     * link is already up, Hi Rokid closed the session (also one whose closure is still on its way
+     * here, which `connect` delivers) or no token is stored.
      */
     @HubShellApi @MainThread
     fun reconnectCxr(): Boolean {
-        if (!hubEnabled || closed || isCxrUp()) return false
+        if (!hubEnabled || closed || isCxrUp() || cxrClosedByServer) return false
         val token = prefs().getString(PREF_TOKEN, "").orEmpty()
         if (token.isBlank()) return false
         log("CXR-L reconnect requested")
-        startCxr(token)
-        return true
+        return startCxr(token, wearerAsked = false)
     }
 
     /** Main thread. Persists the CXR token, then start(). */
