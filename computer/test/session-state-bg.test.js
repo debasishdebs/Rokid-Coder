@@ -26,6 +26,7 @@ async function until(check, ms = 2000, what = "condition") {
 }
 
 function fakePort() {
+  const lateListeners = [];
   const changes = [];
   const written = [];
   const port = {
@@ -56,7 +57,11 @@ function fakePort() {
     compactDone() {},
     onChange: (cb) => changes.push(cb),
     onCommandWritten: (cb) => written.push(cb),
-    onLateResult: () => undefined,
+    onLateResult: (cb) => lateListeners.push(cb),
+    /** The launcher's own result for a command agentd had already cancelled. */
+    late(cmdId, ok, error) {
+      lateListeners.forEach((cb) => cb(cmdId, ok, error));
+    },
     onWriteCheck: (cb) => {
       port.checker = cb;
     },
@@ -740,20 +745,82 @@ test("a_reply_the_launcher_cleared_away_puts_the_readiness_state_back", async ()
   }
 });
 
-test("a_background_reply_that_never_reached_its_enter_also_puts_the_state_back", async () => {
+test("a_background_reply_revoked_after_its_paste_puts_the_latch_back_but_never_the_revoked_stop", async () => {
   const t = setup();
   const before = t.states.snapshotLatch(KEY);
   const { result } = await dispatch(t);
   assert.equal(t.port.check("paste"), true);
   t.port.wrote();
+  assert.notEqual(t.states.latchAt(KEY), undefined, "the paste set the barrier");
   t.hook("Notification", { notification_type: "permission_prompt" });
   const outcome = await result;
   assert.deepEqual([outcome.ok, outcome.error, "consumed" in outcome], [false, "not_sent", false]);
-  assert.deepEqual(
-    { ...t.states.snapshotLatch(KEY), stopAt: undefined, stopCause: undefined },
-    { ...before, stopAt: undefined, stopCause: undefined },
-  );
-  assert.equal(t.states.notBefore(KEY), before.latchAt ?? before.passedLatchAt);
+  assert.deepEqual(t.states.snapshotLatch(KEY), before, "only the latch is restored");
+  // The permission prompt took the Stop away, and the restore does not give it back.
+  assert.equal(t.states.bgPicture(KEY).eligible, false);
+  assert.equal(ready(t), false);
+  assert.equal(t.router.followupWhy(KEY, 1), "background");
+  // A new Stop is what makes it ready again.
+  t.hook("Stop");
+  assert.equal(ready(t), true);
+});
+
+test("a_restore_leaves_a_latch_somebody_else_moved_alone", async () => {
+  const t = idleSession();
+  const result = t.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => t.port.sent.length === 1, 500, "the dispatch");
+  t.port.wrote();
+  // A Stop delivery (another turn started) sets a newer barrier while the reply is being cleared away.
+  t.clock.t += 5;
+  t.router.onStopDelivered(KEY);
+  const newer = t.states.latchAt(KEY);
+  assert.notEqual(newer, undefined);
+  t.port.settle({ ok: false, error: "not_sent" });
+  assert.equal((await result).error, "not_sent");
+  assert.equal(t.states.latchAt(KEY), newer, "the newer latch was not erased by the restore");
+  // The barrier a plain `not_sent` leaves nobody else's is restored (see the test above).
+  const plain = idleSession();
+  const second = plain.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => plain.port.sent.length === 1, 500, "the dispatch");
+  plain.port.wrote();
+  plain.port.settle({ ok: false, error: "not_sent" });
+  await second;
+  assert.equal(plain.states.latchAt(KEY), undefined);
+});
+
+test("a_cancel_after_the_paste_and_before_the_enter_does_not_consume_the_msgId", async () => {
+  // The launcher cleared the paste when asked to stop and says so: cancelled, Enter never pressed.
+  const t = idleSession();
+  const result = t.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => t.port.sent.length === 1, 500, "the dispatch");
+  t.port.wrote();
+  t.port.settle({ ok: false, error: "cancelled" });
+  const outcome = await result;
+  assert.deepEqual(outcome, { ok: false, error: "cancelled" });
+  assert.equal(ready(t), true, "and the readiness state is back");
+  // A compact that was cancelled after it was typed stays spent.
+  const compact = idleSession();
+  const c = compact.router.command(KEY, { command: "compact" });
+  await until(() => compact.port.sent.length === 1, 500, "the dispatch");
+  compact.port.wrote();
+  compact.port.settle({ ok: false, error: "cancelled" });
+  assert.deepEqual(await c, { ok: false, error: "cancelled", consumed: true });
+  // Agentd stopped waiting first: the launcher's late result is what says whether the Enter was pressed.
+  const unheard = idleSession();
+  const u = unheard.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => unheard.port.sent.length === 1, 500, "the dispatch");
+  unheard.port.wrote();
+  const cmdId = unheard.port.pending.cmdId;
+  unheard.router.endSession(KEY);
+  unheard.port.late(cmdId, false, "cancelled");
+  assert.deepEqual(await u, { ok: false, error: "cancelled" });
+  const silent = idleSession();
+  const s = silent.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => silent.port.sent.length === 1, 500, "the dispatch");
+  silent.port.wrote();
+  silent.router.endSession(KEY);
+  const heard = await s;
+  assert.deepEqual([heard.error, heard.consumed], ["typed_after_cancel", true], "no word from the launcher: presumed pressed");
 });
 
 test("only_a_write_that_pressed_enter_consumes_the_msgId", async () => {

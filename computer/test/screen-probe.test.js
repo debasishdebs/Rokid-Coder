@@ -133,6 +133,49 @@ test("the_check_before_an_enter_is_exact_about_interior_whitespace", () => {
   assert.equal(showsExactly(probe(screen(repaint({ input: "" }))), ""), false);
 });
 
+test("a_continuation_row_loses_only_the_uis_indent_and_any_more_leading_space_is_text", () => {
+  const rows = (first, second) => probe(screen(`${["● Done.", RULE, `> ${first}`, second, RULE, FOOTER].join("\r\n")}`));
+  // The UI indents a wrapped row by the width of `> `.
+  assert.equal(showsExactly(rows("hello", "  world"), "hello world"), true);
+  assert.equal(showsExactly(rows("hello", "world"), "hello world"), true, "an unindented row is the same");
+  // More than that is the text's own: five spaces are two of indent and three of text.
+  assert.equal(showsExactly(rows("hello", "     world"), "hello world"), false);
+  assert.equal(showsExactly(rows("hello", "     world"), "hello    world"), true, "one the wrap took, three of text");
+  assert.equal(showsExactly(rows("hello", "     world"), "hello   world"), false);
+  // With the borders of a bordered box the indent is measured the same way.
+  const top = `╭${"─".repeat(58)}╮`;
+  const bottom = `╰${"─".repeat(58)}╯`;
+  const bordered = (second) => probe(screen(["x", top, "│ > hello".padEnd(59) + "│", `│${second}`.padEnd(59) + "│", bottom, FOOTER].join("\r\n")));
+  assert.equal(showsExactly(bordered("   world"), "hello world"), true);
+  assert.equal(showsExactly(bordered("      world"), "hello world"), false);
+});
+
+test("only_a_whole_screen_erase_heals_a_taint_not_the_scrollback_erase_or_a_partial_one", () => {
+  // The exact sequence: the alternate screen holds a draft, an unsupported edit taints, the scrollback is erased
+  // (which leaves the visible screen alone), and the frame and the `> ` prefix are redrawn without erasing the row.
+  const model = screen("");
+  model.push("\x1b[?1049h\x1b[2J\x1b[H");
+  model.push(["● Resumed.", RULE, "> laptop draft", RULE, FOOTER].join("\r\n"));
+  assert.equal(model.tainted, false);
+  model.push("\x1b[1@");
+  assert.equal(model.tainted, true);
+  model.push("\x1b[3J");
+  assert.equal(model.tainted, true, "CSI 3 J erases only the saved scrollback");
+  model.push("\x1b[2;1H" + RULE + "\x1b[3;1H> ");
+  assert.equal(model.lines()[2].includes("laptop draft"), true, "the draft is still on the visible screen");
+  const result = probe(model);
+  assert.deepEqual([result.kind, result.reason], ["unknown", "screen_disturbed"]);
+  assert.equal(showsEmptyPrompt(result), false);
+  for (const partial of ["\x1b[J", "\x1b[1J", "\x1b[2K", "\x1b[K"]) {
+    model.push(partial);
+    assert.equal(model.tainted, true, JSON.stringify(partial));
+  }
+  // A whole-screen erase and a redraw is what heals it, and then the draft is gone from the screen too.
+  model.push(repaint({ input: "" }));
+  assert.equal(model.tainted, false);
+  assert.equal(showsEmptyPrompt(probe(model)), true);
+});
+
 test("a_wrapped_line_is_exact_inside_each_row_and_lets_the_break_take_one_space", () => {
   const text = "please run the full test suite and then summarise every failure you find in the logs";
   const wrapped = (first, second) => probe(screen(repaint({ input: first, continuation: [`  ${second}`] })));

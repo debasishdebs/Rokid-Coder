@@ -3,7 +3,15 @@ import type { CommandError, TypeCommand } from "./launcher-hub";
 import { OutputScanner } from "./output-scanner";
 import { bgReplyText, pasteText } from "./paste-text";
 import type { PtyChild } from "./pty";
-import { probe, showsCleared, showsEmptyPrompt, showsExactly, type ProbeResult, type ScreenModel } from "./screen-probe";
+import {
+  probe,
+  showsCleared,
+  showsDialog,
+  showsEmptyPrompt,
+  showsExactly,
+  type ProbeResult,
+  type ScreenModel,
+} from "./screen-probe";
 
 export interface Clock {
   now(): number;
@@ -702,14 +710,27 @@ export class Typist {
       bg !== undefined &&
       active.bgText !== undefined &&
       showsCleared(probe(bg.screen, { sinceTaints: active.mark }), active.bgText);
+    // A dialog or question the wearer can see: what they type is the answer to it, so the keyboard is
+    // theirs as soon as it shows, and the keys they typed meanwhile are replayed, never dropped.
+    const dialogUp = bg !== undefined && this.dialogOnScreen(bg.screen);
     if (cleared) {
       this.check("clear", active, "ok");
+      this.end(active, "now");
+    } else if (dialogUp) {
+      this.check("clear", active, "refused");
+      this.markUncertain(active.writtenAt);
       this.end(active, "now");
     } else if (now >= active.deadline) {
       this.check("clear", active, "refused");
       this.markUncertain(active.writtenAt);
+      // Only where nothing visible is waiting for an answer and the box is unseen: not replayed into it.
       this.end(active, "drop");
     }
+  }
+
+  /** The screen shows a dialog or a menu (whatever the model has lost track of otherwise). */
+  private dialogOnScreen(screen: ScreenModel): boolean {
+    return showsDialog(screen);
   }
 
   /** Model recovery: Esc, a second of quiet, then `dialog_not_seen`. Esc success is never assumed. */

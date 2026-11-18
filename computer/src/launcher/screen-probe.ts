@@ -457,12 +457,16 @@ export class ScreenModel {
         break;
       case "J": {
         const mode = Number.isFinite(args[0]) ? args[0] : 0;
-        if (mode === 2 || mode === 3) {
+        if (mode === 2) {
           this.grid = Array.from({ length: this.rows }, () => this.blankRow());
           this.dubious = Array.from({ length: this.rows }, () => false);
-          // Every cell is now what the child draws next, whatever the model lost track of before.
-          // On the alternate screen too: that buffer is the child's alone, and Claude erases it on entry.
+          // Every visible cell is now what the child draws next, whatever the model lost track of
+          // before. Only this whole-screen erase heals a taint; on the alternate screen too, which is
+          // the child's alone and which Claude erases on entry and after a resize.
           this.cleanFrom = this.taintCount;
+        } else if (mode === 3) {
+          // Erases the saved scrollback and leaves the visible screen as it is: the model keeps no
+          // scrollback, so nothing changes, and a taint it was under is not healed by it.
         } else if (mode === 1) {
           for (let r = 0; r < this.row; r += 1) {
             this.grid[r] = this.blankRow();
@@ -766,6 +770,15 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   return { kind: "prompt", text, rows: exactRows(inputRows), empty: solid === "" };
 }
 
+/** How many leading whitespace characters of a continuation row are the UI's indent: at most `indent`, never text. */
+function indentWidth(row: string, indent: number): number {
+  let width = 0;
+  while (width < indent && /\s/.test(row[width] ?? "")) {
+    width += 1;
+  }
+  return width;
+}
+
 /**
  * The input rows as drawn, for an exact comparison: the box's side borders, the
  * prompt glyph with the one space (or no-break space) the UI puts after it, a
@@ -773,9 +786,16 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
  * and are removed; whitespace inside a row is kept as it is.
  */
 function exactRows(rows: string[]): string[] {
+  let indent = 2;
   return rows.map((row, index) => {
-    const withoutBorder = row.replace(BORDER_LEFT, index === 0 ? "" : " ").replace(BORDER_RIGHT, "");
-    const content = index === 0 ? withoutBorder.replace(/^\s*[>❯][  ]?/, "") : withoutBorder.replace(/^\s+/, "");
+    // A bordered box's side border is no part of the text and no part of the indent.
+    const withoutBorder = row.replace(BORDER_LEFT, "").replace(BORDER_RIGHT, "");
+    if (index === 0) {
+      // The continuation indent is the width of what precedes the text on the first row (a leading space,
+      // the glyph, its one space or no-break space), measured there.
+      indent = (/^\s*[>❯][  ]?/.exec(withoutBorder)?.[0] ?? "").length;
+    }
+    const content = index === 0 ? withoutBorder.replace(/^\s*[>❯][  ]?/, "") : withoutBorder.slice(indentWidth(withoutBorder, indent));
     return content.replace(/\s+$/, "");
   });
 }
@@ -792,6 +812,18 @@ function inputContent(rows: string[]): string {
       return index === 0 ? withoutBorder.replace(/^\s*[>❯]/, "") : withoutBorder;
     })
     .join(" ");
+}
+
+/**
+ * Whether the screen shows a dialog or a menu anywhere, framed prompt box or not (a permission
+ * dialog replaces the box). For deciding that what the wearer types is an answer; never a
+ * reason to type anything.
+ */
+export function showsDialog(screen: ScreenModel): boolean {
+  if (screen.unsettled) {
+    return false;
+  }
+  return screen.lines().some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row));
 }
 
 /** Whether the probe shows the framed prompt box visibly empty, with no dialog, question or other text in it. */

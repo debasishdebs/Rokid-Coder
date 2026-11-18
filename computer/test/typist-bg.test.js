@@ -758,7 +758,8 @@ test("an_aborted_reply_releases_the_keyboard_at_once_and_replays_in_order_or_dro
   const b = track(unsure.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
   await unsure.advance(150);
   assert.equal(unsure.input.key("1"), "");
-  unsure.draw(`Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`);
+  // The box is not on screen at all (nothing a wearer could be answering), so the clear cannot be seen.
+  unsure.draw("\x1b[2J\x1b[HResuming the session");
   await unsure.advance(4000);
   assert.equal(b.result.error, "not_sent");
   assert.equal(unsure.binding.uncertain, true);
@@ -795,4 +796,30 @@ test("the_two_looks_must_be_of_the_same_thing_and_restart_when_the_box_changes",
   assert.equal(second.result, undefined, "a line that keeps changing is never judged on two looks");
   await u.advance(150);
   assert.deepEqual(second.result, { ok: false, error: "laptop_draft" });
+});
+
+test("keys_typed_into_a_visible_dialog_during_the_cleanup_reach_the_pty", async () => {
+  for (const file of ["idle", "busy"]) {
+    const t = setup({ file });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(repaint());
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain", ...(file === "busy" ? { bgReply: true } : {}) }));
+    await t.advance(150);
+    if (file === "busy") {
+      t.typist.verdict("c1", "paste", true);
+      await t.advance(0);
+    }
+    assert.equal(t.pty.writes[0], PASTE("plain"));
+    // A permission dialog takes the screen: automation aborts, and the wearer answers it at once.
+    t.draw(`\x1b[2J\x1b[HBash command\r\n  rm -rf build\r\nDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n  esc to cancel`);
+    await t.advance(10);
+    assert.equal(t.input.key("y"), "", "held while the reply is still being aborted");
+    assert.equal(t.input.key("\r"), "");
+    await t.advance(1700);
+    assert.equal(box.result.error, "not_sent");
+    await t.advance(300);
+    assert.equal(t.pty.writes.includes("y\r"), true, `${file}: the answer typed into the dialog reaches the pty`);
+    assert.equal(t.input.holding, false);
+    assert.equal(t.binding.uncertain, true, "the paste in a dialog is still not assumed cleared");
+  }
 });

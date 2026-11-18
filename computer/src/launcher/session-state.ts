@@ -103,6 +103,8 @@ interface Entry {
    * it as `notBefore`, so the launcher checks the same barrier at its write.
    */
   passedLatchAt?: number;
+  /** Bumped on every change of `latchAt` or `passedLatchAt`, so a restore can tell whether it still owns them. */
+  latchVersion: number;
   inFlight: boolean;
   compact?: CompactWatch;
   /**
@@ -124,12 +126,10 @@ export interface BgPicture {
   modeOk: boolean;
 }
 
-/** The parts of a session's readiness state that a write changes. */
+/** The readiness latch alone, as it was before a write; never the Stop evidence, which a revocation owns. */
 export interface LatchSnapshot {
   latchAt?: number;
   passedLatchAt?: number;
-  stopAt?: number;
-  stopCause?: string;
 }
 
 /** A prompt or a reply with every whitespace removed, so that it can be compared with the other. */
@@ -219,6 +219,7 @@ export class SessionStates {
       entry.stopCause = "typed_write_or_delivered_stop";
     }
     entry.latchAt = entry.latchAt === undefined ? at : Math.max(entry.latchAt, at);
+    entry.latchVersion += 1;
   }
 
   /**
@@ -234,6 +235,7 @@ export class SessionStates {
       entry.latchAt = undefined;
     }
     entry.passedLatchAt = undefined;
+    entry.latchVersion += 1;
   }
 
   latchAt(key: SessionKey): number | undefined {
@@ -246,30 +248,34 @@ export class SessionStates {
     return entry?.latchAt ?? entry?.passedLatchAt;
   }
 
-  /** What a write is about to change in the readiness state, so a write that never reached Enter can put it back. */
+  /** The readiness latch as it is now, for a write that may have to put it back. */
   snapshotLatch(key: SessionKey): LatchSnapshot {
     const entry = this.entries.get(key);
-    return {
-      latchAt: entry?.latchAt,
-      passedLatchAt: entry?.passedLatchAt,
-      stopAt: entry?.stopAt,
-      stopCause: entry?.stopCause,
-    };
+    return { latchAt: entry?.latchAt, passedLatchAt: entry?.passedLatchAt };
+  }
+
+  /** Counts every change of the latch; compare two reads to know whether it moved in between. */
+  latchVersion(key: SessionKey): number {
+    return this.entries.get(key)?.latchVersion ?? 0;
   }
 
   /**
-   * A paste that was cleared away (a `not_sent`, a takeover before the Enter) submitted nothing: the
-   * barrier its first write set would wait for an idle that can never come, so the state from before
-   * the paste is put back.
+   * A paste that was cleared away (a `not_sent`, a takeover or a cancel before the Enter) submitted
+   * nothing: the barrier its first write set would wait for an idle that can never come. The latch,
+   * and only the latch, goes back to what it was before the paste, and only when nothing has changed
+   * it since that write (`version` is what `latchVersion` said right after it): a newer latch, a
+   * cleared one or another command's write stands. The Stop evidence is never touched here, so
+   * what a revocation took away stays gone. True when it was restored.
    */
-  restoreLatch(key: SessionKey, snapshot: LatchSnapshot): void {
+  restoreLatch(key: SessionKey, snapshot: LatchSnapshot, version: number): boolean {
     const entry = this.entries.get(key);
-    if (entry) {
-      entry.latchAt = snapshot.latchAt;
-      entry.passedLatchAt = snapshot.passedLatchAt;
-      entry.stopAt = snapshot.stopAt;
-      entry.stopCause = snapshot.stopCause;
+    if (!entry || entry.latchVersion !== version) {
+      return false;
     }
+    entry.latchAt = snapshot.latchAt;
+    entry.passedLatchAt = snapshot.passedLatchAt;
+    entry.latchVersion += 1;
+    return true;
   }
 
   /** The evidence of a main-thread Stop is used up or gone. */
@@ -543,6 +549,7 @@ export class SessionStates {
       }
       entry.passedLatchAt = entry.latchAt;
       entry.latchAt = undefined;
+      entry.latchVersion += 1;
       // R141: Claude has been seen idle since the write that left it uncertain.
       if (binding.uncertain) {
         this.sources.clearUncertain(key);
@@ -575,7 +582,7 @@ export class SessionStates {
   private entry(key: SessionKey): Entry {
     let entry = this.entries.get(key);
     if (!entry) {
-      entry = { inFlight: false };
+      entry = { inFlight: false, latchVersion: 0 };
       this.entries.set(key, entry);
     }
     return entry;
@@ -600,7 +607,7 @@ export interface LauncherPort {
   onChange(cb: (key: SessionKey) => void): void;
   onCommandWritten(cb: (key: SessionKey, cmdId: string, at: number) => void): void;
   /** R165: the launcher's own result for a command agentd had already cancelled. */
-  onLateResult(cb: (cmdId: string, ok: boolean) => void): void;
+  onLateResult(cb: (cmdId: string, ok: boolean, error?: string) => void): void;
   /** A launcher asks, mid-command, whether a background reply may write now (`paste`, then `enter`). */
   onWriteCheck?(cb: (key: SessionKey, cmdId: string, phase: WriteCheckPhase) => boolean): void;
 }
@@ -643,6 +650,10 @@ interface Running {
   dead?: boolean;
   /** A background reply: called with the prompt of a UserPromptSubmit seen after its Enter was allowed. */
   accept?: (prompt: string | undefined) => void;
+  /** `latchVersion` right after this command's own first write: a restore is only for a latch nobody has moved since. */
+  latchMark?: number;
+  /** The launcher's own error for a command agentd had already cancelled, once it arrived. */
+  lateError?: string;
 }
 
 /**
@@ -699,13 +710,15 @@ export class LauncherRouter {
       if (running?.cmdId === cmdId) {
         running.written = true;
         running.writtenAt ??= at;
+        running.latchMark ??= this.states.latchVersion(key);
         this.states.compactWritten(key);
         running.settled?.();
       }
     });
-    this.port.onLateResult((cmdId) => {
+    this.port.onLateResult((cmdId, _ok, error) => {
       for (const running of this.running.values()) {
         if (running.cmdId === cmdId) {
+          running.lateError = error;
           running.settled?.();
         }
       }
@@ -1036,9 +1049,17 @@ export class LauncherRouter {
     // never pressed (it cleared its paste away, or made none): nothing was submitted, so the same msgId
     // may be sent again and the readiness state is what it was before the paste. A compact or a model
     // change that was taken over had been typed, and stays spent.
+    // `cancelled` is the launcher's too: it cleared the paste when asked to stop, and nothing was entered.
     const unsent = (error: string): boolean =>
-      cmd.command === "text" && (error === "not_sent" || error === "laptop_draft" || error === "taken_over");
+      cmd.command === "text" &&
+      (error === "not_sent" || error === "laptop_draft" || error === "taken_over" || error === "cancelled");
     const before = this.states.snapshotLatch(key);
+    // Puts the latch back for a paste that was never entered, if nobody has moved it since that write.
+    const putBack = (): void => {
+      if (running.latchMark !== undefined) {
+        this.states.restoreLatch(key, before, running.latchMark);
+      }
+    };
     const failed = (error: string): RouteOutcome =>
       spent() && !unsent(error) ? { ok: false, error, consumed: true } : fail(error);
     const promptSeen = bg && cmd.command === "text"
@@ -1082,15 +1103,20 @@ export class LauncherRouter {
         // The launcher has not answered in time, or the session went away:
         // cancel whatever it is still doing, and say so.
         this.port.cancelCommand(cmdId);
-        await this.settleCancel(key, running);
+        await this.settleCancel(key, running, cmd.command === "text");
         this.noteFailure(key, gen, cmd, result);
         // R165: it was typed before the cancel reached the launcher. The msgId
         // is spent, so a resend is a duplicate and never typed twice.
         if (bg && !spent()) {
           if (running.written) {
-            this.states.restoreLatch(key, before);
+            putBack();
             return fail("not_sent");
           }
+          return fail(result);
+        }
+        // The launcher's own word that it cleared a pasted reply and never pressed the Enter.
+        if (running.written && running.lateError !== undefined && unsent(running.lateError)) {
+          putBack();
           return fail(result);
         }
         return running.written ? { ok: false, error: "typed_after_cancel", consumed: true } : failed(result);
@@ -1099,7 +1125,7 @@ export class LauncherRouter {
         const error: SendError = result.error ?? "not_ready";
         this.noteFailure(key, gen, cmd, error);
         if (unsent(error)) {
-          this.states.restoreLatch(key, before);
+          putBack();
         }
         return failed(error);
       }
@@ -1151,8 +1177,10 @@ export class LauncherRouter {
    * been typed, its `command_written` already on the way. The answer waits
    * until the launcher says either way, or the settle window passes.
    */
-  private settleCancel(key: SessionKey, running: Running): Promise<void> {
-    if (running.written || this.port.binding(key)?.gen !== running.gen) {
+  private settleCancel(key: SessionKey, running: Running, text = false): Promise<void> {
+    // A text reply that was pasted may still be waiting for its Enter: the launcher's own result says
+    // whether it was pressed (`not_sent`, `cancelled`, `taken_over`: no), so that is waited for too.
+    if ((running.written && !text) || this.port.binding(key)?.gen !== running.gen) {
       return Promise.resolve();
     }
     return new Promise((resolve) => {

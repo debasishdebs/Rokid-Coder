@@ -116,3 +116,17 @@ test("a_resize_while_on_the_alternate_screen_keeps_both_buffers_whole", () => {
   assert.equal(model.lines().length, 30);
   assert.equal(model.lines()[0], "main");
 });
+
+test("the_real_program_heals_with_a_whole_screen_erase_the_one_erase_that_may_heal", () => {
+  const bytes = CAPTURE.chunks.join("");
+  assert.equal(bytes.includes("\x1b[2J"), true, "Claude erases the whole screen when it enters the alternate screen");
+  assert.equal(bytes.includes("\x1b[3J"), false);
+  // And the exact reproduction of the review on top of the real startup: a taint, a scrollback erase and a
+  // redraw of the box without erasing the input row leave the model refusing to call it empty.
+  const model = replay(at("pasted hello world"));
+  assert.equal(showsExactly(probe(model), "hello world"), true);
+  model.push("\x1b[1@\x1b[3J");
+  assert.equal(model.tainted, true);
+  assert.equal(probe(model).kind, "unknown");
+  assert.equal(showsEmptyPrompt(probe(model)), false);
+});
