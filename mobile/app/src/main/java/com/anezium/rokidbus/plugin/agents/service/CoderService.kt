@@ -50,7 +50,9 @@ class CoderService : Service(), HubForegroundHost {
     private var core: CoderCore? = null
     private var agents: AgentsCore? = null
     private var links: AgentdLinks? = null
-    private var healer: GlassesLinkHealer? = null
+    // Read on the Binder thread CXR reports link changes on; the healer hops to the main thread itself.
+    @Volatile private var healer: GlassesLinkHealer? = null
+    private var monitoringWatch: AutoCloseable? = null
     private var sessionsWatch: Job? = null
 
     /** Whether some startForeground of this instance succeeded since it last stopped. */
@@ -143,12 +145,15 @@ class CoderService : Service(), HubForegroundHost {
         agentdLinks.start()
         val hub = (coreFactory?.invoke(this, this) ?: HubCoderCore(this, this)).also { core = it }
         // Before the hub starts, so the first link state it reports already reaches the healer.
+        val config = AgentsConfigStore(this)
         val glassesHealer = GlassesLinkHealer(
-            mainScope, hub, enabled = { AgentsConfigStore(this).load().shouldMonitor },
+            mainScope, hub, enabled = { config.load().shouldMonitor },
         ).also { healer = it }
         hub.start()
         glassesHealer.onLinkState(hub.linkState())
         CoderRuntime.attachHealer(glassesHealer)
+        // The switch alone changes whether the glasses are chased: the link state does not move with it.
+        monitoringWatch = config.watchMonitoring { glassesHealer.onMonitoringChanged() }
         agents = AgentsCore(hub.surface, this).also(AgentsCore::start)
         CoderRuntime.attachCore(hub)
         CoderRuntime.attach(agentdLinks)
@@ -173,6 +178,8 @@ class CoderService : Service(), HubForegroundHost {
         sessionsWatch?.cancel()
         sessionsWatch = null
         links?.let(CoderRuntime::detach)
+        runCatching { monitoringWatch?.close() }
+        monitoringWatch = null
         healer?.stop()
         healer = null
         CoderRuntime.attachHealer(null)

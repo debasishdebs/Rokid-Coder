@@ -230,6 +230,18 @@ class AgentsConfigStore internal constructor(
     }
 
     /**
+     * Calls [onChange] after the Monitoring switch is written, by whichever screen or flow wrote it.
+     * Close the result to stop; hold on to it meanwhile, or the platform lets the listener go.
+     */
+    fun watchMonitoring(onChange: () -> Unit): AutoCloseable {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == KEY_AGENTD_ENABLED) onChange()
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        return AutoCloseable { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
+    /**
      * False, with nothing written, when [agentdPairingRefusal] turns [config] away.
      * A non-null [config] is a pairing the wearer just made, so it counts as a use.
      */

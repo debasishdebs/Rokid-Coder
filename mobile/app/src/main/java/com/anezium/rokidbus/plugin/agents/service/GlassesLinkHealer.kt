@@ -1,11 +1,13 @@
 package com.anezium.rokidbus.plugin.agents.service
 
 import com.anezium.rokidbus.shared.LinkStateBits
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.coroutines.ContinuationInterceptor
 
 /**
  * Keeps the CXR control link to the glasses up. The hub reconnects its Bluetooth data link on its own
@@ -17,7 +19,10 @@ import kotlinx.coroutines.launch
  * It tries only while [enabled] (monitoring is on), the glasses are bonded (the link state says so), and
  * Hi Rokid has not closed its session on purpose. A voice request denied for want of the link
  * asks for one attempt at once through [healNow], whatever the pause, because the wearer is waiting.
- * Everything runs on [scope]'s thread, the main one in the service.
+ *
+ * Every state change and every callback runs on [scope]'s thread, the main one in the service. The
+ * entry points may be called from any thread (the link state arrives on the Binder thread CXR reports
+ * on) and hop there first, so a voice start retried from [healNow]'s answer is always made on it.
  */
 internal class GlassesLinkHealer(
     private val scope: CoroutineScope,
@@ -33,7 +38,16 @@ internal class GlassesLinkHealer(
     private val waiting = mutableListOf<(Boolean) -> Unit>()
 
     /** The core's link state changed (or the service just started): start, keep or end the background retries. */
-    fun onLinkState(state: Int) {
+    fun onLinkState(state: Int) = onScope { evaluate(state) }
+
+    /**
+     * Monitoring was turned on or off. The link state need not have changed with it, so nothing else
+     * would start the retries again after they ended, or end the ones running.
+     */
+    fun onMonitoringChanged() = onScope { evaluate(core.linkState()) }
+
+    private fun evaluate(state: Int) {
+        if (stopped) return
         if (state and LinkStateBits.CXR_CONTROL_UP != 0) {
             attempts = 0
             loop?.cancel()
@@ -42,6 +56,7 @@ internal class GlassesLinkHealer(
             return
         }
         if (!wantsHeal(state)) {
+            attempts = 0
             loop?.cancel()
             loop = null
             return
@@ -54,13 +69,11 @@ internal class GlassesLinkHealer(
      * One reconnect now, and [onResult] with whether the link was up within [settleMs] of it (at once when
      * it already is, or when there is nothing to connect with). Calls made while one is waiting share it.
      */
-    fun healNow(onResult: (Boolean) -> Unit) {
-        if (core.linkState() and LinkStateBits.CXR_CONTROL_UP != 0) {
-            onResult(true)
-            return
-        }
+    fun healNow(onResult: (Boolean) -> Unit) = onScope {
+        if (stopped) return@onScope onResult(false)
+        if (core.linkState() and LinkStateBits.CXR_CONTROL_UP != 0) return@onScope onResult(true)
         waiting += onResult
-        if (settling?.isActive == true) return
+        if (settling?.isActive == true) return@onScope
         settling = scope.launch {
             if (!core.reconnectLink()) return@launch resolve(false)
             delay(settleMs)
@@ -68,13 +81,27 @@ internal class GlassesLinkHealer(
         }
     }
 
-    /** The service is going down: no more tries, and nobody is left waiting. */
-    fun stop() {
+    /** The service is going down: no more tries, and nobody is left waiting. Final. */
+    fun stop() = onScope {
+        stopped = true
         loop?.cancel()
         loop = null
         settling?.cancel()
         settling = null
         resolve(false)
+    }
+
+    /** Set by [stop]: a link state or a request that arrives afterwards connects nothing. */
+    private var stopped = false
+
+    /** Runs [block] on [scope]'s thread: at once when already there, else posted to it. */
+    private fun onScope(block: () -> Unit) {
+        val dispatcher = scope.coroutineContext[ContinuationInterceptor] as? CoroutineDispatcher
+        if (dispatcher == null || !dispatcher.isDispatchNeeded(scope.coroutineContext)) {
+            block()
+        } else {
+            scope.launch { block() }
+        }
     }
 
     private fun resolve(up: Boolean) {
@@ -93,7 +120,12 @@ internal class GlassesLinkHealer(
         while (scope.isActive) {
             delay(retryDelaysMs[attempts.coerceAtMost(retryDelaysMs.lastIndex)])
             val state = core.linkState()
-            if (state and LinkStateBits.CXR_CONTROL_UP != 0 || !wantsHeal(state)) return
+            if (state and LinkStateBits.CXR_CONTROL_UP != 0) return
+            if (!wantsHeal(state)) {
+                // Monitoring went off, the glasses went away: whatever starts the tries again starts them over.
+                attempts = 0
+                return
+            }
             // Nothing to connect with (no token, hub stopped): a later link state starts this again.
             if (!core.reconnectLink()) return
             attempts += 1
