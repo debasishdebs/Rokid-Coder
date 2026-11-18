@@ -21,6 +21,9 @@ const STATUS_ROWS = 8;
 /** The most rows the input line may wrap over. */
 const MAX_INPUT_ROWS = 10;
 
+/** SGR attributes that change nothing about whether text is muted (bold, italic, underline, blink, inverse, strike and their resets). */
+const KNOWN_SGR: ReadonlySet<number> = new Set([1, 3, 4, 5, 6, 7, 8, 9, 21, 23, 24, 25, 27, 28, 29, 53, 55, 59]);
+
 /** Prefixes the cell of a muted character; never a character a terminal would draw. */
 const MUTED = "\u0001";
 
@@ -30,6 +33,8 @@ type ParseState ="text" | "esc" | "esc_intermediate" | "csi" | "string" | "strin
 const BENIGN_PRIVATE_MODES: ReadonlySet<number> = new Set([
   7, // autowrap on; switching it off is a taint, since the model always wraps
   12, 25, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 2004, 2026,
+  // Seen from the real Claude Code 2.1.285 at startup: colour-scheme reports and pixel mouse.
+  1016, 2031,
 ]);
 const ALT_SCREEN_MODES: ReadonlySet<number> = new Set([47, 1047, 1049]);
 
@@ -83,6 +88,8 @@ export class ScreenModel {
   private intermediates = "";
   private stringLength = 0;
   private alt = false;
+  /** The main screen's cells while the alternate one is shown. */
+  private mainBuffer?: { grid: string[][]; dubious: boolean[]; row: number; col: number; saved: { row: number; col: number } };
   private taintCount = 0;
   /** The taint count when the whole screen was last erased: what happened before it no longer matters. */
   private cleanFrom = 0;
@@ -116,9 +123,14 @@ export class ScreenModel {
     return this.taintCount > this.cleanFrom;
   }
 
-  /** Right now: the child is mid-sequence, or on the alternate screen. */
+  /** Whether the alternate screen is the one showing (the model follows it as it does the main one). */
+  get alternate(): boolean {
+    return this.alt;
+  }
+
+  /** Right now: the child is in the middle of an escape sequence. */
   get unsettled(): boolean {
-    return this.state !== "text" || this.alt;
+    return this.state !== "text";
   }
 
   resize(cols: number, rows: number): void {
@@ -129,6 +141,13 @@ export class ScreenModel {
     this.dubious = Array.from({ length: this.rows }, (_, i) => this.dubious[i] ?? false);
     this.row = Math.min(this.row, this.rows - 1);
     this.col = Math.min(this.col, this.cols - 1);
+    const main = this.mainBuffer;
+    if (main) {
+      main.grid = Array.from({ length: this.rows }, (_, i) => this.fit(main.grid[i] ?? []));
+      main.dubious = Array.from({ length: this.rows }, (_, i) => main.dubious[i] ?? false);
+      main.row = Math.min(main.row, this.rows - 1);
+      main.col = Math.min(main.col, this.cols - 1);
+    }
   }
 
   /** The visible rows, trailing blanks removed. */
@@ -258,8 +277,10 @@ export class ScreenModel {
           this.col = Math.max(0, Math.min(this.col, this.cols - 1) - 1);
         } else if (ch === "\t") {
           this.col = Math.min(this.cols - 1, (Math.floor(this.col / 8) + 1) * 8);
-        } else if (ch === "\x0e" || ch === "\x0f") {
-          this.taint(); // a shifted character set draws other glyphs
+        } else if (ch === "\x0e") {
+          this.taint(); // shift out: the other character set draws other glyphs
+        } else if (ch === "\x0f") {
+          // Shift in selects the default set, which is what the model draws; Claude sends it after `ESC ( B`.
         } else if (ch >= " " && ch !== "\x7f" && !(ch >= "\x80" && ch <= "\x9f")) {
           this.put(ch);
         }
@@ -351,6 +372,7 @@ export class ScreenModel {
         // A full reset also resets modes and character sets the model does not track.
         this.clear();
         this.alt = false;
+        this.mainBuffer = undefined;
         this.taint();
         break;
       case "D":
@@ -435,13 +457,16 @@ export class ScreenModel {
         break;
       case "J": {
         const mode = Number.isFinite(args[0]) ? args[0] : 0;
-        if (mode === 2 || mode === 3) {
+        if (mode === 2) {
           this.grid = Array.from({ length: this.rows }, () => this.blankRow());
           this.dubious = Array.from({ length: this.rows }, () => false);
-          if (!this.alt) {
-            // Every cell is now what the child draws next, whatever the model lost track of before.
-            this.cleanFrom = this.taintCount;
-          }
+          // Every visible cell is now what the child draws next, whatever the model lost track of
+          // before. Only this whole-screen erase heals a taint; on the alternate screen too, which is
+          // the child's alone and which Claude erases on entry and after a resize.
+          this.cleanFrom = this.taintCount;
+        } else if (mode === 3) {
+          // Erases the saved scrollback and leaves the visible screen as it is: the model keeps no
+          // scrollback, so nothing changes, and a taint it was under is not healed by it.
         } else if (mode === 1) {
           for (let r = 0; r < this.row; r += 1) {
             this.grid[r] = this.blankRow();
@@ -505,8 +530,15 @@ export class ScreenModel {
       case "n":
       case "c":
         break; // status and attribute requests to the terminal: they draw nothing
+      case "r":
+        // `CSI r` with nothing in it resets the scroll region to the whole screen, which is what the
+        // model always has (Claude sends it at startup). Setting a region changes where text scrolls.
+        if (raw !== "") {
+          this.taint();
+        }
+        break;
       case "m":
-        this.sgr(args, raw.includes(":"));
+        this.sgr(raw);
         break;
       default:
         // Scroll regions, insert and delete of characters, modes, reports: not modelled.
@@ -518,19 +550,23 @@ export class ScreenModel {
   /**
    * Only one thing about styles matters: whether text is muted (faint, or a
    * gray foreground), which is how Claude draws a placeholder or a suggestion
-   * in an input box that holds nothing of the wearer's. A style the model
-   * cannot read (colon sub-parameters) is not muted, so such text counts as
-   * text and an input line holding it is not empty.
+   * in an input box that holds nothing of the wearer's. The parameters are
+   * split on `;` and applied in order, so a reset (`0` or an empty parameter)
+   * is honoured wherever it stands. A parameter the model cannot read (colon
+   * sub-parameters, a malformed colour, a code it does not know) makes the
+   * style unknown: text drawn under it is NOT muted, so it counts as text and
+   * an input line holding it is not empty.
    */
-  private sgr(args: number[], colon: boolean): void {
-    if (colon) {
-      this.grayFg = false;
-      return;
-    }
-    const list = args.length === 0 || (args.length === 1 && Number.isNaN(args[0])) ? [0] : args;
-    for (let i = 0; i < list.length; i += 1) {
-      const code = Number.isNaN(list[i]) ? 0 : list[i];
-      if (code === 0) {
+  private sgr(raw: string): void {
+    const tokens = raw === "" ? ["0"] : raw.split(";");
+    let unknown = false;
+    const number = (token: string | undefined): number | undefined =>
+      token !== undefined && /^\d{1,3}$/.test(token) ? Number(token) : undefined;
+    for (let i = 0; i < tokens.length; i += 1) {
+      const code = tokens[i] === "" ? 0 : number(tokens[i]);
+      if (code === undefined) {
+        unknown = true;
+      } else if (code === 0) {
         this.faint = false;
         this.grayFg = false;
       } else if (code === 2) {
@@ -541,20 +577,55 @@ export class ScreenModel {
         this.grayFg = false;
       } else if (code === 90) {
         this.grayFg = true;
-      } else if (code === 38) {
-        if (list[i + 1] === 5) {
-          const n = list[i + 2];
-          this.grayFg = n === 8 || (n >= 232 && n <= 255);
-          i += 2;
-        } else if (list[i + 1] === 2) {
-          const [r, g, b] = [list[i + 2], list[i + 3], list[i + 4]];
-          this.grayFg = [r, g, b].every(Number.isFinite) && Math.max(r, g, b) - Math.min(r, g, b) <= 8;
-          i += 4;
+      } else if (code === 38 || code === 48 || code === 58) {
+        // An extended colour: 5;n or 2;r;g;b. Only a foreground can make text gray.
+        const kind = number(tokens[i + 1]);
+        const width = kind === 5 ? 1 : kind === 2 ? 3 : 0;
+        const values = tokens.slice(i + 2, i + 2 + width).map(number);
+        if (width === 0 || values.length < width || values.some((value) => value === undefined)) {
+          unknown = true;
+          i = tokens.length;
         } else {
-          this.grayFg = false;
-          i = list.length;
+          if (code === 38) {
+            const [a, b, c] = values as number[];
+            this.grayFg = kind === 5 ? a === 8 || (a >= 232 && a <= 255) : Math.max(a, b, c) - Math.min(a, b, c) <= 8;
+          }
+          i += 1 + width;
         }
+      } else if (!KNOWN_SGR.has(code) && !(code >= 40 && code <= 49) && !(code >= 100 && code <= 107)) {
+        unknown = true;
       }
+    }
+    if (unknown) {
+      this.faint = false;
+      this.grayFg = false;
+    }
+  }
+
+  /**
+   * The real Claude Code runs on the alternate screen: it enters with `?1049h`
+   * and clears at once. The model holds the two buffers as a terminal does (the
+   * alternate one starts blank, the main one comes back as it was), and a
+   * switch is still a taint: only a whole-screen erase drawn after it, which
+   * Claude sends right away, makes what the model holds the child's own again.
+   * A switch that does not match (leaving a screen not entered) is a taint too.
+   */
+  private switchScreen(enter: boolean): void {
+    this.taint();
+    if (enter && !this.alt) {
+      this.mainBuffer = {
+        grid: this.grid,
+        dubious: this.dubious,
+        row: this.row,
+        col: this.col,
+        saved: this.saved,
+      };
+      this.clear();
+      this.alt = true;
+    } else if (!enter && this.alt && this.mainBuffer) {
+      ({ grid: this.grid, dubious: this.dubious, row: this.row, col: this.col, saved: this.saved } = this.mainBuffer);
+      this.mainBuffer = undefined;
+      this.alt = false;
     }
   }
 
@@ -564,9 +635,7 @@ export class ScreenModel {
     }
     for (const mode of args) {
       if (ALT_SCREEN_MODES.has(mode)) {
-        // Switching screens swaps in a buffer this model does not hold.
-        this.alt = set;
-        this.taint();
+        this.switchScreen(set);
       } else if (mode === 7 && !set) {
         this.taint(); // no autowrap: the model wraps
       } else if (!BENIGN_PRIVATE_MODES.has(mode)) {
@@ -609,12 +678,14 @@ export type ProbeResult =
   /** A dialog, a question, a permission prompt or a running-turn sign is on screen. */
   | { kind: "blocked"; reason: string }
   /**
-   * The framed prompt box, with what is on its input line (whitespace removed),
-   * and whether that line is visibly empty: nothing on it but muted text (the
-   * placeholder or a suggestion Claude draws in faint or gray) or Claude's own
-   * `Try "..."` hint.
+   * The framed prompt box, with what is on its input line (whitespace
+   * normalised: runs are one space, ends trimmed) and the same line row by row
+   * exactly as drawn (`rows`: after the prompt glyph and its one space, with
+   * only the terminal's right padding and a wrapped row's indent removed), and
+   * whether that line is visibly empty: nothing on it but muted text (the
+   * placeholder, a suggestion or the `Try "..."` hint, all drawn faint or gray).
    */
-  | { kind: "prompt"; text: string; empty: boolean };
+  | { kind: "prompt"; text: string; rows: string[]; empty: boolean };
 
 export interface ProbeOptions {
   /**
@@ -693,11 +764,41 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   }
   const text = normalise(inputContent(inputRows));
   const solid = normalise(inputContent(screen.solidLines().slice(top + 1, bottom)));
-  return { kind: "prompt", text, empty: solid === "" || TRY_HINT.test(text) };
+  // Claude's own `Try "..."` hint is no exception: it is empty only when drawn muted, like any
+  // placeholder. Typed text that looks like it is text, and so is a multi-line draft that begins
+  // and ends the same way.
+  return { kind: "prompt", text, rows: exactRows(inputRows), empty: solid === "" };
 }
 
-/** Claude's own hint in an empty box, `Try "fix lint errors"`. */
-const TRY_HINT = /^Try\s*["“'‘].*["”'’]$/;
+/** How many leading whitespace characters of a continuation row are the UI's indent: at most `indent`, never text. */
+function indentWidth(row: string, indent: number): number {
+  let width = 0;
+  while (width < indent && /\s/.test(row[width] ?? "")) {
+    width += 1;
+  }
+  return width;
+}
+
+/**
+ * The input rows as drawn, for an exact comparison: the box's side borders, the
+ * prompt glyph with the one space (or no-break space) the UI puts after it, a
+ * wrapped row's indent and every row's right padding are what the terminal adds
+ * and are removed; whitespace inside a row is kept as it is.
+ */
+function exactRows(rows: string[]): string[] {
+  let indent = 2;
+  return rows.map((row, index) => {
+    // A bordered box's side border is no part of the text and no part of the indent.
+    const withoutBorder = row.replace(BORDER_LEFT, "").replace(BORDER_RIGHT, "");
+    if (index === 0) {
+      // The continuation indent is the width of what precedes the text on the first row (a leading space,
+      // the glyph, its one space or no-break space), measured there.
+      indent = (/^\s*[>❯][  ]?/.exec(withoutBorder)?.[0] ?? "").length;
+    }
+    const content = index === 0 ? withoutBorder.replace(/^\s*[>❯][  ]?/, "") : withoutBorder.slice(indentWidth(withoutBorder, indent));
+    return content.replace(/\s+$/, "");
+  });
+}
 
 /**
  * What the input rows hold after the prompt character and the box's side
@@ -713,12 +814,57 @@ function inputContent(rows: string[]): string {
     .join(" ");
 }
 
+/**
+ * Whether the screen shows a dialog or a menu anywhere, framed prompt box or not (a permission
+ * dialog replaces the box). For deciding that what the wearer types is an answer; never a
+ * reason to type anything.
+ */
+export function showsDialog(screen: ScreenModel): boolean {
+  if (screen.unsettled) {
+    return false;
+  }
+  return screen.lines().some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row));
+}
+
 /** Whether the probe shows the framed prompt box visibly empty, with no dialog, question or other text in it. */
 export function showsEmptyPrompt(result: ProbeResult): boolean {
   return result.kind === "prompt" && result.empty;
 }
 
-/** Whether the probe shows `expected` (already sanitised) on the input line, and nothing but it. */
+/**
+ * Whether the input line holds exactly `expected` (the sanitised text that was
+ * pasted) and nothing else: interior whitespace must be the same, so "hello  world"
+ * is not "hello world". What is allowed to differ is only what the terminal adds:
+ * the right padding of the last row and, where the line wrapped over rows, one
+ * space at each break (the wrap may take it). Used before an Enter.
+ */
+export function showsExactly(result: ProbeResult, expected: string): boolean {
+  if (result.kind !== "prompt") {
+    return false;
+  }
+  const want = expected.replace(/\s+$/, "");
+  if (want.length === 0) {
+    return false;
+  }
+  let position = 0;
+  for (let i = 0; i < result.rows.length; i += 1) {
+    const row = result.rows[i];
+    if (!want.startsWith(row, position)) {
+      return false;
+    }
+    position += row.length;
+    if (i < result.rows.length - 1 && want[position] === " ") {
+      position += 1; // the break between wrapped rows may have taken one space
+    }
+  }
+  return position === want.length;
+}
+
+/**
+ * Whether the probe shows `expected` on the input line, whitespace normalised (runs
+ * of it one space, ends trimmed). The loose comparison, for the places that need
+ * no more than "this is the text": never the check before an Enter.
+ */
 export function showsText(result: ProbeResult, expected: string): boolean {
   return result.kind === "prompt" && expected.length > 0 && result.text === normalise(expected);
 }

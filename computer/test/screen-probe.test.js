@@ -6,7 +6,7 @@
  */
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { ScreenModel, probe, showsText, showsCleared, showsEmptyPrompt } = require("../dist/launcher/screen-probe.js");
+const { ScreenModel, probe, showsText, showsExactly, showsCleared, showsEmptyPrompt } = require("../dist/launcher/screen-probe.js");
 const { bgReplyText } = require("../dist/launcher/paste-text.js");
 
 const RULE = "─".repeat(60);
@@ -25,7 +25,7 @@ function screen(chunk, cols = 80, rows = 24) {
 }
 
 test("an_empty_or_placeholder_box_is_a_prompt_whose_text_is_not_ours", () => {
-  const model = screen(repaint({ input: 'Try "fix lint errors"' }));
+  const model = screen(repaint({ input: '\x1b[2mTry "fix lint errors"\x1b[22m' }));
   const result = probe(model);
   assert.equal(result.kind, "prompt");
   assert.equal(showsText(result, "yes do it"), false);
@@ -35,8 +35,10 @@ test("a_box_is_visibly_empty_only_when_nothing_in_it_is_solid_text", () => {
   const empty = (input) => showsEmptyPrompt(probe(screen(repaint({ input }))));
   assert.equal(empty(""), true);
   assert.equal(empty("   "), true);
-  // Claude's own hint in an empty box.
-  assert.equal(empty('Try "fix lint errors"'), true);
+  // Claude's own hint in an empty box, drawn muted like any placeholder; typed text that looks like it is text.
+  assert.equal(empty('\x1b[2mTry "fix lint errors"\x1b[22m'), true);
+  assert.equal(empty('Try "do not overwrite this"'), false);
+  assert.equal(empty('\x1b[0mTry "do not overwrite this"'), false);
   // Placeholders and suggestions are drawn faint or in gray, whatever the way.
   assert.equal(empty("\x1b[2mrun the tests\x1b[22m"), true);
   assert.equal(empty("\x1b[2mrun the tests\x1b[0m"), true);
@@ -56,10 +58,41 @@ test("a_box_is_visibly_empty_only_when_nothing_in_it_is_solid_text", () => {
   assert.equal(showsEmptyPrompt({ kind: "unknown", reason: "no_box" }), false);
 });
 
+test("a_style_the_model_cannot_read_is_never_muted_and_a_reset_is_honoured_wherever_it_stands", () => {
+  const empty = (input) => showsEmptyPrompt(probe(screen(repaint({ input }))));
+  // The exact sequence from the review: it resets faint and sets red, so what follows is text.
+  assert.equal(empty("\x1b[2mhint\x1b[0;38:2::255:0:0mprivate draft"), false);
+  assert.equal(empty("\x1b[2m\x1b[0;38:2::255:0:0mprivate draft"), false);
+  // A reset is honoured wherever it stands in the sequence, and an empty parameter is a reset.
+  assert.equal(empty("\x1b[2m\x1b[1;0mprivate draft"), false);
+  assert.equal(empty("\x1b[2m\x1b[mprivate draft"), false);
+  assert.equal(empty("\x1b[2m\x1b[;mprivate draft"), false);
+  assert.equal(empty("\x1b[2m\x1b[0;2mrun the tests"), true, "reset first, then faint again");
+  // Anything unrecognised in the sequence makes the style unknown, faint or not.
+  for (const seq of ["\x1b[2;38:5:245m", "\x1b[2;12m", "\x1b[2;38;9m", "\x1b[2;38;5m", "\x1b[2;38;2;1;2m", "\x1b[2;abcm", "\x1b[2;999m"]) {
+    assert.equal(empty(`${seq}private draft`), false, JSON.stringify(seq));
+  }
+  // The plain suggestions and harmless extra attributes still read as muted.
+  assert.equal(empty("\x1b[2mrun the tests\x1b[22m"), true);
+  assert.equal(empty("\x1b[2;3mrun the tests\x1b[0m"), true);
+  assert.equal(empty("\x1b[2;48;5;17mrun the tests\x1b[0m"), true);
+  assert.equal(empty("\x1b[1;90mrun the tests\x1b[0m"), true);
+  assert.equal(empty("\x1b[38;5;245;4mrun the tests\x1b[0m"), true);
+});
+
+test("a_multi_line_draft_that_looks_like_the_hint_is_text", () => {
+  const model = screen(
+    `${["● Resumed.", RULE, '> Try "first line', '  second line"', RULE, FOOTER].join("\r\n")}`,
+  );
+  const result = probe(model);
+  assert.equal(result.kind, "prompt");
+  assert.equal(result.empty, false);
+});
+
 test("the_pasted_text_alone_on_the_input_line_inside_the_box_is_shown", () => {
   const model = screen(repaint({ input: "yes do it" }));
   const result = probe(model);
-  assert.deepEqual(result, { kind: "prompt", text: "yes do it", empty: false });
+  assert.deepEqual(result, { kind: "prompt", text: "yes do it", rows: ["yes do it"], empty: false });
   assert.equal(showsText(result, "yes do it"), true);
   assert.equal(showsText(result, "yes do it please"), false);
   // Text that is not alone is not what was pasted: a laptop draft in front of it.
@@ -81,6 +114,78 @@ test("altered_text_is_not_the_text_a_missing_or_extra_word_space_included", () =
   assert.equal(showsCleared(probe(screen(repaint({ input: "yes do it" }))), "yes do it"), false);
 });
 
+test("the_check_before_an_enter_is_exact_about_interior_whitespace", () => {
+  const exact = (input, expected = "hello world") => showsExactly(probe(screen(repaint({ input }))), expected);
+  assert.equal(exact("hello world"), true);
+  assert.equal(exact("hello  world"), false, "two spaces are not one");
+  assert.equal(exact("hello   world"), false);
+  assert.equal(exact("hello world"), false, "a no-break space is not a space");
+  assert.equal(exact("helloworld"), false);
+  assert.equal(exact("hello world "), true, "the terminal's trailing blank cells are padding");
+  assert.equal(exact("hello world", "hello world   "), true, "so is trailing whitespace of what was pasted");
+  assert.equal(exact("hello world!"), false);
+  assert.equal(exact("hello"), false);
+  assert.equal(exact(" hello world", " hello world"), true, "a leading space of the paste is on the line");
+  assert.equal(exact("hello world", " hello world"), false);
+  // The loose comparison still reads these as the text; it is not the one an Enter relies on.
+  assert.equal(showsText(probe(screen(repaint({ input: "hello  world" }))), "hello world"), true);
+  assert.equal(showsExactly({ kind: "blocked", reason: "dialog" }, "hello world"), false);
+  assert.equal(showsExactly(probe(screen(repaint({ input: "" }))), ""), false);
+});
+
+test("a_continuation_row_loses_only_the_uis_indent_and_any_more_leading_space_is_text", () => {
+  const rows = (first, second) => probe(screen(`${["● Done.", RULE, `> ${first}`, second, RULE, FOOTER].join("\r\n")}`));
+  // The UI indents a wrapped row by the width of `> `.
+  assert.equal(showsExactly(rows("hello", "  world"), "hello world"), true);
+  assert.equal(showsExactly(rows("hello", "world"), "hello world"), true, "an unindented row is the same");
+  // More than that is the text's own: five spaces are two of indent and three of text.
+  assert.equal(showsExactly(rows("hello", "     world"), "hello world"), false);
+  assert.equal(showsExactly(rows("hello", "     world"), "hello    world"), true, "one the wrap took, three of text");
+  assert.equal(showsExactly(rows("hello", "     world"), "hello   world"), false);
+  // With the borders of a bordered box the indent is measured the same way.
+  const top = `╭${"─".repeat(58)}╮`;
+  const bottom = `╰${"─".repeat(58)}╯`;
+  const bordered = (second) => probe(screen(["x", top, "│ > hello".padEnd(59) + "│", `│${second}`.padEnd(59) + "│", bottom, FOOTER].join("\r\n")));
+  assert.equal(showsExactly(bordered("   world"), "hello world"), true);
+  assert.equal(showsExactly(bordered("      world"), "hello world"), false);
+});
+
+test("only_a_whole_screen_erase_heals_a_taint_not_the_scrollback_erase_or_a_partial_one", () => {
+  // The exact sequence: the alternate screen holds a draft, an unsupported edit taints, the scrollback is erased
+  // (which leaves the visible screen alone), and the frame and the `> ` prefix are redrawn without erasing the row.
+  const model = screen("");
+  model.push("\x1b[?1049h\x1b[2J\x1b[H");
+  model.push(["● Resumed.", RULE, "> laptop draft", RULE, FOOTER].join("\r\n"));
+  assert.equal(model.tainted, false);
+  model.push("\x1b[1@");
+  assert.equal(model.tainted, true);
+  model.push("\x1b[3J");
+  assert.equal(model.tainted, true, "CSI 3 J erases only the saved scrollback");
+  model.push("\x1b[2;1H" + RULE + "\x1b[3;1H> ");
+  assert.equal(model.lines()[2].includes("laptop draft"), true, "the draft is still on the visible screen");
+  const result = probe(model);
+  assert.deepEqual([result.kind, result.reason], ["unknown", "screen_disturbed"]);
+  assert.equal(showsEmptyPrompt(result), false);
+  for (const partial of ["\x1b[J", "\x1b[1J", "\x1b[2K", "\x1b[K"]) {
+    model.push(partial);
+    assert.equal(model.tainted, true, JSON.stringify(partial));
+  }
+  // A whole-screen erase and a redraw is what heals it, and then the draft is gone from the screen too.
+  model.push(repaint({ input: "" }));
+  assert.equal(model.tainted, false);
+  assert.equal(showsEmptyPrompt(probe(model)), true);
+});
+
+test("a_wrapped_line_is_exact_inside_each_row_and_lets_the_break_take_one_space", () => {
+  const text = "please run the full test suite and then summarise every failure you find in the logs";
+  const wrapped = (first, second) => probe(screen(repaint({ input: first, continuation: [`  ${second}`] })));
+  assert.equal(showsExactly(wrapped(text.slice(0, 40), text.slice(40)), text), true, "the break took the space");
+  assert.equal(showsExactly(wrapped(text.slice(0, 39), text.slice(40)), text), true, "the space is still at the end of a row");
+  assert.equal(showsExactly(wrapped(text.slice(0, 41), text.slice(41)), text), true, "mid-word break, no space lost");
+  assert.equal(showsExactly(wrapped(text.slice(0, 40), `x${text.slice(40)}`), text), false);
+  assert.equal(showsExactly(wrapped(text.slice(0, 40).replace("the full", "the  full"), text.slice(40)), text), false);
+});
+
 test("a_tainted_screen_is_refused_without_a_baseline_and_a_whole_screen_erase_heals_it", () => {
   for (const seq of ["\x1b[1;20r", "\x1b#8", "\x1b#3", "\x1bc", "\x1b(0", "\x1b[?1049h\x1b[?1049l", "\x1b[?47h\x1b[?47l", "\x1b[?1047h\x1b[?1047l"]) {
     const model = screen(repaint({ input: "yes do it" }));
@@ -99,9 +204,14 @@ test("a_tainted_screen_is_refused_without_a_baseline_and_a_whole_screen_erase_he
   resized.resize(100, 30);
   assert.equal(resized.tainted, true);
   assert.equal(probe(resized).kind, "unknown");
-  // A sequence inside the alternate screen is not healed by an erase there.
+  // The alternate screen is a buffer of its own that Claude erases on entry, so that erase heals the switch;
+  // what comes back when it is left is the main screen as it was, trusted again only after an erase of its own.
   const alt = screen(repaint());
-  alt.push("\x1b[?1049h\x1b[2J");
+  alt.push("\x1b[?1049h");
+  assert.equal(alt.tainted, true);
+  alt.push("\x1b[2J");
+  assert.equal(alt.tainted, false);
+  alt.push("\x1b[?1049l");
   assert.equal(alt.tainted, true);
 });
 
@@ -236,7 +346,7 @@ test("a_spinner_redrawn_every_frame_does_not_disturb_the_screen", () => {
 });
 
 test("a_cleared_line_is_shown_cleared_and_a_still_present_text_is_not", () => {
-  const cleared = probe(screen(repaint({ input: 'Try "fix lint errors"' })));
+  const cleared = probe(screen(repaint({ input: '\x1b[2mTry "fix lint errors"\x1b[22m' })));
   assert.equal(showsCleared(cleared, "yes do it"), true);
   assert.equal(showsCleared(probe(screen(repaint({ input: "yes do it" }))), "yes do it"), false);
   assert.equal(showsCleared({ kind: "unknown", reason: "no_box" }, "yes do it"), false);

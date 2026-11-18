@@ -1034,8 +1034,13 @@ test("evidence_lost_before_the_write_is_refused_at_the_write_check_and_the_reply
     await phone.waitFor("session_upsert", (f) => f.session.id === ID && f.session.subagents?.running === 1 && f.session.capabilities.followup === "ready");
     followup("yes do it", "bg-fu3");
     const frame = await launcher.waitFor("type_command");
-    // The main thread starts a tool before the launcher writes anything.
-    await postHook(httpPort, { hook_event_name: "PreToolUse", session_id: ID, tool_name: "Bash", permission_mode: "auto" });
+    // A permission dialog is announced before the launcher writes anything.
+    await postHook(httpPort, {
+      hook_event_name: "Notification",
+      session_id: ID,
+      notification_type: "permission_prompt",
+      permission_mode: "auto",
+    });
     const late = await ack("bg-fu3");
     assert.deepEqual([late.result, late.error, "consumed" in late], ["rejected", "busy", false]);
     await launcher.waitFor("cancel_command", (f) => f.cmdId === frame.cmdId);

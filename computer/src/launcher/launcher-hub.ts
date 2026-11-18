@@ -680,6 +680,34 @@ export class LauncherHub {
         this.write(connection, { type: "write_verdict", cmdId: frame.cmdId, phase, ok });
         return undefined;
       }
+      case "screen_check": {
+        // The launcher's own look at the screen around a reply: names, lengths and flags only.
+        const word = /^[a-z_]{1,40}$/;
+        if (
+          !hasShape(frame, ["type", "phase", "probe", "reason", "textLen", "tainted", "outcome"]) ||
+          (frame.phase !== "pre" && frame.phase !== "post" && frame.phase !== "clear") ||
+          typeof frame.probe !== "string" ||
+          !word.test(frame.probe) ||
+          typeof frame.reason !== "string" ||
+          !word.test(frame.reason) ||
+          !Number.isInteger(frame.textLen) ||
+          (frame.textLen as number) < 0 ||
+          typeof frame.tainted !== "boolean" ||
+          (frame.outcome !== "ok" && frame.outcome !== "refused")
+        ) {
+          return "bad_frame";
+        }
+        this.options.logger.info("launcher_screen_check", {
+          session: connection.binding?.key,
+          phase: frame.phase,
+          probe: frame.probe,
+          reason: frame.reason,
+          textLen: frame.textLen,
+          tainted: frame.tainted,
+          outcome: frame.outcome,
+        });
+        return undefined;
+      }
       case "laptop_state":
         if (!hasShape(frame, ["type", "draft"]) || typeof frame.draft !== "boolean") {
           return "bad_frame";

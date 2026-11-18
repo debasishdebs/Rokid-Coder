@@ -96,16 +96,18 @@ function setup({ file = "busy" } = {}) {
   const screen = new ScreenModel(80, 24);
   const asked = [];
   const written = [];
+  const checks = [];
   const typist = new Typist(pty, input, (after) => sessionReady(session, after), clock, {
     binding,
     onWritten: (cmdId, at) => written.push({ cmdId, at }),
+    onCheck: (check) => checks.push(check),
     bg: {
       screen,
       fileStatus: () => session.status,
       askWrite: (cmdId, phase) => asked.push({ cmdId, phase }),
     },
   });
-  const t = { pty, clock, input, session, binding, screen, asked, written, typist };
+  const t = { pty, clock, input, session, binding, screen, asked, written, typist, checks };
   t.draw = (chunk) => pty.emit(chunk);
   t.advance = async (ms) => {
     // A poll's worth at a time, as the typist's own timer would run.
@@ -178,7 +180,7 @@ test("an_unconfirmed_paste_is_cleared_after_the_confirm_window_and_not_sent", as
   const t = setup();
   const box = await t.toPasted();
   // The screen never shows the text (still the placeholder).
-  t.draw(repaint({ input: 'Try "fix lint errors"' }));
+  t.draw(repaint({ input: '\x1b[2mTry "fix lint errors"\x1b[22m' }));
   await t.advance(1400);
   assert.equal(box.result, undefined);
   await t.advance(300);
@@ -389,14 +391,26 @@ test("a_spinner_animating_every_200ms_does_not_starve_a_ready_write", async () =
   assert.deepEqual(box.result, { ok: true });
 });
 
-test("a_laptop_draft_or_held_keys_keep_the_paste_back", async () => {
+test("keys_the_screen_does_not_show_are_no_draft_and_held_keys_keep_the_paste_back", async () => {
   const t = setup();
   t.draw(repaint());
+  t.input.key("\x1b");
   t.input.key("half a thou");
+  assert.equal(t.input.draft, true, "the key stream says draft");
   const box = t.run();
-  await t.advance(3000);
-  assert.deepEqual(t.asked, []);
-  assert.deepEqual(box.result, undefined);
+  await t.advance(150);
+  assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], "the box is empty, so the guess blocks nothing");
+  t.typist.cancel("c1");
+  await t.advance(0);
+  assert.equal(box.result.error, "cancelled");
+  // Keys held for another command's paste keep a new reply back.
+  const u = setup();
+  u.draw(repaint());
+  u.input.hold();
+  const held = u.run();
+  await u.advance(3000);
+  assert.deepEqual(u.asked, []);
+  assert.deepEqual(held.result, undefined);
 });
 
 test("a_text_that_is_not_one_short_line_is_refused_before_anything_is_written", async () => {
@@ -437,35 +451,122 @@ test("the_keyboard_is_not_frozen_after_the_enter_though_the_file_stays_busy", as
   assert.equal(t.pty.writes.at(-1), "a", "the held key was replayed after the Enter");
 });
 
-test("an_ordinary_text_command_is_typed_exactly_as_before", async () => {
+test("an_idle_reply_takes_the_same_two_phases_without_asking_agentd", async () => {
   const t = setup({ file: "idle" });
   t.session.statusUpdatedAt = t.clock.now() - 10_000;
+  t.draw(repaint({ input: "\x1b[2mrun the suite\x1b[22m" }));
   const box = track(t.typist.run({ cmdId: "c2", gen: 1, command: "text", text: "plain" }));
-  await t.advance(700);
-  assert.deepEqual(t.pty.writes, [`${PASTE("plain")}\r`]);
+  await t.advance(200);
+  assert.deepEqual(t.pty.writes, [PASTE("plain")], "the paste, and no Enter yet");
+  assert.deepEqual(t.asked, [], "an idle reply needs no word from agentd");
+  t.draw(repaint({ input: "plain" }));
+  await t.advance(200);
+  assert.deepEqual(t.pty.writes, [PASTE("plain"), "\r"]);
   assert.deepEqual(box.result, { ok: true });
 });
 
-test("a_box_that_is_not_visibly_empty_gets_no_paste_and_a_retryable_not_sent", async () => {
-  for (const [what, screenDraw] of [
-    ["text in the box", repaint({ input: "something half typed" })],
-    ["a queued follow-up", repaint({ input: "\x1b[38;2;215;119;87mfollow up on the failing test\x1b[0m" })],
-    ["a question beside it", repaint({ above: ["Which suite should I run?"], input: "x", footer: ["  Enter to select · ↑/↓ to navigate"] })],
-    ["a dialog", `Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`],
-    ["a running turn", repaint({ above: ["✻ Thinking… (3s · esc to interrupt)"] })],
+test("an_idle_reply_with_the_wearers_text_appearing_during_the_paste_window_is_cleared_and_not_sent", async () => {
+  const t = setup({ file: "idle" });
+  t.session.statusUpdatedAt = t.clock.now() - 10_000;
+  t.draw(repaint());
+  const box = track(t.typist.run({ cmdId: "c2", gen: 1, command: "text", text: "plain" }));
+  await t.advance(200);
+  assert.deepEqual(t.pty.writes, [PASTE("plain")]);
+  // The wearer's own character landed beside the paste.
+  t.draw(repaint({ input: "xplain" }));
+  await t.advance(1700);
+  assert.deepEqual(t.pty.writes, [PASTE("plain"), CTRL_U]);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+});
+
+test("an_idle_reply_is_refused_for_a_tainted_screen_and_a_dialog_and_never_pastes", async () => {
+  for (const [what, draw] of [
+    ["tainted", (t) => t.draw("\x1b[1;20r")],
+    ["a dialog", (t) => t.draw(`Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`)],
+  ]) {
+    const t = setup({ file: "idle" });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(repaint());
+    draw(t);
+    const box = track(t.typist.run({ cmdId: "c2", gen: 1, command: "text", text: "plain" }));
+    await t.advance(300);
+    assert.deepEqual(t.pty.writes, [], what);
+    assert.deepEqual(box.result, { ok: false, error: "not_sent" }, what);
+  }
+});
+
+test("an_idle_reply_waits_for_the_file_to_read_idle", async () => {
+  const t = setup({ file: "busy" });
+  t.draw(repaint());
+  const box = track(t.typist.run({ cmdId: "c2", gen: 1, command: "text", text: "plain" }));
+  await t.advance(3000);
+  assert.deepEqual(t.pty.writes, [], "a busy file lets no ordinary reply through");
+  assert.equal(box.result, undefined);
+});
+
+test("every_look_of_the_screen_check_is_reported_as_names_and_lengths_only", async () => {
+  const t = setup();
+  t.draw(repaint({ input: "\x1b[2mrun the suite\x1b[22m" }));
+  t.run({ text: "secret words" });
+  await t.advance(150);
+  t.typist.verdict("c1", "paste", true);
+  await t.advance(0);
+  t.draw(repaint({ input: "secret words" }));
+  await t.advance(100);
+  t.typist.verdict("c1", "enter", true);
+  await t.advance(0);
+  assert.deepEqual(
+    t.checks.map((c) => [c.phase, c.probe, c.reason, c.textLen, c.outcome]),
+    [
+      ["pre", "prompt", "empty", "run the suite".length, "ok"],
+      ["post", "prompt", "text", "secret words".length, "ok"],
+    ],
+  );
+  assert.equal(JSON.stringify(t.checks).includes("secret"), false);
+  const refused = setup();
+  refused.draw(repaint({ input: "typed by the wearer" }));
+  refused.run();
+  await refused.advance(150);
+  assert.deepEqual(
+    refused.checks.map((c) => [c.phase, c.reason, c.textLen, c.outcome]),
+    [["pre", "text", "typed by the wearer".length, "refused"]],
+  );
+});
+
+test("a_box_that_is_not_visibly_empty_gets_no_paste_and_the_wearers_text_is_never_touched", async () => {
+  for (const [what, screenDraw, error] of [
+    ["text in the box", repaint({ input: "something half typed" }), "laptop_draft"],
+    ["a queued follow-up", repaint({ input: "\x1b[38;2;215;119;87mfollow up on the failing test\x1b[0m" }), "laptop_draft"],
+    ["typed text that looks like the hint", repaint({ input: 'Try "do not overwrite this"' }), "laptop_draft"],
+    ["a draft after a reset into an unreadable colour", repaint({ input: "\x1b[2mhint\x1b[0;38:2::255:0:0mprivate draft\x1b[0m" }), "laptop_draft"],
+    ["a question beside it", repaint({ above: ["Which suite should I run?"], input: "x", footer: ["  Enter to select · ↑/↓ to navigate"] }), "not_sent"],
+    ["a dialog", `Do you want to proceed?\r\n${RULE}\r\n> \r\n${RULE}\r\n  esc to cancel`, "not_sent"],
+    ["a running turn", repaint({ above: ["✻ Thinking… (3s · esc to interrupt)"] }), "not_sent"],
   ]) {
     const t = setup();
     t.draw(screenDraw);
     const box = t.run();
     await t.advance(300);
+    // Nothing was pasted, so there is nothing to clear: no Ctrl+U, which would take the wearer's text with it.
     assert.deepEqual(t.pty.writes, [], what);
     assert.deepEqual(t.asked, [], `${what}: agentd is not even asked`);
-    assert.deepEqual(box.result, { ok: false, error: "not_sent" }, what);
+    assert.deepEqual(box.result, { ok: false, error }, what);
   }
 });
 
+test("a_screen_the_model_cannot_read_is_refused_after_5_s_not_waited_on_for_a_minute", async () => {
+  const t = setup();
+  t.draw("Welcome back\r\nResuming…");
+  const box = t.run();
+  await t.advance(4800);
+  assert.equal(box.result, undefined);
+  await t.advance(400);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+  assert.deepEqual(t.pty.writes, []);
+});
+
 test("a_muted_placeholder_or_suggestion_is_an_empty_box_and_the_paste_goes", async () => {
-  for (const input of ['Try "fix lint errors"', "\x1b[2mrun the test suite\x1b[22m", "\x1b[90msuggestion\x1b[39m"]) {
+  for (const input of ['\x1b[2mTry "fix lint errors"\x1b[22m', "\x1b[2mrun the test suite\x1b[22m","\x1b[90msuggestion\x1b[39m"]) {
     const t = setup();
     t.draw(repaint({ input }));
     t.run();
@@ -580,5 +681,145 @@ test("text_that_differs_from_the_reply_by_a_word_space_is_cleared_and_never_sent
     assert.deepEqual(t.pty.writes, [PASTE("yes do it"), CTRL_U], shown);
     assert.deepEqual(box.result, { ok: false, error: "not_sent" }, shown);
     assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], shown);
+  }
+});
+
+test("a_background_reply_goes_on_a_shell_file_too_and_on_no_other_status_but_busy", async () => {
+  for (const [status, asks] of [["shell", true], ["busy", true], ["waiting", false], ["mystery", false], [undefined, false]]) {
+    const t = setup({ file: status ?? "busy" });
+    t.session.status = status;
+    t.draw(repaint());
+    t.run();
+    await t.advance(300);
+    assert.deepEqual(t.asked.map((a) => a.phase), asks ? ["paste"] : [], String(status));
+  }
+});
+
+// ---- Codex's five findings against the two-phase typing ------------------------------
+
+test("an_enter_is_never_pressed_for_text_that_differs_in_interior_whitespace", async () => {
+  for (const [file, shown] of [["idle", "hello  world"], ["busy", "hello  world"], ["idle", "hello world"]]) {
+    const t = setup({ file });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(repaint());
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "hello world", ...(file === "busy" ? { bgReply: true } : {}) }));
+    await t.advance(150);
+    if (file === "busy") {
+      t.typist.verdict("c1", "paste", true);
+      await t.advance(0);
+    }
+    t.draw(repaint({ input: shown }));
+    await t.advance(1700);
+    assert.deepEqual(t.pty.writes, [PASTE("hello world"), CTRL_U], `${file} ${JSON.stringify(shown)}`);
+    assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+  }
+});
+
+test("a_key_typed_in_the_paste_window_is_replayed_once_after_the_enter_whatever_the_file_says", async () => {
+  const t = setup({ file: "idle" });
+  t.session.statusUpdatedAt = t.clock.now() - 10_000;
+  t.draw(repaint());
+  const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+  await t.advance(150);
+  assert.equal(t.input.holding, true, "held from the paste");
+  assert.equal(t.input.key("1"), "", "a key in the window is held");
+  t.draw(repaint({ input: "plain" }));
+  await t.advance(150);
+  assert.deepEqual(box.result, { ok: true });
+  assert.deepEqual(t.pty.writes, [PASTE("plain"), "\r", "1"], "the held key follows the Enter, in order, once");
+  assert.equal(t.input.holding, false);
+  // Claude's file is still idle, then waits on a permission dialog: the next key is the wearer's, not held.
+  t.session.status = "waiting";
+  assert.equal(t.input.key("2"), "2");
+  await t.advance(60_000);
+  assert.equal(t.input.key("3"), "3");
+});
+
+test("an_aborted_reply_releases_the_keyboard_at_once_and_replays_in_order_or_drops_when_unsure", async () => {
+  // A paste that fails the check and is cleared: the held keys are replayed after the Ctrl+U.
+  const cleared = setup({ file: "idle" });
+  cleared.session.statusUpdatedAt = cleared.clock.now() - 10_000;
+  cleared.draw(repaint());
+  const a = track(cleared.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+  await cleared.advance(150);
+  assert.equal(cleared.input.key("1"), "");
+  assert.equal(cleared.input.key("2"), "");
+  cleared.draw(repaint({ input: "other" }));
+  await cleared.advance(1700);
+  cleared.draw(repaint());
+  await cleared.advance(100);
+  assert.equal(a.result.error, "not_sent");
+  assert.deepEqual(cleared.pty.writes, [PASTE("plain"), CTRL_U, "12"]);
+  assert.equal(cleared.input.holding, false);
+  // A clear nobody could see: the keyboard is the wearer's at once, and what they typed meanwhile is dropped, not replayed.
+  const unsure = setup({ file: "idle" });
+  unsure.session.statusUpdatedAt = unsure.clock.now() - 10_000;
+  unsure.draw(repaint());
+  const b = track(unsure.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+  await unsure.advance(150);
+  assert.equal(unsure.input.key("1"), "");
+  // The box is not on screen at all (nothing a wearer could be answering), so the clear cannot be seen.
+  unsure.draw("\x1b[2J\x1b[HResuming the session");
+  await unsure.advance(4000);
+  assert.equal(b.result.error, "not_sent");
+  assert.equal(unsure.binding.uncertain, true);
+  assert.equal(unsure.input.holding, false, "never left held waiting for a status");
+  assert.equal(unsure.pty.writes.includes("1"), false, "nothing replayed into a prompt nobody saw");
+  assert.equal(unsure.input.key("y"), "y", "the next key passes");
+});
+
+test("the_two_looks_must_be_of_the_same_thing_and_restart_when_the_box_changes", async () => {
+  const t = setup({ file: "idle" });
+  t.session.statusUpdatedAt = t.clock.now() - 10_000;
+  t.draw(repaint({ input: "half typed" }));
+  const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+  await t.advance(0);
+  // 50 ms later (past the 40 ms gap) the wearer's text is gone: this is the first look at an empty box, not the second.
+  t.clock.advance(50);
+  t.draw(repaint());
+  await t.advance(0);
+  assert.deepEqual(t.pty.writes, [], "no paste on the first empty look");
+  assert.equal(box.result, undefined, "and no refusal from the old draft either");
+  await t.advance(150);
+  assert.deepEqual(t.pty.writes, [PASTE("plain")], "pasted on the second empty look");
+  // A draft that changes between looks never counts as two looks of a draft.
+  const u = setup({ file: "idle" });
+  u.session.statusUpdatedAt = u.clock.now() - 10_000;
+  u.draw(repaint({ input: "a" }));
+  const second = track(u.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+  await u.advance(0);
+  for (const typed of ["ab", "abc", "abcd"]) {
+    u.clock.advance(30);
+    u.draw(repaint({ input: typed }));
+    await u.advance(0);
+  }
+  assert.equal(second.result, undefined, "a line that keeps changing is never judged on two looks");
+  await u.advance(150);
+  assert.deepEqual(second.result, { ok: false, error: "laptop_draft" });
+});
+
+test("keys_typed_into_a_visible_dialog_during_the_cleanup_reach_the_pty", async () => {
+  for (const file of ["idle", "busy"]) {
+    const t = setup({ file });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(repaint());
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain", ...(file === "busy" ? { bgReply: true } : {}) }));
+    await t.advance(150);
+    if (file === "busy") {
+      t.typist.verdict("c1", "paste", true);
+      await t.advance(0);
+    }
+    assert.equal(t.pty.writes[0], PASTE("plain"));
+    // A permission dialog takes the screen: automation aborts, and the wearer answers it at once.
+    t.draw(`\x1b[2J\x1b[HBash command\r\n  rm -rf build\r\nDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n  esc to cancel`);
+    await t.advance(10);
+    assert.equal(t.input.key("y"), "", "held while the reply is still being aborted");
+    assert.equal(t.input.key("\r"), "");
+    await t.advance(1700);
+    assert.equal(box.result.error, "not_sent");
+    await t.advance(300);
+    assert.equal(t.pty.writes.includes("y\r"), true, `${file}: the answer typed into the dialog reaches the pty`);
+    assert.equal(t.input.holding, false);
+    assert.equal(t.binding.uncertain, true, "the paste in a dialog is still not assumed cleared");
   }
 });

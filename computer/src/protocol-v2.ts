@@ -48,7 +48,9 @@ export type FollowupState = "waiting" | "unavailable" | "cap_reached" | "ready";
 /**
  * Why a follow-up is "unavailable", for the phone to say (never a readiness
  * decision). Precedence: draft, mode_not_allowed, bg_off, background, busy.
- * - `draft`: text sits at the laptop's prompt, so typing would mix with it;
+ * - `draft`: the launcher's screen model shows text in the prompt box (never a guess
+ *   from the laptop's keys), so typing would mix with it; a reply refused for the
+ *   same reason fails `laptop_draft` and nothing is sent;
  * - `mode_not_allowed`: the main prompt looks free while a background subagent
  *   runs (a main-thread Stop and no work since, Claude's file `busy`), but the
  *   session's permission mode is `plan` (its plan-approval dialog would take

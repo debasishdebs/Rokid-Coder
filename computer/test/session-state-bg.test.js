@@ -26,6 +26,7 @@ async function until(check, ms = 2000, what = "condition") {
 }
 
 function fakePort() {
+  const lateListeners = [];
   const changes = [];
   const written = [];
   const port = {
@@ -56,7 +57,11 @@ function fakePort() {
     compactDone() {},
     onChange: (cb) => changes.push(cb),
     onCommandWritten: (cb) => written.push(cb),
-    onLateResult: () => undefined,
+    onLateResult: (cb) => lateListeners.push(cb),
+    /** The launcher's own result for a command agentd had already cancelled. */
+    late(cmdId, ok, error) {
+      lateListeners.forEach((cb) => cb(cmdId, ok, error));
+    },
     onWriteCheck: (cb) => {
       port.checker = cb;
     },
@@ -76,7 +81,7 @@ function fakePort() {
 }
 
 /** A session at the point a background reply could be typed: file busy, a Stop, a subagent, auto mode, switch on. */
-function setup({ mode = "auto", switchOn = true, subagents = 1, stop = true, hookMode, approvalSource = true } = {}) {
+function setup({ mode = "auto", switchOn = true, subagents = 1, stop = true, hookMode, approvalSource = true, log } = {}) {
   const port = fakePort();
   // Real time, but movable: a frozen clock would never reach the readiness deadline.
   const clock = {
@@ -109,6 +114,7 @@ function setup({ mode = "auto", switchOn = true, subagents = 1, stop = true, hoo
     clock: () => clock.t,
     timings: TIMINGS,
     bgReplies: () => flags.bg,
+    ...(log ? { log } : {}),
   });
   const hook = (event, extra = {}) =>
     router.onHook(KEY, event, { permission_mode: hookMode ?? mode, ...extra });
@@ -276,16 +282,17 @@ test("an_idle_file_takes_the_release_path_and_stays_ready_without_any_hook_evide
 test("main_thread_work_and_non_quiet_notifications_take_the_stop_away", () => {
   const takes = [
     ["UserPromptSubmit", { prompt: "x" }],
-    ["PreToolUse", { tool_name: "Bash" }],
-    ["PostToolUse", {}],
     ["PermissionRequest", { tool_name: "Bash" }],
     ["PermissionRequest", { tool_name: "Bash", agent_id: "bg1" }],
+    ["Elicitation", { server: "x" }],
+    ["PermissionDenied", { tool_name: "Bash" }],
     ["Notification", { notification_type: "permission_prompt" }],
     ["Notification", { notification_type: "elicitation_dialog" }],
+    ["Notification", { notification_type: "elicitation_url_dialog" }],
     ["Notification", { notification_type: "agent_needs_input", agent_id: "bg1" }],
+    ["Notification", { notification_type: "a_type_nobody_knew" }],
     ["Notification", {}],
     ["Notification", { message: "Claude is waiting for your input" }],
-    ["SubagentStop", { agent_id: "bg1" }],
     ["Stop", { stop_hook_active: true }],
     ["Stop", { stop_hook_active: "yes" }],
     ["PreCompact", { trigger: "auto" }],
@@ -294,24 +301,192 @@ test("main_thread_work_and_non_quiet_notifications_take_the_stop_away", () => {
     const t = setup();
     assert.equal(ready(t), true, event);
     t.hook(event, extra);
-    // SubagentStop also ends the subagent in the store; the count stays in this fake.
     assert.equal(ready(t), false, `${event} ${JSON.stringify(extra)}`);
   }
 });
 
-test("quiet_notifications_and_subagent_work_leave_the_stop_alone", () => {
+test("background_agents_finishing_and_benign_notifications_leave_the_stop_alone", () => {
   const leaves = [
+    ["SubagentStop", { agent_id: "bg1" }],
+    ["SubagentStop", {}],
     ["Notification", { notification_type: "idle_prompt" }],
     ["Notification", { notification_type: "auth_success" }],
+    ["Notification", { notification_type: "agent_completed" }],
+    ["Notification", { notification_type: "plugin_notification" }],
+    ["Notification", { notification_type: "elicitation_complete" }],
+    ["Notification", { notification_type: "quota_auto_resume_fired" }],
     ["PreToolUse", { tool_name: "Bash", agent_id: "bg1" }],
     ["PostToolUse", { agent_id: "bg1" }],
     ["SubagentStart", { agent_id: "bg2" }],
   ];
-  for (const [event, extra] of leaves) {
-    const t = setup();
-    t.hook(event, extra);
-    assert.equal(ready(t), true, event);
+  for (const mode of ["auto", "default"]) {
+    for (const [event, extra] of leaves) {
+      const t = setup({ mode });
+      t.hook(event, extra);
+      assert.equal(ready(t), true, `${mode} ${event} ${JSON.stringify(extra)}`);
+    }
   }
+});
+
+test("main_thread_tool_use_revokes_only_where_a_tool_can_open_a_dialog", () => {
+  for (const [mode, revokes] of [
+    ["auto", false],
+    ["bypassPermissions", false],
+    ["default", true],
+    ["acceptEdits", true],
+    ["dontAsk", true],
+  ]) {
+    for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
+      const t = setup({ mode });
+      t.hook(event, { tool_name: "Bash" });
+      assert.equal(ready(t), !revokes, `${mode} ${event}`);
+    }
+  }
+  // A turn of the main thread revokes in every mode, tool use or not.
+  for (const mode of ["auto", "bypassPermissions", "default"]) {
+    const t = setup({ mode });
+    t.hook("UserPromptSubmit", { prompt: "a background task finished" });
+    assert.equal(ready(t), false, mode);
+  }
+});
+
+test("the_file_may_say_busy_or_shell_and_nothing_else", () => {
+  for (const status of ["busy", "shell"]) {
+    const t = setup();
+    t.file.status = status;
+    assert.equal(ready(t), true, status);
+    assert.equal(t.router.followupWhy(KEY, 1), undefined, status);
+  }
+  for (const status of ["waiting", "starting", "SHELL", "", "mystery", "idle_busy"]) {
+    const t = setup();
+    t.file.status = status;
+    assert.equal(ready(t), false, JSON.stringify(status));
+    assert.equal(t.states.bgPicture(KEY).eligible, false, JSON.stringify(status));
+  }
+  // No status at all (an unreadable or missing file) is unknown, and unknown is refused.
+  const t = setup();
+  delete t.file.status;
+  assert.equal(ready(t), false);
+  // `idle` is the ordinary path, which needs no hook evidence.
+  const idle = setup({ stop: false, switchOn: false, mode: "plan" });
+  idle.file.status = "idle";
+  assert.equal(idle.router.followupState(KEY), "ready");
+});
+
+test("a_session_sitting_in_shell_takes_a_background_reply_end_to_end", async () => {
+  const t = setup();
+  t.file.status = "shell";
+  const { result, cmd } = await dispatch(t);
+  assert.equal(cmd.bgReply, true);
+  assert.equal(t.port.check("paste"), true);
+  t.port.wrote();
+  // The file moves from shell to busy while the reply waits for its Enter: still allowed.
+  t.file.status = "busy";
+  assert.equal(t.port.check("enter"), true);
+  t.port.settle({ ok: true });
+  t.hook("UserPromptSubmit", { prompt: "yes do it" });
+  assert.deepEqual(await result, { ok: true });
+});
+
+test("bg_decision_is_logged_once_per_change_with_the_first_failing_rule_and_the_raw_status", () => {
+  const logs = [];
+  const t = setup({ stop: false, log: (event, meta) => logs.push({ event, ...meta }) });
+  const rules = () => logs.filter((l) => l.event === "bg_decision").map((l) => `${l.rule}|${l.fileStatus}`);
+  t.router.bgRepliesChanged();
+  // The prompt the setup began with took any Stop away, and the log says so.
+  assert.equal(rules().at(-1), "stop_revoked_by:UserPromptSubmit|busy");
+  // Looking again at the same answer says nothing: not per poll.
+  const lines = logs.length;
+  t.router.bgRepliesChanged();
+  t.router.bgRepliesChanged();
+  t.router.onHook(KEY, "Notification", { permission_mode: "auto", notification_type: "idle_prompt" });
+  assert.equal(logs.length, lines);
+  t.hook("Stop");
+  t.router.bgRepliesChanged();
+  assert.deepEqual(rules().at(-1), "ready|busy");
+  t.file.status = "shell";
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "ready|shell", "the raw status is in the line");
+  t.file.status = "starting_up";
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "file_status:starting_up|starting_up");
+  t.file.status = "busy";
+  t.hook("Notification", { notification_type: "permission_prompt" });
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "stop_revoked_by:Notification:permission_prompt|busy");
+  t.hook("Stop");
+  t.flags.bg = false;
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "switch_off|busy");
+  t.flags.bg = true;
+  t.flags.subagents = 0;
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "no_running_subagent|busy");
+  t.flags.subagents = 1;
+  t.flags.approvals = true;
+  t.router.bgRepliesChanged();
+  assert.equal(rules().at(-1), "approval_pending|busy");
+  const last = logs.at(-1);
+  assert.deepEqual(
+    [last.session, last.answer, last.mode, last.runningSubagents, typeof last.secondsSinceStop],
+    [KEY, "refused", "auto", 1, "number"],
+  );
+  assert.equal(JSON.stringify(logs).includes("go"), false, "names, a status and numbers; no prompt text");
+});
+
+test("bg_decision_names_each_rule_in_the_documented_order", () => {
+  const first = (build) => {
+    const logs = [];
+    const t = build((event, meta) => logs.push({ event, ...meta }));
+    t.router.bgRepliesChanged();
+    return logs.at(-1).rule;
+  };
+  assert.equal(first((log) => setup({ switchOn: false, mode: "plan", subagents: 0, stop: false, log })), "switch_off");
+  assert.equal(first((log) => setup({ mode: "plan", subagents: 0, stop: false, log })), "mode_not_allowed:plan");
+  assert.equal(first((log) => setup({ subagents: 0, stop: false, log })), "no_running_subagent");
+  assert.equal(
+    first((log) => {
+      const t = setup({ stop: false, log });
+      t.file.status = "waiting";
+      return t;
+    }),
+    "file_status:waiting",
+  );
+  assert.equal(first((log) => setup({ stop: false, log })), "stop_revoked_by:UserPromptSubmit");
+  assert.equal(
+    first((log) => {
+      // A session no hook has spoken for yet has seen no Stop at all.
+      const t = setup({ stop: false, log });
+      t.states.forget(KEY);
+      return t;
+    }),
+    "mode_not_allowed:unknown",
+  );
+  assert.equal(
+    first((log) => {
+      const t = setup({ log });
+      t.hook("UserPromptSubmit", { prompt: "x" });
+      return t;
+    }),
+    "stop_revoked_by:UserPromptSubmit",
+  );
+  assert.equal(
+    first((log) => {
+      const t = setup({ log });
+      t.clock.t += BACKGROUND_STOP_FRESH_MS + 1;
+      return t;
+    }),
+    "stop_too_old",
+  );
+  assert.equal(
+    first((log) => {
+      const t = setup({ log });
+      t.port.drafts.set(KEY, true);
+      return t;
+    }),
+    "laptop_draft",
+  );
+  assert.equal(first((log) => setup({ log })), "ready");
 });
 
 test("a_continued_stop_is_not_evidence_and_a_later_clean_one_is", () => {
@@ -374,9 +549,10 @@ test("an_enter_without_a_matching_prompt_times_out_consumed_and_is_never_retyped
 
 test("revocation_before_the_write_cancels_the_command_busy_and_unconsumed", async () => {
   for (const [what, revoke] of [
-    ["main-thread tool use", (t) => t.hook("PreToolUse", { tool_name: "Bash" })],
+    ["a permission request from a subagent", (t) => t.hook("PermissionRequest", { tool_name: "Bash", agent_id: "bg1" })],
     ["permission notification", (t) => t.hook("Notification", { notification_type: "permission_prompt" })],
-    ["subagent finished", (t) => t.hook("SubagentStop", { agent_id: "bg1" })],
+    ["elicitation", (t) => t.hook("Notification", { notification_type: "elicitation_dialog" })],
+    ["a prompt of the main thread", (t) => t.hook("UserPromptSubmit", { prompt: "a background task finished" })],
     ["another Stop hook continues", (t) => t.hook("Stop", { stop_hook_active: true })],
     [
       "mode changed",
@@ -541,4 +717,184 @@ test("a_reply_waits_for_the_evidence_to_arrive_and_then_goes", async () => {
   assert.equal(t.port.sent[0].bgReply, true);
   t.router.endSession(KEY);
   await result;
+});
+
+// ---- Codex's findings on the latch and the msgId ---------------------------------------
+
+/** A session sitting idle at its prompt, long enough ago that only a write can make it busy. */
+function idleSession() {
+  const t = setup({ switchOn: false, mode: "plan" });
+  t.file.status = "idle";
+  t.file.statusUpdatedAt = t.clock.t - 60_000;
+  return t;
+}
+
+test("a_reply_the_launcher_cleared_away_puts_the_readiness_state_back", async () => {
+  for (const error of ["not_sent", "laptop_draft", "taken_over"]) {
+    const t = idleSession();
+    assert.equal(ready(t), true, "ready before");
+    const result = t.router.followup(KEY, "hi", () => ({ ok: true }));
+    await until(() => t.port.sent.length === 1, 500, "the dispatch");
+    t.port.wrote();
+    assert.equal(ready(t), false, "the paste set the barrier");
+    t.port.settle({ ok: false, error });
+    const outcome = await result;
+    assert.deepEqual([outcome.ok, outcome.error], [false, error]);
+    assert.equal(ready(t), true, `${error}: nothing was submitted, so a retry sees the state from before the paste`);
+    assert.equal(t.states.notBefore(KEY), undefined, error);
+  }
+});
+
+test("a_background_reply_revoked_after_its_paste_puts_the_latch_back_but_never_the_revoked_stop", async () => {
+  const t = setup();
+  const before = t.states.snapshotLatch(KEY);
+  const { result } = await dispatch(t);
+  assert.equal(t.port.check("paste"), true);
+  t.port.wrote();
+  assert.notEqual(t.states.latchAt(KEY), undefined, "the paste set the barrier");
+  t.hook("Notification", { notification_type: "permission_prompt" });
+  const outcome = await result;
+  assert.deepEqual([outcome.ok, outcome.error, "consumed" in outcome], [false, "not_sent", false]);
+  assert.deepEqual(t.states.snapshotLatch(KEY), before, "only the latch is restored");
+  // The permission prompt took the Stop away, and the restore does not give it back.
+  assert.equal(t.states.bgPicture(KEY).eligible, false);
+  assert.equal(ready(t), false);
+  assert.equal(t.router.followupWhy(KEY, 1), "background");
+  // A new Stop is what makes it ready again.
+  t.hook("Stop");
+  assert.equal(ready(t), true);
+});
+
+test("a_restore_leaves_a_latch_somebody_else_moved_alone", async () => {
+  const t = idleSession();
+  const result = t.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => t.port.sent.length === 1, 500, "the dispatch");
+  t.port.wrote();
+  // A Stop delivery (another turn started) sets a newer barrier while the reply is being cleared away.
+  t.clock.t += 5;
+  t.router.onStopDelivered(KEY);
+  const newer = t.states.latchAt(KEY);
+  assert.notEqual(newer, undefined);
+  t.port.settle({ ok: false, error: "not_sent" });
+  assert.equal((await result).error, "not_sent");
+  assert.equal(t.states.latchAt(KEY), newer, "the newer latch was not erased by the restore");
+  // The barrier a plain `not_sent` leaves nobody else's is restored (see the test above).
+  const plain = idleSession();
+  const second = plain.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => plain.port.sent.length === 1, 500, "the dispatch");
+  plain.port.wrote();
+  plain.port.settle({ ok: false, error: "not_sent" });
+  await second;
+  assert.equal(plain.states.latchAt(KEY), undefined);
+});
+
+test("a_cancel_after_the_paste_began_consumes_the_msgId_so_a_reply_is_never_sent_twice", async () => {
+  // A cancel can come before the paste, between it and the Enter, or after the Enter, and agentd cannot
+  // tell which: a text reply cancelled once its paste began is presumed sent. It can cost a re-spoken
+  // reply, never a duplicate.
+  const t = idleSession();
+  const result = t.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => t.port.sent.length === 1, 500, "the dispatch");
+  t.port.wrote();
+  t.port.settle({ ok: false, error: "cancelled" });
+  assert.deepEqual(await result, { ok: false, error: "cancelled", consumed: true });
+  assert.equal(ready(t), false, "and the barrier of the paste stays");
+  // A cancel before anything was written is not spent.
+  const early = idleSession();
+  const e = early.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => early.port.sent.length === 1, 500, "the dispatch");
+  early.port.settle({ ok: false, error: "cancelled" });
+  assert.deepEqual(await e, { ok: false, error: "cancelled" });
+  // A background reply whose Enter was allowed and which Claude has not taken yet: a cancel in that wait
+  // is spent too, since the Enter was pressed.
+  const waiting = setup();
+  const { result: pending } = await dispatch(waiting);
+  waiting.port.check("paste");
+  waiting.port.wrote();
+  waiting.port.check("enter");
+  waiting.port.settle({ ok: true });
+  await settle(30);
+  waiting.router.endSession(KEY);
+  const cancelledWaiting = await pending;
+  assert.equal(cancelledWaiting.ok, false);
+  assert.equal(cancelledWaiting.consumed, true);
+  // The same cancel through the hub's own synthetic result.
+  const synthetic = setup();
+  const { result: pending2 } = await dispatch(synthetic);
+  synthetic.port.check("paste");
+  synthetic.port.wrote();
+  synthetic.port.check("enter");
+  synthetic.port.settle({ ok: false, error: "cancelled" });
+  assert.deepEqual(await pending2, { ok: false, error: "cancelled", consumed: true });
+  // A compact that was cancelled after it was typed stays spent.
+  const compact = idleSession();
+  const c = compact.router.command(KEY, { command: "compact" });
+  await until(() => compact.port.sent.length === 1, 500, "the dispatch");
+  compact.port.wrote();
+  compact.port.settle({ ok: false, error: "cancelled" });
+  assert.deepEqual(await c, { ok: false, error: "cancelled", consumed: true });
+  // Agentd stops waiting first: it does not wait for the launcher's word, and a late one changes nothing.
+  const unheard = idleSession();
+  const u = unheard.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => unheard.port.sent.length === 1, 500, "the dispatch");
+  unheard.port.wrote();
+  const cmdId = unheard.port.pending.cmdId;
+  const started = Date.now();
+  unheard.router.endSession(KEY);
+  const heard = await u;
+  assert.deepEqual([heard.ok, heard.error, heard.consumed], [false, "typed_after_cancel", true]);
+  assert.equal(Date.now() - started < 200, true, "no wait for a late result");
+  unheard.port.late(cmdId, false, "not_sent");
+  // A command_written that arrives while a cancel waits ends that wait, and the reply is presumed sent
+  // whatever the launcher's result says 40 ms later.
+  const delayed = idleSession();
+  const d = delayed.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => delayed.port.sent.length === 1, 500, "the dispatch");
+  delayed.router.endSession(KEY);
+  delayed.port.wrote();
+  const late = await d;
+  assert.deepEqual([late.error, late.consumed], ["typed_after_cancel", true]);
+});
+
+test("only_a_write_that_pressed_enter_consumes_the_msgId", async () => {
+  // Esc during the check: Ctrl+U and taken_over, Enter never pressed, so a retry of the same message is not a duplicate.
+  const idle = idleSession();
+  const a = idle.router.followup(KEY, "hi", () => ({ ok: true }));
+  await until(() => idle.port.sent.length === 1, 500, "the dispatch");
+  idle.port.wrote();
+  idle.port.settle({ ok: false, error: "taken_over" });
+  const outcome = await a;
+  assert.deepEqual(outcome, { ok: false, error: "taken_over" });
+  assert.equal("consumed" in outcome, false);
+  // The same for a background reply, whose Enter was never allowed.
+  const bg = setup();
+  const { result } = await dispatch(bg);
+  bg.port.check("paste");
+  bg.port.wrote();
+  bg.port.settle({ ok: false, error: "taken_over" });
+  assert.equal("consumed" in (await result), false);
+  // The launcher's own word wins over agentd's grant: it presses the Enter only after the verdict, so a
+  // takeover it reports after one means the Esc came first and the Enter was not pressed.
+  const granted = setup();
+  const { result: pressed } = await dispatch(granted);
+  granted.port.check("paste");
+  granted.port.wrote();
+  granted.port.check("enter");
+  granted.port.settle({ ok: false, error: "taken_over" });
+  assert.equal("consumed" in (await pressed), false);
+  // Without a word from the launcher the Enter is presumed pressed: a cancel after the grant is spent.
+  const cancelled = setup();
+  const { result: unheard } = await dispatch(cancelled);
+  cancelled.port.check("paste");
+  cancelled.port.wrote();
+  cancelled.port.check("enter");
+  cancelled.router.endSession(KEY);
+  assert.equal((await unheard).consumed, true);
+  // A compact or a model change that was taken over had been typed: it stays spent.
+  const model = idleSession();
+  const m = model.router.command(KEY, { command: "model", model: "opus" });
+  await until(() => model.port.sent.length === 1, 500, "the dispatch");
+  model.port.wrote();
+  model.port.settle({ ok: false, error: "taken_over" });
+  assert.deepEqual(await m, { ok: false, error: "taken_over", consumed: true });
 });

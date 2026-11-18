@@ -103,6 +103,8 @@ interface Entry {
    * it as `notBefore`, so the launcher checks the same barrier at its write.
    */
   passedLatchAt?: number;
+  /** Bumped on every change of `latchAt` or `passedLatchAt`, so a restore can tell whether it still owns them. */
+  latchVersion: number;
   inFlight: boolean;
   compact?: CompactWatch;
   /**
@@ -110,6 +112,8 @@ interface Entry {
    * sign of main-thread work since: see `trackMainThread` for what clears it.
    */
   stopAt?: number;
+  /** Why `stopAt` is not set: the name of what took the Stop away, for the log. Absent before any Stop. */
+  stopCause?: string;
   /** The `permission_mode` of the latest main-thread hook; undefined when that hook carried none. */
   mode?: string;
 }
@@ -122,6 +126,12 @@ export interface BgPicture {
   modeOk: boolean;
 }
 
+/** The readiness latch alone, as it was before a write; never the Stop evidence, which a revocation owns. */
+export interface LatchSnapshot {
+  latchAt?: number;
+  passedLatchAt?: number;
+}
+
 /** A prompt or a reply with every whitespace removed, so that it can be compared with the other. */
 function squash(text: string | undefined): string {
   return (text ?? "").replace(/\s+/g, "");
@@ -132,13 +142,14 @@ function isSubagentHook(payload: Record<string, unknown>): boolean {
   return payload.agent_id !== undefined && payload.agent_id !== null && payload.agent_id !== "";
 }
 
-/** Hooks whose main-thread firing is a sign the main thread is working. */
-const MAIN_THREAD_WORK: ReadonlySet<string> = new Set([
+/**
+ * Hooks whose main-thread firing takes the Stop away in every mode: a new turn
+ * (a prompt, a background task's report, a compact, a restart) or a tool the
+ * classifier refused.
+ */
+const MAIN_THREAD_TURN: ReadonlySet<string> = new Set([
   "UserPromptSubmit",
   "UserPromptExpansion",
-  "PreToolUse",
-  "PostToolUse",
-  "PostToolUseFailure",
   "PermissionDenied",
   "PreCompact",
   "PostCompact",
@@ -146,10 +157,44 @@ const MAIN_THREAD_WORK: ReadonlySet<string> = new Set([
   "SessionEnd",
   "StopFailure",
 ]);
-/** Hooks that mean something is, or may be, waiting on the wearer, whichever thread fired them. */
-const BLOCKING_HOOKS: ReadonlySet<string> = new Set(["PermissionRequest", "Elicitation", "ElicitationResult", "SubagentStop"]);
-/** Notifications that do not say the prompt is taken: the prompt is idle, a login finished. */
-const QUIET_NOTIFICATIONS: ReadonlySet<string> = new Set(["idle_prompt", "auth_success"]);
+/**
+ * Main-thread tool use takes the Stop away only where a tool can open a dialog.
+ * In `auto` and `bypassPermissions` none does, and a reply typed while the main
+ * thread works only queues, so tool use there is no reason to refuse; the turn
+ * hooks above still are.
+ */
+const MAIN_THREAD_TOOL: ReadonlySet<string> = new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure"]);
+/**
+ * Hooks that mean something is, or may be, waiting on the wearer, whichever
+ * thread fired them. A SubagentStop is not one: background agents finishing is
+ * normal and puts nothing on the main screen.
+ */
+const BLOCKING_HOOKS: ReadonlySet<string> = new Set(["PermissionRequest", "Elicitation", "ElicitationResult"]);
+/**
+ * Notifications that are not a dialog (idle, a login, a finished or resumed
+ * background agent, a plugin's own): they leave the Stop alone. Every other type,
+ * a dialog's (`permission_prompt`, `elicitation_dialog`, ...) or one agentd does
+ * not know or that has none, takes it away.
+ */
+const QUIET_NOTIFICATIONS: ReadonlySet<string> = new Set([
+  "idle_prompt",
+  "auth_success",
+  "auth_storage_failure",
+  "elicitation_complete",
+  "elicitation_response",
+  "agent_completed",
+  "quota_auto_resume_fired",
+  "quota_auto_resume_stale",
+  "quota_auto_resume_disabled",
+  "plugin_notification",
+]);
+/**
+ * What Claude's sessions file may say while a background reply is typed: `busy`,
+ * and `shell`, which the live file showed at an idle-looking prompt ("Waiting for
+ * background agents to finish") although no document defines it. `idle` takes the
+ * ordinary path; anything else or unknown is refused.
+ */
+export const BG_FILE_STATUSES: ReadonlySet<string> = new Set(["busy", "shell"]);
 
 export class SessionStates {
   private readonly entries = new Map<SessionKey, Entry>();
@@ -171,8 +216,10 @@ export class SessionStates {
     // work. A background reply's own paste keeps the evidence until its Enter is allowed.
     if (!keepStop) {
       entry.stopAt = undefined;
+      entry.stopCause = "typed_write_or_delivered_stop";
     }
     entry.latchAt = entry.latchAt === undefined ? at : Math.max(entry.latchAt, at);
+    entry.latchVersion += 1;
   }
 
   /**
@@ -188,6 +235,7 @@ export class SessionStates {
       entry.latchAt = undefined;
     }
     entry.passedLatchAt = undefined;
+    entry.latchVersion += 1;
   }
 
   latchAt(key: SessionKey): number | undefined {
@@ -200,11 +248,42 @@ export class SessionStates {
     return entry?.latchAt ?? entry?.passedLatchAt;
   }
 
+  /** The readiness latch as it is now, for a write that may have to put it back. */
+  snapshotLatch(key: SessionKey): LatchSnapshot {
+    const entry = this.entries.get(key);
+    return { latchAt: entry?.latchAt, passedLatchAt: entry?.passedLatchAt };
+  }
+
+  /** Counts every change of the latch; compare two reads to know whether it moved in between. */
+  latchVersion(key: SessionKey): number {
+    return this.entries.get(key)?.latchVersion ?? 0;
+  }
+
+  /**
+   * A paste that was cleared away (a `not_sent`, a takeover or a cancel before the Enter) submitted
+   * nothing: the barrier its first write set would wait for an idle that can never come. The latch,
+   * and only the latch, goes back to what it was before the paste, and only when nothing has changed
+   * it since that write (`version` is what `latchVersion` said right after it): a newer latch, a
+   * cleared one or another command's write stands. The Stop evidence is never touched here, so
+   * what a revocation took away stays gone. True when it was restored.
+   */
+  restoreLatch(key: SessionKey, snapshot: LatchSnapshot, version: number): boolean {
+    const entry = this.entries.get(key);
+    if (!entry || entry.latchVersion !== version) {
+      return false;
+    }
+    entry.latchAt = snapshot.latchAt;
+    entry.passedLatchAt = snapshot.passedLatchAt;
+    entry.latchVersion += 1;
+    return true;
+  }
+
   /** The evidence of a main-thread Stop is used up or gone. */
   clearStop(key: SessionKey): void {
     const entry = this.entries.get(key);
     if (entry) {
       entry.stopAt = undefined;
+      entry.stopCause = "used_by_a_reply";
     }
   }
 
@@ -262,16 +341,91 @@ export class SessionStates {
         ? payload.permission_mode
         : undefined;
     }
+    const revoke = (cause: string): void => {
+      entry.stopAt = undefined;
+      entry.stopCause = cause;
+    };
     if (event === "Stop") {
       const continued = payload.stop_hook_active !== undefined && payload.stop_hook_active !== false;
-      entry.stopAt = sub || continued ? undefined : this.clock();
-    } else if (event === "Notification") {
-      if (typeof payload.notification_type !== "string" || !QUIET_NOTIFICATIONS.has(payload.notification_type)) {
-        entry.stopAt = undefined;
+      if (sub || continued) {
+        revoke(continued ? "stop_hook_active" : "stop_from_subagent");
+      } else {
+        entry.stopAt = this.clock();
+        entry.stopCause = undefined;
       }
-    } else if (BLOCKING_HOOKS.has(event) || (!sub && MAIN_THREAD_WORK.has(event))) {
-      entry.stopAt = undefined;
+    } else if (event === "Notification") {
+      const type = payload.notification_type;
+      if (typeof type !== "string" || !QUIET_NOTIFICATIONS.has(type)) {
+        revoke(`Notification:${typeof type === "string" && /^[a-z_]{1,40}$/.test(type) ? type : "unknown"}`);
+      }
+    } else if (BLOCKING_HOOKS.has(event)) {
+      revoke(event);
+    } else if (!sub && MAIN_THREAD_TURN.has(event)) {
+      revoke(event);
+    } else if (!sub && MAIN_THREAD_TOOL.has(event) && !AUTO_APPROVING_MODES.has(entry.mode ?? "")) {
+      revoke(event);
     }
+  }
+
+  /**
+   * For the log only: the first rule of the background-reply evidence that fails
+   * for the session, by name, with the raw file status, the main-thread mode and
+   * the age of the Stop in seconds. The router adds the phone's switch and the
+   * laptop draft. Never a decision, and never anything typed or shown.
+   */
+  bgDiagnosis(
+    key: SessionKey,
+    ownsClaim = false,
+  ): { rule: string; status: string; mode: string; stopAgeSec: number | null; subagents: number } {
+    const binding = this.sources.binding(key);
+    const entry = this.entries.get(key);
+    const file = binding?.claudePid === undefined ? undefined : this.readSession(binding.claudePid);
+    const subagents = this.sources.subagents?.(key) ?? 0;
+    const stopAgeMs = entry?.stopAt === undefined ? null : this.clock() - entry.stopAt;
+    const stopAge = stopAgeMs === null ? null : Math.round(stopAgeMs / 1000);
+    const mode = entry?.mode !== undefined && /^[A-Za-z]{1,40}$/.test(entry.mode) ? entry.mode : "unknown";
+    const status = file && /^[a-z_]{1,20}$/.test(file.status) ? file.status : file ? "other" : "none";
+    const rule = (): string => {
+      if (!binding || binding.claudePid === undefined) {
+        return "not_bound";
+      }
+      if (!BG_ALLOWED_MODES.has(entry?.mode ?? "")) {
+        return `mode_not_allowed:${mode}`;
+      }
+      if (subagents < 1) {
+        return "no_running_subagent";
+      }
+      if (!file) {
+        return "file_status:none";
+      }
+      if (!BG_FILE_STATUSES.has(file.status)) {
+        return `file_status:${status}`;
+      }
+      if (file.sessionId !== key.slice(key.indexOf(":") + 1)) {
+        return "file_of_another_session";
+      }
+      if (entry?.stopAt === undefined) {
+        return entry?.stopCause === undefined ? "no_main_thread_stop" : `stop_revoked_by:${entry.stopCause}`;
+      }
+      if (stopAgeMs === null || stopAgeMs < 0 || stopAgeMs > BACKGROUND_STOP_FRESH_MS) {
+        return "stop_too_old";
+      }
+      if (this.sources.asking(key)) {
+        return "approval_pending";
+      }
+      if (this.sources.held(key)) {
+        return "stop_held";
+      }
+      if (binding.uncertain) {
+        return "uncertain";
+      }
+      if (entry?.inFlight === true && !ownsClaim) {
+        return "in_flight";
+      }
+      const picture = this.bgPicture(key, ownsClaim);
+      return picture.eligible && picture.modeOk ? "ok" : "mode_guard";
+    };
+    return { rule: rule(), status, mode, stopAgeSec: stopAge, subagents };
   }
 
   /**
@@ -303,7 +457,7 @@ export class SessionStates {
       return no;
     }
     const file = this.readSession(binding.claudePid);
-    if (!file || file.status !== "busy" || file.sessionId !== key.slice(key.indexOf(":") + 1)) {
+    if (!file || !BG_FILE_STATUSES.has(file.status) || file.sessionId !== key.slice(key.indexOf(":") + 1)) {
       return no;
     }
     const stopAge = entry?.stopAt === undefined ? undefined : this.clock() - entry.stopAt;
@@ -395,6 +549,7 @@ export class SessionStates {
       }
       entry.passedLatchAt = entry.latchAt;
       entry.latchAt = undefined;
+      entry.latchVersion += 1;
       // R141: Claude has been seen idle since the write that left it uncertain.
       if (binding.uncertain) {
         this.sources.clearUncertain(key);
@@ -421,13 +576,13 @@ export class SessionStates {
       return false;
     }
     const file = this.readSession(binding.claudePid);
-    return file?.status === "busy" && (file.sessionId === undefined || file.sessionId === key.slice(key.indexOf(":") + 1));
+    return file !== undefined && BG_FILE_STATUSES.has(file.status) && (file.sessionId === undefined || file.sessionId === key.slice(key.indexOf(":") + 1));
   }
 
   private entry(key: SessionKey): Entry {
     let entry = this.entries.get(key);
     if (!entry) {
-      entry = { inFlight: false };
+      entry = { inFlight: false, latchVersion: 0 };
       this.entries.set(key, entry);
     }
     return entry;
@@ -495,6 +650,8 @@ interface Running {
   dead?: boolean;
   /** A background reply: called with the prompt of a UserPromptSubmit seen after its Enter was allowed. */
   accept?: (prompt: string | undefined) => void;
+  /** `latchVersion` right after this command's own first write: a restore is only for a latch nobody has moved since. */
+  latchMark?: number;
 }
 
 /**
@@ -514,6 +671,9 @@ export class LauncherRouter {
   private readonly shown = new Map<SessionKey, string>();
   private watchTimer?: NodeJS.Timeout;
   private readonly bgSwitch: () => boolean;
+  private readonly log?: (event: string, meta: Record<string, unknown>) => void;
+  /** The last `bg_decision` logged for each session, so only a change says anything. */
+  private readonly bgLogged = new Map<SessionKey, string>();
 
   constructor(options: {
     port: LauncherPort;
@@ -524,7 +684,10 @@ export class LauncherRouter {
     onStateChange?: (key: SessionKey) => void;
     /** The phone's opt-in for background replies, read live; absent, off. */
     bgReplies?: () => boolean;
+    /** Where `bg_decision` lines go: names, a raw status and numbers, never prompt text. */
+    log?: (event: string, meta: Record<string, unknown>) => void;
   }) {
+    this.log = options.log;
     this.port = options.port;
     this.states = options.states;
     this.clock = options.clock ?? Date.now;
@@ -545,6 +708,7 @@ export class LauncherRouter {
       if (running?.cmdId === cmdId) {
         running.written = true;
         running.writtenAt ??= at;
+        running.latchMark ??= this.states.latchVersion(key);
         this.states.compactWritten(key);
         running.settled?.();
       }
@@ -783,6 +947,7 @@ export class LauncherRouter {
     this.port.cancel(key, "cancelled");
     this.states.forget(key);
     this.shown.delete(key);
+    this.bgLogged.delete(key);
   }
 
   /** `compact` or `model`, from the glasses' launcher_command. */
@@ -877,7 +1042,25 @@ export class LauncherRouter {
     // the launcher clears the paste away, and the same msgId may be sent again.
     const spent = (): boolean => (bg ? running.enterGranted === true : running.written);
     // Typed, then failed: the msgId is spent, so a resend is a duplicate, never a retype.
-    const failed = (error: string): RouteOutcome => (spent() ? { ok: false, error, consumed: true } : fail(error));
+    // For a text reply only the launcher's `not_sent`, `laptop_draft` and `taken_over` positively say the
+    // Enter was never pressed (it cleared its paste away, or made none): nothing was submitted, so the same
+    // msgId may be sent again and the latch goes back to before the paste. A compact or a model change that
+    // was taken over had been typed, and stays spent.
+    // A `cancelled` is NOT such a word, nor is a timeout or the loss of the link: a cancel can arrive
+    // before the paste, between it and the Enter, or after the Enter, and agentd cannot tell which. So a
+    // text reply cancelled after its paste began is presumed sent and its msgId consumed. The trade-off
+    // is deliberate: a cancel can cost the wearer a re-spoken reply, and never a duplicate.
+    const unsent = (error: string): boolean =>
+      cmd.command === "text" && (error === "not_sent" || error === "laptop_draft" || error === "taken_over");
+    const before = this.states.snapshotLatch(key);
+    // Puts the latch back for a paste that was never entered, if nobody has moved it since that write.
+    const putBack = (): void => {
+      if (running.latchMark !== undefined) {
+        this.states.restoreLatch(key, before, running.latchMark);
+      }
+    };
+    const failed = (error: string): RouteOutcome =>
+      spent() && !unsent(error) ? { ok: false, error, consumed: true } : fail(error);
     const promptSeen = bg && cmd.command === "text"
       ? new Promise<string>((resolve) => {
           const want = squash(cmd.text);
@@ -922,15 +1105,25 @@ export class LauncherRouter {
         await this.settleCancel(key, running);
         this.noteFailure(key, gen, cmd, result);
         // R165: it was typed before the cancel reached the launcher. The msgId
-        // is spent, so a resend is a duplicate and never typed twice.
+        // is spent, so a resend is a duplicate and never typed twice. A text reply whose paste had
+        // begun is treated the same, Enter pressed or not (see `unsent`); the one exception is a
+        // background reply whose Enter agentd never allowed: the launcher presses it only after
+        // agentd's yes, so agentd knows it was not pressed.
         if (bg && !spent()) {
-          return running.written ? fail("not_sent") : fail(result);
+          if (running.written) {
+            putBack();
+            return fail("not_sent");
+          }
+          return fail(result);
         }
         return running.written ? { ok: false, error: "typed_after_cancel", consumed: true } : failed(result);
       }
       if (!result.ok) {
         const error: SendError = result.error ?? "not_ready";
         this.noteFailure(key, gen, cmd, error);
+        if (unsent(error)) {
+          putBack();
+        }
         return failed(error);
       }
       if (cmd.command === "model") {
@@ -1027,6 +1220,48 @@ export class LauncherRouter {
     return this.epochs.get(key) ?? 0;
   }
 
+  /**
+   * One `bg_decision` line when the background-reply answer for a session
+   * changes (not per poll): the first rule that fails, in the order switch, mode,
+   * running subagent, file status, main-thread Stop (and what revoked it),
+   * approval pending, in flight or uncertain, laptop draft; the raw file status,
+   * the mode name, the running subagents and the Stop's age in seconds. Lengths
+   * and names only. Diagnosis for a real session, never a decision.
+   */
+  private logBgDecision(key: SessionKey): void {
+    if (!this.log) {
+      return;
+    }
+    const diagnosis = this.states.bgDiagnosis(key);
+    let on = false;
+    try {
+      on = this.bgSwitch() === true;
+    } catch {
+      on = false;
+    }
+    const rule = !on
+      ? "switch_off"
+      : diagnosis.rule !== "ok"
+        ? diagnosis.rule
+        : this.port.laptopDraft(key)
+          ? "laptop_draft"
+          : "ready";
+    const signature = `${rule}|${diagnosis.status}`;
+    if (this.bgLogged.get(key) === signature) {
+      return;
+    }
+    this.bgLogged.set(key, signature);
+    this.log("bg_decision", {
+      session: key,
+      answer: rule === "ready" ? "ready" : "refused",
+      rule,
+      fileStatus: diagnosis.status,
+      mode: diagnosis.mode,
+      runningSubagents: diagnosis.subagents,
+      secondsSinceStop: diagnosis.stopAgeSec,
+    });
+  }
+
   /** Tells the phone when what it shows for a session would change; `always` for a binding change. */
   private look(key: SessionKey, always: boolean): void {
     if (!this.port.binding(key)) {
@@ -1036,6 +1271,7 @@ export class LauncherRouter {
       return;
     }
     this.revokeBg(key);
+    this.logBgDecision(key);
     // What the phone shows is the follow-up state and, when unavailable, why.
     const seen = `${this.followupState(key)}/${this.bgAssess(key)}`;
     if (always || this.shown.get(key) !== seen) {

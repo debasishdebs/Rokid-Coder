@@ -1,7 +1,7 @@
 import { readClaudeSession, type ClaudeSessionFile } from "./claude-sessions";
 import type { TypeCommand } from "./launcher-hub";
 import type { PtyChild } from "./pty";
-import { ScreenModel } from "./screen-probe";
+import { ScreenModel, probe } from "./screen-probe";
 import { LaptopInput, sessionBusySince } from "./laptop-input";
 import { Typist, sessionReady, systemClock, type BindingView, type Clock } from "./typist";
 
@@ -11,6 +11,12 @@ const CMD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const COMMANDS: ReadonlySet<string> = new Set(["compact", "model", "text"]);
 /** `laptop_state` goes out on change, at most this often. */
 const DRAFT_REPORT_MS = 250;
+/**
+ * What agentd is told as `laptop_state.draft` is what the screen shows, not
+ * what the keys suggest: the framed prompt box visibly has text in it. The
+ * screen is looked at once the output has paused this long.
+ */
+const SCREEN_LOOK_MS = 150;
 
 export interface LauncherClientOptions {
   child: PtyChild;
@@ -70,8 +76,11 @@ export class LauncherClient {
   private running?: { cmdId: string; epoch: number };
   private readonly screen: ScreenModel;
   private reportedDraft = false;
+  /** The screen shows text in the prompt box, as of the last look; this, never the keys, is what agentd hears. */
+  private visibleDraft = false;
   private lastReportAt = Number.NEGATIVE_INFINITY;
   private reportTimer?: unknown;
+  private screenTimer?: unknown;
 
   constructor(options: LauncherClientOptions) {
     this.child = options.child;
@@ -83,6 +92,9 @@ export class LauncherClient {
       const file = owned ? readClaudeSession(options.sessionsDir, owned.pid) : undefined;
       return file?.sessionId === owned?.sessionId ? file : undefined;
     };
+    // The screen model is fed Claude's output for the whole session (the typist subscribes
+    // in its constructor); each pause in the output is a moment to look at the prompt box.
+    options.child.onData(() => this.scheduleScreenLook());
     const ready = (after?: number): boolean => sessionReady(readOwned(), after);
     this.input = new LaptopInput({ clock: this.clock, busySince: (at) => sessionBusySince(readOwned(), at) });
     this.screen = new ScreenModel(options.size?.cols ?? 80, options.size?.rows ?? 24);
@@ -103,13 +115,15 @@ export class LauncherClient {
           this.send({ type: "command_written", cmdId, at });
         }
       },
+      // What the screen check decided, for agentd's log: names and lengths, never prompt text.
+      onCheck: (check) => this.send({ type: "screen_check", ...check }),
     });
-    this.input.onDraftChange(() => this.reportDraft());
   }
 
   /** The terminal was resized. */
   resize(cols: number, rows: number): void {
     this.screen.resize(cols, rows);
+    this.scheduleScreenLook();
   }
 
   /** Bytes from the user's terminal. */
@@ -118,6 +132,33 @@ export class LauncherClient {
     const now = this.input.key(data);
     if (now) {
       this.child.write(now);
+    }
+  }
+
+  private scheduleScreenLook(): void {
+    if (this.screenTimer === undefined) {
+      this.screenTimer = this.clock.setTimeout(() => {
+        this.screenTimer = undefined;
+        this.lookAtScreen();
+      }, SCREEN_LOOK_MS);
+    }
+  }
+
+  /**
+   * Whether the prompt box visibly has text in it, which is what agentd calls a
+   * laptop draft. The keys never say so: a stray Esc or Tab is not text, and a
+   * draft the keys never saw (a restored one, a paste) still is. While a command
+   * of ours has the prompt, the box holds our own paste, which is no draft.
+   */
+  private lookAtScreen(): void {
+    if (this.typist.busy) {
+      return; // looked at again when the command ends
+    }
+    const seen = probe(this.screen);
+    const text = seen.kind === "prompt" && !seen.empty;
+    if (text !== this.visibleDraft) {
+      this.visibleDraft = text;
+      this.reportDraft();
     }
   }
 
@@ -205,6 +246,8 @@ export class LauncherClient {
     this.typist.dispose();
     this.input.dispose();
     this.clock.clearTimeout(this.reportTimer);
+    this.clock.clearTimeout(this.screenTimer);
+    this.screenTimer = undefined;
   }
 
   /** R160: whatever was in flight, past its result too, is abandoned with the link that sent it. */
@@ -233,6 +276,7 @@ export class LauncherClient {
       if (epoch === this.epoch) {
         this.send({ type: "command_result", cmdId: cmd.cmdId, ok: result.ok, ...(result.error ? { error: result.error } : {}) });
       }
+      this.scheduleScreenLook();
     });
   }
 
@@ -248,7 +292,7 @@ export class LauncherClient {
       }, wait);
       return;
     }
-    const draft = this.input.draft;
+    const draft = this.visibleDraft;
     if (draft !== this.reportedDraft) {
       this.reportedDraft = draft;
       this.lastReportAt = this.clock.now();

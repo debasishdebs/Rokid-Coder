@@ -41,7 +41,29 @@ let inPaste = false;
 let sessionFileWritten = false;
 let consumed = 0;
 
-const out = (text) => process.stdout.write(text);
+const raw = (text) => process.stdout.write(text);
+
+// FAKE_BOX=1: the way real Claude draws its prompt, for the glasses replies that look for their own
+// text on the input line. Every change repaints the whole screen: the last lines Claude printed,
+// then the input line between two rules, then a footer. Typed keys are not echoed one by one.
+const boxMode = env.FAKE_BOX === "1";
+const history = [];
+function repaint() {
+  const rule = "─".repeat(60);
+  raw(`\x1b[2J\x1b[H${[...history.slice(-4), rule, `> ${state.line.replace(/\n/g, " ")}`, rule, "  ? for shortcuts"].join("\r\n")}`);
+}
+function out(text) {
+  if (!boxMode) {
+    raw(text);
+    return;
+  }
+  // What matters is the lines Claude printed, not the editing keystrokes it echoes.
+  const lines = text.replace(/\x1b\[[0-9;?]*[@-~]/g, "").replace(/[\r\b]/g, "").split("\n");
+  if (lines.length > 1) {
+    history.push(...lines.filter((line) => line.trim().length > 0));
+  }
+  repaint();
+}
 
 function sessionFile() {
   const dir = env.ROKID_CLAUDE_SESSIONS_DIR;
@@ -226,6 +248,7 @@ function onInput(data) {
   }
   pending = pending.slice(i);
   consumed += i;
+  if (boxMode) repaint();
   if (env.FAKE_INPUT_ACK_FILE) fs.writeFileSync(env.FAKE_INPUT_ACK_FILE, String(consumed));
 }
 
@@ -263,8 +286,8 @@ setTimeout(() => {
   writeSession();
   // What a TUI does on start: hide the cursor and turn bracketed paste on. rk must
   // undo both on every exit path, whatever state the child dies in.
-  out("\x1b[?25l\x1b[?2004h");
+  raw("\x1b[?25l\x1b[?2004h");
   // FAKE_TUI_MODES=1: the rest a full-screen TUI turns on, as real Claude does (R162).
-  if (env.FAKE_TUI_MODES === "1") out("\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[>1u");
+  if (env.FAKE_TUI_MODES === "1") raw("\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[>1u");
   out("fake-claude ready\r\n");
 }, Number(env.FAKE_SESSION_DELAY_MS) || 0);

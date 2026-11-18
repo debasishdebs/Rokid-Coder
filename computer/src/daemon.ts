@@ -280,6 +280,7 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
     onStateChange: (key) => phoneV2?.onLauncherChange(key),
     // The phone's opt-in, read live; false until a phone says otherwise.
     bgReplies: () => phoneV2?.bgRepliesEnabled() === true,
+    log: (event, meta) => logger.info(event, meta),
   });
   // Synchronous, inside the release: the session is busy before the Stop hook's
   // response is written (Review Focus 2).
