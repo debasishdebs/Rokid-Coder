@@ -90,15 +90,21 @@ internal class VoiceQuestionWiring(
             when {
                 // The wearer left the card, or started another utterance, while the link was coming up.
                 screen.voice !== run -> Unit
-                link == LinkEnsure.UP -> beginSpeech(run)
+                link == LinkEnsure.UP -> {
+                    run.capture.onLinkReady()
+                    beginSpeech(run)
+                }
                 else -> {
                     run.capture.onLinkUnavailable(linkUnavailableMessage(link))
                     voiceChanged(run)
                 }
             }
         }
-        // Waiting on the link: the card is up, saying it is starting.
-        if (!answered) voiceChanged(run)
+        // Waiting on the link, one bind or two: the card says it is connecting, which is not an error.
+        if (!answered) {
+            run.capture.onConnecting()
+            voiceChanged(run)
+        }
     }
 
     private fun linkUnavailableMessage(link: LinkEnsure): String = when (link) {

@@ -21,9 +21,11 @@ import kotlin.coroutines.ContinuationInterceptor
  * Hi Rokid has not closed its session on purpose: the background never fights Hi Rokid for the glasses.
  *
  * A voice action of the wearer is a different thing. Before it starts, [ensureLink] makes sure the link is
- * there: a live one is reused and nothing is bound; a down one is bound once, over a session Hi Rokid closed
- * too (as the Glass app screen does), and waited for up to [waitMs]. Taps made while one attempt waits join
- * it, and the background retries stand aside while it runs. That needs monitoring on and the service running.
+ * there: a live one is reused and nothing is bound; a down one is bound, over a session Hi Rokid closed
+ * too (as the Glass app screen does), and waited for up to [firstWaitMs]. If it is not up by then, one
+ * more bind is made, as the wearer's own second tap would, and waited for up to [secondWaitMs]; only after
+ * both is the link "not reached". Taps made while either waits join it, and the background retries stand
+ * aside while it runs. That needs monitoring on and the service running.
  *
  * Every decision is logged under [LinkLog], state changes and attempts only.
  *
@@ -36,13 +38,24 @@ internal class GlassesLinkHealer(
     private val core: CoderCore,
     private val enabled: () -> Boolean = { true },
     private val retryDelaysMs: List<Long> = RETRY_DELAYS_MS,
-    /** How long [ensureLink] waits for the link to come up after it bound. */
-    private val waitMs: Long = ENSURE_WAIT_MS,
+    /** How long [ensureLink] waits for the link to come up after its first bind. */
+    private val firstWaitMs: Long = FIRST_WAIT_MS,
+    /** How long it waits after the one more bind it makes when the first did not bring the link up. */
+    private val secondWaitMs: Long = SECOND_WAIT_MS,
+    /** Milliseconds on a clock that never goes back, for the timing lines. */
+    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     private var loop: Job? = null
     private var attempts = 0
     private var settling: Job? = null
-    private val waiting = mutableListOf<(LinkEnsure) -> Unit>()
+
+    /** A voice tap waiting on the link: when it was taken, and who hears the answer. */
+    private class Waiter(val tappedAtMs: Long, val onResult: (LinkEnsure) -> Unit)
+
+    private val waiting = mutableListOf<Waiter>()
+
+    /** Which bind of the current wait is running (1 or 2), for the timing lines. */
+    private var bindNo = 0
 
     /** The core's link state changed (or the service just started): start, keep or end the background retries. */
     fun onLinkState(state: Int) = onScope { evaluate(state) }
@@ -89,44 +102,52 @@ internal class GlassesLinkHealer(
     /**
      * The link, made sure of for a voice action the wearer just took, and [onResult] with how it went:
      * [LinkEnsure.UP] at once for a live link (nothing is bound), or once a bind brought it up within
-     * [waitMs]; [LinkEnsure.NOT_REACHED] when it did not; and at once, binding nothing, a distinct reason
-     * when monitoring is off, no token is stored or the service is stopping. One attempt at a time: taps
-     * made while one waits join it. Never retried here.
+     * [firstWaitMs] or, after one more bind, [secondWaitMs]; [LinkEnsure.NOT_REACHED] when neither did; and
+     * at once, binding nothing, a distinct reason when monitoring is off, no token is stored or the service
+     * is stopping. One wait at a time: taps made while it runs join it. Two binds at most, never a loop.
      */
     fun ensureLink(onResult: (LinkEnsure) -> Unit) = onScope {
+        val tappedAtMs = clockMs()
         if (stopped) {
             LinkLog.i("wearer link: skipped (service stopped)")
             return@onScope onResult(LinkEnsure.STOPPED)
         }
         if (core.linkState() and LinkStateBits.CXR_CONTROL_UP != 0) {
             LinkLog.i("wearer link: up, reused")
+            LinkLog.i("voice tap: link UP after 0ms (reused)")
             return@onScope onResult(LinkEnsure.UP)
         }
         if (!enabled()) {
             LinkLog.i("wearer link: skipped (monitoring off)")
             return@onScope onResult(LinkEnsure.MONITORING_OFF)
         }
-        waiting += onResult
+        waiting += Waiter(tappedAtMs, onResult)
         if (settling?.isActive == true) {
             LinkLog.i("wearer link: joins the attempt in flight")
             return@onScope
         }
         settling = scope.launch {
-            LinkLog.i("wearer link: down, binding (closedByServer=${core.linkClosedByServer})")
-            val bound = core.ensureLink()
-            LinkLog.i("wearer link: bind result $bound")
-            when (bound) {
-                CxrEnsureResult.ALREADY_UP -> resolve(LinkEnsure.UP)
-                CxrEnsureResult.NO_TOKEN -> resolve(LinkEnsure.NO_TOKEN)
-                CxrEnsureResult.HUB_STOPPED -> resolve(LinkEnsure.STOPPED)
-                CxrEnsureResult.NOT_BOUND -> resolve(LinkEnsure.NOT_REACHED)
-                CxrEnsureResult.CONNECTING -> {
-                    delay(waitMs)
-                    val up = core.linkState() and LinkStateBits.CXR_CONTROL_UP != 0
-                    LinkLog.i("wearer link: ${if (up) "up" else "still down"} after ${waitMs}ms")
-                    resolve(if (up) LinkEnsure.UP else LinkEnsure.NOT_REACHED)
+            for (bind in 1..MAX_BINDS) {
+                bindNo = bind
+                LinkLog.i("wearer link: down, binding (bind $bind, closedByServer=${core.linkClosedByServer})")
+                val bound = core.ensureLink()
+                LinkLog.i("wearer link: bind $bind result $bound")
+                when (bound) {
+                    CxrEnsureResult.ALREADY_UP -> return@launch resolve(LinkEnsure.UP)
+                    CxrEnsureResult.NO_TOKEN -> return@launch resolve(LinkEnsure.NO_TOKEN)
+                    CxrEnsureResult.HUB_STOPPED -> return@launch resolve(LinkEnsure.STOPPED)
+                    // Refused outright: the one more bind may be accepted; no wait for a link that has no bind.
+                    CxrEnsureResult.NOT_BOUND -> Unit
+                    CxrEnsureResult.CONNECTING -> {
+                        val wait = if (bind == 1) firstWaitMs else secondWaitMs
+                        delay(wait)
+                        val up = core.linkState() and LinkStateBits.CXR_CONTROL_UP != 0
+                        LinkLog.i("wearer link: bind $bind ${if (up) "up" else "still down"} after ${wait}ms")
+                        if (up) return@launch resolve(LinkEnsure.UP)
+                    }
                 }
             }
+            resolve(LinkEnsure.NOT_REACHED)
         }
     }
 
@@ -158,7 +179,20 @@ internal class GlassesLinkHealer(
         if (waiting.isEmpty()) return
         val callbacks = waiting.toList()
         waiting.clear()
-        callbacks.forEach { it(result) }
+        val now = clockMs()
+        // Per tap, so the next field log says how long the link took, and where it gave up.
+        callbacks.forEach { waiter ->
+            val took = now - waiter.tappedAtMs
+            when (result) {
+                LinkEnsure.UP -> LinkLog.i("voice tap: link UP after ${took}ms (attempt $bindNo)")
+                LinkEnsure.NOT_REACHED -> LinkLog.i(
+                    "voice tap: link NOT_REACHED after ${took}ms (attempt $bindNo failed, " +
+                        "${LinkLog.bits(core.linkState(), core.linkClosedByServer)})",
+                )
+                else -> LinkLog.i("voice tap: link $result after ${took}ms")
+            }
+        }
+        callbacks.forEach { it.onResult(result) }
     }
 
     /** Why the background must not chase the link now, or null when it may. */
@@ -214,8 +248,17 @@ internal class GlassesLinkHealer(
         /** The pause before each try, the last one repeating: long enough for one to finish, short of a battery cost. */
         val RETRY_DELAYS_MS = listOf(10_000L, 20_000L, 40_000L, 80_000L, 160_000L, 300_000L)
 
-        /** How long a voice action waits for the glasses link to come up after it was bound again. */
-        const val ENSURE_WAIT_MS = 5_000L
+        /** How long a voice action waits for the glasses link to come up after the first bind. */
+        const val FIRST_WAIT_MS = 6_000L
+
+        /** And after the one more bind made when the first did not bring it up. */
+        const val SECOND_WAIT_MS = 8_000L
+
+        /** A voice action binds at most this often: the tap's own bind and one more. */
+        const val MAX_BINDS = 2
+
+        /** The longest a voice action can wait on the link, both waits together. */
+        const val TOTAL_WAIT_MS = FIRST_WAIT_MS + SECOND_WAIT_MS
 
         private const val WEARER_BIND_IN_FLIGHT = "the wearer's bind is in flight"
     }

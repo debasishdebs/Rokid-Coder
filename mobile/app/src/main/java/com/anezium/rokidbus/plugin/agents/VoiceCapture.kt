@@ -24,6 +24,9 @@ fun interface SpeechStop {
 class VoiceCapture {
     sealed interface State {
         data object Idle : State
+
+        /** The glasses link is being made sure of before listening starts: neither an error nor listening yet. */
+        data object Connecting : State
         data object Listening : State
         data class Heard(val text: String) : State
         data class Failed(val message: String) : State
@@ -75,8 +78,20 @@ class VoiceCapture {
      * says why in words the wearer can act on, not as a link that was lost.
      */
     fun onLinkUnavailable(message: String) {
-        if (invalidated || state != State.Idle) return
+        if (invalidated || (state != State.Idle && state != State.Connecting)) return
         state = State.Failed(message)
+    }
+
+    /** The link is not up yet and the wait goes on: the card says so rather than showing an error. */
+    fun onConnecting() {
+        if (invalidated || state != State.Idle) return
+        state = State.Connecting
+    }
+
+    /** The link is up: the start that was waiting on it goes ahead from where an untouched capture stands. */
+    fun onLinkReady() {
+        if (invalidated || state != State.Connecting) return
+        state = State.Idle
     }
 
     fun onPartial(text: String) {
@@ -232,6 +247,9 @@ data class VoiceView(
  * and that card opens on `Cancel`.
  */
 object VoiceCard {
+    /** What the card says while the glasses link is being made sure of, between the tap and listening. */
+    const val CONNECTING_LINE = "Connecting to the glasses…"
+
     /** The BODY rows, its lead row included, the heard card draws of a reply at most. */
     const val BODY_ROWS = 3
 
@@ -344,6 +362,8 @@ object VoiceCard {
         return when (state) {
             VoiceCapture.State.Idle ->
                 VoiceView(title, "Starting…", listOf(VoiceRow("Cancel", null, VoiceAct.CANCEL)), 0)
+            VoiceCapture.State.Connecting ->
+                VoiceView(title, CONNECTING_LINE, listOf(VoiceRow("Cancel", null, VoiceAct.CANCEL)), 0)
             VoiceCapture.State.Listening ->
                 VoiceView(title, "Listening…", listOf(VoiceRow("Cancel", "speak now", VoiceAct.CANCEL)), 0)
             is VoiceCapture.State.Failed -> VoiceView(

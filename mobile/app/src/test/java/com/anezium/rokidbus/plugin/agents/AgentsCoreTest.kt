@@ -235,11 +235,34 @@ class AgentsCoreTest {
         assertEquals(1, linkCore.binds)
         assertEquals("nothing listens before the link is there", 0, glasses.speech.size)
         assertFalse(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+        assertTrue("the card says it is connecting", text(lastCard()).contains(VoiceCard.CONNECTING_LINE))
 
         linkUp(healer)
 
         assertEquals(1, glasses.speech.size)
         assertEquals(1, linkCore.binds)
+        assertFalse(text(lastCard()).contains(VoiceCard.CONNECTING_LINE))
+    }
+
+    @Test
+    fun the_first_wait_running_out_shows_the_connecting_card_not_an_error_and_the_second_bind_wins() {
+        glasses.open()
+        linkDown()
+        val healer = attachHealer()
+
+        core.startVoice(VoiceTarget.Approval("a1"))
+        idle()
+        ShadowLooper.idleMainLooper(GlassesLinkHealer.FIRST_WAIT_MS + 500, TimeUnit.MILLISECONDS)
+
+        assertEquals("one more bind, quietly", 2, linkCore.binds)
+        assertTrue(text(lastCard()).contains(VoiceCard.CONNECTING_LINE))
+        assertFalse(text(lastCard()).contains(VoiceCapture.NOT_REACHED))
+        assertFalse(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+
+        linkUp(healer)
+
+        assertEquals("the voice starts, with no error card between", 1, glasses.speech.size)
+        assertFalse(text(lastCard()).contains(VoiceCapture.NOT_REACHED))
     }
 
     @Test
@@ -269,7 +292,7 @@ class AgentsCoreTest {
 
         core.startVoice(VoiceTarget.Approval("a1"))
         idle()
-        ShadowLooper.idleMainLooper(GlassesLinkHealer.ENSURE_WAIT_MS + 500, TimeUnit.MILLISECONDS)
+        ShadowLooper.idleMainLooper(GlassesLinkHealer.TOTAL_WAIT_MS + 500, TimeUnit.MILLISECONDS)
         assertTrue(text(lastCard()).contains(VoiceCapture.NOT_REACHED))
 
         ShadowLooper.idleMainLooper(30, TimeUnit.MINUTES)
@@ -285,17 +308,18 @@ class AgentsCoreTest {
 
         core.startVoice(VoiceTarget.Approval("a1"))
         idle()
-        ShadowLooper.idleMainLooper(GlassesLinkHealer.ENSURE_WAIT_MS + 500, TimeUnit.MILLISECONDS)
+        ShadowLooper.idleMainLooper(GlassesLinkHealer.TOTAL_WAIT_MS + 500, TimeUnit.MILLISECONDS)
 
         assertEquals(0, glasses.speech.size)
-        assertTrue(text(lastCard()).contains(VoiceCapture.NOT_REACHED))
+        assertTrue("the error shows once, after both binds", text(lastCard()).contains(VoiceCapture.NOT_REACHED))
         assertFalse(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+        assertEquals(2, linkCore.binds)
 
         // Hi Rokid closes it again; "Speak again" is another tap, and another bind: no sticky refusal.
         linkCore.closedByServer = true
         core.startVoice(VoiceTarget.Approval("a1"))
         idle()
-        assertEquals(2, linkCore.binds)
+        assertEquals(3, linkCore.binds)
     }
 
     @Test

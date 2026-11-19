@@ -35,7 +35,7 @@ class LinkLogTest {
     private fun TestScope.newHealer(core: FakeLinkCore, enabled: () -> Boolean = { true }) =
         GlassesLinkHealer(
             CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)),
-            core, enabled = enabled,
+            core, enabled = enabled, clockMs = { testScheduler.currentTime },
         ).also { core.onLinkState = it::onLinkState }
 
     @Test
@@ -108,23 +108,31 @@ class LinkLogTest {
     }
 
     @Test
-    fun a_wearer_bind_says_its_attempt_and_its_result() = runTest {
+    fun a_wearer_bind_says_each_attempt_its_result_and_where_it_gave_up() = runTest {
         val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
         val healer = newHealer(core)
 
         healer.ensureLink { }
         runCurrent()
         healer.ensureLink { }
-        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        advanceTimeBy(GlassesLinkHealer.TOTAL_WAIT_MS + 1)
 
+        val failed = "voice tap: link NOT_REACHED after 14000ms (attempt 2 failed, " +
+            "cxr=down spp=down bonded=true worn=false closedByServer=true)"
         assertEquals(
             listOf(
-                "wearer link: down, binding (closedByServer=true)",
+                "wearer link: down, binding (bind 1, closedByServer=true)",
                 // The hub reports its state at the bind, and the closure still stands.
                 "healer: not chasing the link (Hi Rokid closed the session)",
-                "wearer link: bind result CONNECTING",
+                "wearer link: bind 1 result CONNECTING",
                 "wearer link: joins the attempt in flight",
-                "wearer link: still down after 5000ms",
+                "wearer link: bind 1 still down after 6000ms",
+                "wearer link: down, binding (bind 2, closedByServer=true)",
+                "wearer link: bind 2 result CONNECTING",
+                "wearer link: bind 2 still down after 8000ms",
+                // One line per tap, each with its own time.
+                failed,
+                failed,
             ),
             lines,
         )
@@ -132,7 +140,57 @@ class LinkLogTest {
         lines.clear()
         core.state = bonded or LinkStateBits.CXR_CONTROL_UP
         healer.ensureLink { }
-        assertEquals(listOf("wearer link: up, reused"), lines)
+        assertEquals(listOf("wearer link: up, reused", "voice tap: link UP after 0ms (reused)"), lines)
+    }
+
+    @Test
+    fun the_time_to_the_link_and_the_attempt_that_brought_it_are_logged_per_tap() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        val healer = newHealer(core)
+
+        healer.ensureLink { }
+        runCurrent()
+        advanceTimeBy(2_500)
+        healer.ensureLink { }
+        // The link comes up during the second wait: attempt 2, and each tap's own wait.
+        advanceTimeBy(5_500)
+        core.bringUp()
+
+        assertTrue(lines.toString(), "voice tap: link UP after 8000ms (attempt 2)" in lines)
+        assertTrue(lines.toString(), "voice tap: link UP after 5500ms (attempt 2)" in lines)
+
+        lines.clear()
+        val quick = FakeLinkCore().apply { state = bonded }
+        newHealer(quick).ensureLink { }
+        runCurrent()
+        advanceTimeBy(1_200)
+        quick.bringUp()
+        assertTrue(lines.toString(), "voice tap: link UP after 1200ms (attempt 1)" in lines)
+    }
+
+    @Test
+    fun the_lines_the_link_says_itself_are_never_touched_by_the_redaction() = runTest {
+        LinkLog.clearRecent()
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        healer.onLinkState(core.state)
+        healer.ensureLink { }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.TOTAL_WAIT_MS + 1)
+        core.bringUp()
+        core.drop(byServer = false)
+        advanceTimeBy(60_000)
+        healer.stop()
+        listOf(
+            "CXR-L connected=false", "CXR-L session closed by Hi Rokid", "Hi Rokid glass BT connected=true",
+            "CXR-L connect requested bound=true", "CXR-L closed-session flag stands until the link is seen up",
+        ).forEach(LinkLog::hub)
+        lines += LinkLog.bits(bonded, false)
+
+        assertTrue(lines.isNotEmpty())
+        // What the app wrote is what came out: no marker anywhere, so no line of ours looks like a secret.
+        assertTrue(lines.toString(), lines.none { "<id>" in it || "<addr>" in it })
+        LinkLog.clearRecent()
     }
 
     @Test
