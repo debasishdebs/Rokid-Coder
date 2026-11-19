@@ -58,6 +58,8 @@ Rokid-Coder has no cloud server and no account, and it collects nothing. Your ph
 
 ## Status
 
+What works, what is still being checked on real hardware, and what comes next is in the [roadmap](ROADMAP.md).
+
 Rokid-Coder is a release candidate for version 1.0, not a final release. Windows support is new and is still being tested. The installers are not signed yet, which is why your computer warns you. Rokid-Coder is not affiliated with Rokid, Anthropic or OpenAI. It is built on the open-source [Rokid Nexus](https://github.com/Anezium/Rokid-Nexus) by Anezium.
 
 ## For developers
