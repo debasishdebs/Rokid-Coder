@@ -336,10 +336,11 @@ export class SessionStates {
   private trackMainThread(key: SessionKey, event: string, payload: Record<string, unknown>): void {
     const sub = isSubagentHook(payload);
     const entry = this.entry(key);
-    if (!sub) {
-      entry.mode = typeof payload.permission_mode === "string" && payload.permission_mode.length <= 40
-        ? payload.permission_mode
-        : undefined;
+    // Sticky: only a valid `permission_mode` replaces the mode last known. A hook without the field (the
+    // idle_prompt notification, a minute after a Stop, carries none in the real logs) says nothing about
+    // it and must not wipe it; a mode never seen stays unknown, and unknown is refused.
+    if (!sub && typeof payload.permission_mode === "string" && payload.permission_mode.length > 0 && payload.permission_mode.length <= 40) {
+      entry.mode = payload.permission_mode;
     }
     const revoke = (cause: string): void => {
       entry.stopAt = undefined;
@@ -674,6 +675,8 @@ export class LauncherRouter {
   private readonly log?: (event: string, meta: Record<string, unknown>) => void;
   /** The last `bg_decision` logged for each session, so only a change says anything. */
   private readonly bgLogged = new Map<SessionKey, string>();
+  /** Sessions that have been told to the log as having a main-thread hook without a permission mode. */
+  private readonly noModeLogged = new Set<SessionKey>();
 
   constructor(options: {
     port: LauncherPort;
@@ -859,6 +862,7 @@ export class LauncherRouter {
   }
 
   onHook(key: SessionKey, event: string, payload: Record<string, unknown>): void {
+    this.logNoMode(key, event, payload);
     this.states.onHook(key, event, payload);
     // A hook may take a background reply's evidence away.
     this.revokeBg(key);
@@ -948,6 +952,7 @@ export class LauncherRouter {
     this.states.forget(key);
     this.shown.delete(key);
     this.bgLogged.delete(key);
+    this.noModeLogged.delete(key);
   }
 
   /** `compact` or `model`, from the glasses' launcher_command. */
@@ -1218,6 +1223,28 @@ export class LauncherRouter {
 
   private epoch(key: SessionKey): number {
     return this.epochs.get(key) ?? 0;
+  }
+
+  /**
+   * Once per session, the first main-thread hook that arrives without a `permission_mode`: its event and
+   * notification type, so the hooks that carry no mode are known from the log (the mode is sticky, so they
+   * cost nothing, but a session that never sends one would stay refused). Names only.
+   */
+  private logNoMode(key: SessionKey, event: string, payload: Record<string, unknown>): void {
+    const mode = payload.permission_mode;
+    if (!this.log || this.noModeLogged.has(key) || (typeof mode === "string" && mode.length > 0 && mode.length <= 40)) {
+      return;
+    }
+    if (payload.agent_id !== undefined && payload.agent_id !== null && payload.agent_id !== "") {
+      return; // a subagent's hook says nothing about the main thread's mode
+    }
+    this.noModeLogged.add(key);
+    const type = payload.notification_type;
+    this.log("hook_no_mode", {
+      session: key,
+      event: /^[A-Za-z]{1,40}$/.test(event) ? event : "other",
+      notificationType: typeof type === "string" && /^[a-z_]{1,40}$/.test(type) ? type : null,
+    });
   }
 
   /**

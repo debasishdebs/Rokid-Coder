@@ -9,6 +9,7 @@ import {
   showsDialog,
   showsEmptyPrompt,
   showsExactly,
+  showsPlanMode,
   type ProbeResult,
   type ScreenModel,
 } from "./screen-probe";
@@ -560,6 +561,12 @@ export class Typist {
       active.look = undefined;
       return "full";
     }
+    // The footer of plan mode (Shift+Tab at the laptop is no hook): its approval dialog takes any key, so
+    // no reply is pasted, whatever mode the last hook said. An unrecognised footer blocks nothing.
+    if (showsPlanMode(bg.screen)) {
+      active.look = { kind: "blocked", reason: "plan_mode" };
+      return "full";
+    }
     const seen = probe(bg.screen);
     active.look = seen;
     if (seen.kind === "unknown") {
@@ -617,7 +624,7 @@ export class Typist {
   /** The text, whole, on the input line; nothing disturbed the screen since it was pasted; Claude's file still allowing it. */
   private bgStillShows(active: Active): boolean {
     const bg = this.options.bg;
-    if (!bg || active.bgText === undefined || !this.fileAllows(active)) {
+    if (!bg || active.bgText === undefined || !this.fileAllows(active) || showsPlanMode(bg.screen)) {
       return false;
     }
     return showsExactly(probe(bg.screen, { sinceTaints: active.mark }), active.bgText);
@@ -652,6 +659,12 @@ export class Typist {
       return;
     }
     const seen = probe(bg.screen, { sinceTaints: active.mark });
+    if (showsPlanMode(bg.screen)) {
+      // Plan mode came on between the paste and the Enter: cleared, never entered.
+      this.check("post", active, "refused", { kind: "blocked", reason: "plan_mode" });
+      this.bgAbort(active, "not_sent");
+      return;
+    }
     // Exact, interior whitespace included: an Enter goes only for what was pasted.
     if (showsExactly(seen, active.bgText)) {
       active.seenAt ??= now;

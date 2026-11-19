@@ -305,7 +305,13 @@ Limits to know about:
   check as `launcher_screen_check` (phase, probe, reason, lengths, never prompt text), and, once per change
   of a session's background-reply answer, a `bg_decision` line naming the first rule that failed (switch,
   mode, running subagent, file status with its raw value, main-thread Stop and what revoked it, approval
-  pending, in flight or uncertain, laptop draft) with the Stop's age in seconds.
+  pending, in flight or uncertain, laptop draft) with the Stop's age in seconds. The permission mode is
+  sticky: only a hook that carries a valid `permission_mode` changes it (the idle_prompt notification,
+  a minute after a Stop, carries none), and the first main-thread hook without one is logged once per
+  session as `hook_no_mode`. The running-subagent count is cleared by a session start from `startup`,
+  `resume`, `clear` or an unknown source and by the session's end, not by a `compact` (agents run on
+  through a compaction); every SubagentStart, SubagentStop and clearing is logged as `subagent_event`
+  with the counts before and after, the cause and the first 8 characters of the agent id.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result
   cannot be seen, the session is marked uncertain and further commands are refused until you check it.
 - A follow-up is one bracketed paste of at most 16 KiB.

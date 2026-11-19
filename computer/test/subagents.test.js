@@ -177,3 +177,77 @@ test("the_phone_gets_subagents_in_session_upsert_and_snapshot_only_while_some_ru
     assert.ok(done);
   });
 });
+
+// ---- SessionStart and the running count; the log that explains it ------------------------
+
+function loggedStore() {
+  const clock = { now: 1_800_000_000_000 };
+  const logs = [];
+  const logger = {
+    info: (name, meta) => logs.push({ name, ...meta }),
+    warn: () => undefined,
+    error: () => undefined,
+  };
+  const s = new SessionStore({ machineId: "m", machineName: "n" }, logger, () => clock.now);
+  const hook = (event, extra = {}) => s.handleHook({ session_id: ID, cwd: "/work/demo", hook_event_name: event, ...extra });
+  return { s, hook, logs, subagents: () => s.get(ID)?.subagents, events: () => logs.filter((l) => l.name === "subagent_event") };
+}
+
+test("a_compaction_keeps_the_running_agents_and_every_other_session_start_clears_them", () => {
+  for (const [source, kept] of [
+    ["compact", true],
+    ["startup", false],
+    ["resume", false],
+    ["clear", false],
+    [undefined, false],
+    ["something_new", false],
+    ["Compact", false],
+  ]) {
+    const { hook, subagents } = loggedStore();
+    hook("SessionStart", source === undefined ? {} : { source });
+    hook("SubagentStart", start("agent-one-aaaaaaaa"));
+    hook("SubagentStart", start("agent-two-bbbbbbbb"));
+    assert.equal(subagents().running, 2);
+    hook("SessionStart", source === undefined ? {} : { source });
+    assert.equal(subagents()?.running, kept ? 2 : undefined, String(source));
+  }
+});
+
+test("the_end_of_a_session_clears_the_count_and_says_so", () => {
+  const { hook, events, subagents } = loggedStore();
+  hook("SessionStart", { source: "startup" });
+  hook("SubagentStart", start("a1"));
+  hook("SessionEnd");
+  assert.equal(subagents(), undefined);
+  assert.deepEqual(
+    events().map((e) => [e.event, e.cause, e.before, e.after]).at(-1),
+    ["subagents_cleared", "session_end", 1, 0],
+  );
+});
+
+test("every_subagent_event_and_every_clearing_is_logged_with_counts_and_a_short_id", () => {
+  const { hook, events } = loggedStore();
+  hook("SessionStart", { source: "startup" });
+  assert.deepEqual(events(), [], "a start with nothing running clears nothing worth a line");
+  hook("SubagentStart", start("0123456789abcdef", { prompt: "secret words", description: "secret words" }));
+  hook("SubagentStart", { agent_type: "general-purpose" });
+  hook("SubagentStop", { agent_id: "0123456789abcdef" });
+  hook("SubagentStop", { agent_id: "unknown-agent-zzz" });
+  hook("SubagentStart", start("fedcba9876543210"));
+  hook("SessionStart", { source: "compact" });
+  hook("SessionStart", { source: "resume" });
+  assert.deepEqual(
+    events().map((e) => [e.event, e.cause, e.before, e.after, e.agent]),
+    [
+      ["SubagentStart", "hook", 0, 1, "01234567"],
+      ["SubagentStart", "hook", 1, 1, "none"],
+      ["SubagentStop", "hook", 1, 0, "01234567"],
+      ["SubagentStop", "hook", 0, 0, "unknown-"],
+      ["SubagentStart", "hook", 0, 1, "fedcba98"],
+      ["session_start_kept", "session_start:compact", 1, 1, undefined],
+      ["subagents_cleared", "session_start:resume", 1, 0, undefined],
+    ],
+  );
+  assert.equal(events().every((e) => e.session === ID.slice(0, 8)), true);
+  assert.equal(JSON.stringify(events()).includes("secret"), false, "no payload bodies");
+});

@@ -363,3 +363,15 @@ test("a_background_reply_text_is_one_short_line_with_nothing_that_acts_as_a_key"
   assert.equal(bgReplyText("   "), undefined);
   assert.equal(bgReplyText(42), undefined);
 });
+
+test("only_a_recognised_plan_mode_footer_is_plan_mode", () => {
+  const { showsPlanMode } = require("../dist/launcher/screen-probe.js");
+  const withFooter = (footer) => screen(repaint({ footer: [footer] }));
+  for (const footer of ["  ⏸ plan mode on (shift+tab to cycle)", "plan mode on", "  ⏸⏸ PLAN MODE ON · 1 agent", "  >> Plan  Mode  On"]) {
+    assert.equal(showsPlanMode(withFooter(footer)), true, footer);
+  }
+  for (const footer of ["  ⏵⏵ auto mode on (shift+tab to cycle)", "  ⏵⏵ accept edits on", "  ? for shortcuts", "  bypass permissions on", "  plan mode off", "  airplane mode on", "  the plan mode online"]) {
+    assert.equal(showsPlanMode(withFooter(footer)), false, footer);
+  }
+  assert.equal(showsPlanMode(screen("")), false);
+});
