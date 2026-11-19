@@ -42,6 +42,8 @@ class AgentsCoreTest {
 
     @Before
     fun setUp() {
+        // The service's healer, with the link up, so a tap reuses it and the speech starts as it always did.
+        attachHealer()
         core = AgentsCore(glasses, RuntimeEnvironment.getApplication())
         core.start()
         idle()
@@ -187,101 +189,176 @@ class AgentsCoreTest {
         assertEquals(1, run.stops)
     }
 
-    // ------------------------------------------------------- a voice start denied for want of the glasses link
+    // ------------------------------------------------------- every voice tap makes sure of the glasses link first
 
-    private val linkCore = FakeLinkCore().apply { state = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED }
+    private val bonded = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED
+    private val linkCore = FakeLinkCore().apply { state = bonded or LinkStateBits.CXR_CONTROL_UP }
     private val healerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var monitoring = true
 
+    /** The service's healer on [linkCore], which starts with the link up: a tap then reuses it. */
     private fun attachHealer(): GlassesLinkHealer =
-        GlassesLinkHealer(healerScope, linkCore, settleMs = 2_000).also(CoderRuntime::attachHealer)
+        GlassesLinkHealer(healerScope, linkCore, enabled = { monitoring }).also {
+            linkCore.onLinkState = it::onLinkState
+            CoderRuntime.attachHealer(it)
+        }
 
-    private fun denyNoLink(run: FakeGlassesSurface.Handle) =
-        run.listener.onStopped(NexusSpeechStopReason.DENIED_NO_LINK, null)
+    private fun linkDown() {
+        linkCore.state = bonded
+    }
 
-    @Test
-    fun a_voice_start_denied_for_no_link_reconnects_and_runs_again_when_the_link_comes_up() {
-        glasses.open()
-        val healer = attachHealer()
-        core.startVoice(VoiceTarget.Approval("a1"))
-
-        denyNoLink(glasses.speech.single())
+    private fun linkUp(@Suppress("UNUSED_PARAMETER") healer: GlassesLinkHealer) {
+        linkCore.bringUp()
         idle()
-
-        assertEquals("one reconnect, at once", 1, linkCore.reconnects)
-        assertEquals("the denial is not shown while the link is coming back", 1, glasses.speech.size)
-        assertFalse(text(lastCard()).contains(VoiceCapture.LINK_LOST))
-
-        linkCore.state = linkCore.state or LinkStateBits.CXR_CONTROL_UP
-        healer.onLinkState(linkCore.state)
-        idle()
-
-        assertEquals("the start ran once more", 2, glasses.speech.size)
-        glasses.speech.last().listener.onStarted(true)
-        assertTrue(text(lastCard()).isNotBlank())
-        assertFalse(text(lastCard()).contains(VoiceCapture.LINK_LOST))
-        CoderRuntime.attachHealer(null)
     }
 
     @Test
-    fun a_link_that_stays_down_shows_the_loss_after_the_wait() {
+    fun a_tap_with_the_link_up_reuses_it_and_binds_nothing() {
         glasses.open()
-        attachHealer()
+
         core.startVoice(VoiceTarget.Approval("a1"))
 
-        denyNoLink(glasses.speech.single())
+        assertEquals("the speech started at once", 1, glasses.speech.size)
+        assertEquals(0, linkCore.binds)
+        assertEquals(0, linkCore.reconnects)
+    }
+
+    @Test
+    fun a_tap_with_the_link_down_binds_once_and_listens_only_when_it_is_up() {
+        glasses.open()
+        linkDown()
+        val healer = attachHealer()
+
+        core.startVoice(VoiceTarget.Approval("a1"))
         idle()
-        ShadowLooper.idleMainLooper(2_500, TimeUnit.MILLISECONDS)
+
+        assertEquals(1, linkCore.binds)
+        assertEquals("nothing listens before the link is there", 0, glasses.speech.size)
+        assertFalse(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+
+        linkUp(healer)
 
         assertEquals(1, glasses.speech.size)
-        assertTrue(text(lastCard()).contains(VoiceCapture.LINK_LOST))
-        CoderRuntime.attachHealer(null)
+        assertEquals(1, linkCore.binds)
     }
 
     @Test
-    fun the_retry_is_one_only_and_a_second_denial_is_shown() {
+    fun a_tap_over_a_session_hi_rokid_closed_takes_the_link_back_and_the_closure_clears_when_it_is_up() {
         glasses.open()
+        linkDown()
+        linkCore.closedByServer = true
         val healer = attachHealer()
+
         core.startVoice(VoiceTarget.Approval("a1"))
-        denyNoLink(glasses.speech.single())
-        linkCore.state = linkCore.state or LinkStateBits.CXR_CONTROL_UP
-        healer.onLinkState(linkCore.state)
         idle()
-        assertEquals(2, glasses.speech.size)
+        assertEquals(1, linkCore.binds)
+        assertTrue("the closure stands until the link is seen up", linkCore.closedByServer)
+        assertEquals("the background reconnect was never used", 0, linkCore.reconnects)
 
-        denyNoLink(glasses.speech.last())
-        idle()
-        ShadowLooper.idleMainLooper(5, TimeUnit.SECONDS)
-
-        assertEquals("no second retry", 2, glasses.speech.size)
-        assertEquals(1, linkCore.reconnects)
-        assertTrue(text(lastCard()).contains(VoiceCapture.LINK_LOST))
-        CoderRuntime.attachHealer(null)
+        linkUp(healer)
+        assertFalse(linkCore.closedByServer)
+        assertEquals(1, glasses.speech.size)
     }
 
     @Test
-    fun with_no_service_to_reconnect_the_denial_is_shown_at_once() {
+    fun a_failed_tap_leaves_the_background_refusing_after_the_card_has_said_so() {
         glasses.open()
-        CoderRuntime.attachHealer(null)
-        core.startVoice(VoiceTarget.Approval("a1"))
-
-        denyNoLink(glasses.speech.single())
-        idle()
-
-        assertTrue(text(lastCard()).contains(VoiceCapture.LINK_LOST))
-    }
-
-    @Test
-    fun other_denials_are_not_retried() {
-        glasses.open()
+        linkDown()
+        linkCore.closedByServer = true
         attachHealer()
+
+        core.startVoice(VoiceTarget.Approval("a1"))
+        idle()
+        ShadowLooper.idleMainLooper(GlassesLinkHealer.ENSURE_WAIT_MS + 500, TimeUnit.MILLISECONDS)
+        assertTrue(text(lastCard()).contains(VoiceCapture.NOT_REACHED))
+
+        ShadowLooper.idleMainLooper(30, TimeUnit.MINUTES)
+
+        assertEquals("no background reconnect after the failed tap", 0, linkCore.reconnects)
+    }
+
+    @Test
+    fun a_link_that_does_not_come_up_says_so_specifically_and_each_tap_tries_again() {
+        glasses.open()
+        linkDown()
+        attachHealer()
+
+        core.startVoice(VoiceTarget.Approval("a1"))
+        idle()
+        ShadowLooper.idleMainLooper(GlassesLinkHealer.ENSURE_WAIT_MS + 500, TimeUnit.MILLISECONDS)
+
+        assertEquals(0, glasses.speech.size)
+        assertTrue(text(lastCard()).contains(VoiceCapture.NOT_REACHED))
+        assertFalse(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+
+        // Hi Rokid closes it again; "Speak again" is another tap, and another bind: no sticky refusal.
+        linkCore.closedByServer = true
+        core.startVoice(VoiceTarget.Approval("a1"))
+        idle()
+        assertEquals(2, linkCore.binds)
+    }
+
+    @Test
+    fun two_quick_taps_make_one_bind_and_one_listening_session() {
+        glasses.open()
+        linkDown()
+        val healer = attachHealer()
+
+        core.startVoice(VoiceTarget.Approval("a1"))
+        core.startVoice(VoiceTarget.Approval("a1"))
+        idle()
+        assertEquals("one bind, not two", 1, linkCore.binds)
+
+        linkUp(healer)
+        assertEquals("only the second tap's card listens", 1, glasses.speech.size)
+    }
+
+    @Test
+    fun a_missing_token_monitoring_off_or_no_service_each_say_something_of_their_own() {
+        glasses.open()
+        linkDown()
+        attachHealer()
+        linkCore.ensureResult = com.anezium.rokidbus.phone.CxrEnsureResult.NO_TOKEN
+        core.startVoice(VoiceTarget.Approval("a1"))
+        idle()
+        assertTrue(text(lastCard()).contains(VoiceCapture.GLASSES_NOT_SET_UP))
+
+        monitoring = false
+        core.startVoice(VoiceTarget.Approval("a1"))
+        idle()
+        assertTrue(text(lastCard()).contains(VoiceCapture.MONITORING_OFF))
+
+        CoderRuntime.attachHealer(null)
+        core.startVoice(VoiceTarget.Approval("a1"))
+        idle()
+        assertTrue(text(lastCard()).contains(VoiceCapture.NOT_REACHED))
+        assertEquals("none of them started listening", 0, glasses.speech.size)
+    }
+
+    @Test
+    fun a_denial_after_the_link_was_made_sure_of_is_shown_not_retried() {
+        glasses.open()
+        core.startVoice(VoiceTarget.Approval("a1"))
+
+        glasses.speech.single().listener.onStopped(NexusSpeechStopReason.DENIED_NO_LINK, null)
+        idle()
+        ShadowLooper.idleMainLooper(10, TimeUnit.SECONDS)
+
+        assertTrue(text(lastCard()).contains(VoiceCapture.LINK_LOST))
+        assertEquals(1, glasses.speech.size)
+        assertEquals(0, linkCore.binds)
+    }
+
+    @Test
+    fun other_denials_are_shown_as_they_are() {
+        glasses.open()
         core.startVoice(VoiceTarget.Approval("a1"))
 
         glasses.speech.single().listener.onStopped(NexusSpeechStopReason.DENIED_BUSY, null)
         idle()
 
-        assertEquals(0, linkCore.reconnects)
+        assertEquals(0, linkCore.binds)
         assertTrue(text(lastCard()).contains(VoiceCapture.MIC_BUSY))
-        CoderRuntime.attachHealer(null)
     }
 
     @Test

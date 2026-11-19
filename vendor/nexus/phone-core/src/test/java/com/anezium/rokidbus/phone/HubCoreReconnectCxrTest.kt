@@ -97,6 +97,123 @@ class HubCoreReconnectCxrTest {
         assertFalse(core.cxrClosedByServer)
     }
 
+    // ---------------------------------------------------------------- the link, made sure of for the wearer
+
+    @Test
+    fun a_live_link_is_reused_and_nothing_is_bound() {
+        harness.startLinked()
+        assertTrue(core.isCxrUp())
+
+        assertEquals(CxrEnsureResult.ALREADY_UP, core.ensureCxrLink())
+        assertEquals(CxrEnsureResult.ALREADY_UP, core.ensureCxrLink())
+
+        assertEquals("no extra bind", 1, cxr.connectTokens.size)
+        assertEquals(0, cxr.disconnects)
+    }
+
+    @Test
+    fun a_session_hi_rokid_closed_is_taken_back_for_the_wearer_and_the_closure_clears_when_the_link_is_up() {
+        harness.startLinked()
+        cxr.linkDown()
+        cxr.linkCallback!!.onCXRLDisconnectedByServer()
+        assertTrue(core.cxrClosedByServer)
+        // The background retry still refuses.
+        assertFalse(core.reconnectCxr())
+        assertEquals(1, cxr.connectTokens.size)
+
+        assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
+
+        assertEquals(listOf("test-token", "test-token"), cxr.connectTokens.toList())
+        assertEquals(0, cxr.disconnects)
+        assertTrue("the closure stands until the link is seen up", core.cxrClosedByServer)
+
+        cxr.linkUp()
+        assertFalse(core.cxrClosedByServer)
+    }
+
+    @Test
+    fun a_bind_that_never_comes_up_leaves_the_background_refusing() {
+        harness.startLinked()
+        cxr.linkDown()
+        cxr.linkCallback!!.onCXRLDisconnectedByServer()
+
+        assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
+        assertFalse(core.isCxrUp())
+
+        assertTrue(core.cxrClosedByServer)
+        assertFalse("the background still refuses", core.reconnectCxr())
+        assertEquals("and binds nothing", 2, cxr.connectTokens.size)
+    }
+
+    @Test
+    fun once_the_link_was_seen_up_a_later_drop_that_is_not_a_closure_is_the_backgrounds_to_heal() {
+        harness.startLinked()
+        cxr.linkDown()
+        cxr.linkCallback!!.onCXRLDisconnectedByServer()
+        assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
+        cxr.linkUp()
+        assertFalse(core.cxrClosedByServer)
+
+        cxr.linkDown()
+
+        assertTrue(core.reconnectCxr())
+        assertEquals(3, cxr.connectTokens.size)
+    }
+
+    @Test
+    fun a_closure_delivered_while_the_wearers_bind_connects_does_not_stop_it() {
+        harness.startLinked()
+        cxr.linkDown()
+        cxr.beforeBind = {
+            cxr.beforeBind = {}
+            cxr.linkCallback!!.onCXRLDisconnectedByServer()
+        }
+
+        assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
+
+        assertEquals("the bind is kept", 0, cxr.disconnects)
+        assertTrue("and the closure stands until the link is up", core.cxrClosedByServer)
+        cxr.linkUp()
+        assertFalse(core.cxrClosedByServer)
+    }
+
+    @Test
+    fun a_link_that_stays_down_is_bound_again_on_the_next_ask_with_no_sticky_refusal() {
+        harness.startLinked()
+        cxr.linkDown()
+        cxr.linkCallback!!.onCXRLDisconnectedByServer()
+
+        assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
+        // The bind came up but the glasses did not report in: still down.
+        assertFalse(core.isCxrUp())
+        assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
+        cxr.linkCallback!!.onCXRLDisconnectedByServer()
+        assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
+
+        assertEquals(4, cxr.connectTokens.size)
+    }
+
+    @Test
+    fun a_bind_the_library_refuses_is_said_so() {
+        harness.startLinked()
+        cxr.linkDown()
+        cxr.refuseBind = true
+
+        assertEquals(CxrEnsureResult.NOT_BOUND, core.ensureCxrLink())
+    }
+
+    @Test
+    fun a_stopped_hub_or_no_stored_token_binds_nothing_and_says_which() {
+        harness.context.getSharedPreferences(HubPrefs.PREFS, 0).edit().remove("cxrl_token").commit()
+        core.start()
+        assertEquals(CxrEnsureResult.NO_TOKEN, core.ensureCxrLink())
+        assertEquals(0, cxr.connectTokens.size)
+
+        core.stop()
+        assertEquals(CxrEnsureResult.HUB_STOPPED, core.ensureCxrLink())
+        assertEquals(0, cxr.connectTokens.size)
+    }
+
     @Test
     fun no_stored_token_means_nothing_to_connect_with() {
         harness.context.getSharedPreferences(HubPrefs.PREFS, 0).edit().remove("cxrl_token").commit()

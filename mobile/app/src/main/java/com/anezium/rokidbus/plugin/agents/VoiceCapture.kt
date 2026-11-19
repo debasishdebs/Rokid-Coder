@@ -70,6 +70,15 @@ class VoiceCapture {
         }
     }
 
+    /**
+     * The glasses link could not be made sure of before listening, so no session was ever started; [message]
+     * says why in words the wearer can act on, not as a link that was lost.
+     */
+    fun onLinkUnavailable(message: String) {
+        if (invalidated || state != State.Idle) return
+        state = State.Failed(message)
+    }
+
     fun onPartial(text: String) {
         if (invalidated || state != State.Listening) return
         if (text.isNotBlank()) lastPartial = text
@@ -147,6 +156,9 @@ class VoiceCapture {
     companion object {
         const val MIC_BUSY = "Mic busy — try again"
         const val LINK_LOST = "Glasses link lost"
+        const val NOT_REACHED = "Could not reach the glasses, try again"
+        const val MONITORING_OFF = "Monitoring is off — turn it on in Settings"
+        const val GLASSES_NOT_SET_UP = "Glasses not set up — open Rokid Coder to connect them"
         const val DIDNT_CATCH = "Didn't catch that"
         const val UNAVAILABLE = "Voice unavailable"
         const val VOICE_ERROR = "Voice failed — try again"

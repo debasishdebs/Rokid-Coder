@@ -40,6 +40,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
+import com.anezium.rokidbus.plugin.agents.service.LinkEnsure
 
 /**
  * The Agents code on the glasses, in-process with the hub: the board, the menus, the alert
@@ -185,7 +186,7 @@ class AgentsCore(
                 override fun brief(title: String, body: String, safety: Boolean) =
                     showBriefNotice(title, body, safety)
                 override val voiceWordLimit: Int get() = configStore.voiceWordLimit()
-                override fun healLink(onResult: (Boolean) -> Unit) = CoderRuntime.healGlassesLink(onResult)
+                override fun ensureLink(onResult: (LinkEnsure) -> Unit) = CoderRuntime.ensureGlassesLink(onResult)
             },
         )
     }

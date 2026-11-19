@@ -239,6 +239,31 @@ class CoderServiceTest {
     }
 
     @Test
+    fun the_link_is_logged_when_it_changes_and_not_when_it_only_repeats() {
+        val lines = mutableListOf<String>()
+        val original = LinkLog.sink
+        LinkLog.sink = { lines += it }
+        try {
+            val service = deliver(bootIntent())
+            lines.clear()
+
+            service.onLinkStateChanged(LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED)
+            service.onLinkStateChanged(LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED)
+            service.onLinkStateChanged(LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED or LinkStateBits.CXR_CONTROL_UP)
+
+            assertEquals(
+                listOf(
+                    "link state cxr=down spp=down bonded=true worn=false closedByServer=false",
+                    "link state cxr=up spp=down bonded=true worn=false closedByServer=false",
+                ),
+                lines.filter { it.startsWith("link state") },
+            )
+        } finally {
+            LinkLog.sink = original
+        }
+    }
+
+    @Test
     fun monitoring_off_leaves_a_dropped_glasses_link_alone() {
         AgentsConfigStore(app).setAgentdEnabled(false)
         linkBits = LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED

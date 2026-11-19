@@ -85,13 +85,14 @@ object CoderRuntime : CoderCommands {
     }
 
     /**
-     * One reconnect of the glasses link now, for a request the wearer just made that it denied; [onResult]
-     * says whether the link was up a moment later. With no service running there is nothing to reconnect.
+     * Makes sure the glasses link is up before something the wearer just asked for (a voice reply) starts:
+     * a live link is reused, a down one is bound once and waited for a little; [onResult] says what came of
+     * it. With no service running there is nothing to connect.
      */
     @MainThread
-    fun healGlassesLink(onResult: (Boolean) -> Unit) {
+    internal fun ensureGlassesLink(onResult: (LinkEnsure) -> Unit) {
         val current = healer
-        if (current == null) onResult(false) else current.healNow(onResult)
+        if (current == null) onResult(LinkEnsure.STOPPED) else current.ensureLink(onResult)
     }
 
     /**

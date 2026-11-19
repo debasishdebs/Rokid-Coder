@@ -42,9 +42,12 @@ internal class FakeCxrTransport : CxrTransport {
 
     /** What the library does inside `connect` before it binds: the closure of a bind it finishes first. */
     @Volatile var beforeBind: () -> Unit = {}
+    /** The library refusing the bind, as when Hi Rokid is not installed or not authorized. */
+    @Volatile var refuseBind = false
     override fun connect(token: String): Boolean {
         connectTokens += token
         beforeBind()
+        if (refuseBind) return false
         serviceConnected = true
         return true
     }

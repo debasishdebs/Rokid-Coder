@@ -1,5 +1,6 @@
 package com.anezium.rokidbus.plugin.agents.service
 
+import com.anezium.rokidbus.phone.CxrEnsureResult
 import com.anezium.rokidbus.shared.LinkStateBits
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -33,8 +34,8 @@ class GlassesLinkHealerTest {
     private fun TestScope.newHealer(core: FakeLinkCore, enabled: () -> Boolean = { true }) =
         GlassesLinkHealer(
             CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)),
-            core, enabled = enabled, settleMs = 3_000,
-        )
+            core, enabled = enabled,
+        ).also { core.onLinkState = it::onLinkState }
 
     @Test
     fun a_dropped_link_is_connected_again_with_a_growing_pause() = runTest {
@@ -168,88 +169,256 @@ class GlassesLinkHealerTest {
         assertEquals(0, core.reconnects)
     }
 
-    // ------------------------------------------------------------------ a request that was denied for want of the link
+    // ------------------------------------------------------------------ the link, made sure of for a voice action
 
     @Test
-    fun a_denied_request_reconnects_at_once_and_hears_the_link_come_up() = runTest {
+    fun a_live_link_is_reused_without_binding_anything() = runTest {
+        val core = FakeLinkCore().apply { state = bonded or up }
+        var answer: LinkEnsure? = null
+
+        newHealer(core).ensureLink { answer = it }
+
+        assertEquals(LinkEnsure.UP, answer)
+        assertEquals("not even asked of the hub", 0, core.ensures)
+        assertEquals(0, core.binds)
+    }
+
+    @Test
+    fun a_down_link_is_bound_at_once_and_the_voice_start_hears_it_come_up() = runTest {
         val core = FakeLinkCore().apply { state = bonded }
         val healer = newHealer(core)
-        var result: Boolean? = null
+        var answer: LinkEnsure? = null
 
-        healer.healNow { result = it }
+        healer.ensureLink { answer = it }
         runCurrent()
-        assertEquals("no waiting for a pause", 1, core.reconnects)
-        assertNull(result)
+        assertEquals("no waiting for a pause", 1, core.binds)
+        assertEquals("not the background's reconnect", 0, core.reconnects)
+        assertNull(answer)
 
         core.state = bonded or up
         healer.onLinkState(core.state)
-        assertEquals(true, result)
+        assertEquals(LinkEnsure.UP, answer)
     }
 
     @Test
-    fun a_link_that_does_not_come_up_within_the_wait_is_reported_down() = runTest {
+    fun a_link_that_does_not_come_up_within_the_wait_is_not_reached() = runTest {
         val core = FakeLinkCore().apply { state = bonded }
         val healer = newHealer(core)
-        var result: Boolean? = null
+        var answer: LinkEnsure? = null
 
-        healer.healNow { result = it }
+        healer.ensureLink { answer = it }
         runCurrent()
-        advanceTimeBy(2_999)
-        assertNull(result)
+        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS - 1)
+        assertNull(answer)
         advanceTimeBy(2)
-        assertEquals(false, result)
+        assertEquals(LinkEnsure.NOT_REACHED, answer)
     }
 
     @Test
-    fun an_up_link_answers_at_once_and_a_core_with_nothing_to_connect_says_down_at_once() = runTest {
-        val up = FakeLinkCore().apply { state = bonded or this@GlassesLinkHealerTest.up }
-        var answer: Boolean? = null
-        newHealer(up).healNow { answer = it }
-        assertEquals(true, answer)
-        assertEquals(0, up.reconnects)
+    fun the_wait_is_a_named_bounded_constant() {
+        assertTrue(GlassesLinkHealer.ENSURE_WAIT_MS in 3_000L..5_000L)
+    }
 
-        val bare = FakeLinkCore().apply { state = bonded; canReconnect = false }
-        answer = null
-        newHealer(bare).healNow { answer = it }
+    @Test
+    fun a_refused_bind_a_missing_token_and_a_stopped_hub_each_say_which() = runTest {
+        fun answerFor(result: CxrEnsureResult): LinkEnsure? {
+            val core = FakeLinkCore().apply { state = bonded; ensureResult = result }
+            var answer: LinkEnsure? = null
+            newHealer(core).ensureLink { answer = it }
+            runCurrent()
+            return answer
+        }
+        assertEquals(LinkEnsure.NOT_REACHED, answerFor(CxrEnsureResult.NOT_BOUND))
+        assertEquals(LinkEnsure.NO_TOKEN, answerFor(CxrEnsureResult.NO_TOKEN))
+        assertEquals(LinkEnsure.STOPPED, answerFor(CxrEnsureResult.HUB_STOPPED))
+    }
+
+    @Test
+    fun a_tap_takes_the_link_back_from_a_session_hi_rokid_closed_and_the_closure_clears() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        var answer: LinkEnsure? = null
+
+        // The background holds back while the closure stands.
+        healer.onLinkState(core.state)
+        advanceTimeBy(900_000)
+        assertEquals(0, core.reconnects)
+
+        healer.ensureLink { answer = it }
         runCurrent()
-        assertEquals(false, answer)
+
+        assertEquals("the wearer's own tap binds", 1, core.binds)
+        assertTrue("the closure stands until the link is seen up", core.closedByServer)
+        core.bringUp()
+        assertFalse(core.closedByServer)
+        assertEquals(LinkEnsure.UP, answer)
     }
 
     @Test
-    fun a_denied_request_tries_even_when_hi_rokid_closed_the_session_or_monitoring_is_off() = runTest {
+    fun a_wearer_bind_that_never_comes_up_does_not_free_the_background_to_fight_hi_rokid() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        var answer: LinkEnsure? = null
+
+        healer.ensureLink { answer = it }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        assertEquals(LinkEnsure.NOT_REACHED, answer)
+
+        // Well past every backoff step: the background never took the glasses back.
+        advanceTimeBy(2_000_000)
+
+        assertEquals(1, core.binds)
+        assertEquals(0, core.reconnects)
+        assertTrue(core.closedByServer)
+    }
+
+    @Test
+    fun a_wearer_bind_that_came_up_frees_the_background_for_a_later_drop_that_is_not_a_closure() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        healer.ensureLink { }
+        runCurrent()
+        core.bringUp()
+
+        // Later the link drops on its own, not by Hi Rokid's hand.
+        core.drop(byServer = false)
+        advanceTimeBy(10_001)
+
+        assertEquals(1, core.reconnects)
+    }
+
+    @Test
+    fun a_later_drop_that_is_a_closure_is_still_left_to_the_wearer() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        healer.ensureLink { }
+        runCurrent()
+        core.bringUp()
+
+        core.drop(byServer = true)
+        advanceTimeBy(2_000_000)
+
+        assertEquals(0, core.reconnects)
+    }
+
+    @Test
+    fun a_second_tap_after_a_failed_bind_still_binds() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+
+        healer.ensureLink { }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        healer.ensureLink { }
+        runCurrent()
+
+        assertEquals("the closure that stood did not refuse the wearer", 2, core.binds)
+    }
+
+    @Test
+    fun the_background_alone_still_refuses_while_the_closure_stands() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        healer.onLinkState(core.state)
+        healer.onMonitoringChanged()
+        advanceTimeBy(900_000)
+        assertEquals(0, core.reconnects)
+        assertEquals(0, core.binds)
+        assertTrue(core.closedByServer)
+    }
+
+    @Test
+    fun two_quick_taps_make_one_bind_and_both_hear_the_answer() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        val healer = newHealer(core)
+        val answers = mutableListOf<LinkEnsure>()
+
+        healer.ensureLink { answers += it }
+        healer.ensureLink { answers += it }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+
+        assertEquals("one bind, not two", 1, core.binds)
+        assertEquals(listOf(LinkEnsure.NOT_REACHED, LinkEnsure.NOT_REACHED), answers)
+    }
+
+    @Test
+    fun a_tap_after_an_attempt_ended_makes_an_attempt_of_its_own() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        val answers = mutableListOf<LinkEnsure>()
+
+        healer.ensureLink { answers += it }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        // Closed again by Hi Rokid, and the wearer taps Speak again: no sticky refusal.
+        core.closedByServer = true
+        healer.ensureLink { answers += it }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+
+        assertEquals(2, core.binds)
+        assertEquals(listOf(LinkEnsure.NOT_REACHED, LinkEnsure.NOT_REACHED), answers)
+    }
+
+    @Test
+    fun the_link_coming_up_early_ends_the_attempt_and_the_next_tap_finds_it_up_or_binds_afresh() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        val healer = newHealer(core)
+        healer.ensureLink { }
+        runCurrent()
+        core.state = bonded or up
+        healer.onLinkState(core.state)
+
+        // It drops again before the old wait would have ended: a new tap binds again, not joins a dead attempt.
+        core.state = bonded
+        healer.onLinkState(core.state)
+        healer.ensureLink { }
+        runCurrent()
+
+        assertEquals(2, core.binds)
+    }
+
+    @Test
+    fun the_background_stands_aside_while_a_wearers_bind_is_in_flight() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        val healer = newHealer(core)
+        healer.onLinkState(core.state)
+        advanceTimeBy(9_000)
+        // The wearer taps just before the first background attempt would fall.
+        healer.ensureLink { }
+        runCurrent()
+        advanceTimeBy(2_000)
+
+        assertEquals(1, core.binds)
+        assertEquals("the background did not bind over the wearer's bind", 0, core.reconnects)
+    }
+
+    @Test
+    fun a_tap_is_not_honoured_with_monitoring_off() = runTest {
         val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
         val healer = newHealer(core) { false }
-        healer.healNow { }
-        runCurrent()
-        // The wearer is waiting on it; the background tries are the ones that hold back.
-        assertEquals(1, core.reconnects)
-    }
+        var answer: LinkEnsure? = null
 
-    @Test
-    fun requests_that_arrive_while_one_is_waiting_share_it() = runTest {
-        val core = FakeLinkCore().apply { state = bonded }
-        val healer = newHealer(core)
-        val results = mutableListOf<Boolean>()
-        healer.healNow { results += it }
-        healer.healNow { results += it }
+        healer.ensureLink { answer = it }
         runCurrent()
-        advanceTimeBy(3_001)
 
-        assertEquals(1, core.reconnects)
-        assertEquals(listOf(false, false), results)
+        assertEquals(LinkEnsure.MONITORING_OFF, answer)
+        assertEquals(0, core.binds)
+        assertEquals(0, core.reconnects)
     }
 
     @Test
     fun stop_answers_whoever_is_waiting() = runTest {
         val core = FakeLinkCore().apply { state = bonded }
         val healer = newHealer(core)
-        var answer: Boolean? = null
-        healer.healNow { answer = it }
+        var answer: LinkEnsure? = null
+        healer.ensureLink { answer = it }
         runCurrent()
         healer.stop()
-        assertEquals(false, answer)
-        assertFalse(answer == true)
-        assertTrue(core.reconnects == 1)
+        assertEquals(LinkEnsure.STOPPED, answer)
+        assertEquals(1, core.binds)
     }
 
     // ------------------------------------------------------------------ threads
@@ -260,25 +429,25 @@ class GlassesLinkHealerTest {
         try {
             val scope = CoroutineScope(SupervisorJob() + executor.asCoroutineDispatcher())
             val core = FakeLinkCore().apply { state = bonded }
-            val healer = GlassesLinkHealer(scope, core, settleMs = 60_000)
+            val healer = GlassesLinkHealer(scope, core, waitMs = 60_000)
             val answered = CountDownLatch(1)
             var answeredOn: String? = null
-            var answer: Boolean? = null
+            var answer: LinkEnsure? = null
 
-            healer.healNow {
+            healer.ensureLink {
                 answeredOn = Thread.currentThread().name
                 answer = it
                 answered.countDown()
             }
             // CXR reports the glasses' Bluetooth on its own Binder thread, here the test's.
             val reconnected = System.currentTimeMillis() + 5_000
-            while (core.reconnects == 0 && System.currentTimeMillis() < reconnected) Thread.sleep(5)
-            assertEquals(1, core.reconnects)
+            while (core.binds == 0 && System.currentTimeMillis() < reconnected) Thread.sleep(5)
+            assertEquals(1, core.binds)
             core.state = bonded or up
             healer.onLinkState(core.state)
 
             assertTrue(answered.await(5, TimeUnit.SECONDS))
-            assertEquals(true, answer)
+            assertEquals(LinkEnsure.UP, answer)
             // The coroutine debug agent appends " @coroutine#n" to the name of a thread running one.
             assertTrue("the voice retry is made on the main thread, not on $answeredOn", answeredOn!!.startsWith("healer-main"))
         } finally {
@@ -381,11 +550,12 @@ class GlassesLinkHealerTest {
 
         healer.onLinkState(core.state)
         healer.onMonitoringChanged()
-        var answer: Boolean? = null
-        healer.healNow { answer = it }
+        var answer: LinkEnsure? = null
+        healer.ensureLink { answer = it }
         advanceTimeBy(900_000)
 
         assertEquals(0, core.reconnects)
-        assertEquals(false, answer)
+        assertEquals("Stop also ends the wearer's binds", 0, core.binds)
+        assertEquals(LinkEnsure.STOPPED, answer)
     }
 }

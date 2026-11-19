@@ -1,6 +1,7 @@
 package com.anezium.rokidbus.plugin.agents.service
 
 import android.content.Context
+import com.anezium.rokidbus.phone.CxrEnsureResult
 import com.anezium.rokidbus.phone.GlassesAppInstaller
 import com.anezium.rokidbus.phone.GlassesSurface
 import com.anezium.rokidbus.phone.HubCore
@@ -38,6 +39,13 @@ internal interface CoderCore {
      */
     fun reconnectLink(): Boolean = false
 
+    /**
+     * Makes sure the glasses link is there for something the wearer just asked for: a live link is reused,
+     * a down one is bound again (over a session Hi Rokid closed too, as the Glass app screen does). It
+     * answers at once and does not wait for the link; never for a background retry.
+     */
+    fun ensureLink(): CxrEnsureResult = CxrEnsureResult.HUB_STOPPED
+
     /** Terminal: stops the hub and releases the radios. */
     fun close()
 }
@@ -66,6 +74,9 @@ internal class HubCoderCore(private val hub: HubCore) : CoderCore {
     @OptIn(HubShellApi::class)
     override fun reconnectLink(): Boolean = hub.reconnectCxr()
 
+    @OptIn(HubShellApi::class)
+    override fun ensureLink(): CxrEnsureResult = hub.ensureCxrLink()
+
     override fun close() = hub.close()
 
     companion object {
@@ -74,6 +85,7 @@ internal class HubCoderCore(private val hub: HubCore) : CoderCore {
             foreground = host,
             identity = AppIdentity(BuildConfig.PHONE_APPLICATION_ID, BuildConfig.GLASSES_APPLICATION_ID),
             inProcessApp = AGENTS_APP,
+            log = LinkLog::hub,
         )
 
         /** What the hub knows the Agents app as: the grants and prefixes its plugin manifest declared. */

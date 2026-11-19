@@ -378,6 +378,7 @@ class HubCore internal constructor(
             cxrConnected = connected
             sppCxrIdentity.onConnectionChanged(isCxrUp())
             if (connected) {
+                if (cxrClosedByServer) log("CXR-L closed-session flag cleared: link up")
                 cxrClosedByServer = false
             } else {
                 glassesWorn = false
@@ -2744,9 +2745,14 @@ class HubCore internal constructor(
      * reason to stay down. An automatic attempt (false) never binds into one: Hi Rokid closes the
      * session on a binder thread and the closure reaches us on the main thread later, so the flag can
      * still be clear when the attempt starts; `connect` then finishes the closed bind first, which
-     * sets it, and the new bind is let go. False when it was.
+     * sets it, and the new bind is let go ([CxrStart.DROPPED]). A bind the library refused is
+     * [CxrStart.NOT_BOUND]; the link state says so.
+     *
+     * [clearClosure]: a wearer start puts a standing closure away as soon as it is bound, as the Glass
+     * app screen always did. [ensureCxrLink] keeps it until the link is seen up (`onCXRLConnected(true)`
+     * clears it), so a bind that never comes up leaves a shell's background retries refusing, as before.
      */
-    private fun startCxr(token: String, wearerAsked: Boolean = true): Boolean {
+    private fun startCxr(token: String, wearerAsked: Boolean = true, clearClosure: Boolean = true): CxrStart {
         val link = cxrLink ?: (seams.cxr ?: CxrLinkTransport(CXRLink(applicationContext))).apply {
             configCXRSession(
                 CxrDefs.CXRSession(
@@ -2764,10 +2770,15 @@ class HubCore internal constructor(
                 runCatching { link.disconnect() }
                 log("CXR-L reconnect dropped: Hi Rokid closed the session")
                 notifyLinkState()
-                return false
+                return CxrStart.DROPPED
             }
-            cxrClosedByServer = false
-            updateStatusNotification(linkState())
+            if (clearClosure) {
+                cxrClosedByServer = false
+                log("CXR-L closed-session flag cleared by a wearer start")
+                updateStatusNotification(linkState())
+            } else {
+                log("CXR-L closed-session flag stands until the link is seen up")
+            }
         }
         log("CXR-L connect requested bound=$bound")
         if (!bound) {
@@ -2777,8 +2788,10 @@ class HubCore internal constructor(
             glassesWorn = false
             notifyLinkState()
         }
-        return true
+        return if (bound) CxrStart.BOUND else CxrStart.NOT_BOUND
     }
+
+    private enum class CxrStart { BOUND, NOT_BOUND, DROPPED }
 
     private fun isPhoneWifiEnabled(): Boolean =
         runCatching {
@@ -3200,7 +3213,29 @@ class HubCore internal constructor(
         val token = prefs().getString(PREF_TOKEN, "").orEmpty()
         if (token.isBlank()) return false
         log("CXR-L reconnect requested")
-        return startCxr(token, wearerAsked = false)
+        return startCxr(token, wearerAsked = false) != CxrStart.DROPPED
+    }
+
+    /**
+     * Main thread. Makes sure the CXR link is there for something the wearer just asked for (a voice
+     * reply on the glasses). A live link is reused and nothing is bound. A link that is down is bound
+     * again with the stored token, as the Glass app screen does, and a session Hi Rokid closed is no
+     * reason to stay down. The closure is cleared only when the link is then seen up: a bind that never
+     * comes up leaves it standing, so [reconnectCxr] keeps refusing and the background does not take the
+     * glasses from Hi Rokid on the strength of a failed tap. This does not wait for the link, and never
+     * loops. Never for a background retry.
+     */
+    @HubShellApi @MainThread
+    fun ensureCxrLink(): CxrEnsureResult {
+        if (!hubEnabled || closed) return CxrEnsureResult.HUB_STOPPED
+        if (isCxrUp()) return CxrEnsureResult.ALREADY_UP
+        val token = prefs().getString(PREF_TOKEN, "").orEmpty()
+        if (token.isBlank()) return CxrEnsureResult.NO_TOKEN
+        log("CXR-L ensure: link down, binding for the wearer closedByServer=$cxrClosedByServer")
+        return when (startCxr(token, wearerAsked = true, clearClosure = false)) {
+            CxrStart.BOUND -> CxrEnsureResult.CONNECTING
+            else -> CxrEnsureResult.NOT_BOUND
+        }
     }
 
     /** Main thread. Persists the CXR token, then start(). */
