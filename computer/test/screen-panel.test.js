@@ -128,3 +128,64 @@ test("the_shape_line_describes_rows_by_class_and_length_and_leaks_no_text", () =
   assert.equal(shape.reason, "no_box");
   assert.equal(shape.bottom, 3);
 });
+
+// ---- review fixes: the inverse-video rule, a long or rule-like draft, a huge terminal ----------
+
+const RESET = "\x1b[0m";
+const MUTE = "\x1b[2m";
+const INV = "\x1b[7m";
+
+/** A screen holding the box with these input lines, built by hand. */
+function boxScreen(lines, { cols = 80, rows = 24 } = {}) {
+  const screen = new ScreenModel(cols, rows);
+  const rule = "─".repeat(cols);
+  screen.push(`\x1b[2J\x1b[H● Done.\r\n${rule}\r\n${lines.join("\r\n")}\r\n${rule}\r\n  ▶▶ auto mode on`);
+  return screen;
+}
+
+test("an_inverse_cell_is_muted_only_as_the_cursor_on_the_first_letter_of_a_suggestion", () => {
+  const empty = (line) => showsEmptyPrompt(probe(boxScreen([line])));
+  // The real suggestion with the cursor on its first letter, and a lone blank cursor on an empty box.
+  assert.equal(empty(`❯ ${INV}c${RESET}${MUTE}ontinue${RESET}`), true, "the suggestion");
+  assert.equal(empty(`❯ ${INV} ${RESET}`), true, "a blank cursor");
+  assert.equal(empty(`❯ ${INV} ${RESET}${MUTE}continue${RESET}`), true, "a blank cursor in front of a suggestion");
+  // A typed `c`, with the cursor on it or after it, is text.
+  assert.equal(empty(`❯ ${INV}c${RESET}`), false, "a lone inverse letter is a typed one");
+  assert.equal(empty(`❯ c${INV} ${RESET}`), false, "a typed letter and the cursor after it");
+  // An inverse letter anywhere else, or with solid text after it, is text.
+  assert.equal(empty(`❯ ${MUTE}con${RESET}${INV}t${RESET}${MUTE}inue${RESET}`), false, "not the first cell");
+  assert.equal(empty(`❯ ${INV}c${RESET}ontinue`), false, "solid text after it");
+  assert.equal(empty(`❯ ${INV}c${RESET}${MUTE}ont${RESET}inue`), false, "solid text after muted text");
+  assert.equal(empty(`❯ x${INV}c${RESET}${MUTE}ontinue${RESET}`), false, "text before it");
+  assert.equal(probe(boxScreen([`❯ ${INV}c${RESET}`])).kind, "prompt");
+});
+
+test("a_draft_taller_than_the_box_or_with_a_rule_like_row_is_a_draft_not_an_unreadable_screen", () => {
+  const long = ["❯ first line", ...Array.from({ length: 13 }, (_, i) => `  line ${i + 2} of a long draft`)];
+  const tall = probe(boxScreen(long));
+  assert.deepEqual([tall.kind, tall.empty], ["prompt", false], "more than ten rows");
+  assert.equal(tall.text.startsWith("first line line 2"), true);
+  const middle = probe(boxScreen(["❯ first line", `${"─".repeat(12)} foo ─`, "  last"]));
+  assert.deepEqual([middle.kind, middle.empty], ["prompt", false], "a rule-like row in the middle");
+  const last = probe(boxScreen(["❯ first line", `${"─".repeat(12)} foo ─`]));
+  assert.deepEqual([last.kind, last.empty], ["prompt", false], "a rule-like last row");
+  // With nothing but muted text between the rules there is nothing to say: the box is empty as before.
+  assert.equal(probe(boxScreen([`❯ ${INV}c${RESET}${MUTE}ontinue${RESET}`])).empty, true);
+  // A dialog is still a dialog.
+  const dialog = new ScreenModel(80, 24);
+  dialog.push(`\x1b[2J\x1b[HDo you want to proceed?\r\n${"─".repeat(80)}\r\n❯ 1. Yes\r\n  2. No\r\n${"─".repeat(80)}\r\n  Esc to cancel`);
+  assert.equal(probe(dialog).kind, "blocked");
+});
+
+test("the_shape_of_a_huge_terminal_stays_within_what_the_hub_accepts", () => {
+  const screen = new ScreenModel(2100, 1100);
+  screen.push("\x1b[2J\x1b[H" + Array.from({ length: 1100 }, (_, i) => `row ${i} of a screen nobody has`).join("\r\n"));
+  const shape = describeShape(screen, probe(screen));
+  assert.equal(shape.cols <= 2000 && shape.cols >= 1, true);
+  assert.equal(shape.rows <= 1000 && shape.rows >= 1, true);
+  assert.match(shape.shape, /^[0-9BRPMGT ]{0,8000}$/);
+  assert.equal(shape.shape.length > 0, true);
+  const last = shape.shape.split(" ").pop();
+  assert.equal(last.startsWith("1099"), true,"the rows kept are the ones nearest the bottom");
+  assert.match(shape.reason, /^[a-z_]{1,40}$/);
+});

@@ -75,6 +75,8 @@ const BG_CLEAR_MS = 1500;
  * read (another layout, a screen not drawn): the reply is refused, not waited on for a minute.
  */
 const UNREADABLE_MS = 5000;
+/** The probe's reasons for a screen with no readable prompt box on it (the only ones whose shape is logged). */
+const NO_BOX_REASONS: ReadonlySet<string> = new Set(["no_box", "no_prompt", "narrow"]);
 
 /**
  * The readiness rule for one read of Claude's sessions file: it says idle and,
@@ -549,20 +551,26 @@ export class Typist {
    */
   private unreadableError(look: ProbeResult | undefined): CommandError {
     const bg = this.options.bg;
-    const reasons = new Set(["no_box", "no_prompt", "narrow"]);
-    if (look?.kind === "unknown" && reasons.has(look.reason) && bg && !showsDialog(bg.screen) && !showsPlanMode(bg.screen)) {
+    if (look?.kind === "unknown" && NO_BOX_REASONS.has(look.reason) && bg && !showsDialog(bg.screen) && !showsPlanMode(bg.screen)) {
       return "screen_unreadable";
     }
     return "not_sent";
   }
 
-  /** The row kinds of a screen the probe could not read, once per change (a repeat of the same shape says nothing). */
+  /**
+   * The row kinds of a screen in which no box was found, once per change (a repeat of the same shape says
+   * nothing). A screen that is tainted, unsettled or one with a box in it is not this: nothing is logged.
+   */
   private reportShape(look: ProbeResult | undefined): void {
     const bg = this.options.bg;
-    if (!bg || !this.options.onShape || (look !== undefined && look.kind !== "unknown")) {
+    if (!bg || !this.options.onShape) {
       return;
     }
-    const shape = describeShape(bg.screen, look ?? probe(bg.screen));
+    const seen = look ?? probe(bg.screen);
+    if (seen.kind !== "unknown" || !NO_BOX_REASONS.has(seen.reason)) {
+      return;
+    }
+    const shape = describeShape(bg.screen, seen);
     const signature = `${shape.cols}x${shape.rows}|${shape.reason}|${shape.shape}`;
     if (signature !== this.lastShape) {
       this.lastShape = signature;

@@ -10,7 +10,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { Typist, sessionReady } = require("../dist/launcher/typist.js");
 const { LaptopInput, sessionBusySince } = require("../dist/launcher/laptop-input.js");
-const { ScreenModel } = require("../dist/launcher/screen-probe.js");
+const { ScreenModel, probe } = require("../dist/launcher/screen-probe.js");
 
 const PASTE = (text) => `\x1b[200~${text}\x1b[201~`;
 const CTRL_U = "\x15";
@@ -972,6 +972,61 @@ test("a_box_that_vanishes_after_the_paste_is_cleared_and_screen_unreadable_not_b
   assert.deepEqual(t.pty.writes, [PASTE("plain"), CTRL_U]);
   assert.deepEqual(box.result, { ok: false, error: "screen_unreadable" });
   assert.equal(t.shapes.length, 1);
+});
+
+test("a_dialog_beside_a_screen_with_no_box_is_not_sent_through_the_unreadable_path_and_logs_its_shape", async () => {
+  const t = setup({ file: "idle" });
+  t.session.statusUpdatedAt = t.clock.now() - 10_000;
+  // No rule pair at all (so the probe says no_box, not blocked) but a dialog's text is on the screen.
+  t.draw("\x1b[2J\x1b[HDo you want to proceed?\r\n  1. Yes\r\n  2. No\r\n  Esc to cancel");
+  assert.equal(probe(t.screen).kind, "unknown");
+  assert.equal(probe(t.screen).reason, "no_box");
+  const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+  await t.advance(300);
+  assert.equal(box.result, undefined, "still waiting: the screen is unreadable, not refused at once");
+  await t.advance(5200);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+  assert.deepEqual(t.pty.writes, [], "nothing typed");
+  assert.equal(t.shapes.length, 1, "the shape of a screen with no box is still logged");
+});
+
+test("a_draft_of_many_rows_or_with_a_rule_like_row_is_laptop_draft_and_not_unreadable", async () => {
+  const long = ["> first line", ...Array.from({ length: 13 }, (_, i) => `  line ${i + 2} of a long draft`)];
+  const ruleLike = ["> first line", `${"─".repeat(12)} foo ─`, "  last"];
+  for (const [what, rows] of [["long", long], ["rule-like", ruleLike]]) {
+    const t = setup({ file: "idle" });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(`\x1b[2J\x1b[H● Done.\r\n${[RULE, ...rows, RULE, FOOTER].join("\r\n")}`);
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+    await t.advance(300);
+    assert.deepEqual(box.result, { ok: false, error: "laptop_draft" }, what);
+    assert.deepEqual(t.pty.writes, [], what);
+    assert.deepEqual(t.shapes, [], `${what}: a box was found`);
+  }
+});
+
+test("a_tainted_screen_refusal_logs_no_shape_and_a_huge_terminal_logs_one_the_hub_accepts", async () => {
+  const tainted = setup({ file: "idle" });
+  tainted.session.statusUpdatedAt = tainted.clock.now() - 10_000;
+  tainted.draw(repaint());
+  tainted.draw("\x1b[1;20r");
+  const box = track(tainted.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+  await tainted.advance(5400);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+  assert.deepEqual(tainted.shapes, [], "a disturbed screen says nothing about its layout");
+
+  const huge = setup({ file: "idle" });
+  huge.session.statusUpdatedAt = huge.clock.now() - 10_000;
+  huge.screen.resize(2100, 1100);
+  huge.draw("\x1b[2J\x1b[H" + Array.from({ length: 1100 }, (_, i) => `row ${i} of nothing`).join("\r\n"));
+  const big = track(huge.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+  await huge.advance(5400);
+  assert.equal(big.result.ok, false);
+  assert.equal(huge.shapes.length, 1);
+  const [shape] = huge.shapes;
+  assert.equal(shape.cols >= 1 && shape.cols <= 2000, true);
+  assert.equal(shape.rows >= 1 && shape.rows <= 1000, true);
+  assert.match(shape.shape, /^[0-9BRPMGT ]{0,8000}$/);
 });
 
 test("the_busy_cases_keep_not_sent_and_a_draft_keeps_laptop_draft", async () => {
