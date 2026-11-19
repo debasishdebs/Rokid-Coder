@@ -26,6 +26,8 @@ const KNOWN_SGR: ReadonlySet<number> = new Set([1, 3, 4, 5, 6, 7, 8, 9, 21, 23, 
 
 /** Prefixes the cell of a muted character; never a character a terminal would draw. */
 const MUTED = "\u0001";
+/** Prefixes (after MUTED) the cell of a character drawn in inverse video: the cursor, in Claude's input line. */
+const INVERSE = "\u0002";
 
 type ParseState ="text" | "esc" | "esc_intermediate" | "csi" | "string" | "string_esc";
 
@@ -96,6 +98,7 @@ export class ScreenModel {
   /** SGR state: text drawn now is muted (faint or a gray foreground), as placeholders and suggestions are. */
   private faint = false;
   private grayFg = false;
+  private inverse = false;
 
   constructor(
     private cols = 80,
@@ -152,14 +155,23 @@ export class ScreenModel {
 
   /** The visible rows, trailing blanks removed. */
   lines(): string[] {
-    return this.grid.map((cells) => cells.join("").split(MUTED).join("").replace(/\s+$/, ""));
+    return this.grid.map((cells) => cells.join("").split(MUTED).join("").split(INVERSE).join("").replace(/\s+$/, ""));
   }
 
-  /** The visible rows with every muted character blanked: what is on screen that is not a placeholder or a suggestion. */
+  /**
+   * The visible rows with every muted character blanked: what is on screen that is not a placeholder or a
+   * suggestion. The cursor is drawn as the character under it in inverse video, so on the first letter of
+   * a suggestion it is the suggestion's own letter: an inverse character counts as muted when the cell
+   * right after it is muted (and as itself otherwise, so a typed letter under the cursor still counts).
+   */
   solidLines(): string[] {
+    const bare = (cell: string): string => cell.split(MUTED).join("").split(INVERSE).join("");
     return this.grid.map((cells) =>
       cells
-        .map((cell) => (cell.startsWith(MUTED) ? " ".repeat(Math.max(1, [...cell].length - 1)) : cell))
+        .map((cell, index) => {
+          const blanked = cell.startsWith(MUTED) || (cell.includes(INVERSE) && (cells[index + 1] ?? "").startsWith(MUTED));
+          return blanked ? " ".repeat(Math.max(1, [...bare(cell)].length)) : bare(cell);
+        })
         .join("")
         .replace(/\s+$/, ""),
     );
@@ -250,7 +262,7 @@ export class ScreenModel {
     if (width === undefined) {
       this.dubious[this.row] = true;
     }
-    cellsRow[this.col] = this.faint || this.grayFg ? MUTED + ch : ch;
+    cellsRow[this.col] = (this.faint || this.grayFg ? MUTED : "") + (this.inverse ? INVERSE : "") + ch;
     if (cells === 2) {
       cellsRow[this.col + 1] = "";
     }
@@ -569,6 +581,11 @@ export class ScreenModel {
       } else if (code === 0) {
         this.faint = false;
         this.grayFg = false;
+        this.inverse = false;
+      } else if (code === 7) {
+        this.inverse = true;
+      } else if (code === 27) {
+        this.inverse = false;
       } else if (code === 2) {
         this.faint = true;
       } else if (code === 22) {
@@ -648,10 +665,16 @@ export class ScreenModel {
 const RULE_CHARS = "─━╭╮╰╯┌┐└┘";
 const RULE_TRIM = /^[\s]+|[\s]+$/g;
 
-/** A horizontal rule of the prompt box, with or without its corners. */
+/**
+ * A horizontal rule of the prompt box, with or without its corners, and with or without a label in
+ * it: the real UI puts one in the top rule ("───── Rokid app for Claude code integration ─"), and on
+ * a narrow screen the label is a good part of the row. A rule is a run of rule characters, then at
+ * most one label (up to 100 characters, a space on each side) and a run of rule characters again, and
+ * at least 10 rule characters in all. The label's words are never read.
+ */
 function isRule(row: string): boolean {
   const text = row.replace(RULE_TRIM, "");
-  if (text.length < 10) {
+  if (text.length < 10 || !RULE_ROW.test(text)) {
     return false;
   }
   let rule = 0;
@@ -660,8 +683,9 @@ function isRule(row: string): boolean {
       rule += 1;
     }
   }
-  return rule / text.length >= 0.8 && RULE_CHARS.includes(text[0]) && RULE_CHARS.includes(text[text.length - 1]);
+  return rule >= 10;
 }
+const RULE_ROW = new RegExp(`^[${RULE_CHARS}]+(?: [^${RULE_CHARS}]{1,100} ?[${RULE_CHARS}]+)?$`);
 
 /** The input line: a `>` or `❯` prompt, with or without the box's side border. */
 const PROMPT_ROW = /^\s*(?:[│┃]\s*)?[>❯](?:\s|$)/;
@@ -674,7 +698,8 @@ const DIALOG_TEXT =
   /esc to cancel|enter to (?:confirm|select)|press enter|do you want to|\(y\/n\)|\[y\/n\]|allow (?:once|always)|don't ask again|tab to amend|to navigate|ctrl\+e to explain|waiting for (?:your )?(?:input|approval)/i;
 
 export type ProbeResult =
-  | { kind: "unknown"; reason: string }
+  /** `top` and `bottom` are the rows where the box was expected, when the probe got as far as a rule. */
+  | { kind: "unknown"; reason: string; top?: number; bottom?: number }
   /** A dialog, a question, a permission prompt or a running-turn sign is on screen. */
   | { kind: "blocked"; reason: string }
   /**
@@ -726,12 +751,12 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
     }
   }
   if (bottom < 1) {
-    return { kind: "unknown", reason: "no_box" };
+    return { kind: "unknown", reason: "no_box", ...(bottom >= 0 ? { bottom } : {}) };
   }
+  // Everything under the bottom rule is the footer and, while agents run, the agents panel (`● main`, a
+  // `○` row for each agent, one of which may carry a `❯` selection). It is as tall as there are agents,
+  // so it is not counted; it is never read for what the input line holds, and a `❯` there is no prompt.
   const footer = rows.slice(bottom + 1);
-  if (footer.filter((row) => row.length > 0).length > MAX_FOOTER_ROWS) {
-    return { kind: "unknown", reason: "no_box" };
-  }
   let top = -1;
   for (let i = bottom - 1; i >= Math.max(0, bottom - 1 - MAX_INPUT_ROWS); i -= 1) {
     if (isRule(rows[i])) {
@@ -740,7 +765,7 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
     }
   }
   if (top < 0 || bottom - top < 2) {
-    return { kind: "unknown", reason: "no_box" };
+    return { kind: "unknown", reason: "no_box", bottom, ...(top >= 0 ? { top } : {}) };
   }
   const inputRows = rows.slice(top + 1, bottom);
   for (let i = top; i <= bottom; i += 1) {
@@ -754,7 +779,7 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
     return { kind: "blocked", reason: "menu" };
   }
   if (!PROMPT_ROW.test(inputRows[0])) {
-    return { kind: "unknown", reason: "no_prompt" };
+    return { kind: "unknown", reason: "no_prompt", top, bottom };
   }
   if (around.some((row) => BUSY_INDICATOR.test(row))) {
     return { kind: "blocked", reason: "busy_indicator" };
@@ -834,6 +859,51 @@ export function showsDialog(screen: ScreenModel): boolean {
     return false;
   }
   return screen.lines().some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row));
+}
+
+/** What the screen looks like by row kinds alone, and where the probe expected the box. No text of the screen is in it. */
+export interface ScreenShape {
+  cols: number;
+  rows: number;
+  /** `<row><class><length>` per row, space separated: B blank, R rule, P prompt-glyph row, M muted text, G glyphs only, T text. */
+  shape: string;
+  reason: string;
+  top?: number;
+  bottom?: number;
+}
+
+/**
+ * The screen as classes and lengths, so a layout the probe cannot read can be rebuilt from a log line
+ * without a character of what was on it (which can be anything the wearer or Claude wrote). `look` says
+ * why the probe refused and, when it got as far as a rule, where it expected the box.
+ */
+export function describeShape(screen: ScreenModel, look?: ProbeResult): ScreenShape {
+  const lines = screen.lines();
+  const solid = screen.solidLines();
+  const tokens = lines.map((line, index) => {
+    const trimmed = line.trim();
+    let kind = "T";
+    if (trimmed === "") {
+      kind = "B";
+    } else if (isRule(line)) {
+      kind = "R";
+    } else if (PROMPT_ROW.test(line)) {
+      kind = "P";
+    } else if ((solid[index] ?? "").trim() === "") {
+      kind = "M";
+    } else if (/^[^\p{L}\p{N}]+$/u.test(trimmed)) {
+      kind = "G";
+    }
+    return `${index}${kind}${[...line].length}`;
+  });
+  return {
+    cols: screen.width,
+    rows: lines.length,
+    shape: tokens.join(" "),
+    reason: look?.kind === "unknown" || look?.kind === "blocked" ? look.reason : "none",
+    ...(look?.kind === "unknown" && look.top !== undefined ? { top: look.top } : {}),
+    ...(look?.kind === "unknown" && look.bottom !== undefined ? { bottom: look.bottom } : {}),
+  };
 }
 
 /** Whether the probe shows the framed prompt box visibly empty, with no dialog, question or other text in it. */

@@ -37,7 +37,9 @@ export type CommandError =
   | "taken_over"
   | "uncertain"
   /** A background reply was pasted but never submitted: the screen did not confirm it, or its evidence went. */
-  | "not_sent";
+  | "not_sent"
+  /** Claude was idle but the launcher could not read its screen (no prompt box found): nothing, or only a cleared paste, was typed. */
+  | "screen_unreadable";
 
 export interface TypeCommand {
   cmdId: string;
@@ -134,6 +136,7 @@ const COMMAND_ERRORS: ReadonlySet<string> = new Set<CommandError>([
   "taken_over",
   "uncertain",
   "not_sent",
+  "screen_unreadable",
 ]);
 const LAUNCHER_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SESSION_ID = /^[A-Za-z0-9._-]{1,256}$/;
@@ -678,6 +681,37 @@ export class LauncherHub {
           }
         }
         this.write(connection, { type: "write_verdict", cmdId: frame.cmdId, phase, ok });
+        return undefined;
+      }
+      case "screen_shape": {
+        // Row kinds and lengths of a screen the launcher could not read: classes, numbers and spaces only.
+        const word = /^[a-z_]{1,40}$/;
+        if (
+          !hasShape(frame, ["type", "cols", "rows", "shape", "reason"], ["top", "bottom"]) ||
+          !Number.isInteger(frame.cols) ||
+          !Number.isInteger(frame.rows) ||
+          (frame.cols as number) < 1 ||
+          (frame.cols as number) > 2000 ||
+          (frame.rows as number) < 1 ||
+          (frame.rows as number) > 1000 ||
+          typeof frame.shape !== "string" ||
+          !/^[0-9BRPMGT ]{0,8000}$/.test(frame.shape) ||
+          typeof frame.reason !== "string" ||
+          !word.test(frame.reason) ||
+          (frame.top !== undefined && !Number.isInteger(frame.top)) ||
+          (frame.bottom !== undefined && !Number.isInteger(frame.bottom))
+        ) {
+          return "bad_frame";
+        }
+        this.options.logger.info("launcher_screen_shape", {
+          session: connection.binding?.key,
+          cols: frame.cols,
+          rows: frame.rows,
+          reason: frame.reason,
+          ...(frame.top !== undefined ? { top: frame.top } : {}),
+          ...(frame.bottom !== undefined ? { bottom: frame.bottom } : {}),
+          shape: frame.shape,
+        });
         return undefined;
       }
       case "screen_check": {

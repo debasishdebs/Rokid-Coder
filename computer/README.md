@@ -299,7 +299,15 @@ Limits to know about:
   box fails the reply with `laptop_draft` and nothing is sent, so your text is never touched. Then the reply
   is pasted with no Enter, the box must show exactly it on two looks, and only then Enter is pressed;
   anything else sends Ctrl+U (only after the paste) and fails `not_sent`. A screen in which no prompt box
-  is found for 5 s fails `not_sent`. Keys alone no longer block a reply (a stray Esc or Tab is not text);
+  is found for 5 s fails `screen_unreadable` (retryable, nothing consumed; the phone says it could not read
+  Claude's screen), while text in the box, a dialog, plan mode or a changing screen keep `not_sent` and
+  `laptop_draft`. The box is the lowest rule and the rule above it with a `❯` row between them: a label in
+  a rule, an update notice above it, and the agents panel under the footer (`● main`, a `○` row per agent,
+  one with a selection `❯`) do not hide it, and a `❯` outside the pair is never the prompt. The cursor on
+  the first letter of a muted suggestion (inverse video) is part of the suggestion. When a check refuses for
+  want of a readable box, agentd logs one `launcher_screen_shape` line per change: each row's index, a class
+  (R rule, P prompt glyph, M muted text, T text, G glyphs only, B blank) and its length, the screen size and
+  the rows where the box was expected, never a character of the screen. Keys alone no longer block a reply (a stray Esc or Tab is not text);
   `compact` and `model`, which are typed unseen, ignore a key-only guess only when the screen shows the box
   empty. Replies are one line of at most 600 characters; anything else fails `not_ready`. Agentd logs each
   check as `launcher_screen_check` (phase, probe, reason, lengths, never prompt text), and, once per change
