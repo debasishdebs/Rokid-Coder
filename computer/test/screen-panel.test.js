@@ -222,6 +222,50 @@ test("a_draft_row_that_reads_as_a_rule_does_not_make_the_rows_around_it_an_empty
   assert.equal(probe(boxScreen(["❯ hello", "  ❯ yes"])).kind, "blocked");
 });
 
+/** A tall draft whose real top (rule and first row) has scrolled off: only indented draft rows above the bottom rule. */
+function scrolledScreen(tail, { cols = 80, rows = 24, ruleLike = "  ──────────────" } = {}) {
+  const screen = new ScreenModel(cols, rows);
+  const draft = Array.from({ length: 12 }, (_, i) => `  draft line ${i}`);
+  const footer = ["  auto mode on", "", "● main", "  ○ general-purpose  Task one"];
+  screen.push(`\x1b[2J\x1b[H${[...draft, ruleLike, ...tail, "─".repeat(cols), ...footer].join("\r\n")}`);
+  return screen;
+}
+
+test("a_draft_whose_top_scrolled_off_is_never_an_empty_box_whatever_row_reads_as_a_rule", () => {
+  for (const [what, tail] of [
+    ["glyph and space", ["  > "]],
+    ["bare >", ["  >"]],
+    ["a second glyph", ["  ❯"]],
+    ["glyph and a blank row", ["  > ", ""]],
+    ["glyph, text", ["  > yes"]],
+  ]) {
+    for (const ruleLike of ["  ──────────────", "  ──── foo ─", "  ─────────────────────────────────────────"]) {
+      const seen = probe(scrolledScreen(tail, { ruleLike }));
+      assert.equal(showsEmptyPrompt(seen), false, `${what} ${ruleLike.length}: ${JSON.stringify(seen)}`);
+      assert.equal(seen.kind === "prompt" && seen.empty, false);
+    }
+  }
+  assert.deepEqual(probe(scrolledScreen(["  > "])).reason, "no_box");
+  // The UI's own top rule, plain or with a label, in the first column is still the top.
+  for (const [cols, rows] of SIZES) {
+    for (const label of ["", " Rokid app for Claude code integration"]) {
+      assert.equal(showsEmptyPrompt(probe(model({ cols, rows, agents: 2, label }))), true, `${cols}x${rows} ${label.length}`);
+    }
+  }
+  assert.equal(showsEmptyPrompt(probe(boxScreen([`❯ ${INV}c${RESET}${MUTE}ontinue${RESET}`]))), true);
+});
+
+test("a_muted_bare_glyph_on_a_later_input_row_is_no_empty_box_and_a_solid_one_is_text", () => {
+  const muted = probe(boxScreen([`❯ ${MUTE}Try "x"${RESET}`, `  ${MUTE}❯${RESET}`]));
+  assert.deepEqual([muted.kind, muted.reason], ["blocked", "menu"]);
+  const mutedSpace = probe(boxScreen(["❯ hello", `  ${MUTE}> ${RESET}`]));
+  assert.deepEqual([mutedSpace.kind, mutedSpace.reason], ["blocked", "menu"]);
+  const solid = probe(boxScreen(["❯ hello", "  ❯"]));
+  assert.deepEqual([solid.kind, solid.empty], ["prompt", false]);
+  const lone = probe(boxScreen([`❯ ${MUTE}Try "x"${RESET}`]));
+  assert.equal(showsEmptyPrompt(lone), true);
+});
+
 test("the_shape_of_a_huge_terminal_stays_within_what_the_hub_accepts", () => {
   const screen = new ScreenModel(2100, 1100);
   screen.push("\x1b[2J\x1b[H" + Array.from({ length: 1100 }, (_, i) => `row ${i} of a screen nobody has`).join("\r\n"));
