@@ -302,7 +302,12 @@ Limits to know about:
   flight, and again about every second while unchanged; a report older than 3 s, or none, puts the file rule
   back. The check at the write (two looks before the paste, exact text after it) is unchanged and is still
   the authority. A pending approval or question of any origin, a held Stop and an uncertain write still
-  refuse. `compact`, `model` and every other permission mode keep the idle rule exactly. The phone is told
+  refuse, and so does a file status other than `idle`, `busy` or `shell` (`waiting` among them). A hook that
+  announces a dialog (a permission request, an elicitation, a dialog notification; a subagent's included) takes
+  the route away at once: a reply already pasted is cleared before its Enter, and no new one is typed until the
+  tool's Post hook, the elicitation's result, the wearer's next prompt or the next Stop closes it, or 30 s pass
+  (so a lost hook cannot refuse replies for good). A reply queued behind a turn keeps agentd from holding the
+  turn's Stop for the glasses (when Stop holding is on) until Claude takes the prompt, or 15 minutes pass. `compact`, `model` and every other permission mode keep the idle rule exactly. The phone is told
   why a reply cannot go: text typed at the laptop (`draft`), a dialog or question to answer there
   (`dialog`), the screen could not be read (`unreadable`), plan mode (`mode_not_allowed`), and only
   otherwise that Claude is working.

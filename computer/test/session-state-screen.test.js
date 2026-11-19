@@ -21,10 +21,17 @@ async function until(check, ms = 2000, what = "condition") {
 
 test("an_empty_box_is_ready_in_auto_and_bypass_whatever_the_file_says_and_the_hint_is_gone", () => {
   for (const mode of ["auto", "bypassPermissions"]) {
-    for (const status of ["idle", "busy", "shell", "waiting"]) {
+    for (const status of ["idle", "busy", "shell"]) {
       const t = setup({ mode, status, report: "empty" });
       assert.equal(t.router.followupState(KEY), "ready", `${mode} ${status}`);
       assert.equal(t.router.followupWhy(KEY), undefined, `${mode} ${status}`);
+    }
+    // `waiting` (Claude waits for the user), a word not known and no status at all are no ground: the file rule.
+    for (const status of ["waiting", "starting", "WAITING", "", undefined]) {
+      const t = setup({ mode, status, report: "empty" });
+      assert.equal(t.router.followupState(KEY), "unavailable", `${mode} ${String(status)}`);
+      assert.equal(t.router.followupWhy(KEY), "busy", `${mode} ${String(status)}`);
+      assert.equal(t.states.screenVerdict(KEY), "no", `${mode} ${String(status)}`);
     }
   }
 });
@@ -135,6 +142,151 @@ test("the_screen_route_stops_when_an_approval_appears_before_the_write", async (
   const final = await result;
   assert.equal(final.ok, false);
   assert.equal(final.error, "busy");
+});
+
+// ---- a dialog that a hook announces ---------------------------------------------------------------------------
+
+const BASH = { tool_name: "Bash", tool_input: { command: "rm -rf build" } };
+const ANNOUNCEMENTS = [
+  ["PermissionRequest", "PermissionRequest", BASH],
+  ["Elicitation", "Elicitation", { mcp_server_name: "docs" }],
+  ["a permission_prompt notification", "Notification", { notification_type: "permission_prompt" }],
+  ["an elicitation_dialog notification", "Notification", { notification_type: "elicitation_dialog" }],
+  ["a notification of a type nobody knows", "Notification", { notification_type: "something_new" }],
+];
+
+/** The reply is dispatched, agentd said yes to the paste and the launcher pasted: the Enter is the next question. */
+async function pasted(t) {
+  const result = t.router.followup(KEY, "yes do it", () => ({ ok: false, error: "not_held" }));
+  await until(() => t.port.pending, 2000, "the command");
+  assert.equal(t.port.check("paste"), true);
+  t.port.wrote();
+  return { result };
+}
+
+test("a_hook_that_announces_a_dialog_aborts_a_pasted_reply_before_the_enter_whoever_fired_it", async () => {
+  for (const [what, event, extra] of ANNOUNCEMENTS) {
+    for (const agent of [undefined, "sub1"]) {
+      const t = setup({ mode: "auto", status: "busy", report: "empty" });
+      const { result } = await pasted(t);
+      // The hook arrives before agentd's approval manager knows of it (nothing is asking yet) and before Claude draws it.
+      assert.equal(t.flags.asking, false);
+      t.hook(event, { ...extra, ...(agent ? { agent_id: agent } : {}) });
+      assert.equal(t.port.check("enter"), false, `${what} ${agent ?? "main"}: no Enter`);
+      assert.deepEqual(await result, { ok: false, error: "not_sent" }, `${what} ${agent ?? "main"}: cleared, nothing sent`);
+      assert.equal(t.port.pending, undefined);
+    }
+  }
+});
+
+test("a_dialog_a_hook_announced_refuses_new_replies_until_its_post_or_result_hook_a_prompt_or_a_stop", async () => {
+  const closers = [
+    ["its tool's PostToolUse", "PermissionRequest", BASH, ["PostToolUse", BASH]],
+    ["its tool's PostToolUseFailure", "PermissionRequest", BASH, ["PostToolUseFailure", BASH]],
+    ["PermissionDenied", "PermissionRequest", BASH, ["PermissionDenied", BASH]],
+    ["ElicitationResult", "Elicitation", {}, ["ElicitationResult", {}]],
+    ["an elicitation_complete notification", "Elicitation", {}, ["Notification", { notification_type: "elicitation_complete" }]],
+    ["a UserPromptSubmit", "Notification", { notification_type: "permission_prompt" }, ["UserPromptSubmit", { prompt: "go" }]],
+    ["the next Stop", "PermissionRequest", BASH, ["Stop", {}]],
+  ];
+  for (const [what, event, extra, [closer, closing]] of closers) {
+    const t = setup({ mode: "auto", status: "busy", report: "empty" });
+    t.hook(event, extra);
+    assert.equal(t.router.followupState(KEY), "unavailable", `${what}: refused while announced`);
+    assert.equal(t.router.followupWhy(KEY), "dialog", what);
+    const refused = await t.router.followup(KEY, "yes do it", () => ({ ok: false, error: "not_held" }));
+    assert.equal(refused.ok, false, what);
+    assert.deepEqual(t.port.sent, [], `${what}: nothing sent`);
+    t.hook(closer, closing);
+    assert.equal(t.router.followupState(KEY), "ready", `${what}: closed by ${closer}`);
+  }
+  // Another tool's Post hook, a subagent's included, does not close a dialog that is still open; its own does.
+  const t = setup({ mode: "auto", status: "busy", report: "empty" });
+  t.hook("PermissionRequest", BASH);
+  t.hook("PostToolUse", { tool_name: "Read", tool_input: { file_path: "/x" }, agent_id: "sub1" });
+  assert.equal(t.router.followupState(KEY), "unavailable");
+  t.hook("PostToolUse", { ...BASH, agent_id: "sub1" });
+  assert.equal(t.router.followupState(KEY), "ready", "the same tool call's Post, whoever fired it");
+  // Two dialogs: one closing leaves the other.
+  t.hook("PermissionRequest", BASH);
+  t.hook("Elicitation", {});
+  t.hook("ElicitationResult", {});
+  assert.equal(t.router.followupState(KEY), "unavailable");
+  t.hook("PostToolUse", BASH);
+  assert.equal(t.router.followupState(KEY), "ready");
+});
+
+test("a_dialog_announcement_expires_so_a_lost_hook_cannot_refuse_replies_for_good", () => {
+  const t = setup({ mode: "auto", status: "busy", report: "empty" });
+  t.hook("PermissionRequest", BASH);
+  t.clock.offset += 29_000;
+  assert.equal(t.router.followupState(KEY), "unavailable");
+  t.clock.offset += 2_000;
+  assert.equal(t.router.followupState(KEY), "ready");
+  assert.equal(t.router.followupWhy(KEY), undefined);
+});
+
+test("a_dialog_announcement_changes_nothing_outside_the_auto_modes", () => {
+  const t = setup({ mode: "default", status: "idle", report: "empty" });
+  t.hook("PermissionRequest", BASH);
+  assert.equal(t.router.followupState(KEY), "ready", "the file rule is as it was: the typist's checks stand at the write");
+});
+
+// ---- a reply queued behind a turn and the Stop hold ------------------------------------------------------------
+
+test("a_queued_reply_keeps_the_stop_from_being_held_until_claude_takes_it_as_a_prompt", async () => {
+  const { StopWait } = require("../dist/stop-wait.js");
+  const t = setup({ mode: "auto", status: "busy", report: "empty" });
+  const stopWait = new StopWait({
+    waitLimitMs: 60_000,
+    continuationCap: 3,
+    enabled: true,
+    skipHold: (id) => t.states.queuedPending(`claude:${id}`),
+  });
+  const closed = new AbortController().signal;
+  assert.equal(t.states.queuedPending(KEY), false);
+  const result = t.router.followup(KEY, "yes do it", () => ({ ok: false, error: "not_held" }));
+  await until(() => t.port.pending, 2000, "the command");
+  assert.equal(t.port.check("paste"), true);
+  t.port.wrote();
+  assert.equal(t.port.check("enter"), true);
+  t.port.settle({ ok: true });
+  assert.deepEqual(await result, { ok: true });
+  assert.equal(t.states.queuedPending(KEY), true, "typed, Claude has not taken it yet");
+  // The turn ends: its Stop is not held, so Claude goes on to the queued prompt at once.
+  assert.deepEqual(await stopWait.hold("s1", closed), {});
+  assert.equal(stopWait.state("s1").waiting, false);
+  // A prompt that is not ours does not end it; ours does.
+  t.hook("UserPromptSubmit", { prompt: "something typed at the laptop" });
+  assert.equal(t.states.queuedPending(KEY), true);
+  t.hook("UserPromptSubmit", { prompt: "yes  do it\n" });
+  assert.equal(t.states.queuedPending(KEY), false);
+  const held = stopWait.hold("s1", closed);
+  assert.equal(stopWait.state("s1").waiting, true, "an ordinary Stop is held again");
+  stopWait.deliver("s1", "go on", "m1");
+  await held;
+  // It expires too, whatever hooks did or did not arrive.
+  const u = setup({ mode: "auto", status: "busy", report: "empty" });
+  u.states.markQueued(KEY, "yes do it");
+  assert.equal(u.states.queuedPending(KEY), true);
+  u.clock.offset += 15 * 60_000 + 1000;
+  assert.equal(u.states.queuedPending(KEY), false);
+});
+
+test("a_reply_that_failed_marks_nothing_queued", async () => {
+  const t = setup({ mode: "auto", status: "busy", report: "empty" });
+  const result = t.router.followup(KEY, "yes do it", () => ({ ok: false, error: "not_held" }));
+  await until(() => t.port.pending, 2000, "the command");
+  t.port.settle({ ok: false, error: "not_sent" });
+  assert.equal((await result).ok, false);
+  assert.equal(t.states.queuedPending(KEY), false);
+  // And an ordinary reply on an idle file queues nothing either.
+  const idle = setup({ mode: "auto", status: "idle", report: "empty" });
+  const ordinary = idle.router.followup(KEY, "yes do it", () => ({ ok: false, error: "not_held" }));
+  await until(() => idle.port.pending, 2000, "the command");
+  idle.port.settle({ ok: true });
+  assert.equal((await ordinary).ok, true);
+  assert.equal(idle.states.queuedPending(KEY), false);
 });
 
 test("a_refused_screen_never_reaches_the_launcher_and_the_reply_fails_busy", async () => {

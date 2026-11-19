@@ -394,6 +394,31 @@ test("the_verdict_frame_is_sent_on_change_at_most_every_thirty_seconds_and_holds
   assert.equal(verdicts().length <= 3, true, `at most one more line in twelve seconds, saw ${verdicts().length}`);
 });
 
+test("the_sessions_file_and_the_verdict_are_looked_at_about_once_a_second_not_at_every_redraw", () => {
+  const claudeSessions = require("../dist/launcher/claude-sessions.js");
+  const original = claudeSessions.readClaudeSession;
+  let reads = 0;
+  claudeSessions.readClaudeSession = (...args) => {
+    reads += 1;
+    return original(...args);
+  };
+  try {
+    const t = setup();
+    t.draw(repaint());
+    t.wait(200);
+    reads = 0;
+    // A spinner redrawing about five times a second for ten seconds.
+    for (let i = 0; i < 50; i += 1) {
+      t.draw(`\x1b[1;1H● Working… ${i}s`);
+      t.wait(200);
+    }
+    assert.equal(reads <= 12, true, `the sessions file is read about once a second, not per redraw: ${reads} reads in ten seconds`);
+    assert.equal(reads >= 1, true);
+  } finally {
+    claudeSessions.readClaudeSession = original;
+  }
+});
+
 test("a_layout_with_a_prompt_glyph_row_the_probe_cannot_read_is_told_at_once_and_only_the_first_time", () => {
   const t = setup();
   const odd = (word) => `\x1b[2J\x1b[H● ${word}\r\n❯ hunter2\r\n  ○ general-purpose  Task\r\n❯ ○ general-purpose  Task`;

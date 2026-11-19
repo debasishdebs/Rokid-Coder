@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { FollowupState, SessionKey } from "../protocol-v2";
 import type { CommandResult, SendError, TypeCommand, WriteCheckPhase } from "./launcher-hub";
 import { bgReplyText } from "./paste-text";
@@ -136,6 +136,10 @@ interface Entry {
   stopCause?: string;
   /** The `permission_mode` of the latest main-thread hook; undefined when that hook carried none. */
   mode?: string;
+  /** Dialogs hooks announced that no Post or Result hook has closed yet (any agent's), by kind, with when. */
+  dialogs?: Map<string, number>;
+  /** A reply typed on the screen route that Claude has not yet taken as a prompt. */
+  queued?: { text: string; at: number };
 }
 
 /** What the evidence for a background reply says, short of the phone's switch (the router adds it). */
@@ -215,6 +219,39 @@ const QUIET_NOTIFICATIONS: ReadonlySet<string> = new Set([
  * ordinary path; anything else or unknown is refused.
  */
 export const BG_FILE_STATUSES: ReadonlySet<string> = new Set(["busy", "shell"]);
+
+/**
+ * What Claude's sessions file may say while a reply is typed on the launcher's screen report: `idle`, `busy` and
+ * `shell` and nothing else. `waiting` (Claude says it waits for the user), an unknown word or no status at all
+ * refuse, as they do for the hook route.
+ */
+export const SCREEN_FILE_STATUSES: ReadonlySet<string> = new Set(["idle", "busy", "shell"]);
+
+/**
+ * How long a dialog a hook announced (a permission request, an elicitation, a dialog notification) holds the
+ * screen route back before its own Post or Result hook, a prompt or a Stop clears it: a hook lost on the way
+ * cannot block replies for good. The hooks arrive before Claude has drawn the dialog, and before agentd's own
+ * approval manager has registered anything, so the screen and the approval count cannot be the only guards.
+ */
+export const DIALOG_ANNOUNCED_MS = 30_000;
+
+/**
+ * How long a reply queued behind a running turn keeps the Stop from being held for the glasses: Claude takes
+ * the queued prompt at the end of the turn, and a hold there would keep it from doing so. A matching
+ * UserPromptSubmit ends it sooner.
+ */
+export const QUEUED_REPLY_MS = 15 * 60_000;
+
+/** What a permission request or its tool's Post hook say of one tool call: the same on both, never kept as text. */
+function toolSignature(payload: Record<string, unknown>): string {
+  let input = "";
+  try {
+    input = JSON.stringify(payload.tool_input ?? null) ?? "";
+  } catch {
+    input = "";
+  }
+  return createHash("sha256").update(`${typeof payload.tool_name === "string" ? payload.tool_name : ""}\u0000${input}`).digest("hex").slice(0, 16);
+}
 
 export class SessionStates {
   private readonly entries = new Map<SessionKey, Entry>();
@@ -317,6 +354,13 @@ export class SessionStates {
         if (this.sources.binding(key)?.uncertain) {
           this.sources.clearUncertain(key);
         }
+        {
+          // Claude took the queued reply as a prompt of its own: the Stop may be held again.
+          const entry = this.entries.get(key);
+          if (entry?.queued && typeof payload.prompt === "string" && squash(payload.prompt) === entry.queued.text) {
+            entry.queued = undefined;
+          }
+        }
         break;
       case "PreCompact": {
         const watch = this.entries.get(key)?.compact;
@@ -366,6 +410,7 @@ export class SessionStates {
       entry.stopAt = undefined;
       entry.stopCause = cause;
     };
+    this.trackDialogs(entry, event, payload, sub);
     if (event === "Stop") {
       const continued = payload.stop_hook_active !== undefined && payload.stop_hook_active !== false;
       if (sub || continued) {
@@ -386,6 +431,75 @@ export class SessionStates {
     } else if (!sub && MAIN_THREAD_TOOL.has(event) && !AUTO_APPROVING_MODES.has(entry.mode ?? "")) {
       revoke(event);
     }
+  }
+
+  /**
+   * The dialogs hooks announce, from any agent: a permission request, an elicitation, a dialog notification.
+   * They arrive before Claude has drawn the dialog and before agentd's approval manager knows of the request,
+   * and agentd may answer the request without Claude's own dialog going away, so a reply typed on the screen
+   * route has to stop at them. Each is closed by its own Post or Result hook; a prompt of the wearer's or the
+   * main thread's Stop closes all; and none outlives DIALOG_ANNOUNCED_MS.
+   */
+  private trackDialogs(entry: Entry, event: string, payload: Record<string, unknown>, sub: boolean): void {
+    const dialogs = (entry.dialogs ??= new Map());
+    const now = this.clock();
+    const notification = typeof payload.notification_type === "string" ? payload.notification_type : "";
+    if (event === "PermissionRequest") {
+      dialogs.set(`perm:${toolSignature(payload)}`, now);
+    } else if (event === "Elicitation") {
+      dialogs.set("elicit", now);
+    } else if (event === "ElicitationResult") {
+      dialogs.delete("elicit");
+    } else if (event === "Notification") {
+      if (notification === "elicitation_complete" || notification === "elicitation_response") {
+        dialogs.delete("elicit");
+      } else if (!QUIET_NOTIFICATIONS.has(notification)) {
+        dialogs.set(`note:${/^[a-z_]{1,40}$/.test(notification) ? notification : "unknown"}`, now);
+      }
+    } else if (event === "PostToolUse" || event === "PostToolUseFailure" || event === "PermissionDenied") {
+      dialogs.delete(`perm:${toolSignature(payload)}`);
+      if (![...dialogs.keys()].some((kind) => kind.startsWith("perm:"))) {
+        dialogs.delete("note:permission_prompt");
+      }
+    } else if (!sub && event === "UserPromptSubmit") {
+      dialogs.clear();
+    } else if (!sub && event === "Stop" && (payload.stop_hook_active === undefined || payload.stop_hook_active === false)) {
+      dialogs.clear();
+    }
+  }
+
+  /** A dialog a hook announced is not yet closed (and not yet old enough to be a hook that was lost). */
+  dialogAnnounced(key: SessionKey): boolean {
+    const dialogs = this.entries.get(key)?.dialogs;
+    if (!dialogs) {
+      return false;
+    }
+    const now = this.clock();
+    for (const [kind, at] of dialogs) {
+      if (now - at > DIALOG_ANNOUNCED_MS || now < at) {
+        dialogs.delete(kind);
+      }
+    }
+    return dialogs.size > 0;
+  }
+
+  /** A reply typed on the screen route went in (its Enter was pressed) and Claude has not taken it as a prompt yet. */
+  markQueued(key: SessionKey, text: string): void {
+    this.entry(key).queued = { text: squash(text), at: this.clock() };
+  }
+
+  /** A reply is queued behind a turn: the Stop is not held for the glasses meanwhile, or Claude would never take it. */
+  queuedPending(key: SessionKey): boolean {
+    const entry = this.entries.get(key);
+    const queued = entry?.queued;
+    if (!entry || !queued) {
+      return false;
+    }
+    if (this.clock() - queued.at > QUEUED_REPLY_MS || this.clock() < queued.at) {
+      entry.queued = undefined;
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -481,15 +595,26 @@ export class SessionStates {
       return "no";
     }
     const file = this.readSession(binding.claudePid);
-    if (!file || (file.sessionId !== undefined && file.sessionId !== key.slice(key.indexOf(":") + 1))) {
+    if (
+      !file ||
+      !SCREEN_FILE_STATUSES.has(file.status) ||
+      (file.sessionId !== undefined && file.sessionId !== key.slice(key.indexOf(":") + 1))
+    ) {
       return "no";
     }
+    // A hook announced a dialog that no Post or Result hook has closed: whatever the screen showed last, and
+    // whatever the approval count says, Claude's own dialog may be about to take the keys. For the command that
+    // holds the claim this ends its evidence; for a new one it only speaks where the screen route would apply.
+    const announced = this.dialogAnnounced(key);
     if (ownsClaim) {
-      return "ready";
+      return announced ? "dialog" : "ready";
     }
     const report = this.sources.screen?.(key);
     if (!report || report.ageMs > SCREEN_FRESH_MS) {
       return "no";
+    }
+    if (announced) {
+      return "dialog";
     }
     switch (report.box) {
       case "empty":
@@ -1321,6 +1446,10 @@ export class LauncherRouter {
           if (end !== "accepted") {
             return failed(end);
           }
+        }
+        if (screen) {
+          // Typed behind whatever Claude is doing: until it takes the prompt, no Stop is held for the glasses.
+          this.states.markQueued(key, cmd.text);
         }
         return OK;
       }

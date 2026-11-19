@@ -1,7 +1,7 @@
 import { readClaudeSession, type ClaudeSessionFile } from "./claude-sessions";
 import type { TypeCommand } from "./launcher-hub";
 import type { PtyChild } from "./pty";
-import { ScreenModel, describeVerdict, layoutClasses, type ScreenBox, type VerdictShape } from "./screen-probe";
+import { ScreenModel, boxState, describeVerdict, layoutClasses, type ScreenBox, type VerdictShape } from "./screen-probe";
 import { LaptopInput, sessionBusySince } from "./laptop-input";
 import { Typist, sessionReady, systemClock, type BindingView, type Clock } from "./typist";
 
@@ -15,6 +15,8 @@ const DRAFT_REPORT_MS = 250;
 const BOX_REFRESH_MS = 1000;
 /** `screen_verdict` goes out when the verdict changed, at most this often (the first one at once). */
 const VERDICT_REPORT_MS = 30_000;
+/** The verdict is worked out (screen probes, the sessions file) at most this often. */
+const VERDICT_CHECK_MS = 1000;
 /** How many distinct layouts are counted, and how many unreadable ones are told at once, per session. */
 const MAX_LAYOUTS = 500;
 const MAX_UNKNOWN_LAYOUTS = 20;
@@ -104,6 +106,7 @@ export class LauncherClient {
   /** What `screen_verdict` last said, and when; the distinct layouts (row-class strings) seen, and the unreadable ones told at once. */
   private verdictSignature?: string;
   private verdictSentAt?: number;
+  private verdictCheckedAt?: number;
   private readonly layouts = new Set<string>();
   private readonly unknownLayouts = new Set<string>();
   private lastReportAt = Number.NEGATIVE_INFINITY;
@@ -185,11 +188,11 @@ export class LauncherClient {
     if (this.typist.busy) {
       return; // looked at again when the command ends
     }
-    const verdict = describeVerdict(this.screen);
-    this.visibleDraft = verdict.box === "text";
-    this.visibleBox = verdict.box;
+    const box = boxState(this.screen);
+    this.visibleDraft = box === "text";
+    this.visibleBox = box;
     this.reportDraft();
-    this.reportVerdict(verdict);
+    this.reportVerdict();
     this.armRefresh();
   }
 
@@ -198,7 +201,15 @@ export class LauncherClient {
    * VERDICT_REPORT_MS, and once at the start), and at once, a few times per session, the first time a layout
    * with a prompt-glyph row the probe could not read appears. Names, numbers and row classes only.
    */
-  private reportVerdict(verdict: VerdictShape): void {
+  private reportVerdict(): void {
+    // The verdict (several probes of the screen) and the sessions file are looked at only about once a second:
+    // a screen redraws several times a second while Claude works, and a line goes out at most every 30 s.
+    const at = this.clock.now();
+    if (this.verdictCheckedAt !== undefined && at - this.verdictCheckedAt < VERDICT_CHECK_MS) {
+      return;
+    }
+    this.verdictCheckedAt = at;
+    const verdict: VerdictShape = describeVerdict(this.screen);
     const classes = layoutClasses(this.screen);
     if (!this.layouts.has(classes) && this.layouts.size < MAX_LAYOUTS) {
       this.layouts.add(classes);

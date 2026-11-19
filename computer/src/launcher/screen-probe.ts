@@ -758,7 +758,9 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
     return { kind: "unknown", reason: "narrow" };
   }
   const rows = screen.lines();
-  const solidRows = screen.solidLines();
+  // Which cells are muted is worked out only when there is a rule to build a box on: the screen can be big.
+  let solidMemo: string[] | undefined;
+  const solidRows = (): string[] => (solidMemo ??= screen.solidLines());
   const { bottom, top } = locateBox(rows, solidRows);
   if (bottom < 1) {
     return { kind: "unknown", reason: "no_box", ...(bottom >= 0 ? { bottom } : {}) };
@@ -780,7 +782,7 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   const around = [...rows.slice(Math.max(0, top - STATUS_ROWS), top), ...footer];
   // A second prompt row with something after its glyph is a selection list; a bare `>` is a row of the draft,
   // but only a solid one: a muted bare glyph is no text of the wearer's, and no empty box either.
-  const mutedRow = (index: number): boolean => (solidRows[top + 1 + index] ?? "").trim() === "";
+  const mutedRow = (index: number): boolean => (solidRows()[top + 1 + index] ?? "").trim() === "";
   if (
     inputRows.some(
       (row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row) && (row.replace(PROMPT_LEAD, "").trim() !== "" || mutedRow(index))),
@@ -798,7 +800,7 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
     return { kind: "blocked", reason: "dialog" };
   }
   const text = normalise(inputContent(inputRows));
-  const solid = normalise(inputContent(screen.solidLines().slice(top + 1, bottom)));
+  const solid = normalise(inputContent(solidRows().slice(top + 1, bottom)));
   // Claude's own `Try "..."` hint is no exception: it is empty only when drawn muted, like any
   // placeholder. Typed text that looks like it is text, and so is a multi-line draft that begins
   // and ends the same way.
@@ -817,7 +819,7 @@ function isTopRule(row: string): boolean {
  * (with the real top scrolled off, it would make the rows below it an "empty" box and the hidden draft above it
  * would be sent).
  */
-function locateBox(rows: string[], solidRows: string[]): { bottom: number; top: number } {
+function locateBox(rows: string[], solidRows: () => string[]): { bottom: number; top: number } {
   let bottom = -1;
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     if (isRule(rows[i])) {
@@ -840,7 +842,7 @@ function locateBox(rows: string[], solidRows: string[]): { bottom: number; top: 
   // with a prompt row under it and only box-like rows down to the bottom rule encloses solid text, that is the
   // box holding a draft: the caller must be told there is text, never that the box is empty or unreadable.
   const topFound = top >= 0 && bottom - top >= 2 && PROMPT_ROW.test(rows[top + 1] ?? "");
-  const draftTop = findDraftTop(rows, bottom, solidRows, topFound);
+  const draftTop = findDraftTop(rows, bottom, solidRows(), topFound);
   if (draftTop >= 0 && (!topFound || draftTop < top)) {
     top = draftTop;
   }
@@ -1078,7 +1080,7 @@ export function describeVerdict(screen: ScreenModel): VerdictShape {
   const shape = describeShape(screen, look);
   const lines = screen.lines();
   const solid = screen.solidLines();
-  const { bottom, top } = locateBox(lines, solid);
+  const { bottom, top } = locateBox(lines, () => solid);
   const boxed = bottom >= 1 && top >= 0 && bottom - top >= 2;
   const below = new Map<string, number>();
   if (bottom >= 0) {

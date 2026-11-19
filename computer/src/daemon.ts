@@ -175,11 +175,13 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
   // its trust, its phone forgotten, no longer holds anything.
   const trustedPhoneConnected = (): boolean =>
     phoneLink?.trustedConnected === true || wsHub?.hasTrustedClient === true;
-  const stopWait = new StopWait({
+  const stopWait: StopWait = new StopWait({
     waitLimitMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
     continuationCap: DEFAULT_STOP_CONTINUATION_CAP,
     canAsk: trustedPhoneConnected,
     enabled: config.rokidCoder.stopHold === true,
+    // A glasses reply queued behind the turn that is ending is Claude's next prompt: no hold in its way.
+    skipHold: (sessionId) => launcherStates.queuedPending(sessionKeyOf("claude", sessionId)),
   });
   // No phone frame carries a release yet; until followup_closed exists the log
   // is the only trace of how a wait ended.
@@ -254,7 +256,7 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
     },
   });
   // agentd's own read of the file Claude keeps for the bound process (R55).
-  const launcherStates = new SessionStates(
+  const launcherStates: SessionStates = new SessionStates(
     (claudePid) => {
       const file = readClaudeSession(launcherSessionsDir, claudePid);
       return file && { status: file.status, statusUpdatedAt: file.statusUpdatedAt ?? 0, sessionId: file.sessionId };

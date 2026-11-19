@@ -1171,6 +1171,22 @@ test("a_queued_reply_whose_text_never_shows_is_cleared_and_not_sent_while_the_tu
   assert.deepEqual(box.result, { ok: false, error: "not_sent" });
 });
 
+test("a_queued_reply_is_typed_only_on_a_file_that_says_idle_busy_or_shell", async () => {
+  for (const file of ["waiting", "starting", "BUSY", ""]) {
+    const t = setup({ file });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    replay(t, real.AFTER.working);
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "yes do it", bgReply: true, queued: true }));
+    await t.advance(3000);
+    assert.deepEqual(t.pty.writes, [], `${JSON.stringify(file)}: nothing typed`);
+    assert.deepEqual(t.asked, [], file);
+    assert.equal(box.result, undefined, `${JSON.stringify(file)}: it waits for a file it can go on`);
+    t.session.status = "shell";
+    await t.advance(400);
+    assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], `${JSON.stringify(file)}: and goes once it says shell`);
+  }
+});
+
 test("a_queued_flag_needs_a_background_reply_and_a_text", async () => {
   const t = setup({ file: "busy" });
   replay(t, real.AFTER.working);

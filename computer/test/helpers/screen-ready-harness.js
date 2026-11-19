@@ -61,15 +61,18 @@ function fakePort() {
  * the launcher's last box state, or undefined for none (`ageMs` says how old it is).
  */
 function setup(options = {}) {
-  const { mode = "auto", status = "busy", ageMs = 0, asking = false, held = false, subagents = 0 } = options;
+  const { mode = "auto", ageMs = 0, asking = false, held = false, subagents = 0 } = options;
+  const status = "status" in options ? options.status : "busy";
   // An explicit `report: undefined` is no report at all, not the default.
   const report = "report" in options ? options.report : "empty";
   const port = fakePort();
   const file = { status, statusUpdatedAt: Date.now() - 5000, sessionId: "s1" };
   const flags = { held, asking, report, ageMs, subagents };
+  // agentd's own clock for the dialog and queued markers, movable: `clock.offset += ms` is that much later.
+  const clock = { offset: 0 };
   const states = new SessionStates(
     (pid) => (pid === PID ? { ...file } : undefined),
-    Date.now,
+    () => Date.now() + clock.offset,
     {
       binding: (key) => port.binding(key),
       held: () => flags.held,
@@ -80,10 +83,10 @@ function setup(options = {}) {
       screen: () => (flags.report === undefined ? undefined : { box: flags.report, ageMs: flags.ageMs }),
     },
   );
-  const router = new LauncherRouter({ port, states, timings: TIMINGS, bgReplies: () => false });
+  const router = new LauncherRouter({ port, states, clock: () => Date.now() + clock.offset, timings: TIMINGS, bgReplies: () => false });
   // One main-thread hook that carries the mode: it is sticky from then on.
   router.onHook(KEY, "UserPromptSubmit", { permission_mode: mode, prompt: "go" });
-  return { port, file, flags, states, router };
+  return { port, file, flags, states, router, clock, hook: (event, payload = {}) => router.onHook(KEY, event, { permission_mode: mode, ...payload }) };
 }
 
 module.exports = { KEY, PID, TIMINGS, fakePort, setup };

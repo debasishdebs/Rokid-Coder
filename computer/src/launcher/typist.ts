@@ -590,8 +590,9 @@ export class Typist {
     const status = this.options.bg?.fileStatus();
     if (active.cmd.queued) {
       // agentd found the box empty on the screen report: the file may say idle, busy or shell (a turn, a
-      // background task); only a file that cannot be read at all is no ground to type on.
-      return status !== undefined;
+      // background task); `waiting` (Claude waits for the user), a word not known and no file refuse, as they
+      // do on agentd's side.
+      return status === "idle" || status === "busy" || status === "shell";
     }
     return status === "busy" || status === "shell";
   }
