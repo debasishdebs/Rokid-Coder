@@ -104,7 +104,7 @@ async function bind(client, sessionId) {
  * Claude sessions dir. The registry's attached.json lives in the config dir,
  * as it does in the daemon.
  */
-async function withHub(body, { logger = silentLogger } = {}) {
+async function withHub(body, { logger = silentLogger, hubOptions = {} } = {}) {
   await withTempDir(async (dir) => {
     const configDir = path.join(dir, "rc");
     const sessionsDir = path.join(dir, "sessions");
@@ -112,7 +112,7 @@ async function withHub(body, { logger = silentLogger } = {}) {
     const file = path.join(configDir, "attached.json");
     const make = () => {
       const registry = new AttachRegistry({ file, logger });
-      return { registry, hub: new LauncherHub({ configDir, claudeSessionsDir: sessionsDir, logger, registry }) };
+      return { registry, hub: new LauncherHub({ configDir, claudeSessionsDir: sessionsDir, logger, registry, ...hubOptions }) };
     };
     const first = make();
     await first.hub.start();
@@ -184,6 +184,72 @@ test("bind_accepted_for_owned_session_file", async (t) => {
     assert.equal(registry.mode("claude", "s1"), "plugin");
     assert.equal(hub.laptopDraft(KEY("s1")), false);
   });
+});
+
+test("the_launchers_box_report_is_kept_with_its_age_and_the_verdict_line_carries_agentds_decision", async (t) => {
+  const { events, logger } = capturingLogger();
+  await withHub(
+    async ({ hub, sessionsDir }) => {
+      const mine = sleeper(t);
+      sessionFile(sessionsDir, mine.pid, "s1");
+      const client = await launcher(hub, { launcherId: "L1", childPid: mine.pid });
+      assert.equal((await bind(client, "s1")).type, "bind_accepted");
+      // No report yet; an older launcher's laptop_state (the draft alone) is still understood.
+      assert.equal(hub.laptopScreen(KEY("s1")), undefined);
+      client.send({ type: "laptop_state", draft: false });
+      await settle(50);
+      assert.equal(hub.laptopScreen(KEY("s1")), undefined, "no box in the frame: no report");
+      const changes = [];
+      hub.onChange((key) => changes.push(key));
+      client.send({ type: "laptop_state", draft: false, box: "empty", at: Date.now() });
+      const seen = await until(() => hub.laptopScreen(KEY("s1")), 3000, "the box report");
+      assert.equal(seen.box, "empty");
+      assert.equal(seen.ageMs >= 0 && seen.ageMs < 2000, true);
+      assert.deepEqual(changes, [KEY("s1")], "a change of the box is a change of what the phone may show");
+      // The same report again is no change, but it is fresh again.
+      await settle(300);
+      const aged = hub.laptopScreen(KEY("s1")).ageMs;
+      client.send({ type: "laptop_state", draft: false, box: "empty", at: Date.now() });
+      await until(() => hub.laptopScreen(KEY("s1")).ageMs < aged, 3000, "a refreshed report");
+      assert.deepEqual(changes, [KEY("s1")]);
+      client.send({ type: "laptop_state", draft: true, box: "text", at: Date.now() });
+      await until(() => hub.laptopScreen(KEY("s1")).box === "text", 3000, "a changed report");
+      assert.equal(hub.laptopDraft(KEY("s1")), true);
+      // A box word outside the list, or a bad `at`, is a bad frame.
+      client.send({ type: "laptop_state", draft: false, box: "secret", at: 1 });
+      await client.waitClosed();
+      assert.equal(hub.laptopScreen(KEY("s1")), undefined, "gone with the connection");
+    },
+    { logger },
+  );
+  assert.equal(events.some((e) => e.event === "launcher_connection_dropped"), true);
+  // The verdict line, from a bound launcher, adds what only agentd knows.
+  const second = capturingLogger();
+  await withHub(
+    async ({ hub, sessionsDir }) => {
+      const mine = sleeper(t);
+      sessionFile(sessionsDir, mine.pid, "s2");
+      const client = await launcher(hub, { launcherId: "L2", childPid: mine.pid });
+      assert.equal((await bind(client, "s2")).type, "bind_accepted");
+      client.send({
+        type: "screen_verdict", probe: "prompt", reason: "none", box: "empty", tainted: false, cols: 207, rows: 50,
+        top: 46, prompt: 47, bottom: 48, below: "B1 M1", shape: "46R207 47P2 48R207", file: "shell", layouts: 4, unknown: true,
+      });
+      await until(() => second.events.find((e) => e.event === "launcher_screen_verdict"), 3000, "the verdict line");
+      const line = second.events.find((e) => e.event === "launcher_screen_verdict");
+      assert.deepEqual(
+        { ...line.meta },
+        {
+          session: KEY("s2"), probe: "prompt", reason: "none", box: "empty", tainted: false, cols: 207, rows: 50, top: 46, prompt: 47,
+          bottom: 48, below: "B1 M1", file: "shell", layoutSeen: 4, ready: true, readyWhy: "screen_empty", mode: "auto", shape: "46R207 47P2 48R207",
+        },
+      );
+      const warn = second.events.find((e) => e.event === "launcher_screen_unknown_layout");
+      assert.equal(warn.level, "warn");
+      assert.equal(warn.meta.session, KEY("s2"));
+    },
+    { logger: second.logger, hubOptions: { verdictContext: () => ({ ready: true, readyWhy: "screen_empty", mode: "auto" }) } },
+  );
 });
 
 test("bind_rejected_for_other_sessions_id", async (t) => {

@@ -169,3 +169,17 @@ test("a Stop hook's last_assistant_message is the session's latest assistant tex
   assert.equal(store.get(base.session_id).lastAssistantText.length, 140);
   store.dispose();
 });
+
+test("the_mcp_elicitation_hooks_change_nothing_and_are_not_unknown_events", () => {
+  const events = [];
+  const logger = { info: (event) => events.push(event), warn: (event) => events.push(event), error: (event) => events.push(event) };
+  const store = new SessionStore(identity, logger, () => 1_753_380_000_000);
+  const base = { session_id: "session-elicit-1", transcript_path: "/tmp/s.jsonl", cwd: "/work/sample" };
+  store.handleHook({ ...base, hook_event_name: "SessionStart", source: "startup" });
+  const before = JSON.stringify(store.get(base.session_id));
+  store.handleHook({ ...base, hook_event_name: "Elicitation", mcp_server_name: "docs" });
+  store.handleHook({ ...base, hook_event_name: "ElicitationResult", mcp_server_name: "docs", action: "accept" });
+  assert.equal(events.includes("hook_unknown_event"), false);
+  assert.equal(JSON.stringify(store.get(base.session_id)), before);
+  store.dispose();
+});

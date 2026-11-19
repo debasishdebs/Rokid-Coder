@@ -314,7 +314,7 @@ export class Typist {
   }
 
   private typeable(cmd: TypeCommand): boolean {
-    if (cmd.bgReply && cmd.command !== "text") {
+    if ((cmd.bgReply || cmd.queued) && cmd.command !== "text") {
       return false;
     }
     switch (cmd.command) {
@@ -588,6 +588,12 @@ export class Typist {
       return this.ready(active.cmd.notBefore);
     }
     const status = this.options.bg?.fileStatus();
+    if (active.cmd.queued) {
+      // agentd found the box empty on the screen report: the file may say idle, busy or shell (a turn, a
+      // background task); `waiting` (Claude waits for the user), a word not known and no file refuse, as they
+      // do on agentd's side.
+      return status === "idle" || status === "busy" || status === "shell";
+    }
     return status === "busy" || status === "shell";
   }
 
@@ -615,7 +621,7 @@ export class Typist {
       active.look = { kind: "blocked", reason: "plan_mode" };
       return "full";
     }
-    const seen = probe(bg.screen);
+    const seen = probe(bg.screen, { queued: active.cmd.queued === true });
     active.look = seen;
     if (seen.kind === "unknown") {
       return "unreadable";
@@ -632,7 +638,7 @@ export class Typist {
     if (!bg) {
       return;
     }
-    const look = seen ?? probe(bg.screen);
+    const look = seen ?? probe(bg.screen, { queued: active.cmd.queued === true });
     this.options.onCheck?.({
       phase,
       probe: look.kind,
@@ -675,7 +681,7 @@ export class Typist {
     if (!bg || active.bgText === undefined || !this.fileAllows(active) || showsPlanMode(bg.screen)) {
       return false;
     }
-    return showsExactly(probe(bg.screen, { sinceTaints: active.mark }), active.bgText);
+    return showsExactly(probe(bg.screen, { sinceTaints: active.mark, queued: active.cmd.queued === true }), active.bgText);
   }
 
   /** One bracketed paste and no Enter. */
@@ -706,7 +712,7 @@ export class Typist {
       this.bgAbort(active, this.stale(active) ? "cancelled" : "not_sent");
       return;
     }
-    const seen = probe(bg.screen, { sinceTaints: active.mark });
+    const seen = probe(bg.screen, { sinceTaints: active.mark, queued: active.cmd.queued === true });
     if (showsPlanMode(bg.screen)) {
       // Plan mode came on between the paste and the Enter: cleared, never entered.
       this.check("post", active, "refused", { kind: "blocked", reason: "plan_mode" });
@@ -771,7 +777,7 @@ export class Typist {
     const cleared =
       bg !== undefined &&
       active.bgText !== undefined &&
-      showsCleared(probe(bg.screen, { sinceTaints: active.mark }), active.bgText);
+      showsCleared(probe(bg.screen, { sinceTaints: active.mark, queued: active.cmd.queued === true }), active.bgText);
     // A dialog or question the wearer can see: what they type is the answer to it, so the keyboard is
     // theirs as soon as it shows, and the keys they typed meanwhile are replayed, never dropped.
     const dialogUp = bg !== undefined && this.dialogOnScreen(bg.screen);

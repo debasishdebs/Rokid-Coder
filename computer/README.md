@@ -292,6 +292,29 @@ Limits to know about:
   rebind, a timeout, the link going) once the paste began is presumed sent and consumes the id, because
   agentd cannot tell a cancel before the Enter from one after it: it can cost you a re-spoken reply,
   never a duplicate one.
+- In `auto` and `bypassPermissions` modes (where Claude never stops to ask) a text reply goes whenever the
+  launcher's own screen says the prompt box is found and empty (a muted suggestion is empty), with no dialog,
+  menu, plan-mode footer or text of yours, whatever Claude's sessions file says: `idle`, `busy` (a turn runs,
+  or a background task or monitor keeps it from idle) or `shell`. A running turn's `esc to interrupt` is no
+  reason to refuse in this route: the reply is typed and queues behind the turn, and its Enter is the end
+  (no prompt of Claude's is waited for). The launcher reports the box (`empty`, `text`, `dialog`, `plan`,
+  `unreadable`) on every change, with the trailing look after output, never while its own command is in
+  flight, and again about every second while unchanged; a report older than 3 s, or none, puts the file rule
+  back. The check at the write (two looks before the paste, exact text after it) is unchanged and is still
+  the authority. A pending approval or question of any origin, a held Stop and an uncertain write still
+  refuse, and so does a file status other than `idle`, `busy` or `shell` (`waiting` among them). A hook that
+  announces a dialog (a permission request, an elicitation, a dialog notification; a subagent's included) takes
+  the route away at once: a reply already pasted is cleared before its Enter, and no new one is typed until the
+  tool's Post hook, the elicitation's result, the wearer's next prompt or the next Stop closes it, or 30 s pass
+  (so a lost hook cannot refuse replies for good). A reply queued behind a turn keeps agentd from holding the
+  turn's Stop for the glasses (when Stop holding is on, which it is not by default), from the moment its Enter is
+  allowed until a prompt that holds the reply's text arrives, the next Stop after any other prompt, a failure of
+  the reply, or 3 minutes. The plugin registers the MCP `Elicitation` and `ElicitationResult` hooks (the names
+  Claude Code 2.1.285 defines) so those dialogs are announced and closed like a permission request; a plugin
+  installed before this release needs the plugin sync to pick them up. `compact`, `model` and every other permission mode keep the idle rule exactly. The phone is told
+  why a reply cannot go: text typed at the laptop (`draft`), a dialog or question to answer there
+  (`dialog`), the screen could not be read (`unreadable`), plan mode (`mode_not_allowed`), and only
+  otherwise that Claude is working.
 - Every glasses reply, idle or background, is typed in the same two phases, and a draft is what the
   screen shows, not what your keys suggest. Before a byte is written the prompt box must be visibly empty
   on two looks (a faint or gray placeholder or suggestion is empty; `Try "..."` only when drawn faint),
@@ -348,6 +371,28 @@ Limits to know about:
 The banner is printed before Claude draws, so it is never mixed into the TUI. It reads "attaching…"
 because the phone confirms the bind afterwards. In Claude, `/rokid:status` shows the session's state and
 `/rokid:off` stops sending it to the glasses.
+
+### Reading Claude's screen: how to report a layout
+
+`rk claude` reads Claude's screen to know whether its prompt box is empty, and Claude's layout changes from
+release to release. When a reply is refused for a screen that looks fine, or something else about the box is
+wrong, the log tells which layout it was, without a character of what was on the screen. Look in
+`~/.nexus-agentd/agentd.log` for:
+
+- `launcher_screen_verdict`: one line whenever what the launcher makes of the screen changes (at most one every
+  30 s, and one at the start): the probe's answer (`prompt`, `blocked`, `unknown`) and reason, the box state
+  (`empty`, `text`, `dialog`, `plan`, `unreadable`), whether the screen model was disturbed (`tainted`), the
+  screen size, the rows of the top rule, the prompt row and the bottom rule, the rows under the bottom rule
+  by class (`below`), Claude's sessions-file status (`file`), agentd's decision (`ready`, `readyWhy`),
+  the permission mode and `layoutSeen`, how many distinct layouts this session has shown.
+- `launcher_screen_shape`: when a reply was refused because no box was found, each row's index, class and length.
+- `launcher_screen_unknown_layout`: a warning, the first time (a few per session at most) a layout shows a
+  prompt-glyph row the probe could not read as the box: the line to send.
+
+The classes are `R` rule, `P` row starting with the prompt glyph, `M` muted text, `T` text, `G` glyphs only,
+`B` blank, each with the row's length; the launcher and agentd accept nothing else in these fields (digits,
+those letters and spaces), so the lines hold no screen text, no paths, no titles and no ids and are safe to
+paste into an issue.
 
 ### Pairing from `rk`
 

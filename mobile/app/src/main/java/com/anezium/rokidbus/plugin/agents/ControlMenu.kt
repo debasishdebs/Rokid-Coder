@@ -75,6 +75,7 @@ object ControlMenu {
     const val FOLLOWUP_BUSY = "Claude is working — try again when it is idle"
     const val FOLLOWUP_BACKGROUND = "background work is running — wait for it, or reply at the laptop"
     const val FOLLOWUP_DRAFT = "text typed at the laptop prompt — clear it first"
+    const val FOLLOWUP_DIALOG = "Claude is asking something — answer it at the laptop first"
     const val FOLLOWUP_NOT_LAUNCHER = "start the session with rk claude"
     const val FOLLOWUP_BG_OFF = "background replies are off — turn them on in Settings"
     const val FOLLOWUP_MODE_NOT_ALLOWED = "Background replies aren't supported in this mode"
@@ -662,6 +663,8 @@ object ControlMenu {
         "busy" -> FOLLOWUP_BUSY
         "background" -> FOLLOWUP_BACKGROUND
         "draft" -> FOLLOWUP_DRAFT
+        "dialog" -> FOLLOWUP_DIALOG
+        "unreadable" -> SCREEN_UNREADABLE_FOLLOWUP
         NOT_LAUNCHER -> FOLLOWUP_NOT_LAUNCHER
         "bg_off" -> FOLLOWUP_BG_OFF
         "mode_not_allowed" -> FOLLOWUP_MODE_NOT_ALLOWED

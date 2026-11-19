@@ -152,6 +152,8 @@ class ControlMenuTest {
         assertEquals("Claude is working — try again when it is idle", sub("busy"))
         assertEquals("background work is running — wait for it, or reply at the laptop", sub("background"))
         assertEquals("text typed at the laptop prompt — clear it first", sub("draft"))
+        assertEquals("Claude is asking something — answer it at the laptop first", sub("dialog"))
+        assertEquals("Could not read Claude's screen, try again or reply at the laptop", sub("unreadable"))
         assertEquals("start the session with rk claude", sub("not_launcher"))
         assertEquals("background replies are off — turn them on in Settings", sub("bg_off"))
         assertEquals("Background replies aren't supported in this mode", sub("mode_not_allowed"))

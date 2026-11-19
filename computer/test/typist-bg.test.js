@@ -1053,6 +1053,149 @@ test("a_draft_whose_top_scrolled_off_gets_nothing_typed_either_way_the_rule_like
   }
 });
 
+// ---- a queued reply: typed while a turn runs, on agentd's word about the screen ---------------------------
+
+const real = require("./helpers/claude-real-turn.js");
+const { layout } = require("./helpers/claude-layouts.js");
+
+/** The real capture replayed up to chunk `index`, on a 207x50 screen. */
+function replay(t, index) {
+  t.screen.resize(real.COLS, real.ROWS);
+  real.CHUNKS.slice(0, index + 1).forEach((chunk) => t.draw(chunk));
+  assert.equal(t.screen.tainted, false);
+}
+
+/** What the real UI draws on the prompt row once our text is pasted: the capture's prompt row is the 48th (index 47). */
+const typedRow = (text) => `\x1b[48;1H\x1b[K❯ ${text}`;
+
+test("a_queued_reply_is_pasted_and_verified_exactly_on_the_real_mid_turn_screen_and_ends_at_the_enter", async () => {
+  for (const file of ["busy", "shell", "idle"]) {
+    const t = setup({ file });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    replay(t, real.AFTER.working);
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "yes do it", bgReply: true, queued: true }));
+    await t.advance(150);
+    assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], `${file}: two looks of an empty box, then agentd is asked`);
+    t.typist.verdict("c1", "paste", true);
+    await t.advance(0);
+    assert.deepEqual(t.pty.writes, [PASTE("yes do it")], file);
+    // The turn still runs (the spinner and `esc to interrupt` are on screen); the box shows exactly our text.
+    t.draw(typedRow("yes do it"));
+    assert.equal(t.screen.lines().some((row) => /esc to interrupt/.test(row)), true, "the turn is still running");
+    await t.advance(150);
+    assert.deepEqual(t.asked.map((a) => a.phase), ["paste", "enter"], file);
+    t.typist.verdict("c1", "enter", true);
+    await t.advance(0);
+    assert.deepEqual(t.pty.writes, [PASTE("yes do it"), "\r"], file);
+    assert.deepEqual(box.result, { ok: true }, file);
+    assert.deepEqual(t.shapes, [], file);
+  }
+});
+
+test("a_queued_reply_is_typed_verified_and_entered_beside_the_agents_panel_in_every_shape", async () => {
+  const { promptLine } = require("./helpers/claude-layouts.js");
+  for (const [cols, rows, agents, selected, phase] of [
+    [207, 50, 3, -1, "waiting"],
+    [207, 50, 3, "main", "waiting"],
+    [207, 50, 3, 1, "working"],
+    [80, 24, 8, 0, "waiting"],
+    [207, 50, 0, -1, "idle"],
+  ]) {
+    const what = `${cols}x${rows} agents ${agents} selected ${selected} ${phase}`;
+    const t = setup({ file: "shell" });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.screen.resize(cols, rows);
+    t.draw(layout({ cols, rows, agents, selected, phase, monitors: 2, right: "updateGoalSeconds", cursor: "blank" }));
+    assert.equal(t.screen.tainted, false, what);
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "yes do it", bgReply: true, queued: true }));
+    await t.advance(150);
+    assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], what);
+    t.typist.verdict("c1", "paste", true);
+    await t.advance(0);
+    assert.deepEqual(t.pty.writes, [PASTE("yes do it")], what);
+    t.draw(`\x1b[${promptLine({ rows, agents })};1H\x1b[K❯ yes do it`);
+    await t.advance(150);
+    assert.deepEqual(t.asked.map((a) => a.phase), ["paste", "enter"], what);
+    t.typist.verdict("c1", "enter", true);
+    await t.advance(0);
+    assert.deepEqual(t.pty.writes, [PASTE("yes do it"), "\r"], what);
+    assert.deepEqual(box.result, { ok: true }, what);
+  }
+});
+
+test("the_same_reply_without_the_queued_flag_is_refused_by_a_running_turn_and_nothing_is_typed", async () => {
+  const t = setup({ file: "busy" });
+  t.session.statusUpdatedAt = t.clock.now() - 10_000;
+  replay(t, real.AFTER.working);
+  const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "yes do it", bgReply: true }));
+  await t.advance(300);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+  assert.deepEqual(t.pty.writes, []);
+  assert.deepEqual(t.asked, []);
+});
+
+test("a_queued_reply_is_refused_on_a_dialog_a_plan_footer_text_in_the_box_and_a_tainted_screen", async () => {
+  for (const [what, prepare, error] of [
+    ["a dialog", (t) => t.draw(claudeScreen({ cols: 80, rows: 24, agents: 0, dialog: true })), "not_sent"],
+    ["a dialog replacing a working screen", (t) => t.draw(`\x1b[2J\x1b[HDo you want to proceed?\r\n${RULE}\r\n❯ 1. Yes\r\n${RULE}\r\n  esc to interrupt`), "not_sent"],
+    ["the plan footer", (t) => t.draw(layout({ cols: 80, rows: 24, footer: "plan", phase: "working" })), "not_sent"],
+    ["text in the box", (t) => t.draw(claudeScreen({ cols: 80, rows: 24, agents: 0, input: "half typed" })), "laptop_draft"],
+    ["a tainted screen", (t) => {
+      t.draw(layout({ cols: 80, rows: 24, phase: "working" }));
+      t.draw("\x1b[1;20r");
+    }, "not_sent"],
+  ]) {
+    const t = setup({ file: "busy" });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    prepare(t);
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "yes do it", bgReply: true, queued: true }));
+    await t.advance(5400);
+    assert.deepEqual(box.result, { ok: false, error: error }, what);
+    assert.deepEqual(t.pty.writes, [], `${what}: nothing typed`);
+    assert.deepEqual(t.asked, [], `${what}: agentd is not asked`);
+  }
+});
+
+test("a_queued_reply_whose_text_never_shows_is_cleared_and_not_sent_while_the_turn_runs", async () => {
+  const t = setup({ file: "shell" });
+  t.session.statusUpdatedAt = t.clock.now() - 10_000;
+  replay(t, real.AFTER.working);
+  const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "yes do it", bgReply: true, queued: true }));
+  await t.advance(150);
+  t.typist.verdict("c1", "paste", true);
+  await t.advance(0);
+  // The box shows something else than what was pasted.
+  t.draw(typedRow("something else"));
+  await t.advance(1700);
+  assert.deepEqual(t.pty.writes, [PASTE("yes do it"), CTRL_U]);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+});
+
+test("a_queued_reply_is_typed_only_on_a_file_that_says_idle_busy_or_shell", async () => {
+  for (const file of ["waiting", "starting", "BUSY", ""]) {
+    const t = setup({ file });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    replay(t, real.AFTER.working);
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "yes do it", bgReply: true, queued: true }));
+    await t.advance(3000);
+    assert.deepEqual(t.pty.writes, [], `${JSON.stringify(file)}: nothing typed`);
+    assert.deepEqual(t.asked, [], file);
+    assert.equal(box.result, undefined, `${JSON.stringify(file)}: it waits for a file it can go on`);
+    t.session.status = "shell";
+    await t.advance(400);
+    assert.deepEqual(t.asked.map((a) => a.phase), ["paste"], `${JSON.stringify(file)}: and goes once it says shell`);
+  }
+});
+
+test("a_queued_flag_needs_a_background_reply_and_a_text", async () => {
+  const t = setup({ file: "busy" });
+  replay(t, real.AFTER.working);
+  const compact = track(t.typist.run({ cmdId: "c1", gen: 1, command: "compact", bgReply: true, queued: true }));
+  await t.advance(100);
+  assert.deepEqual(compact.result, { ok: false, error: "not_ready" });
+  assert.deepEqual(t.pty.writes, []);
+});
+
 test("a_tainted_screen_refusal_logs_no_shape_and_a_huge_terminal_logs_one_the_hub_accepts", async () => {
   const tainted = setup({ file: "idle" });
   tainted.session.statusUpdatedAt = tainted.clock.now() - 10_000;

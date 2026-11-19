@@ -175,11 +175,13 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
   // its trust, its phone forgotten, no longer holds anything.
   const trustedPhoneConnected = (): boolean =>
     phoneLink?.trustedConnected === true || wsHub?.hasTrustedClient === true;
-  const stopWait = new StopWait({
+  const stopWait: StopWait = new StopWait({
     waitLimitMs: (config.rokidCoder.waitLimitSec ?? DEFAULT_WAIT_LIMIT_SEC) * 1000,
     continuationCap: DEFAULT_STOP_CONTINUATION_CAP,
     canAsk: trustedPhoneConnected,
     enabled: config.rokidCoder.stopHold === true,
+    // A glasses reply queued behind the turn that is ending is Claude's next prompt: no hold in its way.
+    skipHold: (sessionId) => launcherStates.queuedPending(sessionKeyOf("claude", sessionId)),
   });
   // No phone frame carries a release yet; until followup_closed exists the log
   // is the only trace of how a wait ended.
@@ -200,11 +202,16 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
   attachRegistry.reconcileLaunchers({
     isSessionLive: liveIds ? (key) => key.startsWith("claude:") && liveIds.has(key.slice("claude:".length)) : undefined,
   });
-  const launchers = new LauncherHub({
+  const launchers: LauncherHub = new LauncherHub({
     configDir: config.rokidCoder.stateDir,
     claudeSessionsDir: launcherSessionsDir,
     logger,
     registry: attachRegistry,
+    // What the launcher's screen verdict line says from agentd's side: the readiness decision and the mode.
+    verdictContext: (key) => {
+      const decision = launcherRouter.readiness(key);
+      return { ready: decision.ready, readyWhy: decision.why, mode: decision.mode };
+    },
     // The plugin's pair command arrives here, from the hook forwarder (R156).
     // It only opens the window: the code is confirmed in a terminal and on the phone.
     armPairing: () => {
@@ -249,7 +256,7 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
     },
   });
   // agentd's own read of the file Claude keeps for the bound process (R55).
-  const launcherStates = new SessionStates(
+  const launcherStates: SessionStates = new SessionStates(
     (claudePid) => {
       const file = readClaudeSession(launcherSessionsDir, claudePid);
       return file && { status: file.status, statusUpdatedAt: file.statusUpdatedAt ?? 0, sessionId: file.sessionId };
@@ -267,10 +274,12 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
       subagents: (key) => sessions.get(key.slice(key.indexOf(":") + 1))?.subagents?.running ?? 0,
       // Every pending approval counts, a subagent's included; an unknown manager is not "none".
       approvalPending: (key) => approvals?.hasPendingForSession(key.slice(key.indexOf(":") + 1)) !== false,
+      // What the launcher's own screen last said of the prompt box, and how long ago.
+      screen: (key) => launchers.laptopScreen(key),
     },
   );
   // The environment overrides exist only so tests need not wait the windows out.
-  const launcherRouter = new LauncherRouter({
+  const launcherRouter: LauncherRouter = new LauncherRouter({
     port: launchers,
     states: launcherStates,
     timings: {

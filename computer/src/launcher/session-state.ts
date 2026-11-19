@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { FollowupState, SessionKey } from "../protocol-v2";
 import type { CommandResult, SendError, TypeCommand, WriteCheckPhase } from "./launcher-hub";
 import { bgReplyText } from "./paste-text";
@@ -86,7 +86,27 @@ export interface StateSources {
    * exist and to say no; absent, such a mode is refused.
    */
   approvalPending?(key: SessionKey): boolean;
+  /**
+   * What the launcher last reported its screen shows of the prompt box (`empty`, `text`, `dialog`, `plan`,
+   * `unreadable`) and how long ago agentd heard it; absent until a report has come.
+   */
+  screen?(key: SessionKey): { box: string; ageMs: number } | undefined;
 }
+
+/**
+ * How old a launcher's report of its screen may be and still count. The launcher repeats an unchanged report
+ * about every second, so one older than this is a launcher that is silent (a busy event loop, a command in
+ * flight, an older launcher): the file-based rules apply then.
+ */
+export const SCREEN_FRESH_MS = 3000;
+
+/**
+ * What the launcher's own screen says about typing a reply, for a session in an auto-approving mode:
+ * `ready` (the box is found and empty, nothing asks, nothing is in flight), the reason the box is not usable
+ * (`text`, `dialog`, `plan`, `unreadable`), or `no` (no verdict: another mode, no fresh report, or something
+ * agentd knows of is in the way, so the file-based rules decide).
+ */
+export type ScreenVerdict = "ready" | "text" | "dialog" | "plan" | "unreadable" | "no";
 
 interface CompactWatch {
   gen: number;
@@ -116,6 +136,10 @@ interface Entry {
   stopCause?: string;
   /** The `permission_mode` of the latest main-thread hook; undefined when that hook carried none. */
   mode?: string;
+  /** Dialogs hooks announced that no Post or Result hook has closed yet (any agent's), by kind, with when. */
+  dialogs?: Map<string, { at: number; count: number; tool?: string }>;
+  /** A reply typed on the screen route that Claude has not yet taken as a prompt. */
+  queued?: { text: string; at: number; sawPrompt: boolean };
 }
 
 /** What the evidence for a background reply says, short of the phone's switch (the router adds it). */
@@ -169,7 +193,20 @@ const MAIN_THREAD_TOOL: ReadonlySet<string> = new Set(["PreToolUse", "PostToolUs
  * thread fired them. A SubagentStop is not one: background agents finishing is
  * normal and puts nothing on the main screen.
  */
-const BLOCKING_HOOKS: ReadonlySet<string> = new Set(["PermissionRequest", "Elicitation", "ElicitationResult"]);
+export const BLOCKING_HOOKS: ReadonlySet<string> = new Set(["PermissionRequest", "Elicitation", "ElicitationResult"]);
+/**
+ * The hooks agentd's dialog tracking depends on beyond the blocking ones: what closes a dialog (a tool's
+ * Post hooks, a denial), what announces one (a notification) and what ends one (a prompt, a Stop). The
+ * plugin's hooks.json must register every one of these and every blocking hook, or the tracking never runs.
+ */
+export const DIALOG_TRACKING_HOOKS: readonly string[] = [
+  "Notification",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PermissionDenied",
+  "UserPromptSubmit",
+  "Stop",
+];
 /**
  * Notifications that are not a dialog (idle, a login, a finished or resumed
  * background agent, a plugin's own): they leave the Stop alone. Every other type,
@@ -195,6 +232,45 @@ const QUIET_NOTIFICATIONS: ReadonlySet<string> = new Set([
  * ordinary path; anything else or unknown is refused.
  */
 export const BG_FILE_STATUSES: ReadonlySet<string> = new Set(["busy", "shell"]);
+
+/**
+ * What Claude's sessions file may say while a reply is typed on the launcher's screen report: `idle`, `busy` and
+ * `shell` and nothing else. `waiting` (Claude says it waits for the user), an unknown word or no status at all
+ * refuse, as they do for the hook route.
+ */
+export const SCREEN_FILE_STATUSES: ReadonlySet<string> = new Set(["idle", "busy", "shell"]);
+
+/**
+ * How long a dialog a hook announced (a permission request, an elicitation, a dialog notification) holds the
+ * screen route back before its own Post or Result hook, a prompt or a Stop clears it: a hook lost on the way
+ * cannot block replies for good. The hooks arrive before Claude has drawn the dialog, and before agentd's own
+ * approval manager has registered anything, so the screen and the approval count cannot be the only guards.
+ */
+export const DIALOG_ANNOUNCED_MS = 30_000;
+
+/**
+ * How long a reply queued behind a running turn keeps the Stop from being held for the glasses: Claude takes
+ * the queued prompt at the end of the turn, and a hold there would keep it from doing so. A UserPromptSubmit
+ * that holds the reply's text ends it sooner, and so does the next main-thread Stop after any prompt (Claude
+ * took the reply in some other way: joined with a prompt of the laptop's, or put back by Esc).
+ */
+export const QUEUED_REPLY_MS = 3 * 60_000;
+
+/** The tool a hook is about, or none. */
+function toolName(payload: Record<string, unknown>): string | undefined {
+  return typeof payload.tool_name === "string" && payload.tool_name.length > 0 ? payload.tool_name : undefined;
+}
+
+/** What a permission request or its tool's Post hook say of one tool call: the same on both, never kept as text. */
+function toolSignature(payload: Record<string, unknown>): string {
+  let input = "";
+  try {
+    input = JSON.stringify(payload.tool_input ?? null) ?? "";
+  } catch {
+    input = "";
+  }
+  return createHash("sha256").update(`${typeof payload.tool_name === "string" ? payload.tool_name : ""}\u0000${input}`).digest("hex").slice(0, 16);
+}
 
 export class SessionStates {
   private readonly entries = new Map<SessionKey, Entry>();
@@ -297,6 +373,19 @@ export class SessionStates {
         if (this.sources.binding(key)?.uncertain) {
           this.sources.clearUncertain(key);
         }
+        {
+          // A prompt that holds the queued reply is Claude taking it (alone, or joined with one typed at the
+          // laptop): the Stop may be held again. Any other prompt is a turn of its own, and the Stop that ends
+          // it (see trackMainThread) is the next word on whether the reply is still waiting.
+          const entry = this.entries.get(key);
+          if (entry?.queued) {
+            if (typeof payload.prompt === "string" && entry.queued.text.length > 0 && squash(payload.prompt).includes(entry.queued.text)) {
+              entry.queued = undefined;
+            } else {
+              entry.queued.sawPrompt = true;
+            }
+          }
+        }
         break;
       case "PreCompact": {
         const watch = this.entries.get(key)?.compact;
@@ -346,6 +435,7 @@ export class SessionStates {
       entry.stopAt = undefined;
       entry.stopCause = cause;
     };
+    this.trackDialogs(entry, event, payload, sub);
     if (event === "Stop") {
       const continued = payload.stop_hook_active !== undefined && payload.stop_hook_active !== false;
       if (sub || continued) {
@@ -353,6 +443,11 @@ export class SessionStates {
       } else {
         entry.stopAt = this.clock();
         entry.stopCause = undefined;
+        // The turn of a prompt that was not our reply ended: whatever became of the queued reply (joined with
+        // that prompt, put back by Esc, taken without a hook), it is not waiting behind a turn any more.
+        if (entry.queued?.sawPrompt) {
+          entry.queued = undefined;
+        }
       }
     } else if (event === "Notification") {
       const type = payload.notification_type;
@@ -366,6 +461,109 @@ export class SessionStates {
     } else if (!sub && MAIN_THREAD_TOOL.has(event) && !AUTO_APPROVING_MODES.has(entry.mode ?? "")) {
       revoke(event);
     }
+  }
+
+  /**
+   * The dialogs hooks announce, from any agent: a permission request, an elicitation, a dialog notification.
+   * They arrive before Claude has drawn the dialog and before agentd's approval manager knows of the request,
+   * and agentd may answer the request without Claude's own dialog going away, so a reply typed on the screen
+   * route has to stop at them. Each is closed by its own Post or Result hook; a prompt of the wearer's or the
+   * main thread's Stop closes all; and none outlives DIALOG_ANNOUNCED_MS.
+   */
+  private trackDialogs(entry: Entry, event: string, payload: Record<string, unknown>, sub: boolean): void {
+    const dialogs = (entry.dialogs ??= new Map());
+    const now = this.clock();
+    const notification = typeof payload.notification_type === "string" ? payload.notification_type : "";
+    // One marker per kind, counting how many of that kind are open: two requests for the same tool call are two
+    // dialogs, and the first Post hook closes one of them.
+    const open = (kind: string, tool?: string): void => {
+      const known = dialogs.get(kind);
+      dialogs.set(kind, { at: now, count: (known?.count ?? 0) + 1, ...(tool !== undefined ? { tool } : {}) });
+    };
+    const close = (kind: string): void => {
+      const known = dialogs.get(kind);
+      if (known && known.count > 1) {
+        known.count -= 1;
+      } else {
+        dialogs.delete(kind);
+      }
+    };
+    if (event === "PermissionRequest") {
+      open(`perm:${toolSignature(payload)}`, toolName(payload));
+    } else if (event === "Elicitation") {
+      open("elicit");
+    } else if (event === "ElicitationResult") {
+      close("elicit");
+    } else if (event === "Notification") {
+      if (notification === "elicitation_complete" || notification === "elicitation_response") {
+        dialogs.delete("elicit");
+        dialogs.delete("note:elicitation_dialog");
+      } else if (!QUIET_NOTIFICATIONS.has(notification)) {
+        dialogs.set(`note:${/^[a-z_]{1,40}$/.test(notification) ? notification : "unknown"}`, { at: now, count: 1 });
+      }
+    } else if (event === "PostToolUse" || event === "PostToolUseFailure" || event === "PermissionDenied") {
+      const exact = `perm:${toolSignature(payload)}`;
+      if (dialogs.has(exact)) {
+        close(exact);
+      } else {
+        // The Post hook's input need not equal the request's (an AskUserQuestion's carries the answers, a
+        // tool's may be a superset): with exactly one dialog open for that tool, it is that one's.
+        const tool = toolName(payload);
+        const same = tool === undefined ? [] : [...dialogs].filter(([kind, marker]) => kind.startsWith("perm:") && marker.tool === tool);
+        if (same.length === 1) {
+          close(same[0][0]);
+        }
+      }
+      if (![...dialogs.keys()].some((kind) => kind.startsWith("perm:"))) {
+        dialogs.delete("note:permission_prompt");
+      }
+    } else if (!sub && event === "UserPromptSubmit") {
+      dialogs.clear();
+    } else if (!sub && event === "Stop" && (payload.stop_hook_active === undefined || payload.stop_hook_active === false)) {
+      dialogs.clear();
+    }
+  }
+
+  /** A dialog a hook announced is not yet closed (and not yet old enough to be a hook that was lost). */
+  dialogAnnounced(key: SessionKey): boolean {
+    const dialogs = this.entries.get(key)?.dialogs;
+    if (!dialogs) {
+      return false;
+    }
+    const now = this.clock();
+    for (const [kind, { at }] of dialogs) {
+      if (now - at > DIALOG_ANNOUNCED_MS || now < at) {
+        dialogs.delete(kind);
+      }
+    }
+    return dialogs.size > 0;
+  }
+
+  /** A reply typed on the screen route went in (its Enter was pressed) and Claude has not taken it as a prompt yet. */
+  markQueued(key: SessionKey, text: string): void {
+    this.entry(key).queued = { text: squash(text), at: this.clock(), sawPrompt: false };
+  }
+
+  /** The reply did not queue (it failed, or was cancelled): nothing waits behind a turn. */
+  clearQueued(key: SessionKey): void {
+    const entry = this.entries.get(key);
+    if (entry) {
+      entry.queued = undefined;
+    }
+  }
+
+  /** A reply is queued behind a turn: the Stop is not held for the glasses meanwhile, or Claude would never take it. */
+  queuedPending(key: SessionKey): boolean {
+    const entry = this.entries.get(key);
+    const queued = entry?.queued;
+    if (!entry || !queued) {
+      return false;
+    }
+    if (this.clock() - queued.at > QUEUED_REPLY_MS || this.clock() < queued.at) {
+      entry.queued = undefined;
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -427,6 +625,72 @@ export class SessionStates {
       return picture.eligible && picture.modeOk ? "ok" : "mode_guard";
     };
     return { rule: rule(), status, mode, stopAgeSec: stopAge, subagents };
+  }
+
+  /** The main thread's permission mode as a name for the log (`unknown` when no hook has carried one). */
+  modeName(key: SessionKey): string {
+    const mode = this.entries.get(key)?.mode;
+    return mode !== undefined && /^[A-Za-z]{1,40}$/.test(mode) ? mode : "unknown";
+  }
+
+  /**
+   * Whether a TEXT reply may be typed on the launcher's own word about its screen, whatever Claude's file
+   * says (idle, busy or shell: a turn, a background task or a monitor keeps it from idle while the box
+   * is empty and usable, and a reply typed then only queues). Only where Claude never stops to ask (the
+   * sticky mode is `auto` or `bypassPermissions`, known), for the bound session's own file, with nothing
+   * held, asked (an approval or a question of any origin), uncertain or (unless `ownsClaim`, for the
+   * command that holds the claim, whose own checks at the write are then the authority) in flight. Without
+   * `ownsClaim` the launcher's last report must be fresh; the verdict is its box state. Never for
+   * compact or model, which keep the idle rule.
+   */
+  screenVerdict(key: SessionKey, ownsClaim = false): ScreenVerdict {
+    const binding = this.sources.binding(key);
+    const entry = this.entries.get(key);
+    if (
+      this.sources.held(key) ||
+      !binding ||
+      binding.claudePid === undefined ||
+      binding.uncertain ||
+      (entry?.inFlight === true && !ownsClaim) ||
+      this.sources.asking(key) ||
+      entry?.mode === undefined ||
+      !AUTO_APPROVING_MODES.has(entry.mode)
+    ) {
+      return "no";
+    }
+    const file = this.readSession(binding.claudePid);
+    if (
+      !file ||
+      !SCREEN_FILE_STATUSES.has(file.status) ||
+      (file.sessionId !== undefined && file.sessionId !== key.slice(key.indexOf(":") + 1))
+    ) {
+      return "no";
+    }
+    // A hook announced a dialog that no Post or Result hook has closed: whatever the screen showed last, and
+    // whatever the approval count says, Claude's own dialog may be about to take the keys. For the command that
+    // holds the claim this ends its evidence; for a new one it only speaks where the screen route would apply.
+    const announced = this.dialogAnnounced(key);
+    if (ownsClaim) {
+      return announced ? "dialog" : "ready";
+    }
+    const report = this.sources.screen?.(key);
+    if (!report || report.ageMs > SCREEN_FRESH_MS) {
+      return "no";
+    }
+    if (announced) {
+      return "dialog";
+    }
+    switch (report.box) {
+      case "empty":
+        return "ready";
+      case "text":
+      case "dialog":
+      case "plan":
+      case "unreadable":
+        return report.box;
+      default:
+        return "no";
+    }
   }
 
   /**
@@ -646,6 +910,15 @@ interface Running {
   settled?: () => void;
   /** A background reply (see `bgAssess`): written is its paste, `enterGranted` its Enter allowed. */
   bg?: boolean;
+  /**
+   * With `bg`: allowed on the launcher's screen report (auto-approving modes), not on the subagent evidence.
+   * Typed though a turn runs, it only queues, so its Enter is the end: no prompt of Claude's is waited for.
+   */
+  screen?: boolean;
+  /** The text of a screen reply, for its queued marker at the Enter's grant. */
+  text?: string;
+  /** The screen reply ended OK: it stays queued. */
+  queuedOk?: boolean;
   enterGranted?: boolean;
   /** The command was aborted here; no later write check of it is answered yes. */
   dead?: boolean;
@@ -779,10 +1052,59 @@ export class LauncherRouter {
     if (state === "held") {
       return "waiting";
     }
-    if (this.port.laptopDraft(key)) {
+    if (this.port.laptopDraft(key) || this.screenAsks(key)) {
       return "unavailable";
     }
-    return state === "ready" || this.bgAssess(key) === "ready" ? "ready" : "unavailable";
+    return state === "ready" || this.screenReady(key) || this.bgAssess(key) === "ready" ? "ready" : "unavailable";
+  }
+
+  /**
+   * The launcher's fresh report says a dialog, a question, the plan-mode footer or text of the wearer's is on
+   * screen (auto-approving modes): nothing is typed, whatever Claude's file says, and the wearer is told why.
+   */
+  private screenAsks(key: SessionKey): boolean {
+    const verdict = this.states.screenVerdict(key);
+    return verdict === "dialog" || verdict === "plan" || verdict === "text";
+  }
+
+  /**
+   * For the log only: whether a text reply may be typed now, by which route or for which reason not, and the
+   * permission mode. A name from a fixed list each; never a decision.
+   */
+  readiness(key: SessionKey): { ready: boolean; why: string; mode: string } {
+    const mode = this.states.modeName(key);
+    if (!this.port.binding(key)) {
+      return { ready: false, why: "not_bound", mode };
+    }
+    const state = this.states.state(key);
+    if (state === "held") {
+      return { ready: true, why: "stop_held", mode };
+    }
+    if (this.port.laptopDraft(key)) {
+      return { ready: false, why: "draft", mode };
+    }
+    const verdict = this.states.screenVerdict(key);
+    if (verdict === "dialog" || verdict === "plan" || verdict === "text") {
+      return { ready: false, why: `screen_${verdict}`, mode };
+    }
+    if (state === "ready") {
+      return { ready: true, why: "file_idle", mode };
+    }
+    if (this.screenReady(key)) {
+      return { ready: true, why: "screen_empty", mode };
+    }
+    if (this.bgAssess(key) === "ready") {
+      return { ready: true, why: "background_evidence", mode };
+    }
+    return { ready: false, why: this.followupWhy(key) ?? "busy", mode };
+  }
+
+  /**
+   * A text reply may be typed on the launcher's own word that the box is empty (auto-approving modes only,
+   * Claude's file may say anything): see `SessionStates.screenVerdict`. A laptop draft still refuses.
+   */
+  private screenReady(key: SessionKey, ownsClaim = false): boolean {
+    return this.states.screenVerdict(key, ownsClaim) === "ready" && !this.port.laptopDraft(key);
   }
 
   /**
@@ -815,13 +1137,18 @@ export class LauncherRouter {
    * or "bg_off" (a background reply would be allowed but for the permission
    * mode, or but for the phone's switch), "background" (Claude's file is busy
    * while `subagentsRunning` subagents run, so the main prompt may well be
-   * free) or "busy" (everything else). Undefined when the follow-up is
-   * available or waiting, or the session is not bound.
+   * free) or "busy" (everything else). In an auto-approving mode the
+   * launcher's fresh screen report decides first: "draft" (text in the box),
+   * "dialog" (a dialog or question on screen), "mode_not_allowed" (the plan
+   * footer), "unreadable" (the screen could not be read while Claude's file
+   * is not idle); "busy" is then said only when there is no fresh report.
+   * Undefined when the follow-up is available or waiting, or the session is
+   * not bound.
    */
   followupWhy(
     key: SessionKey,
     subagentsRunning = 0,
-  ): "busy" | "draft" | "background" | "bg_off" | "mode_not_allowed" | undefined {
+  ): "busy" | "draft" | "dialog" | "unreadable" | "background" | "bg_off" | "mode_not_allowed" | undefined {
     if (!this.port.binding(key)) {
       return undefined;
     }
@@ -832,8 +1159,27 @@ export class LauncherRouter {
     if (this.port.laptopDraft(key)) {
       return "draft";
     }
+    // In an auto-approving mode the launcher's own screen report says why the box cannot take a reply.
+    const verdict = this.states.screenVerdict(key);
+    if (verdict === "dialog") {
+      return "dialog";
+    }
+    if (verdict === "plan") {
+      return "mode_not_allowed";
+    }
+    if (verdict === "text") {
+      return "draft";
+    }
     if (state === "ready") {
       return undefined;
+    }
+    switch (verdict) {
+      case "ready":
+        return undefined;
+      case "unreadable":
+        return "unreadable";
+      default:
+        break;
     }
     const bg = this.bgAssess(key);
     if (bg === "ready") {
@@ -909,9 +1255,14 @@ export class LauncherRouter {
    */
   private revokeBg(key: SessionKey): void {
     const running = this.running.get(key);
-    if (running?.bg && !running.enterGranted && !running.dead && this.bgAssess(key, true) !== "ready") {
+    if (running?.bg && !running.enterGranted && !running.dead && !this.evidenceHolds(key, running)) {
       running.abort("busy");
     }
+  }
+
+  /** The evidence a background reply was allowed on, again: the screen route's own, or the hook route's. */
+  private evidenceHolds(key: SessionKey, running: Running): boolean {
+    return running.screen ? this.screenReady(key, true) : this.bgAssess(key, true) === "ready";
   }
 
   /**
@@ -927,12 +1278,16 @@ export class LauncherRouter {
     if (this.interrupted(key, running.gen, this.epoch(key)) || (phase === "paste") === running.written) {
       return false;
     }
-    if (this.bgAssess(key, true) !== "ready") {
+    if (!this.evidenceHolds(key, running)) {
       return false;
     }
     if (phase === "enter") {
       running.enterGranted = true;
       this.states.clearStop(key);
+      if (running.screen && running.text !== undefined) {
+        // From the grant on, not from the launcher's ok: a Stop in between must not open a hold the reply waits behind.
+        this.states.markQueued(key, running.text);
+      }
     }
     return true;
   }
@@ -984,10 +1339,10 @@ export class LauncherRouter {
     if (ready === "held") {
       return deliverHeld();
     }
-    if (ready !== "ready" && ready !== "ready_bg") {
+    if (ready !== "ready" && ready !== "ready_bg" && ready !== "ready_screen") {
       return fail(ready);
     }
-    return this.run(key, start.gen, epoch, { command: "text", text }, ready === "ready_bg");
+    return this.run(key, start.gen, epoch, { command: "text", text }, ready !== "ready", ready === "ready_screen");
   }
 
   /**
@@ -1020,9 +1375,14 @@ export class LauncherRouter {
       // The launcher would hold it behind the draft anyway (Review Focus 1);
       // waiting here keeps what agentd dispatches in line with what it shows.
       const draft = this.port.laptopDraft(key);
-      const viaBg = background && state !== "ready" && state !== "held" && this.bgAssess(key) === "ready";
-      if ((state === "ready" || viaBg) && !draft && this.states.claim(key)) {
-        return viaBg ? "ready_bg" : "ready";
+      // Only a text reply is held back by the screen's word; compact and model keep today's idle rule.
+      const asks = background && this.screenAsks(key);
+      const notFileReady = background && state !== "ready" && state !== "held";
+      // The launcher's own screen first (auto-approving modes), then the subagent evidence.
+      const viaScreen = notFileReady && this.screenReady(key);
+      const viaBg = notFileReady && !viaScreen && this.bgAssess(key) === "ready";
+      if ((state === "ready" || viaScreen || viaBg) && !draft && !asks && this.states.claim(key)) {
+        return viaScreen ? "ready_screen" : viaBg ? "ready_bg" : "ready";
       }
       if (this.clock() >= deadline) {
         return state === "ready" && draft ? "laptop_draft" : "busy";
@@ -1038,11 +1398,20 @@ export class LauncherRouter {
     epoch: number,
     cmd: LauncherCommand,
     bg: boolean,
+    screen = false,
   ): Promise<RouteOutcome> {
     const cmdId = randomUUID();
     let timer: NodeJS.Timeout | undefined;
     let compactDone: Promise<string> | undefined;
-    const running: Running = { cmdId, written: false, gen, abort: () => undefined, ...(bg ? { bg: true } : {}) };
+    const running: Running = {
+      cmdId,
+      written: false,
+      gen,
+      abort: () => undefined,
+      ...(bg ? { bg: true } : {}),
+      ...(bg && screen ? { screen: true } : {}),
+      ...(bg && screen && cmd.command === "text" ? { text: cmd.text } : {}),
+    };
     // A background reply is spent only when its Enter was allowed: before that
     // the launcher clears the paste away, and the same msgId may be sent again.
     const spent = (): boolean => (bg ? running.enterGranted === true : running.written);
@@ -1067,7 +1436,7 @@ export class LauncherRouter {
     };
     const failed = (error: string): RouteOutcome =>
       spent() && !unsent(error) ? { ok: false, error, consumed: true } : fail(error);
-    const promptSeen = bg && cmd.command === "text"
+    const promptSeen = bg && !screen && cmd.command === "text"
       ? new Promise<string>((resolve) => {
           const want = squash(cmd.text);
           // The prompt of a background task's report is another turn's; ours may follow it.
@@ -1102,6 +1471,7 @@ export class LauncherRouter {
         ...cmd,
         ...(notBefore !== undefined ? { notBefore } : {}),
         ...(bg ? { bgReply: true as const } : {}),
+        ...(bg && screen ? { queued: true as const } : {}),
       });
       const result: CommandResult | string = await Promise.race([sent, interrupt]);
       if (typeof result === "string") {
@@ -1150,6 +1520,10 @@ export class LauncherRouter {
             return failed(end);
           }
         }
+        if (screen) {
+          // Typed behind whatever Claude is doing (marked at the Enter's grant): it stays queued.
+          running.queuedOk = true;
+        }
         return OK;
       }
       const end = await Promise.race([compactDone as Promise<string>, interrupt]);
@@ -1169,6 +1543,12 @@ export class LauncherRouter {
       }
       if (cmd.command === "compact") {
         this.states.disarmCompact(key);
+      }
+      if (screen && running.enterGranted && !running.queuedOk) {
+        // Its Enter was allowed (that set the marker) and it then failed or was cancelled: agentd does not count
+        // a reply as waiting behind a turn when it cannot say it went in. A reply that never got that far
+        // leaves an earlier reply's marker alone.
+        this.states.clearQueued(key);
       }
       this.states.release(key);
       this.look(key, true);
@@ -1301,7 +1681,7 @@ export class LauncherRouter {
     this.revokeBg(key);
     this.logBgDecision(key);
     // What the phone shows is the follow-up state and, when unavailable, why.
-    const seen = `${this.followupState(key)}/${this.bgAssess(key)}`;
+    const seen = `${this.followupState(key)}/${this.bgAssess(key)}/${this.followupWhy(key) ?? "-"}`;
     if (always || this.shown.get(key) !== seen) {
       this.shown.set(key, seen);
       this.onStateChange(key);

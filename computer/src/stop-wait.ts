@@ -31,6 +31,8 @@ export interface StopWaitOptions {
    * Defaults to on; the daemon turns it on only when `rokidCoder.stopHold` asks for it.
    */
   enabled?: boolean;
+  /** True for a session whose Stop must not be held now (a reply of the glasses is already queued behind its turn). */
+  skipHold?: (sessionId: string) => boolean;
 }
 
 interface Hold {
@@ -55,7 +57,7 @@ export class StopWait {
   private readonly canAsk: () => boolean;
   readonly enabled: boolean;
 
-  constructor(options: StopWaitOptions) {
+  constructor(private readonly options: StopWaitOptions) {
     this.waitLimitMs = clampWaitLimit(options.waitLimitMs, MAX_WAIT_LIMIT_MS);
     this.cap = options.continuationCap;
     this.setTimer = options.setTimer ?? setTimeout;
@@ -90,6 +92,10 @@ export class StopWait {
   hold(sessionId: string, closed: AbortSignal): Promise<HookResponse> {
     // Claude would not honour another block, so waiting for one only stalls it.
     if (!this.enabled || closed.aborted || !this.canAsk() || this.continuationsUsed(sessionId) >= this.cap) {
+      return Promise.resolve({});
+    }
+    // A reply was queued behind the turn that is ending: Claude takes it now, and a hold would keep it waiting.
+    if (this.options.skipHold?.(sessionId) === true) {
       return Promise.resolve({});
     }
     // One hook process per session; a second Stop means the first is gone.

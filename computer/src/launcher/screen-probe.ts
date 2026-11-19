@@ -729,6 +729,12 @@ export interface ProbeOptions {
    * screen must not be tainted at all.
    */
   sinceTaints?: number;
+  /**
+   * A running-turn sign (`esc to interrupt` in the footer or the status line) is no reason to refuse by
+   * itself: a reply typed while Claude works only queues. A dialog, a menu, text in the box, taint and an
+   * unreadable screen still refuse.
+   */
+  queued?: boolean;
 }
 
 /** Whitespace runs become one space and the ends are trimmed: where a line wrapped does not matter, a missing word space does. */
@@ -752,14 +758,10 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
     return { kind: "unknown", reason: "narrow" };
   }
   const rows = screen.lines();
-  // The lowest rule with at most a footer under it closes the box.
-  let bottom = -1;
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    if (isRule(rows[i])) {
-      bottom = i;
-      break;
-    }
-  }
+  // Which cells are muted is worked out only when there is a rule to build a box on: the screen can be big.
+  let solidMemo: string[] | undefined;
+  const solidRows = (): string[] => (solidMemo ??= screen.solidLines());
+  const { bottom, top } = locateBox(rows, solidRows);
   if (bottom < 1) {
     return { kind: "unknown", reason: "no_box", ...(bottom >= 0 ? { bottom } : {}) };
   }
@@ -767,26 +769,6 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   // `○` row for each agent, one of which may carry a `❯` selection). It is as tall as there are agents,
   // so it is not counted; it is never read for what the input line holds, and a `❯` there is no prompt.
   const footer = rows.slice(bottom + 1);
-  // The box's top rule starts in the first column, as the UI's own rules do; a draft's rows are indented under
-  // the glyph, so an indented row that reads as a rule is the wearer's text, never the top (with the real top
-  // scrolled off, it would make the rows below it an "empty" box and the hidden draft above it would be sent).
-  let top = -1;
-  for (let i = bottom - 1; i >= Math.max(0, bottom - 1 - MAX_INPUT_ROWS); i -= 1) {
-    if (isTopRule(rows[i])) {
-      top = i;
-      break;
-    }
-  }
-  // A draft longer than the box's rows, or a draft row that itself reads as a rule (the nearest rule is then
-  // the draft's own row, even with a prompt-like row under it), hides the real top rule. When a higher rule
-  // with a prompt row under it and only box-like rows down to the bottom rule encloses solid text, that is the
-  // box holding a draft: the caller must be told there is text, never that the box is empty or unreadable.
-  const topFound = top >= 0 && bottom - top >= 2 && PROMPT_ROW.test(rows[top + 1] ?? "");
-  const solidRows = screen.solidLines();
-  const draftTop = findDraftTop(rows, bottom, solidRows, topFound);
-  if (draftTop >= 0 && (!topFound || draftTop < top)) {
-    top = draftTop;
-  }
   if (top < 0 || bottom - top < 2) {
     return { kind: "unknown", reason: "no_box", bottom, ...(top >= 0 ? { top } : {}) };
   }
@@ -800,7 +782,7 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   const around = [...rows.slice(Math.max(0, top - STATUS_ROWS), top), ...footer];
   // A second prompt row with something after its glyph is a selection list; a bare `>` is a row of the draft,
   // but only a solid one: a muted bare glyph is no text of the wearer's, and no empty box either.
-  const mutedRow = (index: number): boolean => (solidRows[top + 1 + index] ?? "").trim() === "";
+  const mutedRow = (index: number): boolean => (solidRows()[top + 1 + index] ?? "").trim() === "";
   if (
     inputRows.some(
       (row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row) && (row.replace(PROMPT_LEAD, "").trim() !== "" || mutedRow(index))),
@@ -811,14 +793,14 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   if (!PROMPT_ROW.test(inputRows[0])) {
     return { kind: "unknown", reason: "no_prompt", top, bottom };
   }
-  if (around.some((row) => BUSY_INDICATOR.test(row))) {
+  if (options.queued !== true && around.some((row) => BUSY_INDICATOR.test(row))) {
     return { kind: "blocked", reason: "busy_indicator" };
   }
   if ([...around, ...inputRows].some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row))) {
     return { kind: "blocked", reason: "dialog" };
   }
   const text = normalise(inputContent(inputRows));
-  const solid = normalise(inputContent(screen.solidLines().slice(top + 1, bottom)));
+  const solid = normalise(inputContent(solidRows().slice(top + 1, bottom)));
   // Claude's own `Try "..."` hint is no exception: it is empty only when drawn muted, like any
   // placeholder. Typed text that looks like it is text, and so is a multi-line draft that begins
   // and ends the same way.
@@ -828,6 +810,43 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
 /** A rule that starts in the first column: what the UI draws (an indented row that reads as a rule is a draft's). */
 function isTopRule(row: string): boolean {
   return isRule(row) && /^\S/.test(row);
+}
+
+/**
+ * Where the box is on the screen: the lowest rule closes it (`bottom`, -1 when there is none), and `top` is the rule
+ * above it that opens it (-1 when none). The top starts in the first column, as the UI's own rules do; a draft's
+ * rows are indented under the glyph, so an indented row that reads as a rule is the wearer's text, never the top
+ * (with the real top scrolled off, it would make the rows below it an "empty" box and the hidden draft above it
+ * would be sent).
+ */
+function locateBox(rows: string[], solidRows: () => string[]): { bottom: number; top: number } {
+  let bottom = -1;
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (isRule(rows[i])) {
+      bottom = i;
+      break;
+    }
+  }
+  if (bottom < 1) {
+    return { bottom, top: -1 };
+  }
+  let top = -1;
+  for (let i = bottom - 1; i >= Math.max(0, bottom - 1 - MAX_INPUT_ROWS); i -= 1) {
+    if (isTopRule(rows[i])) {
+      top = i;
+      break;
+    }
+  }
+  // A draft longer than the box's rows, or a draft row that itself reads as a rule (the nearest rule is then
+  // the draft's own row, even with a prompt-like row under it), hides the real top rule. When a higher rule
+  // with a prompt row under it and only box-like rows down to the bottom rule encloses solid text, that is the
+  // box holding a draft: the caller must be told there is text, never that the box is empty or unreadable.
+  const topFound = top >= 0 && bottom - top >= 2 && PROMPT_ROW.test(rows[top + 1] ?? "");
+  const draftTop = findDraftTop(rows, bottom, solidRows(), topFound);
+  if (draftTop >= 0 && (!topFound || draftTop < top)) {
+    top = draftTop;
+  }
+  return { bottom, top };
 }
 
 /** The prompt glyph (and a side border) at the start of a row. */
@@ -941,6 +960,32 @@ export function showsDialog(screen: ScreenModel): boolean {
   return screen.lines().some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row));
 }
 
+/** What the screen shows of the prompt box, for agentd to decide whether a reply may be typed (it still is not the check at the write). */
+export type ScreenBox = "empty" | "text" | "dialog" | "plan" | "unreadable";
+
+/**
+ * `empty`: the framed box is found and visibly empty (a muted suggestion is empty), with no dialog or menu,
+ * whether or not a turn is running (a reply typed then queues); `text`: it holds text; `dialog`: a dialog,
+ * a question or a menu is on screen; `plan`: the plan-mode footer; `unreadable`: anything else, a tainted
+ * or unsettled screen included.
+ */
+export function boxState(screen: ScreenModel): ScreenBox {
+  if (screen.tainted || screen.unsettled) {
+    return "unreadable";
+  }
+  if (showsPlanMode(screen)) {
+    return "plan";
+  }
+  const seen = probe(screen, { queued: true });
+  if (seen.kind === "prompt") {
+    return seen.empty ? "empty" : "text";
+  }
+  if (seen.kind === "blocked") {
+    return "dialog";
+  }
+  return showsDialog(screen) ? "dialog" : "unreadable";
+}
+
 /** The largest `screen_shape` frame the hub accepts (see `launcher-hub.ts`); a frame beyond it costs the connection. */
 const SHAPE_MAX_COLS = 2000;
 const SHAPE_MAX_ROWS = 1000;
@@ -965,22 +1010,7 @@ export interface ScreenShape {
 export function describeShape(screen: ScreenModel, look?: ProbeResult): ScreenShape {
   const lines = screen.lines();
   const solid = screen.solidLines();
-  const tokens = lines.map((line, index) => {
-    const trimmed = line.trim();
-    let kind = "T";
-    if (trimmed === "") {
-      kind = "B";
-    } else if (isRule(line)) {
-      kind = "R";
-    } else if (PROMPT_ROW.test(line)) {
-      kind = "P";
-    } else if ((solid[index] ?? "").trim() === "") {
-      kind = "M";
-    } else if (/^[^\p{L}\p{N}]+$/u.test(trimmed)) {
-      kind = "G";
-    }
-    return `${index}${kind}${[...line].length}`;
-  });
+  const tokens = lines.map((line, index) => `${index}${rowClass(line, solid[index] ?? "")}${[...line].length}`);
   // The hub refuses a frame beyond these limits and drops the connection, so a huge terminal is cut to them
   // here: the numbers are clamped and the shape keeps the rows nearest the bottom, where the box is (each
   // token carries its own row number, so a shape that starts part-way down still says which rows it is).
@@ -997,6 +1027,81 @@ export function describeShape(screen: ScreenModel, look?: ProbeResult): ScreenSh
     reason: look?.kind === "unknown" || look?.kind === "blocked" ? look.reason : "none",
     ...(look?.kind === "unknown" && look.top !== undefined ? { top: look.top } : {}),
     ...(look?.kind === "unknown" && look.bottom !== undefined ? { bottom: look.bottom } : {}),
+  };
+}
+
+/** A row's class: B blank, R rule, P prompt-glyph row, M muted text, G glyphs only, T text. Never any of its characters. */
+function rowClass(line: string, solidLine: string): string {
+  const trimmed = line.trim();
+  if (trimmed === "") {
+    return "B";
+  }
+  if (isRule(line)) {
+    return "R";
+  }
+  if (PROMPT_ROW.test(line)) {
+    return "P";
+  }
+  if (solidLine.trim() === "") {
+    return "M";
+  }
+  return /^[^\p{L}\p{N}]+$/u.test(trimmed) ? "G" : "T";
+}
+
+/** The screen's rows as one string of classes (`TBMRPRM...`), without lengths: what a layout is, for telling one from another. */
+export function layoutClasses(screen: ScreenModel): string {
+  const lines = screen.lines();
+  const solid = screen.solidLines();
+  return lines.map((line, index) => rowClass(line, solid[index] ?? "")).join("");
+}
+
+/** What the launcher tells agentd about its screen when the verdict changes: names, numbers and row classes only. */
+export interface VerdictShape {
+  probe: string;
+  reason: string;
+  box: ScreenBox;
+  tainted: boolean;
+  cols: number;
+  rows: number;
+  top?: number;
+  prompt?: number;
+  bottom?: number;
+  /** `<class><count>` per class of the rows under the bottom rule (the footer and the agents panel), e.g. `B1 M1 T3`. */
+  below: string;
+  /** As `ScreenShape.shape`: `<row><class><length>` per row, clamped to what the hub accepts. */
+  shape: string;
+  /** The probe found a prompt-glyph row in a screen it could not read as the box: a layout nobody has described. */
+  unknown: boolean;
+}
+
+/** `describeShape` plus where the probe put the box and the box state. Nothing of the screen's text. */
+export function describeVerdict(screen: ScreenModel): VerdictShape {
+  const look = probe(screen, { queued: true });
+  const shape = describeShape(screen, look);
+  const lines = screen.lines();
+  const solid = screen.solidLines();
+  const { bottom, top } = locateBox(lines, () => solid);
+  const boxed = bottom >= 1 && top >= 0 && bottom - top >= 2;
+  const below = new Map<string, number>();
+  if (bottom >= 0) {
+    for (let i = bottom + 1; i < lines.length; i += 1) {
+      const kind = rowClass(lines[i], solid[i] ?? "");
+      below.set(kind, (below.get(kind) ?? 0) + 1);
+    }
+  }
+  const box = boxState(screen);
+  return {
+    probe: look.kind,
+    reason: shape.reason,
+    box,
+    tainted: screen.tainted,
+    cols: shape.cols,
+    rows: shape.rows,
+    ...(bottom >= 0 ? { bottom: Math.min(bottom, SHAPE_MAX_ROWS) } : {}),
+    ...(boxed ? { top: Math.min(top, SHAPE_MAX_ROWS), prompt: Math.min(top + 1, SHAPE_MAX_ROWS) } : {}),
+    below: [...below.entries()].map(([kind, count]) => `${kind}${count}`).sort().join(" ").slice(0, 200),
+    shape: shape.shape,
+    unknown: box === "unreadable" && lines.some((line) => PROMPT_ROW.test(line)) && look.kind === "unknown",
   };
 }
 
