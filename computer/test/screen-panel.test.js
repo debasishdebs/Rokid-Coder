@@ -89,10 +89,18 @@ test("a_dialog_in_place_of_the_box_and_a_plan_mode_footer_are_still_refused_with
   }
 });
 
-test("a_dialog_text_in_the_agents_panel_blocks_the_box_too", () => {
+test("a_dialogs_chrome_in_the_agents_panel_blocks_the_box_too_but_prose_in_a_title_does_not", () => {
   const screen = new ScreenModel(207, 50);
-  screen.push(claudeScreen({ cols: 207, rows: 50, agents: 2 }).replace("Task number 1 on the draft screen check", "Do you want to proceed?"));
-  assert.equal(probe(screen).kind, "blocked");
+  screen.push(claudeScreen({ cols: 207, rows: 50, agents: 2 }).replace("Task number 1 on the draft screen check", "Esc to cancel · Tab to amend"));
+  const seen = probe(screen);
+  assert.deepEqual([seen.kind, seen.reason], ["blocked", "dialog"]);
+  assert.match(seen.at, /^\d+:chrome$/);
+  // An agent's title or a message that holds words a dialog also holds is not a dialog.
+  for (const prose of ["Do you want to proceed?", "Press enter to see the plan", "Waiting for your input on the schema"]) {
+    const plain = new ScreenModel(207, 50);
+    plain.push(claudeScreen({ cols: 207, rows: 50, agents: 2 }).replace("Task number 1 on the draft screen check", prose));
+    assert.equal(showsEmptyPrompt(probe(plain)), true, prose);
+  }
 });
 
 test("a_screen_without_a_box_stays_unknown_and_so_does_a_prompt_row_outside_a_rule_pair", () => {

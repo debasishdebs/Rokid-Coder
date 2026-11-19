@@ -79,7 +79,12 @@ function charWidth(ch: string): 0 | 1 | 2 | undefined {
 export class ScreenModel {
   private grid: string[][] = [];
   /** A row holding a character whose cells the model is not sure of. */
-  private dubious: boolean[] = [];
+  /**
+   * Per row, the columns whose width the model cannot be sure of (an emoji, a joiner, a variation selector, half
+   * of a wide character written over), with the codepoint there. Per cell, not per row: a cell written over or
+   * erased is certain again, so a glyph that once stood where the box now is leaves nothing behind.
+   */
+  private dubious: Array<Map<number, number>> = [];
   private row = 0;
   private col = 0;
   private saved = { row: 0, col: 0 };
@@ -89,7 +94,7 @@ export class ScreenModel {
   private stringLength = 0;
   private alt = false;
   /** The main screen's cells while the alternate one is shown. */
-  private mainBuffer?: { grid: string[][]; dubious: boolean[]; row: number; col: number; saved: { row: number; col: number } };
+  private mainBuffer?: { grid: string[][]; dubious: Array<Map<number, number>>; row: number; col: number; saved: { row: number; col: number } };
   private taintCount = 0;
   /** The taint count when the whole screen was last erased: what happened before it no longer matters. */
   private cleanFrom = 0;
@@ -139,13 +144,13 @@ export class ScreenModel {
     this.cols = Math.max(1, cols);
     this.rows = Math.max(1, rows);
     this.grid = Array.from({ length: this.rows }, (_, i) => this.fit(this.grid[i] ?? []));
-    this.dubious = Array.from({ length: this.rows }, (_, i) => this.dubious[i] ?? false);
+    this.dubious = Array.from({ length: this.rows }, (_, i) => this.dubious[i] ?? new Map());
     this.row = Math.min(this.row, this.rows - 1);
     this.col = Math.min(this.col, this.cols - 1);
     const main = this.mainBuffer;
     if (main) {
       main.grid = Array.from({ length: this.rows }, (_, i) => this.fit(main.grid[i] ?? []));
-      main.dubious = Array.from({ length: this.rows }, (_, i) => main.dubious[i] ?? false);
+      main.dubious = Array.from({ length: this.rows }, (_, i) => main.dubious[i] ?? new Map());
       main.row = Math.min(main.row, this.rows - 1);
       main.col = Math.min(main.col, this.cols - 1);
     }
@@ -187,8 +192,15 @@ export class ScreenModel {
     });
   }
 
+  /** A cell of this row holds something whose width the model cannot be sure of (a column of it shifts what follows). */
   rowDubious(index: number): boolean {
-    return this.dubious[index] === true;
+    return (this.dubious[index]?.size ?? 0) > 0;
+  }
+
+  /** The first such cell of the row: its column and codepoint (never the text around it), for the log. */
+  dubiousCell(index: number): { col: number; codepoint: number } | undefined {
+    const first = [...(this.dubious[index] ?? [])].sort((a, b) => a[0] - b[0])[0];
+    return first ? { col: first[0], codepoint: first[1] } : undefined;
   }
 
   push(chunk: string): void {
@@ -215,7 +227,7 @@ export class ScreenModel {
 
   private clear(): void {
     this.grid = Array.from({ length: this.rows }, () => this.blankRow());
-    this.dubious = Array.from({ length: this.rows }, () => false);
+    this.dubious = Array.from({ length: this.rows }, () => new Map());
     this.row = 0;
     this.col = 0;
   }
@@ -233,7 +245,7 @@ export class ScreenModel {
       this.grid.shift();
       this.grid.push(this.blankRow());
       this.dubious.shift();
-      this.dubious.push(false);
+      this.dubious.push(new Map());
     }
   }
 
@@ -242,7 +254,20 @@ export class ScreenModel {
       this.grid.pop();
       this.grid.unshift(this.blankRow());
       this.dubious.pop();
-      this.dubious.unshift(false);
+      this.dubious.unshift(new Map());
+    }
+  }
+
+  /** Cells from `from` to `to` (exclusive) are written over or erased: what stood there no longer shifts anything. */
+  private certain(row: number, from: number, to: number): void {
+    const marks = this.dubious[row];
+    if (!marks || marks.size === 0) {
+      return;
+    }
+    for (const col of [...marks.keys()]) {
+      if (col >= from && col < to) {
+        marks.delete(col);
+      }
     }
   }
 
@@ -265,12 +290,24 @@ export class ScreenModel {
       this.lineFeed();
     }
     const cellsRow = this.grid[this.row];
+    // What was in the cells now written is gone; what the write leaves unsure is marked again below.
+    this.certain(this.row, this.col, this.col + cells);
+    const code = ch.codePointAt(0) as number;
     // Writing over half of a wide character leaves the other half meaningless.
-    if (cellsRow[this.col] === "" || (cells === 1 && cellsRow[this.col + 1] === "")) {
-      this.dubious[this.row] = true;
+    const wideAt = (col: number): boolean => {
+      const cell = (cellsRow[col] ?? "").split(MUTED).join("").split(INVERSE).join("");
+      return cell !== "" && charWidth([...cell][0]) === 2;
+    };
+    // The right half of a wide character (an empty cell after one) written over: its left half is meaningless.
+    if (cellsRow[this.col] === "" && this.col > 0 && wideAt(this.col - 1)) {
+      this.dubious[this.row].set(this.col - 1, code);
+    }
+    // Its left half written over by one narrow cell: the right half is.
+    if (cells === 1 && cellsRow[this.col + 1] === "" && wideAt(this.col)) {
+      this.dubious[this.row].set(this.col + 1, code);
     }
     if (width === undefined) {
-      this.dubious[this.row] = true;
+      this.dubious[this.row].set(this.col, code);
     }
     cellsRow[this.col] = (this.faint || this.grayFg ? MUTED : "") + (this.inverse ? INVERSE : "") + ch;
     if (cells === 2) {
@@ -481,7 +518,7 @@ export class ScreenModel {
         const mode = Number.isFinite(args[0]) ? args[0] : 0;
         if (mode === 2) {
           this.grid = Array.from({ length: this.rows }, () => this.blankRow());
-          this.dubious = Array.from({ length: this.rows }, () => false);
+          this.dubious = Array.from({ length: this.rows }, () => new Map());
           // Every visible cell is now what the child draws next, whatever the model lost track of
           // before. Only this whole-screen erase heals a taint; on the alternate screen too, which is
           // the child's alone and which Claude erases on entry and after a resize.
@@ -492,14 +529,16 @@ export class ScreenModel {
         } else if (mode === 1) {
           for (let r = 0; r < this.row; r += 1) {
             this.grid[r] = this.blankRow();
-            this.dubious[r] = false;
+            this.dubious[r] = new Map();
           }
           this.grid[this.row].fill(" ", 0, Math.min(this.col + 1, this.cols));
+          this.certain(this.row, 0, this.col + 1);
         } else {
           this.grid[this.row].fill(" ", Math.min(this.col, this.cols));
+          this.certain(this.row, this.col, this.cols);
           for (let r = this.row + 1; r < this.rows; r += 1) {
             this.grid[r] = this.blankRow();
-            this.dubious[r] = false;
+            this.dubious[r] = new Map();
           }
         }
         break;
@@ -509,22 +548,25 @@ export class ScreenModel {
         const cells = this.grid[this.row];
         if (mode === 2) {
           cells.fill(" ");
-          this.dubious[this.row] = false;
+          this.dubious[this.row] = new Map();
         } else if (mode === 1) {
           cells.fill(" ", 0, Math.min(this.col + 1, this.cols));
+          this.certain(this.row, 0, this.col + 1);
         } else {
           cells.fill(" ", Math.min(this.col, this.cols));
+          this.certain(this.row, this.col, this.cols);
         }
         break;
       }
       case "X":
         this.grid[this.row].fill(" ", Math.min(this.col, this.cols), Math.min(this.col + n(0, 1), this.cols));
+        this.certain(this.row, this.col, this.col + n(0, 1));
         break;
       case "L":
         for (let i = 0; i < n(0, 1); i += 1) {
           this.grid.splice(this.row, 0, this.blankRow());
           this.grid.pop();
-          this.dubious.splice(this.row, 0, false);
+          this.dubious.splice(this.row, 0, new Map());
           this.dubious.pop();
         }
         break;
@@ -533,7 +575,7 @@ export class ScreenModel {
           this.grid.splice(this.row, 1);
           this.grid.push(this.blankRow());
           this.dubious.splice(this.row, 1);
-          this.dubious.push(false);
+          this.dubious.push(new Map());
         }
         break;
       case "S":
@@ -704,14 +746,22 @@ const BORDER_RIGHT = /\s*[│┃]\s*$/;
 /** A selection list (`❯ 1. Yes`): a dialog, never the main prompt. */
 const MENU_ROW = /^\s*(?:[│┃]\s*)?[>❯]?\s*\d+[.)]\s+\S/;
 const BUSY_INDICATOR = /(?:esc(?:ape)?|ctrl\+c)\s+to\s+interrupt/i;
-const DIALOG_TEXT =
-  /esc to cancel|enter to (?:confirm|select)|press enter|do you want to|\(y\/n\)|\[y\/n\]|allow (?:once|always)|don't ask again|tab to amend|to navigate|ctrl\+e to explain|waiting for (?:your )?(?:input|approval)/i;
+/**
+ * What a dialog's own chrome says (its footer hints and answer choices): Claude draws these and nothing else does.
+ * Prose a dialog also holds ("Do you want to proceed?") is just as likely in an assistant message, an agent's
+ * title or a footer hint, so on its own it says nothing outside the input rows.
+ */
+const DIALOG_CHROME =
+  /esc to cancel|enter to (?:confirm|select)|\(y\/n\)|\[y\/n\]|allow (?:once|always)|don't ask again|tab to amend|to navigate|ctrl\+e to explain/i;
+const DIALOG_PROSE = /press enter|do you want to|waiting for (?:your )?(?:input|approval)/i;
+/** A selection list with its selected row (`❯ 1. Yes`): a dialog. An indented `1. item` of a numbered list in a message is not. */
+const SELECTED_MENU_ROW = /^\s*(?:[│┃]\s*)?[>❯]\s*\d+[.)]\s+\S/;
 
 export type ProbeResult =
   /** `top` and `bottom` are the rows where the box was expected, when the probe got as far as a rule. */
-  | { kind: "unknown"; reason: string; top?: number; bottom?: number }
+  | { kind: "unknown"; reason: string; top?: number; bottom?: number; uw?: string }
   /** A dialog, a question, a permission prompt or a running-turn sign is on screen. */
-  | { kind: "blocked"; reason: string }
+  | { kind: "blocked"; reason: string; at?: string }
   /**
    * The framed prompt box, with what is on its input line (whitespace
    * normalised: runs are one space, ends trimmed) and the same line row by row
@@ -775,7 +825,13 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   const inputRows = rows.slice(top + 1, bottom);
   for (let i = top; i <= bottom; i += 1) {
     if (screen.rowDubious(i)) {
-      return { kind: "unknown", reason: "uncertain_width" };
+      // Which row and which codepoint (hex only, never the text around it), so a field problem names itself.
+      const cell = screen.dubiousCell(i);
+      return {
+        kind: "unknown",
+        reason: "uncertain_width",
+        ...(cell ? { uw: `${i}:U+${cell.codepoint.toString(16).toUpperCase().padStart(4, "0")}` } : {}),
+      };
     }
   }
   // Where a running-turn sign or a dialog's own text would be: the rows above the box and its footer.
@@ -783,12 +839,11 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   // A second prompt row with something after its glyph is a selection list; a bare `>` is a row of the draft,
   // but only a solid one: a muted bare glyph is no text of the wearer's, and no empty box either.
   const mutedRow = (index: number): boolean => (solidRows()[top + 1 + index] ?? "").trim() === "";
-  if (
-    inputRows.some(
-      (row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row) && (row.replace(PROMPT_LEAD, "").trim() !== "" || mutedRow(index))),
-    )
-  ) {
-    return { kind: "blocked", reason: "menu" };
+  const menuAt = inputRows.findIndex(
+    (row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row) && (row.replace(PROMPT_LEAD, "").trim() !== "" || mutedRow(index))),
+  );
+  if (menuAt >= 0) {
+    return { kind: "blocked", reason: "menu", at: `${top + 1 + menuAt}:menu` };
   }
   if (!PROMPT_ROW.test(inputRows[0])) {
     return { kind: "unknown", reason: "no_prompt", top, bottom };
@@ -796,8 +851,24 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   if (options.queued !== true && around.some((row) => BUSY_INDICATOR.test(row))) {
     return { kind: "blocked", reason: "busy_indicator" };
   }
-  if ([...around, ...inputRows].some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row))) {
-    return { kind: "blocked", reason: "dialog" };
+  // A dialog's whole text is read in the input rows (the box holds the dialog then); around the box (the rows
+  // above it, the footer, the agents panel) only its chrome and a selected menu row count, never prose or a
+  // numbered list a message or a title happens to hold. Which row and which kind goes to the log, never the text.
+  const dialogAt = (): string | undefined => {
+    const scan = (from: number, to: number, strict: boolean): string | undefined => {
+      for (let i = from; i < to; i += 1) {
+        const row = rows[i] ?? "";
+        if (DIALOG_CHROME.test(row)) return `${i}:chrome`;
+        if (SELECTED_MENU_ROW.test(row)) return `${i}:menu`;
+        if (!strict && (DIALOG_PROSE.test(row) || MENU_ROW.test(row))) return `${i}:input`;
+      }
+      return undefined;
+    };
+    return scan(Math.max(0, top - STATUS_ROWS), top, true) ?? scan(top + 1, bottom, false) ?? scan(bottom + 1, rows.length, true);
+  };
+  const dialog = dialogAt();
+  if (dialog !== undefined) {
+    return { kind: "blocked", reason: "dialog", at: dialog };
   }
   const text = normalise(inputContent(inputRows));
   const solid = normalise(inputContent(solidRows().slice(top + 1, bottom)));
@@ -957,7 +1028,7 @@ export function showsDialog(screen: ScreenModel): boolean {
   if (screen.unsettled) {
     return false;
   }
-  return screen.lines().some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row));
+  return screen.lines().some((row) => DIALOG_CHROME.test(row) || SELECTED_MENU_ROW.test(row));
 }
 
 /** What the screen shows of the prompt box, for agentd to decide whether a reply may be typed (it still is not the check at the write). */
@@ -1072,6 +1143,10 @@ export interface VerdictShape {
   shape: string;
   /** The probe found a prompt-glyph row in a screen it could not read as the box: a layout nobody has described. */
   unknown: boolean;
+  /** With reason `uncertain_width`: the row and the codepoint (`47:U+25B6`), hex only, never the text. */
+  uw?: string;
+  /** With a refusal for a dialog: the row and what kind of evidence it was (`47:chrome`, `47:menu`, `47:input`), never the text. */
+  dlg?: string;
 }
 
 /** `describeShape` plus where the probe put the box and the box state. Nothing of the screen's text. */
@@ -1102,6 +1177,8 @@ export function describeVerdict(screen: ScreenModel): VerdictShape {
     below: [...below.entries()].map(([kind, count]) => `${kind}${count}`).sort().join(" ").slice(0, 200),
     shape: shape.shape,
     unknown: box === "unreadable" && lines.some((line) => PROMPT_ROW.test(line)) && look.kind === "unknown",
+    ...(look.kind === "unknown" && look.uw !== undefined ? { uw: look.uw } : {}),
+    ...(look.kind === "blocked" && look.at !== undefined ? { dlg: look.at } : {}),
   };
 }
 

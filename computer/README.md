@@ -385,6 +385,12 @@ wrong, the log tells which layout it was, without a character of what was on the
   screen size, the rows of the top rule, the prompt row and the bottom rule, the rows under the bottom rule
   by class (`below`), Claude's sessions-file status (`file`), agentd's decision (`ready`, `readyWhy`),
   the permission mode and `layoutSeen`, how many distinct layouts this session has shown.
+  With `reason` `uncertain_width` it adds `uw=<row>:U+<hex>`: the row and the codepoint (a character whose width a
+  terminal does not settle alone, such as `▶`, an emoji or a joiner) that made the box rows unreadable; with a
+  refusal for a dialog, `dlg=<row>:<chrome|menu|input>`: the row, and whether it was a dialog's own hint text, a
+  selected menu row (`❯ 1. Yes`) or something in the input rows. Never the text itself. A width mark is kept per
+  cell and goes when the cell is written over or erased, and counts only on the box's own rows; a dialog's
+  words in a message, an agent's title or a numbered list are not read as a dialog around the box.
 - `launcher_screen_shape`: when a reply was refused because no box was found, each row's index, class and length.
 - `launcher_screen_unknown_layout`: a warning, the first time (a few per session at most) a layout shows a
   prompt-glyph row the probe could not read as the box: the line to send.

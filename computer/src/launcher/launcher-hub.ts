@@ -751,8 +751,10 @@ export class LauncherHub {
           !hasShape(
             frame,
             ["type", "probe", "reason", "box", "tainted", "cols", "rows", "below", "shape", "file", "layouts", "unknown"],
-            ["top", "prompt", "bottom"],
+            ["top", "prompt", "bottom", "uw", "dlg"],
           ) ||
+          (frame.uw !== undefined && (typeof frame.uw !== "string" || !/^\d{1,4}:U\+[0-9A-F]{4,6}$/.test(frame.uw))) ||
+          (frame.dlg !== undefined && (typeof frame.dlg !== "string" || !/^\d{1,4}:(?:chrome|menu|input)$/.test(frame.dlg))) ||
           (frame.probe !== "prompt" && frame.probe !== "blocked" && frame.probe !== "unknown") ||
           typeof frame.reason !== "string" ||
           !word.test(frame.reason) ||
@@ -799,6 +801,10 @@ export class LauncherHub {
           ...(frame.top !== undefined ? { top: frame.top } : {}),
           ...(frame.prompt !== undefined ? { prompt: frame.prompt } : {}),
           ...(frame.bottom !== undefined ? { bottom: frame.bottom } : {}),
+          // With uncertain_width: the row and the codepoint that made the box unreadable (hex only).
+          ...(frame.uw !== undefined ? { uw: frame.uw } : {}),
+          // With a dialog refusal: the row and the kind of evidence (chrome, a selected menu row, input rows).
+          ...(frame.dlg !== undefined ? { dlg: frame.dlg } : {}),
           below: frame.below,
           file: frame.file,
           layoutSeen: frame.layouts,
