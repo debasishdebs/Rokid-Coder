@@ -14,8 +14,6 @@ const MAX_STRING = 4096;
 const MAX_PARAMS = 64;
 /** The probe does not trust a screen narrower than this to be Claude's layout. */
 const MIN_COLS = 40;
-/** Rows under the input box that may hold its footer (mode line, `? for shortcuts`, `1 agent`). */
-const MAX_FOOTER_ROWS = 4;
 /** Rows above the input box that are looked at for a running-turn sign (spinner, `esc to interrupt`) or a dialog's text. */
 const STATUS_ROWS = 8;
 /** The most rows the input line may wrap over. */
@@ -26,6 +24,8 @@ const KNOWN_SGR: ReadonlySet<number> = new Set([1, 3, 4, 5, 6, 7, 8, 9, 21, 23, 
 
 /** Prefixes the cell of a muted character; never a character a terminal would draw. */
 const MUTED = "\u0001";
+/** Prefixes (after MUTED) the cell of a character drawn in inverse video: the cursor, in Claude's input line. */
+const INVERSE = "\u0002";
 
 type ParseState ="text" | "esc" | "esc_intermediate" | "csi" | "string" | "string_esc";
 
@@ -96,6 +96,7 @@ export class ScreenModel {
   /** SGR state: text drawn now is muted (faint or a gray foreground), as placeholders and suggestions are. */
   private faint = false;
   private grayFg = false;
+  private inverse = false;
 
   constructor(
     private cols = 80,
@@ -152,17 +153,38 @@ export class ScreenModel {
 
   /** The visible rows, trailing blanks removed. */
   lines(): string[] {
-    return this.grid.map((cells) => cells.join("").split(MUTED).join("").replace(/\s+$/, ""));
+    return this.grid.map((cells) => cells.join("").split(MUTED).join("").split(INVERSE).join("").replace(/\s+$/, ""));
   }
 
-  /** The visible rows with every muted character blanked: what is on screen that is not a placeholder or a suggestion. */
+  /**
+   * The visible rows with every muted character blanked: what is on screen that is not a placeholder or a
+   * suggestion. The cursor is drawn as the character under it in inverse video, so on the first letter of
+   * a suggestion it is the suggestion's own letter. An inverse letter counts as muted only in that one
+   * shape: it is the first cell after the prompt glyph and its one space, and every other non-blank cell
+   * of the row is muted (and there is some muted text after it: a lone inverse letter is a typed one).
+   * An inverse letter anywhere else, or with solid text after it, is text: the probe fails closed.
+   */
   solidLines(): string[] {
-    return this.grid.map((cells) =>
-      cells
-        .map((cell) => (cell.startsWith(MUTED) ? " ".repeat(Math.max(1, [...cell].length - 1)) : cell))
+    const bare = (cell: string): string => cell.split(MUTED).join("").split(INVERSE).join("");
+    return this.grid.map((cells) => {
+      const glyph = cells.findIndex((cell) => /^[>❯]$/.test(bare(cell)));
+      const lead = glyph < 0 ? -1 : glyph + 2;
+      const cursorOnSuggestion = (index: number): boolean =>
+        glyph >= 0 &&
+        index === lead &&
+        cells.slice(0, glyph).every((cell) => bare(cell).trim() === "" || /^[│┃]$/.test(bare(cell))) &&
+        /^\s$/.test(bare(cells[glyph + 1] ?? "")) &&
+        cells.slice(index + 1).every((cell) => bare(cell).trim() === "" || cell.startsWith(MUTED)) &&
+        // A lone inverse letter with nothing muted after it is a typed letter, not a cursor on a suggestion.
+        (bare(cells[index]).trim() === "" || cells.slice(index + 1).some((cell) => cell.startsWith(MUTED) && bare(cell).trim() !== ""));
+      return cells
+        .map((cell, index) => {
+          const blanked = cell.startsWith(MUTED) || (cell.includes(INVERSE) && cursorOnSuggestion(index));
+          return blanked ? " ".repeat(Math.max(1, [...bare(cell)].length)) : bare(cell);
+        })
         .join("")
-        .replace(/\s+$/, ""),
-    );
+        .replace(/\s+$/, "");
+    });
   }
 
   rowDubious(index: number): boolean {
@@ -250,7 +272,7 @@ export class ScreenModel {
     if (width === undefined) {
       this.dubious[this.row] = true;
     }
-    cellsRow[this.col] = this.faint || this.grayFg ? MUTED + ch : ch;
+    cellsRow[this.col] = (this.faint || this.grayFg ? MUTED : "") + (this.inverse ? INVERSE : "") + ch;
     if (cells === 2) {
       cellsRow[this.col + 1] = "";
     }
@@ -569,6 +591,11 @@ export class ScreenModel {
       } else if (code === 0) {
         this.faint = false;
         this.grayFg = false;
+        this.inverse = false;
+      } else if (code === 7) {
+        this.inverse = true;
+      } else if (code === 27) {
+        this.inverse = false;
       } else if (code === 2) {
         this.faint = true;
       } else if (code === 22) {
@@ -648,10 +675,16 @@ export class ScreenModel {
 const RULE_CHARS = "─━╭╮╰╯┌┐└┘";
 const RULE_TRIM = /^[\s]+|[\s]+$/g;
 
-/** A horizontal rule of the prompt box, with or without its corners. */
+/**
+ * A horizontal rule of the prompt box, with or without its corners, and with or without a label in
+ * it: the real UI puts one in the top rule ("───── Rokid app for Claude code integration ─"), and on
+ * a narrow screen the label is a good part of the row. A rule is a run of rule characters, then at
+ * most one label (up to 100 characters, a space on each side) and a run of rule characters again, and
+ * at least 10 rule characters in all. The label's words are never read.
+ */
 function isRule(row: string): boolean {
   const text = row.replace(RULE_TRIM, "");
-  if (text.length < 10) {
+  if (text.length < 10 || !RULE_ROW.test(text)) {
     return false;
   }
   let rule = 0;
@@ -660,8 +693,9 @@ function isRule(row: string): boolean {
       rule += 1;
     }
   }
-  return rule / text.length >= 0.8 && RULE_CHARS.includes(text[0]) && RULE_CHARS.includes(text[text.length - 1]);
+  return rule >= 10;
 }
+const RULE_ROW = new RegExp(`^[${RULE_CHARS}]+(?: [^${RULE_CHARS}]{1,100} ?[${RULE_CHARS}]+)?$`);
 
 /** The input line: a `>` or `❯` prompt, with or without the box's side border. */
 const PROMPT_ROW = /^\s*(?:[│┃]\s*)?[>❯](?:\s|$)/;
@@ -674,7 +708,8 @@ const DIALOG_TEXT =
   /esc to cancel|enter to (?:confirm|select)|press enter|do you want to|\(y\/n\)|\[y\/n\]|allow (?:once|always)|don't ask again|tab to amend|to navigate|ctrl\+e to explain|waiting for (?:your )?(?:input|approval)/i;
 
 export type ProbeResult =
-  | { kind: "unknown"; reason: string }
+  /** `top` and `bottom` are the rows where the box was expected, when the probe got as far as a rule. */
+  | { kind: "unknown"; reason: string; top?: number; bottom?: number }
   /** A dialog, a question, a permission prompt or a running-turn sign is on screen. */
   | { kind: "blocked"; reason: string }
   /**
@@ -701,7 +736,7 @@ const normalise = (text: string): string => text.replace(/\s+/g, " ").trim();
 
 /**
  * What the screen shows right now. `prompt` only when the framed input box is
- * found (a rule above, the `>`/`❯` input line, a rule below, a short footer),
+ * found (a rule above, the `>`/`❯` input line, a rule below; whatever is under it, the footer and the agents panel, is not counted),
  * nothing around it is a dialog, a menu or a running turn, and the model is
  * not tainted (or, given `sinceTaints`, not disturbed since). The text is what
  * the input line holds, whitespace normalised.
@@ -726,12 +761,12 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
     }
   }
   if (bottom < 1) {
-    return { kind: "unknown", reason: "no_box" };
+    return { kind: "unknown", reason: "no_box", ...(bottom >= 0 ? { bottom } : {}) };
   }
+  // Everything under the bottom rule is the footer and, while agents run, the agents panel (`● main`, a
+  // `○` row for each agent, one of which may carry a `❯` selection). It is as tall as there are agents,
+  // so it is not counted; it is never read for what the input line holds, and a `❯` there is no prompt.
   const footer = rows.slice(bottom + 1);
-  if (footer.filter((row) => row.length > 0).length > MAX_FOOTER_ROWS) {
-    return { kind: "unknown", reason: "no_box" };
-  }
   let top = -1;
   for (let i = bottom - 1; i >= Math.max(0, bottom - 1 - MAX_INPUT_ROWS); i -= 1) {
     if (isRule(rows[i])) {
@@ -739,8 +774,17 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
       break;
     }
   }
+  // A draft longer than the box's rows, or a draft row that itself reads as a rule (the nearest rule is then
+  // the draft's own row, even with a prompt-like row under it), hides the real top rule. When a higher rule
+  // with a prompt row under it and only box-like rows down to the bottom rule encloses solid text, that is the
+  // box holding a draft: the caller must be told there is text, never that the box is empty or unreadable.
+  const topFound = top >= 0 && bottom - top >= 2 && PROMPT_ROW.test(rows[top + 1] ?? "");
+  const draftTop = findDraftTop(rows, bottom, screen.solidLines(), topFound);
+  if (draftTop >= 0 && (!topFound || draftTop < top)) {
+    top = draftTop;
+  }
   if (top < 0 || bottom - top < 2) {
-    return { kind: "unknown", reason: "no_box" };
+    return { kind: "unknown", reason: "no_box", bottom, ...(top >= 0 ? { top } : {}) };
   }
   const inputRows = rows.slice(top + 1, bottom);
   for (let i = top; i <= bottom; i += 1) {
@@ -750,11 +794,12 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   }
   // Where a running-turn sign or a dialog's own text would be: the rows above the box and its footer.
   const around = [...rows.slice(Math.max(0, top - STATUS_ROWS), top), ...footer];
-  if (inputRows.some((row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row)))) {
+  // A second prompt row with something after its glyph is a selection list; a bare `>` is a row of the draft.
+  if (inputRows.some((row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row) && row.replace(PROMPT_LEAD, "").trim() !== ""))) {
     return { kind: "blocked", reason: "menu" };
   }
   if (!PROMPT_ROW.test(inputRows[0])) {
-    return { kind: "unknown", reason: "no_prompt" };
+    return { kind: "unknown", reason: "no_prompt", top, bottom };
   }
   if (around.some((row) => BUSY_INDICATOR.test(row))) {
     return { kind: "blocked", reason: "busy_indicator" };
@@ -768,6 +813,51 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   // placeholder. Typed text that looks like it is text, and so is a multi-line draft that begins
   // and ends the same way.
   return { kind: "prompt", text, rows: exactRows(inputRows), empty: solid === "" };
+}
+
+/** The prompt glyph (and a side border) at the start of a row. */
+const PROMPT_LEAD = /^\s*(?:[│┃]\s*)?[>❯]/;
+
+/**
+ * A row that can be part of the input box: blank, indented (a continuation row is indented under the glyph),
+ * a rule (or a draft row that reads as one) or a prompt row. A row of text from the first column (`● Done`,
+ * `✻ Working`, a footer-less transcript line) is not: the input box does not reach up through it.
+ */
+function boxLike(row: string): boolean {
+  return row.trim() === "" || /^[\s│┃]/.test(row) || isRule(row) || PROMPT_ROW.test(row);
+}
+
+/**
+ * The highest rule above `bottom` that has a prompt row directly under it, with only box-like rows
+ * from there down to `bottom`, and solid (not muted, not a rule) text between: text after the glyph of
+ * that prompt row, or anything on a row below it. -1 when there is none. It finds the top of a draft that is
+ * taller than `MAX_INPUT_ROWS` or holds a row that reads as a rule (which the nearest-rule search takes for the
+ * top). Rows that are only muted (a gray rule, a footer) are no text: they never make a box out of nothing.
+ * `nearestFound` says the nearest-rule search already found a box: then the search may reach above that rule
+ * only across rows of a draft, so no rule that starts in the first column (the UI's own; a draft's rows are
+ * indented under the glyph) is crossed.
+ */
+function findDraftTop(rows: string[], bottom: number, solid: string[], nearestFound: boolean): number {
+  let found = -1;
+  let below = false; // solid, non-rule text on the rows under the candidate's prompt row
+  for (let i = bottom - 1; i >= 0; i -= 1) {
+    if (!boxLike(rows[i])) {
+      break;
+    }
+    if (nearestFound && i + 2 < bottom && isRule(rows[i + 2]) && /^\S/.test(rows[i + 2])) {
+      break;
+    }
+    if (i + 2 < bottom && (solid[i + 2] ?? "").trim() !== "" && !isRule(solid[i + 2])) {
+      below = true;
+    }
+    if (i + 1 < bottom && isRule(rows[i]) && PROMPT_ROW.test(rows[i + 1] ?? "")) {
+      const first = (solid[i + 1] ?? "").replace(PROMPT_LEAD, "").trim();
+      if (below || (first !== "" && !isRule(first))) {
+        found = i;
+      }
+    }
+  }
+  return found;
 }
 
 /** How many leading whitespace characters of a continuation row are the UI's indent: at most `indent`, never text. */
@@ -834,6 +924,65 @@ export function showsDialog(screen: ScreenModel): boolean {
     return false;
   }
   return screen.lines().some((row) => DIALOG_TEXT.test(row) || MENU_ROW.test(row));
+}
+
+/** The largest `screen_shape` frame the hub accepts (see `launcher-hub.ts`); a frame beyond it costs the connection. */
+const SHAPE_MAX_COLS = 2000;
+const SHAPE_MAX_ROWS = 1000;
+const SHAPE_MAX_CHARS = 8000;
+
+/** What the screen looks like by row kinds alone, and where the probe expected the box. No text of the screen is in it. */
+export interface ScreenShape {
+  cols: number;
+  rows: number;
+  /** `<row><class><length>` per row, space separated: B blank, R rule, P prompt-glyph row, M muted text, G glyphs only, T text. */
+  shape: string;
+  reason: string;
+  top?: number;
+  bottom?: number;
+}
+
+/**
+ * The screen as classes and lengths, so a layout the probe cannot read can be rebuilt from a log line
+ * without a character of what was on it (which can be anything the wearer or Claude wrote). `look` says
+ * why the probe refused and, when it got as far as a rule, where it expected the box.
+ */
+export function describeShape(screen: ScreenModel, look?: ProbeResult): ScreenShape {
+  const lines = screen.lines();
+  const solid = screen.solidLines();
+  const tokens = lines.map((line, index) => {
+    const trimmed = line.trim();
+    let kind = "T";
+    if (trimmed === "") {
+      kind = "B";
+    } else if (isRule(line)) {
+      kind = "R";
+    } else if (PROMPT_ROW.test(line)) {
+      kind = "P";
+    } else if ((solid[index] ?? "").trim() === "") {
+      kind = "M";
+    } else if (/^[^\p{L}\p{N}]+$/u.test(trimmed)) {
+      kind = "G";
+    }
+    return `${index}${kind}${[...line].length}`;
+  });
+  // The hub refuses a frame beyond these limits and drops the connection, so a huge terminal is cut to them
+  // here: the numbers are clamped and the shape keeps the rows nearest the bottom, where the box is (each
+  // token carries its own row number, so a shape that starts part-way down still says which rows it is).
+  let first = 0;
+  let length = tokens.reduce((sum, token) => sum + token.length + 1, -1);
+  while (length > SHAPE_MAX_CHARS && first < tokens.length - 1) {
+    length -= tokens[first].length + 1;
+    first += 1;
+  }
+  return {
+    cols: Math.min(SHAPE_MAX_COLS, Math.max(1, screen.width)),
+    rows: Math.min(SHAPE_MAX_ROWS, Math.max(1, lines.length)),
+    shape: tokens.slice(first).join(" "),
+    reason: look?.kind === "unknown" || look?.kind === "blocked" ? look.reason : "none",
+    ...(look?.kind === "unknown" && look.top !== undefined ? { top: look.top } : {}),
+    ...(look?.kind === "unknown" && look.bottom !== undefined ? { bottom: look.bottom } : {}),
+  };
 }
 
 /** Whether the probe shows the framed prompt box visibly empty, with no dialog, question or other text in it. */

@@ -239,3 +239,65 @@ test("agentd_logs_a_screen_check_as_flags_and_lengths_and_refuses_a_malformed_on
     }
   });
 });
+
+test("agentd_logs_a_screen_shape_as_classes_and_numbers_and_refuses_anything_else", async () => {
+  const net = require("node:net");
+  const { LauncherHub } = require("../dist/launcher/launcher-hub.js");
+  const { AttachRegistry } = require("../dist/attach-registry.js");
+  const { withTempDir } = require("./helpers/daemon.js");
+  await withTempDir(async (dir) => {
+    const configDir = path.join(dir, "cfg");
+    fs.mkdirSync(path.join(dir, "sessions"), { recursive: true });
+    const logs = [];
+    const logger = {
+      info: (event, meta) => logs.push({ event, meta }),
+      warn: (event, meta) => logs.push({ event, meta }),
+      error: (event, meta) => logs.push({ event, meta }),
+    };
+    const registry = new AttachRegistry({ file: path.join(dir, "attached.json"), logger });
+    const hub = new LauncherHub({ configDir, claudeSessionsDir: path.join(dir, "sessions"), logger, registry });
+    await hub.start();
+    try {
+      const socket = net.createConnection(hub.socketPath);
+      await new Promise((resolve) => socket.once("connect", resolve));
+      const send = (frame) => socket.write(`${JSON.stringify(frame)}\n`);
+      send({ type: "launcher_hello", v: 1, launcherId: "L-shape", provider: "claude", childPid: 4242 });
+      const good = { type: "screen_shape", cols: 207, rows: 50, shape: "0T120 1B0 46R207 47P35", reason: "no_box", top: 46, bottom: 48 };
+      send(good);
+      for (let i = 0; i < 100 && !logs.some((l) => l.event === "launcher_screen_shape"); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const line = logs.find((l) => l.event === "launcher_screen_shape");
+      assert.deepEqual(
+        { ...line.meta },
+        { session: undefined, cols: 207, rows: 50, reason: "no_box", top: 46, bottom: 48, shape: "0T120 1B0 46R207 47P35" },
+      );
+      // Anything but classes and numbers in the shape drops the connection, and nothing more is logged.
+      send({ ...good, shape: "0T12 the launch code" });
+      for (let i = 0; i < 100 && !logs.some((l) => l.event === "launcher_connection_dropped"); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(logs.filter((l) => l.event === "launcher_screen_shape").length, 1);
+      assert.equal(logs.some((l) => l.event === "launcher_connection_dropped"), true);
+      socket.destroy();
+    } finally {
+      await hub.stop();
+    }
+  });
+});
+
+test("the_client_forwards_the_shape_of_a_screen_it_could_not_read_once", async () => {
+  const t = setup();
+  t.draw("\x1b[2J\x1b[H● something with a secret in it\r\n❯ hunter2");
+  t.client.onFrame({ type: "type_command", cmdId: "c1", gen: 1, command: "text", text: "yes do it" });
+  t.wait(5400);
+  await new Promise((resolve) => setImmediate(resolve));
+  const result = t.frames.find((f) => f.type === "command_result");
+  assert.deepEqual([result.ok, result.error], [false, "screen_unreadable"]);
+  const shapes = t.frames.filter((f) => f.type === "screen_shape");
+  assert.equal(shapes.length, 1);
+  assert.equal(JSON.stringify(shapes).includes("secret"), false);
+  assert.equal(JSON.stringify(shapes).includes("hunter2"), false);
+  assert.match(shapes[0].shape, /^[0-9BRPMGT ]+$/);
+  assert.equal(shapes[0].reason, "no_box");
+});

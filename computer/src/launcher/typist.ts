@@ -4,6 +4,7 @@ import { OutputScanner } from "./output-scanner";
 import { bgReplyText, pasteText } from "./paste-text";
 import type { PtyChild } from "./pty";
 import {
+  describeShape,
   probe,
   showsCleared,
   showsDialog,
@@ -12,6 +13,7 @@ import {
   showsPlanMode,
   type ProbeResult,
   type ScreenModel,
+  type ScreenShape,
 } from "./screen-probe";
 
 export interface Clock {
@@ -73,6 +75,8 @@ const BG_CLEAR_MS = 1500;
  * read (another layout, a screen not drawn): the reply is refused, not waited on for a minute.
  */
 const UNREADABLE_MS = 5000;
+/** The probe's reasons for a screen with no readable prompt box on it (the only ones whose shape is logged). */
+const NO_BOX_REASONS: ReadonlySet<string> = new Set(["no_box", "no_prompt", "narrow"]);
 
 /**
  * The readiness rule for one read of Claude's sessions file: it says idle and,
@@ -139,6 +143,11 @@ export interface TypistOptions {
   /** Told what each decision of the screen check found. */
   onCheck?: (check: ScreenCheck) => void;
   /**
+   * The screen as row kinds and lengths, once per change, when a check refuses because it could not
+   * find the prompt box or read the layout; never a character of the screen.
+   */
+  onShape?: (shape: ScreenShape) => void;
+  /**
    * What every glasses text reply needs and nothing else supplies: the screen
    * model of Claude's terminal and Claude's own file status right now. A
    * background reply (`bgReply`) also needs the question to agentd, which alone
@@ -163,6 +172,8 @@ export interface TypistOptions {
  */
 export class Typist {
   private active?: Active;
+  /** The shape last reported, so one that has not changed is not reported again. */
+  private lastShape?: string;
   /** The first write of the last command whose held keys still wait for positive readiness. */
   private releaseAfter?: number;
   private lastOutputAt: number;
@@ -482,7 +493,7 @@ export class Typist {
       active.seenAt = undefined;
       active.unreadableSince ??= now;
       if (now - active.unreadableSince >= UNREADABLE_MS) {
-        this.refuse(active, "not_sent");
+        this.refuse(active, this.unreadableError(active.look));
         return;
       }
     } else {
@@ -526,8 +537,45 @@ export class Typist {
   /** Nothing was typed: the box is not free, say why and fail. */
   private refuse(active: Active, error: CommandError): void {
     this.check("pre", active, "refused", active.look);
+    this.reportShape(active.look);
     this.settle(active, error);
     this.end(active);
+  }
+
+  /**
+   * What a refusal over a screen with no readable prompt box is called. `screen_unreadable` only when
+   * the box was not found or the layout is not one the probe knows (no rule pair, no prompt row, too
+   * narrow) and no dialog is on screen: Claude may well be idle. A screen that is changing (an escape
+   * sequence cut off, a taint), has a dialog or is in plan mode, or whose width the model cannot be sure of
+   * is a busy one, and keeps the retryable `not_sent`.
+   */
+  private unreadableError(look: ProbeResult | undefined): CommandError {
+    const bg = this.options.bg;
+    if (look?.kind === "unknown" && NO_BOX_REASONS.has(look.reason) && bg && !showsDialog(bg.screen) && !showsPlanMode(bg.screen)) {
+      return "screen_unreadable";
+    }
+    return "not_sent";
+  }
+
+  /**
+   * The row kinds of a screen in which no box was found, once per change (a repeat of the same shape says
+   * nothing). A screen that is tainted, unsettled or one with a box in it is not this: nothing is logged.
+   */
+  private reportShape(look: ProbeResult | undefined): void {
+    const bg = this.options.bg;
+    if (!bg || !this.options.onShape) {
+      return;
+    }
+    const seen = look ?? probe(bg.screen);
+    if (seen.kind !== "unknown" || !NO_BOX_REASONS.has(seen.reason)) {
+      return;
+    }
+    const shape = describeShape(bg.screen, seen);
+    const signature = `${shape.cols}x${shape.rows}|${shape.reason}|${shape.shape}`;
+    if (signature !== this.lastShape) {
+      this.lastShape = signature;
+      this.options.onShape(shape);
+    }
   }
 
   /**
@@ -689,7 +737,8 @@ export class Typist {
     const lost = seen.kind === "blocked" || (seen.kind === "unknown" && seen.reason === "screen_disturbed");
     if (lost || now >= active.deadline) {
       this.check("post", active, "refused", seen);
-      this.bgAbort(active, "not_sent");
+      this.reportShape(seen);
+      this.bgAbort(active, this.unreadableError(seen));
     }
   }
 

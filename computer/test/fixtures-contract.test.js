@@ -419,10 +419,19 @@ const HANDLERS = {
       send({ type: "command_result", cmdId: typed.cmdId, ok: true });
       const applied = await phone.waitFor("ack", (f) => f.msgId === fixture.msgId && f.result !== "rejected");
       assert.deepEqual([applied.result, applied.error, applied.v], ["applied", undefined, 2]);
+      // A screen the launcher could not read: rejected, retryable, and nothing was typed, so no `consumed`.
+      const unreadableId = FROM_AGENT_VARIANTS.ack_screen_unreadable.msgId;
+      phone.send({ ...fixture, msgId: unreadableId });
+      const unread = await next("type_command", (f) => f.cmdId !== typed.cmdId);
+      send({ type: "command_result", cmdId: unread.cmdId, ok: false, error: "screen_unreadable" });
+      const unreadable = await ack(unreadableId);
+      assertSameShape(unreadable, FROM_AGENT_VARIANTS.ack_screen_unreadable, "unreadable ack", {
+        values: { msgId: unreadableId, result: "rejected", error: "screen_unreadable" },
+      });
       // R152: typed, then failed. The id is spent, and the ack says so.
       const consumedId = FROM_AGENT_VARIANTS.ack_consumed.msgId;
       phone.send({ ...fixture, msgId: consumedId });
-      const second = await next("type_command", (f) => f.cmdId !== typed.cmdId);
+      const second = await next("type_command", (f) => f.cmdId !== typed.cmdId && f.cmdId !== unread.cmdId);
       send({ type: "command_written", cmdId: second.cmdId, at: Date.now() });
       send({ type: "command_result", cmdId: second.cmdId, ok: false, error: "dialog_not_seen" });
       const spent = await ack(consumedId);

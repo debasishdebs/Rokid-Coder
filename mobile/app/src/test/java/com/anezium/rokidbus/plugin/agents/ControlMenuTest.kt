@@ -3,6 +3,7 @@ package com.anezium.rokidbus.plugin.agents
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -508,6 +509,20 @@ class ControlMenuTest {
         assertEquals(hint, ControlMenu.ackNotice(ack, followup = true))
         assertEquals(hint, ControlMenu.followupRejection("not_sent", 120))
         assertEquals("Not applied: not_sent", ControlMenu.ackNotice(ack))
+    }
+
+    @Test
+    fun a_reply_agentd_could_not_read_the_screen_for_says_so_and_is_not_called_busy() {
+        val hint = "Could not read Claude's screen, try again or reply at the laptop"
+        val ack = AgentdAction.Ack("m", "rejected", "screen_unreadable")
+        assertEquals(hint, ControlMenu.ackNotice(ack, followup = true))
+        assertEquals(hint, ControlMenu.followupRejection("screen_unreadable", 120))
+        assertEquals("Not applied: screen_unreadable", ControlMenu.ackNotice(ack))
+        // The busy wording stays for not_sent, and the two never read alike.
+        assertNotEquals(ControlMenu.followupRejection("not_sent", 120), hint)
+        assertEquals("Claude is busy with something else, wait a moment and try again", ControlMenu.followupRejection("not_sent", 120))
+        // Retryable and unconsumed: a rejection that spent its id reads as sent, this one does not.
+        assertEquals(hint, ControlMenu.ackNotice(AgentdAction.Ack("m", "rejected", "screen_unreadable", consumed = false), followup = true))
     }
 
     @Test
