@@ -17,7 +17,6 @@ import com.anezium.rokidbus.phone.HubForegroundHost
 import com.anezium.rokidbus.plugin.agents.AgentsConfigStore
 import com.anezium.rokidbus.plugin.agents.AgentsCore
 import com.anezium.rokidbus.plugin.agents.AgentsRuntime
-import com.anezium.rokidbus.shared.LinkStateBits
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -134,10 +133,7 @@ class CoderService : Service(), HubForegroundHost {
 
     private fun logLinkState(state: Int) {
         val closed = core?.linkClosedByServer == true
-        val line = "link state cxr=${if (state and LinkStateBits.CXR_CONTROL_UP != 0) "up" else "down"} " +
-            "spp=${if (state and LinkStateBits.SPP_DATA_UP != 0) "up" else "down"} " +
-            "bonded=${state and LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED != 0} " +
-            "worn=${state and LinkStateBits.GLASSES_WORN != 0} closedByServer=$closed"
+        val line = "link state ${LinkLog.bits(state, closed)}"
         if (line == loggedLink) return
         loggedLink = line
         LinkLog.i(line)

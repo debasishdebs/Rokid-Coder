@@ -34,7 +34,7 @@ class GlassesLinkHealerTest {
     private fun TestScope.newHealer(core: FakeLinkCore, enabled: () -> Boolean = { true }) =
         GlassesLinkHealer(
             CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)),
-            core, enabled = enabled,
+            core, enabled = enabled, clockMs = { testScheduler.currentTime },
         ).also { core.onLinkState = it::onLinkState }
 
     @Test
@@ -201,22 +201,111 @@ class GlassesLinkHealerTest {
     }
 
     @Test
-    fun a_link_that_does_not_come_up_within_the_wait_is_not_reached() = runTest {
+    fun monitoring_turned_off_during_the_first_wait_makes_no_second_bind() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        var monitoring = true
+        val healer = newHealer(core, enabled = { monitoring })
+        var answer: LinkEnsure? = null
+
+        healer.ensureLink { answer = it }
+        runCurrent()
+        monitoring = false
+        healer.onMonitoringChanged()
+        advanceTimeBy(GlassesLinkHealer.FIRST_WAIT_MS + 1)
+
+        assertEquals(LinkEnsure.MONITORING_OFF, answer)
+        assertEquals("only the tap's own bind was made", 1, core.binds)
+    }
+
+    @Test
+    fun a_link_that_comes_up_in_neither_wait_is_not_reached_after_both() = runTest {
         val core = FakeLinkCore().apply { state = bonded }
         val healer = newHealer(core)
         var answer: LinkEnsure? = null
 
         healer.ensureLink { answer = it }
         runCurrent()
-        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS - 1)
+        advanceTimeBy(GlassesLinkHealer.FIRST_WAIT_MS + 1)
+        assertNull("no error after the first wait alone", answer)
+        assertEquals("one more bind, as a second tap would make", 2, core.binds)
+        advanceTimeBy(GlassesLinkHealer.SECOND_WAIT_MS - 2)
         assertNull(answer)
         advanceTimeBy(2)
         assertEquals(LinkEnsure.NOT_REACHED, answer)
+        assertEquals("two binds at most, never a loop", 2, core.binds)
     }
 
     @Test
-    fun the_wait_is_a_named_bounded_constant() {
-        assertTrue(GlassesLinkHealer.ENSURE_WAIT_MS in 3_000L..5_000L)
+    fun a_link_that_comes_up_in_the_second_wait_starts_the_voice_without_an_error() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        val healer = newHealer(core)
+        val answers = mutableListOf<LinkEnsure>()
+
+        healer.ensureLink { answers += it }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.FIRST_WAIT_MS + 1_000)
+        assertEquals("still waiting, nothing said", emptyList<LinkEnsure>(), answers)
+
+        core.bringUp()
+
+        assertEquals(listOf(LinkEnsure.UP), answers)
+        assertEquals(2, core.binds)
+    }
+
+    @Test
+    fun a_link_that_comes_up_in_the_first_wait_binds_once() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        val healer = newHealer(core)
+        var answer: LinkEnsure? = null
+
+        healer.ensureLink { answer = it }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.FIRST_WAIT_MS - 1_000)
+        core.bringUp()
+        advanceTimeBy(GlassesLinkHealer.TOTAL_WAIT_MS)
+
+        assertEquals(LinkEnsure.UP, answer)
+        assertEquals(1, core.binds)
+    }
+
+    @Test
+    fun a_tap_during_the_wait_joins_it_and_hears_the_same_answer() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        val healer = newHealer(core)
+        val answers = mutableListOf<LinkEnsure>()
+
+        healer.ensureLink { answers += it }
+        runCurrent()
+        // Well inside the second wait, a second tap while the card says it is connecting.
+        advanceTimeBy(GlassesLinkHealer.FIRST_WAIT_MS + 2_000)
+        healer.ensureLink { answers += it }
+        runCurrent()
+        assertEquals("joined, not a third bind", 2, core.binds)
+
+        advanceTimeBy(GlassesLinkHealer.SECOND_WAIT_MS)
+
+        assertEquals(listOf(LinkEnsure.NOT_REACHED, LinkEnsure.NOT_REACHED), answers)
+        assertEquals(2, core.binds)
+    }
+
+    @Test
+    fun the_waits_are_named_and_bounded() {
+        assertEquals(6_000L, GlassesLinkHealer.FIRST_WAIT_MS)
+        assertEquals(8_000L, GlassesLinkHealer.SECOND_WAIT_MS)
+        assertEquals(14_000L, GlassesLinkHealer.TOTAL_WAIT_MS)
+        assertEquals(2, GlassesLinkHealer.MAX_BINDS)
+    }
+
+    @Test
+    fun a_bind_the_hub_refuses_gets_the_one_more_and_then_says_not_reached() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; ensureResult = CxrEnsureResult.NOT_BOUND }
+        var answer: LinkEnsure? = null
+
+        newHealer(core).ensureLink { answer = it }
+        runCurrent()
+
+        assertEquals(LinkEnsure.NOT_REACHED, answer)
+        assertEquals(2, core.binds)
     }
 
     @Test
@@ -262,13 +351,13 @@ class GlassesLinkHealerTest {
 
         healer.ensureLink { answer = it }
         runCurrent()
-        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        advanceTimeBy(GlassesLinkHealer.TOTAL_WAIT_MS + 1)
         assertEquals(LinkEnsure.NOT_REACHED, answer)
 
         // Well past every backoff step: the background never took the glasses back.
         advanceTimeBy(2_000_000)
 
-        assertEquals(1, core.binds)
+        assertEquals("the wearer's two binds, none from the background", 2, core.binds)
         assertEquals(0, core.reconnects)
         assertTrue(core.closedByServer)
     }
@@ -309,11 +398,11 @@ class GlassesLinkHealerTest {
 
         healer.ensureLink { }
         runCurrent()
-        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        advanceTimeBy(GlassesLinkHealer.TOTAL_WAIT_MS + 1)
         healer.ensureLink { }
         runCurrent()
 
-        assertEquals("the closure that stood did not refuse the wearer", 2, core.binds)
+        assertEquals("the closure that stood did not refuse the wearer: 2 binds, then 1 more", 3, core.binds)
     }
 
     @Test
@@ -329,7 +418,7 @@ class GlassesLinkHealerTest {
     }
 
     @Test
-    fun two_quick_taps_make_one_bind_and_both_hear_the_answer() = runTest {
+    fun two_quick_taps_share_one_attempt_and_both_hear_the_answer() = runTest {
         val core = FakeLinkCore().apply { state = bonded }
         val healer = newHealer(core)
         val answers = mutableListOf<LinkEnsure>()
@@ -337,9 +426,10 @@ class GlassesLinkHealerTest {
         healer.ensureLink { answers += it }
         healer.ensureLink { answers += it }
         runCurrent()
-        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        assertEquals("one bind for two taps", 1, core.binds)
+        advanceTimeBy(GlassesLinkHealer.TOTAL_WAIT_MS + 1)
 
-        assertEquals("one bind, not two", 1, core.binds)
+        assertEquals("the one attempt's own two binds, not two attempts", 2, core.binds)
         assertEquals(listOf(LinkEnsure.NOT_REACHED, LinkEnsure.NOT_REACHED), answers)
     }
 
@@ -351,14 +441,14 @@ class GlassesLinkHealerTest {
 
         healer.ensureLink { answers += it }
         runCurrent()
-        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        advanceTimeBy(GlassesLinkHealer.TOTAL_WAIT_MS + 1)
         // Closed again by Hi Rokid, and the wearer taps Speak again: no sticky refusal.
         core.closedByServer = true
         healer.ensureLink { answers += it }
         runCurrent()
-        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        advanceTimeBy(GlassesLinkHealer.TOTAL_WAIT_MS + 1)
 
-        assertEquals(2, core.binds)
+        assertEquals("two binds for each tap", 4, core.binds)
         assertEquals(listOf(LinkEnsure.NOT_REACHED, LinkEnsure.NOT_REACHED), answers)
     }
 
@@ -429,7 +519,7 @@ class GlassesLinkHealerTest {
         try {
             val scope = CoroutineScope(SupervisorJob() + executor.asCoroutineDispatcher())
             val core = FakeLinkCore().apply { state = bonded }
-            val healer = GlassesLinkHealer(scope, core, waitMs = 60_000)
+            val healer = GlassesLinkHealer(scope, core, firstWaitMs = 60_000)
             val answered = CountDownLatch(1)
             var answeredOn: String? = null
             var answer: LinkEnsure? = null

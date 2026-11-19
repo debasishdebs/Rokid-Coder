@@ -48,6 +48,15 @@ internal object OnboardingCopy {
     // COMPUTER_CHECKLIST
     const val CHECKLIST_TITLE = "Which do you use?"
 
+    // GLASSES: the link's own log, for the wearer to paste after a failure without adb
+    const val LINK_LOG = "Link log ▸"
+    const val LINK_LOG_HIDE = "Link log ▾"
+    const val LINK_LOG_EMPTY = "Nothing logged yet."
+    const val LINK_LOG_LABEL = "Rokid Coder link log"
+
+    /** How many of the kept lines the screen shows; Copy takes all of them. */
+    const val LINK_LOG_SHOWN_LINES = 40
+
     // FINISH_ON_COMPUTER / PAIRING
     const val FINISH_TITLE = "Finish on your computer"
     const val DOWNLOAD_URL = "https://github.com/debasishdebs/Rokid-Coder/releases/latest"

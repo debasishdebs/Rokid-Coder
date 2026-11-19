@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -44,6 +45,7 @@ import com.anezium.rokidbus.plugin.agents.openGuidedDoor
 import com.anezium.rokidbus.plugin.agents.pairingSnapshot
 import com.anezium.rokidbus.plugin.agents.service.CoderRuntime
 import com.anezium.rokidbus.plugin.agents.service.CoderService
+import com.anezium.rokidbus.plugin.agents.service.LinkLog
 import com.anezium.rokidbus.shared.LinkStateBits
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -79,6 +81,7 @@ class OnboardingActivity : ComponentActivity() {
     private var pairing: PairingStepController? = null
     private var os = ComputerOs.MAC_OS
     private var testAlertMissed = false
+    private var linkLogOpen = false
     private val preview by lazy { SoundPreview(this) { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() } }
 
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -363,6 +366,30 @@ class OnboardingActivity : ComponentActivity() {
         if (!view.install.completesStep) {
             // Goes on, but GLASSES stays incomplete: the next app open resumes here.
             secondary(OnboardingCopy.NOT_NOW) { if (glassesOnly) finish() else next(OnboardingStep.GLASSES) }
+        }
+        linkLogSection()
+    }
+
+    /** The glasses link's own log, collapsed: what to paste after a failure, text only, nothing sensitive in it. */
+    private fun linkLogSection() {
+        secondary(if (linkLogOpen) OnboardingCopy.LINK_LOG_HIDE else OnboardingCopy.LINK_LOG) {
+            linkLogOpen = !linkLogOpen
+            render()
+        }
+        if (!linkLogOpen) return
+        val lines = LinkLog.recent()
+        val shown = if (lines.isEmpty()) OnboardingCopy.LINK_LOG_EMPTY else lines.takeLast(OnboardingCopy.LINK_LOG_SHOWN_LINES).joinToString("\n")
+        content.addView(
+            NexusUi.cardBody(this, shown).apply {
+                typeface = Typeface.MONOSPACE
+                textSize = 11f
+            },
+            NexusUi.block(),
+        )
+        gap(6)
+        secondary(OnboardingCopy.COPY) {
+            getSystemService(ClipboardManager::class.java)
+                ?.setPrimaryClip(ClipData.newPlainText(OnboardingCopy.LINK_LOG_LABEL, LinkLog.recentText()))
         }
     }
 

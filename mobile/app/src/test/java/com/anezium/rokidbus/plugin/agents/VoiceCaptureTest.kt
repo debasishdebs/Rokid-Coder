@@ -15,6 +15,41 @@ class VoiceCaptureTest {
     private fun listening() = VoiceCapture().also { it.onStarted() }
 
     @Test
+    fun connecting_is_neither_an_error_nor_listening_and_the_start_goes_on_from_it() {
+        val capture = VoiceCapture()
+        capture.onConnecting()
+        assertEquals(State.Connecting, capture.state)
+        assertEquals("Connecting to the glasses…", VoiceCard.view(VoiceKind.FOLLOWUP, State.Connecting).body)
+        assertEquals(
+            listOf(VoiceAct.CANCEL),
+            VoiceCard.view(VoiceKind.FOLLOWUP, State.Connecting).rows.map { it.act },
+        )
+
+        // The link came up: the start that waited on it runs, and listening begins.
+        capture.onLinkReady()
+        capture.onStarted()
+        assertEquals(State.Listening, capture.state)
+    }
+
+    @Test
+    fun a_link_that_was_not_reached_ends_the_connecting_card_with_its_reason() {
+        val capture = VoiceCapture()
+        capture.onConnecting()
+        capture.onLinkUnavailable(VoiceCapture.NOT_REACHED)
+        assertEquals(State.Failed("Could not reach the glasses, try again"), capture.state)
+    }
+
+    @Test
+    fun a_card_the_wearer_left_stays_as_it_is() {
+        val capture = VoiceCapture()
+        capture.onConnecting()
+        capture.invalidate()
+        capture.onLinkReady()
+        capture.onLinkUnavailable(VoiceCapture.NOT_REACHED)
+        assertEquals(State.Idle, capture.state)
+    }
+
+    @Test
     fun a_final_is_heard_and_confirmed() {
         val capture = listening()
         capture.onPartial("reply to")
