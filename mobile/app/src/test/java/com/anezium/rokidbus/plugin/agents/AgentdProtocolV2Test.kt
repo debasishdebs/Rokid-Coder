@@ -492,6 +492,10 @@ class AgentdProtocolV2Test {
         assertNull(why(21, "unavailable", "bg-off"))
         // needs_auto_mode was dropped before release; it is an unknown reason now.
         assertNull(why(22, "unavailable", "needs_auto_mode"))
+        // What the launcher's own screen says (auto-approving modes): a dialog waits at the laptop, or the screen cannot be read.
+        assertEquals("dialog", why(23, "unavailable", "dialog"))
+        assertEquals("unreadable", why(24, "unavailable", "unreadable"))
+        assertNull(why(25, "ready", "dialog"))
     }
 
     @Test
