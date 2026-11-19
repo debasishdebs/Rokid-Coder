@@ -167,3 +167,76 @@ test("a_session_has_a_transcript_when_any_project_folder_holds_its_file", () => 
     assert.equal(sessionHasTranscript(dir, bad), undefined, bad);
   }
 });
+
+test("the_hint_is_found_across_a_cut_escape_sequence_and_only_after_the_last_leave_of_the_alternate_screen", () => {
+  // A chunk that ends inside the sequence between two words: the rest of it is not text.
+  const cut = new ResumeHintWatcher();
+  cut.push("Resume\x1b[");
+  cut.push("8Gthis session with:");
+  assert.equal(cut.seen, true);
+  const osc = new ResumeHintWatcher();
+  osc.push("\x1b]0;a title that goes on");
+  osc.push(" and ends\x07Resume this session with:");
+  assert.equal(osc.seen, true);
+  // The phrase in a transcript the child showed on the alternate screen is not its hint.
+  const transcript = new ResumeHintWatcher();
+  transcript.push("\x1b[?1049h\x1b[2JResume this session with: (a line of the conversation)\r\n");
+  assert.equal(transcript.seen, true, "while it is on screen it could still be the hint of a child that never leaves");
+  transcript.push("\x1b[?1049l\x1b[?25h");
+  assert.equal(transcript.seen, false, "the child left the screen and said nothing after it");
+  transcript.push("\r\nResume this session with:\r\nclaude --resume x\r\n");
+  assert.equal(transcript.seen, true, "and what it printed after leaving is");
+  // Leave and phrase in one chunk, and the other alternate-screen modes.
+  for (const leave of ["\x1b[?1049l", "\x1b[?47l", "\x1b[?1047l", "\x1b[?1004;1049l"]) {
+    const w = new ResumeHintWatcher();
+    w.push(`Resume this session with: earlier${leave}`);
+    assert.equal(w.seen, false, JSON.stringify(leave));
+    w.push(`${leave}\r\nResume this session with:`);
+    assert.equal(w.seen, true, JSON.stringify(leave));
+  }
+  // A child that never used the alternate screen: only the last few KiB count.
+  const plain = new ResumeHintWatcher();
+  plain.push("Resume this session with: a line it printed long ago\r\n");
+  assert.equal(plain.seen, true);
+  for (let i = 0; i < 6; i += 1) plain.push("x".repeat(1024));
+  assert.equal(plain.seen, false, "the end of the output is where the hint is");
+});
+
+test("the_line_names_the_session_the_file_shows_last_and_prints_nothing_for_one_with_no_conversation", async () => {
+  // A /clear right before /exit (well inside the two seconds of the slow poll): the id the poll had is the old one.
+  for (const [transcript, expected] of [["sess-after-clear", "sess-after-clear"], [ID, undefined], [undefined, undefined]]) {
+    await withTempDir(async (dir) => {
+      const { env } = await rkEnv(dir, {
+        FAKE_PIDFILE: path.join(dir, "pids.json"),
+        FAKE_SESSION_ID: ID,
+        FAKE_NEXT_SESSION_ID: "sess-after-clear",
+        FAKE_TUI_MODES: "1",
+        FAKE_EXIT_HINT: "leave",
+      });
+      fs.mkdirSync(path.join(dir, "projects", "-f"), { recursive: true });
+      if (transcript) fs.writeFileSync(path.join(dir, "projects", "-f", `${transcript}.jsonl`), "");
+      const run = inPty(process.execPath, [RK, "claude"], env);
+      await run.until("fake-claude ready");
+      const pids = await until(() => readJson(path.join(dir, "pids.json")), 5000, "the fake's pid file");
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      run.write("/clear\r");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      run.write("/exit\r");
+      await run.exited;
+      await waitDead(pids.pid);
+      const lines = [...run.out.matchAll(/rk claude --resume (\S+)/g)].map((m) => m[1]);
+      assert.deepEqual(lines, expected ? [expected] : [], `transcript ${transcript}`);
+    });
+  }
+});
+
+test("a_late_agentd_still_restarts_the_fast_session_polls_and_one_read_serves_each_poll", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "rk.ts"), "utf8");
+  const poll = source.slice(source.indexOf("const pollSession"), source.indexOf("pollTimer = setTimeout(pollSession, everFound"));
+  assert.equal((poll.match(/findOwnedClaudeSession\(/g) ?? []).length, 1, "one read of the sessions file for each poll");
+  // The id is kept without touching `everFound`, so a link that never came up gives up as it always did.
+  const idLine = poll.indexOf("lastSessionId = session.sessionId");
+  const everFound = poll.indexOf("everFound = true");
+  const linkUp = poll.indexOf("if (link.up)");
+  assert.equal(idLine > 0 && idLine < linkUp && everFound > linkUp, true, "everFound is only set once the link is up");
+});

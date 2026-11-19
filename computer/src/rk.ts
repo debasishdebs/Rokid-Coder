@@ -318,13 +318,20 @@ async function runClaude(args: string[]): Promise<void> {
    * known, never when stdout is not a terminal, and it changes no exit code.
    */
   const writeResumeLine = (): void => {
-    if (resumeHint.seen || lastSessionId === undefined || !process.stdout.isTTY) {
+    if (resumeHint.seen || !process.stdout.isTTY) {
       return;
     }
-    if (sessionHasTranscript(path.dirname(sessionsDir), lastSessionId) === false) {
+    // The poll can be up to two seconds behind (a `/clear` just before `/exit`): look at the file once more
+    // now, and if it shows another session, that is the one a hint would be about.
+    const latest = findOwnedClaudeSession(sessionsDir, child.pid)?.sessionId;
+    const id = latest ?? lastSessionId;
+    if (id === undefined) {
+      return;
+    }
+    if (sessionHasTranscript(path.dirname(sessionsDir), id) === false) {
       return; // nothing was said in it: plain claude prints no hint for such a session either
     }
-    fs.writeSync(2, `Resume this session with: rk claude --resume ${lastSessionId}\n`);
+    fs.writeSync(2, `Resume this session with: rk claude --resume ${id}\n`);
   };
 
   const finish = (code: number | null, signal: string | null): void => {
@@ -489,16 +496,14 @@ async function runClaude(args: string[]): Promise<void> {
     if (finished) {
       return;
     }
-    // The id is kept even while agentd is away, which the binding below needs a link for.
-    // Polling goes on at the slow rate once a session was seen, so a `/clear` while agentd is away is
-    // followed too and the id printed at exit is the current one.
-    const seen = findOwnedClaudeSession(sessionsDir, child.pid);
-    if (seen) {
-      lastSessionId = seen.sessionId;
-      everFound = true;
+    // The id is kept while this poll runs, agentd's link up or not (the binding below needs the link, the
+    // id for the line at exit does not). `everFound` stays what it was: a link that is down gives up after
+    // the window as before, and the link coming up restarts the fast polls.
+    const session = findOwnedClaudeSession(sessionsDir, child.pid);
+    if (session) {
+      lastSessionId = session.sessionId;
     }
     if (link.up) {
-      const session = findOwnedClaudeSession(sessionsDir, child.pid);
       if (session) {
         everFound = true;
         client.setSession(session);
@@ -526,15 +531,31 @@ async function runClaude(args: string[]): Promise<void> {
 
 
   // ---- wiring: data and exit are subscribed in the same tick as the spawn ----
+  // A `/clear` makes a new session, and the next `/exit` removes the file: look at it (a few hundred
+  // bytes) when the wearer presses Enter and when the child prints, at most every 100 ms, so the id kept
+  // for the line at exit is not two seconds behind the slow poll.
+  let lastIdRead = 0;
+  const refreshSessionId = (): void => {
+    if (Date.now() - lastIdRead >= 100) {
+      lastIdRead = Date.now();
+      lastSessionId = findOwnedClaudeSession(sessionsDir, child.pid)?.sessionId ?? lastSessionId;
+    }
+  };
   child.onData((chunk) => {
     kitty.push(chunk);
     resumeHint.push(chunk);
+    refreshSessionId();
     process.stdout.write(bell.output(chunk));
   });
   child.onExit((code, signal) => finish(code, signal));
 
   process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (data: string) => client.onStdin(data));
+  process.stdin.on("data", (data: string) => {
+    if (data.includes("\r") || data.includes("\n")) {
+      refreshSessionId();
+    }
+    client.onStdin(data);
+  });
   process.stdin.on("error", () => {});
   const onStdinEnd = (): void => {
     if (shutdown || eofStarted) {

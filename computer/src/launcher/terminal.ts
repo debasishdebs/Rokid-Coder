@@ -109,22 +109,42 @@ export class KittyKeyboardTracker {
   }
 }
 
+/** The text kept for the hint: the end of the output, which is where the hint is. */
+const HINT_WINDOW = 4096;
+/** A leave of the alternate screen (`?1049l`, `?47l`, `?1047l`, alone or among other modes). */
+const ALT_LEAVE = /^\x1b\[\?(?:[\d;]*;)?(?:47|1047|1049)(?:;[\d;]*)?l$/;
+
 /**
- * Whether the child's own "Resume this session with:" hint went by in its output (plain `claude` prints
- * it after leaving the alternate screen, once a conversation exists). Escape sequences are stripped
- * first and the words may be joined by none, since a TUI can place them with cursor moves.
+ * Whether the child's own "Resume this session with:" hint is in the output it left on the terminal
+ * (plain `claude` prints it after leaving the alternate screen, once a conversation exists). Escape
+ * sequences are stripped, the words may be joined by none (a TUI can place them with cursor moves), and a
+ * sequence cut off at the end of a chunk is carried to the next, so a split `ESC [ 8 G` between two
+ * words leaves no stray `8G` in the text. Only the output after the child's last leave of the alternate
+ * screen counts (the same phrase in a transcript it was showing is not the hint), and, for a child that
+ * never used it, only the last few KiB.
  */
 export class ResumeHintWatcher {
-  seen = false;
-  private tail = "";
+  private text = "";
+  private pending = "";
+
+  get seen(): boolean {
+    return /Resume\s*this\s*session\s*with/i.test(this.text);
+  }
 
   push(chunk: string): void {
-    if (this.seen) {
-      return;
+    const raw = this.pending + chunk;
+    // An escape sequence not yet ended waits for the rest of it.
+    const open = /\x1b(?:\[[0-?]*[ -/]*|\][^\x07\x1b]*\x1b?)?$/.exec(raw);
+    const complete = open ? raw.slice(0, open.index) : raw;
+    this.pending = open && open[0].length <= 256 ? open[0] : "";
+    for (const part of complete.split(/(\x1b\[\?[\d;]*[hl])/)) {
+      if (ALT_LEAVE.test(part)) {
+        this.text = "";
+      } else {
+        this.text += part.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b./g, "");
+      }
     }
-    const text = (this.tail + chunk).replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b./g, "");
-    this.seen = /Resume\s*this\s*session\s*with/i.test(text);
-    this.tail = text.slice(-48);
+    this.text = this.text.slice(-HINT_WINDOW);
   }
 }
 
