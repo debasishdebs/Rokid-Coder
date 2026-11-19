@@ -35,7 +35,7 @@ class GlassesLinkHealerTest {
         GlassesLinkHealer(
             CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)),
             core, enabled = enabled,
-        )
+        ).also { core.onLinkState = it::onLinkState }
 
     @Test
     fun a_dropped_link_is_connected_again_with_a_growing_pause() = runTest {
@@ -248,10 +248,72 @@ class GlassesLinkHealerTest {
         runCurrent()
 
         assertEquals("the wearer's own tap binds", 1, core.binds)
-        assertFalse("and the closure is cleared when it does", core.closedByServer)
-        core.state = bonded or up
-        healer.onLinkState(core.state)
+        assertTrue("the closure stands until the link is seen up", core.closedByServer)
+        core.bringUp()
+        assertFalse(core.closedByServer)
         assertEquals(LinkEnsure.UP, answer)
+    }
+
+    @Test
+    fun a_wearer_bind_that_never_comes_up_does_not_free_the_background_to_fight_hi_rokid() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        var answer: LinkEnsure? = null
+
+        healer.ensureLink { answer = it }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        assertEquals(LinkEnsure.NOT_REACHED, answer)
+
+        // Well past every backoff step: the background never took the glasses back.
+        advanceTimeBy(2_000_000)
+
+        assertEquals(1, core.binds)
+        assertEquals(0, core.reconnects)
+        assertTrue(core.closedByServer)
+    }
+
+    @Test
+    fun a_wearer_bind_that_came_up_frees_the_background_for_a_later_drop_that_is_not_a_closure() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        healer.ensureLink { }
+        runCurrent()
+        core.bringUp()
+
+        // Later the link drops on its own, not by Hi Rokid's hand.
+        core.drop(byServer = false)
+        advanceTimeBy(10_001)
+
+        assertEquals(1, core.reconnects)
+    }
+
+    @Test
+    fun a_later_drop_that_is_a_closure_is_still_left_to_the_wearer() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+        healer.ensureLink { }
+        runCurrent()
+        core.bringUp()
+
+        core.drop(byServer = true)
+        advanceTimeBy(2_000_000)
+
+        assertEquals(0, core.reconnects)
+    }
+
+    @Test
+    fun a_second_tap_after_a_failed_bind_still_binds() = runTest {
+        val core = FakeLinkCore().apply { state = bonded; closedByServer = true }
+        val healer = newHealer(core)
+
+        healer.ensureLink { }
+        runCurrent()
+        advanceTimeBy(GlassesLinkHealer.ENSURE_WAIT_MS + 1)
+        healer.ensureLink { }
+        runCurrent()
+
+        assertEquals("the closure that stood did not refuse the wearer", 2, core.binds)
     }
 
     @Test

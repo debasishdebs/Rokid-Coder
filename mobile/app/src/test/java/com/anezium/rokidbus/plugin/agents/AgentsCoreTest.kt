@@ -198,15 +198,17 @@ class AgentsCoreTest {
 
     /** The service's healer on [linkCore], which starts with the link up: a tap then reuses it. */
     private fun attachHealer(): GlassesLinkHealer =
-        GlassesLinkHealer(healerScope, linkCore, enabled = { monitoring }).also(CoderRuntime::attachHealer)
+        GlassesLinkHealer(healerScope, linkCore, enabled = { monitoring }).also {
+            linkCore.onLinkState = it::onLinkState
+            CoderRuntime.attachHealer(it)
+        }
 
     private fun linkDown() {
         linkCore.state = bonded
     }
 
-    private fun linkUp(healer: GlassesLinkHealer) {
-        linkCore.state = bonded or LinkStateBits.CXR_CONTROL_UP
-        healer.onLinkState(linkCore.state)
+    private fun linkUp(@Suppress("UNUSED_PARAMETER") healer: GlassesLinkHealer) {
+        linkCore.bringUp()
         idle()
     }
 
@@ -241,7 +243,7 @@ class AgentsCoreTest {
     }
 
     @Test
-    fun a_tap_over_a_session_hi_rokid_closed_takes_the_link_back_and_the_closure_clears() {
+    fun a_tap_over_a_session_hi_rokid_closed_takes_the_link_back_and_the_closure_clears_when_it_is_up() {
         glasses.open()
         linkDown()
         linkCore.closedByServer = true
@@ -250,11 +252,29 @@ class AgentsCoreTest {
         core.startVoice(VoiceTarget.Approval("a1"))
         idle()
         assertEquals(1, linkCore.binds)
-        assertFalse(linkCore.closedByServer)
+        assertTrue("the closure stands until the link is seen up", linkCore.closedByServer)
         assertEquals("the background reconnect was never used", 0, linkCore.reconnects)
 
         linkUp(healer)
+        assertFalse(linkCore.closedByServer)
         assertEquals(1, glasses.speech.size)
+    }
+
+    @Test
+    fun a_failed_tap_leaves_the_background_refusing_after_the_card_has_said_so() {
+        glasses.open()
+        linkDown()
+        linkCore.closedByServer = true
+        attachHealer()
+
+        core.startVoice(VoiceTarget.Approval("a1"))
+        idle()
+        ShadowLooper.idleMainLooper(GlassesLinkHealer.ENSURE_WAIT_MS + 500, TimeUnit.MILLISECONDS)
+        assertTrue(text(lastCard()).contains(VoiceCapture.NOT_REACHED))
+
+        ShadowLooper.idleMainLooper(30, TimeUnit.MINUTES)
+
+        assertEquals("no background reconnect after the failed tap", 0, linkCore.reconnects)
     }
 
     @Test

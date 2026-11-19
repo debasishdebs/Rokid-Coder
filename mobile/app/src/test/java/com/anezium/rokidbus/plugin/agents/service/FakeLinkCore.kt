@@ -35,12 +35,35 @@ internal class FakeLinkCore : CoderCore {
         return true
     }
 
+    /**
+     * What the hub does when its link state moves: tell the host, at once and on the caller's stack. A test
+     * points it at the healer ([GlassesLinkHealer.onLinkState]), as the service does.
+     */
+    var onLinkState: (Int) -> Unit = {}
+
     override fun ensureLink(): CxrEnsureResult {
         ensures += 1
         if (state and LinkStateBits.CXR_CONTROL_UP != 0) return CxrEnsureResult.ALREADY_UP
-        if (ensureResult == CxrEnsureResult.CONNECTING || ensureResult == CxrEnsureResult.NOT_BOUND) binds += 1
-        // As the hub's wearer-asked bind does: taking the link back clears Hi Rokid's closure.
-        if (ensureResult == CxrEnsureResult.CONNECTING) closedByServer = false
+        if (ensureResult == CxrEnsureResult.CONNECTING || ensureResult == CxrEnsureResult.NOT_BOUND) {
+            binds += 1
+            // The real hub reports a state at the bind (its status notification), re-entrantly, and leaves
+            // Hi Rokid's closure standing: only the link coming up ([bringUp]) clears it.
+            onLinkState(state)
+        }
         return ensureResult
+    }
+
+    /** The glasses link comes up, as the hub's `onCXRLConnected(true)` does: the closure is put away and the host told. */
+    fun bringUp() {
+        state = state or LinkStateBits.CXR_CONTROL_UP
+        closedByServer = false
+        onLinkState(state)
+    }
+
+    /** The link drops, and Hi Rokid closed the session when [byServer]. */
+    fun drop(byServer: Boolean) {
+        state = state and LinkStateBits.CXR_CONTROL_UP.inv()
+        closedByServer = byServer
+        onLinkState(state)
     }
 }

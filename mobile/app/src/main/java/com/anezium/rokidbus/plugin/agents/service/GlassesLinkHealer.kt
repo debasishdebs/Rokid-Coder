@@ -170,10 +170,15 @@ internal class GlassesLinkHealer(
     }
 
     private suspend fun retryLoop() {
+        // Re-checking right after a wearer's bind ended needs no new pause, and no new line about one.
+        var pausing = true
         while (scope.isActive) {
-            val pause = retryDelaysMs[attempts.coerceAtMost(retryDelaysMs.lastIndex)]
-            LinkLog.i("healer: next attempt in ${pause}ms")
-            delay(pause)
+            if (pausing) {
+                val pause = retryDelaysMs[attempts.coerceAtMost(retryDelaysMs.lastIndex)]
+                LinkLog.i("healer: next attempt in ${pause}ms")
+                delay(pause)
+            }
+            pausing = true
             val state = core.linkState()
             if (state and LinkStateBits.CXR_CONTROL_UP != 0) return
             val reason = skipReason(state)
@@ -184,11 +189,17 @@ internal class GlassesLinkHealer(
                 attempts = 0
                 return
             }
-            // The wearer's own bind is in flight: binding again would retire it half done.
-            if (settling?.isActive == true) {
-                LinkLog.i("healer: attempt skipped (the wearer's bind is in flight)")
+            // The wearer's own bind is in flight: binding again would retire it half done. Hold back until
+            // it ends (said once, not once per poll), then look again at once.
+            val inFlight = settling
+            if (inFlight?.isActive == true) {
+                if (skipped != WEARER_BIND_IN_FLIGHT) LinkLog.i("healer: attempt held back ($WEARER_BIND_IN_FLIGHT)")
+                skipped = WEARER_BIND_IN_FLIGHT
+                inFlight.join()
+                pausing = false
                 continue
             }
+            skipped = null
             // Nothing to connect with (no token, hub stopped): a later link state starts this again.
             if (!core.reconnectLink()) {
                 LinkLog.i("healer: attempt ${attempts + 1} had nothing to connect with, retries end")
@@ -205,6 +216,8 @@ internal class GlassesLinkHealer(
 
         /** How long a voice action waits for the glasses link to come up after it was bound again. */
         const val ENSURE_WAIT_MS = 5_000L
+
+        private const val WEARER_BIND_IN_FLIGHT = "the wearer's bind is in flight"
     }
 }
 

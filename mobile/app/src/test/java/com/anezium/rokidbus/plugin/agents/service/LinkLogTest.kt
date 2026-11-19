@@ -36,7 +36,7 @@ class LinkLogTest {
         GlassesLinkHealer(
             CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)),
             core, enabled = enabled,
-        )
+        ).also { core.onLinkState = it::onLinkState }
 
     @Test
     fun the_tag_is_the_one_the_user_is_told_to_filter_on() {
@@ -120,6 +120,8 @@ class LinkLogTest {
         assertEquals(
             listOf(
                 "wearer link: down, binding (closedByServer=true)",
+                // The hub reports its state at the bind, and the closure still stands.
+                "healer: not chasing the link (Hi Rokid closed the session)",
                 "wearer link: bind result CONNECTING",
                 "wearer link: joins the attempt in flight",
                 "wearer link: still down after 5000ms",
@@ -144,6 +146,25 @@ class LinkLogTest {
         lines.clear()
         stopped.ensureLink { }
         assertEquals(listOf("wearer link: skipped (service stopped)"), lines)
+    }
+
+    @Test
+    fun a_wearers_bind_in_flight_holds_the_background_back_with_one_line_not_one_per_poll() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        val healer = newHealer(core)
+        healer.onLinkState(core.state)
+        advanceTimeBy(9_000)
+
+        // The wearer taps just before the first background attempt falls; the bind waits five seconds.
+        healer.ensureLink { }
+        runCurrent()
+        advanceTimeBy(60_000)
+
+        assertEquals(1, lines.count { it.startsWith("healer: attempt held back") })
+        assertEquals(
+            "one pause line per pause, none repeated for the hold-back",
+            1, lines.count { it == "healer: next attempt in 10000ms" },
+        )
     }
 
     @Test
