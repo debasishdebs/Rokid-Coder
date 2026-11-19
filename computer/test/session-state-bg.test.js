@@ -190,22 +190,67 @@ test("a_pending_approval_from_a_subagent_or_any_permission_prompt_revokes_in_eve
   }
 });
 
-test("an_unknown_or_missing_mode_is_refused_and_the_latest_main_thread_hook_decides", () => {
-  const t = setup({ stop: false });
-  // The Stop itself carries no permission_mode: the mode is unknown.
+test("a_mode_never_seen_is_refused_and_a_subagents_hook_never_tells_it", () => {
+  // No main-thread hook has carried a permission_mode: unknown, and unknown is refused.
+  const t = setup({ stop: false, hookMode: "" });
   t.router.onHook(KEY, "Stop", {});
   assert.equal(ready(t), false);
   assert.equal(t.router.followupWhy(KEY, 1), "mode_not_allowed");
-  // A subagent's hook never tells the main thread's mode.
   t.router.onHook(KEY, "Notification", { permission_mode: "auto", agent_id: "bg1", notification_type: "idle_prompt" });
-  assert.equal(ready(t), false);
-  // A later main-thread hook that says auto restores it.
+  assert.equal(ready(t), false, "a subagent's hook never tells the main thread's mode");
   t.router.onHook(KEY, "Notification", { permission_mode: "auto", notification_type: "idle_prompt" });
+  assert.equal(ready(t), true, "a main-thread hook that says auto");
+});
+
+test("the_mode_is_sticky_a_hook_without_permission_mode_leaves_it_alone", () => {
+  // The real logs: the idle_prompt notification a minute after a Stop carries no permission_mode.
+  const t = setup();
   assert.equal(ready(t), true);
-  // Shift+Tab to plan mode: the next hook says so.
+  for (const [event, extra] of [
+    ["Notification", { notification_type: "idle_prompt" }],
+    ["Notification", { notification_type: "auth_success" }],
+    ["Notification", { notification_type: "idle_prompt", permission_mode: "" }],
+    ["Notification", { notification_type: "idle_prompt", permission_mode: 7 }],
+    ["SubagentStop", { agent_id: "bg1" }],
+  ]) {
+    t.router.onHook(KEY, event, extra);
+    assert.equal(ready(t), true, `${event} ${JSON.stringify(extra)}: the mode stays auto and the Stop stands`);
+    assert.equal(t.states.bgPicture(KEY).modeOk, true, event);
+  }
+  // A later hook that carries plan flips it, and one without the field leaves it refused.
   t.router.onHook(KEY, "Notification", { permission_mode: "plan", notification_type: "idle_prompt" });
   assert.equal(ready(t), false);
   assert.equal(t.router.followupWhy(KEY, 1), "mode_not_allowed");
+  t.router.onHook(KEY, "Notification", { notification_type: "idle_prompt" });
+  assert.equal(t.states.bgPicture(KEY).modeOk, false, "plan stays plan");
+  // Back to auto when a hook says so, and a new Stop brings the evidence back.
+  t.router.onHook(KEY, "UserPromptSubmit", { permission_mode: "auto", prompt: "x" });
+  t.router.onHook(KEY, "Stop", { permission_mode: "auto" });
+  assert.equal(ready(t), true);
+  // Unknown values are still refused.
+  t.router.onHook(KEY, "Notification", { permission_mode: "mystery", notification_type: "idle_prompt" });
+  assert.equal(ready(t), false);
+});
+
+test("the_first_hook_without_a_mode_is_logged_once_per_session_by_name", () => {
+  const logs = [];
+  const t = setup({ log: (name, meta) => logs.push({ name, ...meta }) });
+  const noMode = () => logs.filter((l) => l.name === "hook_no_mode");
+  assert.equal(noMode().length, 0, "every hook of the setup carried a mode");
+  t.router.onHook(KEY, "Notification", { notification_type: "idle_prompt", message: "secret words" });
+  t.router.onHook(KEY, "Notification", { notification_type: "idle_prompt" });
+  t.router.onHook(KEY, "Stop", {});
+  assert.equal(noMode().length, 1);
+  assert.deepEqual(
+    [noMode()[0].session, noMode()[0].event, noMode()[0].notificationType],
+    [KEY, "Notification", "idle_prompt"],
+  );
+  assert.equal(JSON.stringify(logs).includes("secret"), false, "names only");
+  // A subagent's hook without a mode is not the news.
+  const other = [];
+  const u = setup({ log: (name, meta) => other.push({ name, ...meta }) });
+  u.router.onHook(KEY, "PreToolUse", { agent_id: "bg1" });
+  assert.equal(other.filter((l) => l.name === "hook_no_mode").length, 0);
 });
 
 test("each_other_missing_item_makes_it_not_ready_and_gives_the_ordinary_reason", () => {

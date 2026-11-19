@@ -200,12 +200,23 @@ export class SessionStore {
 
     let refreshTitle = true;
     switch (eventName) {
-      case "SessionStart":
-        record.subagents = undefined;
+      case "SessionStart": {
+        // `source` says why the session started: `startup`, `resume`, `clear` or `compact`. A compaction
+        // keeps the conversation going and background agents run on through it, so it must not wipe the
+        // count. The others, and a source that is missing or unknown, clear it: a count that is too
+        // low only refuses a background reply, one that is too high could let one through.
+        const source = asString(payload.source);
+        const label = source && /^[a-z_]{1,20}$/.test(source) ? source : "unknown";
+        if (label === "compact") {
+          this.logSubagents("session_start_kept", sessionId, "session_start:compact", record.subagents?.size ?? 0, record.subagents?.size ?? 0);
+        } else {
+          this.clearSubagents(record, sessionId, `session_start:${label}`);
+        }
         record.session.status = "idle";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
         break;
+      }
       case "UserPromptSubmit": {
         const prompt = asString(payload.prompt);
         if (prompt && !prompt.trim().startsWith("<")) {
@@ -246,12 +257,18 @@ export class SessionStore {
         }
         break;
       }
-      case "SubagentStart":
+      case "SubagentStart": {
+        const before = record.subagents?.size ?? 0;
         this.subagentStarted(record, asString(payload.agent_id), now);
+        this.logSubagents("SubagentStart", sessionId, "hook", before, record.subagents?.size ?? 0, asString(payload.agent_id));
         break;
-      case "SubagentStop":
+      }
+      case "SubagentStop": {
+        const before = record.subagents?.size ?? 0;
         this.subagentEnded(record, asString(payload.agent_id));
+        this.logSubagents("SubagentStop", sessionId, "hook", before, record.subagents?.size ?? 0, asString(payload.agent_id));
         break;
+      }
       case "PreToolUse": {
         const input = payload.tool_input;
         const fields = input && typeof input === "object" && !Array.isArray(input)
@@ -275,7 +292,7 @@ export class SessionStore {
         this.applyNotification(record, asString(payload.message), now);
         break;
       case "SessionEnd":
-        record.subagents = undefined;
+        this.clearSubagents(record, sessionId, "session_end");
         record.session.status = "done";
         record.session.statusDetail = undefined;
         record.session.pendingRequest = undefined;
@@ -310,6 +327,31 @@ export class SessionStore {
   /** A SubagentStop ends the live id it names; an id that is not live ends nothing. */
   private subagentEnded(record: SessionRecord, agentId: string | undefined): void {
     if (agentId) record.subagents?.delete(agentId);
+  }
+
+  /** Empties the running-subagent map, and says so (and why) when it held any. */
+  private clearSubagents(record: SessionRecord, sessionId: string, cause: string): void {
+    const before = record.subagents?.size ?? 0;
+    record.subagents = undefined;
+    if (before > 0) {
+      this.logSubagents("subagents_cleared", sessionId, cause, before, 0);
+    }
+  }
+
+  /**
+   * One `subagent_event` line: what happened to the running-subagent count and why, with the first 8
+   * characters of the agent id ("none" when the hook carried no id, the case that counts nothing).
+   * Counts and short ids only, never a payload.
+   */
+  private logSubagents(event: string, sessionId: string, cause: string, before: number, after: number, agentId?: string): void {
+    this.logger.info("subagent_event", {
+      session: sessionId.slice(0, 8),
+      event,
+      cause,
+      before,
+      after,
+      ...(event === "SubagentStart" || event === "SubagentStop" ? { agent: agentId ? agentId.slice(0, 8) : "none" } : {}),
+    });
   }
 
   /** The phone's view of them: absent when none run, so an idle session's frame is what it always was. */
