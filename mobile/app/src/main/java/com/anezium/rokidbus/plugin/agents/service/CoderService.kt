@@ -17,6 +17,7 @@ import com.anezium.rokidbus.phone.HubForegroundHost
 import com.anezium.rokidbus.plugin.agents.AgentsConfigStore
 import com.anezium.rokidbus.plugin.agents.AgentsCore
 import com.anezium.rokidbus.plugin.agents.AgentsRuntime
+import com.anezium.rokidbus.shared.LinkStateBits
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -122,9 +123,24 @@ class CoderService : Service(), HubForegroundHost {
 
     override fun onLinkStateChanged(linkState: Int) {
         this.linkState = linkState
+        logLinkState(linkState)
         CoderRuntime.publishLinkState(linkState)
         healer?.onLinkState(linkState)
         updateNotification()
+    }
+
+    /** The link as the log reads it; said again only when it changed, Hi Rokid's closure of the session included. */
+    @Volatile private var loggedLink: String? = null
+
+    private fun logLinkState(state: Int) {
+        val closed = core?.linkClosedByServer == true
+        val line = "link state cxr=${if (state and LinkStateBits.CXR_CONTROL_UP != 0) "up" else "down"} " +
+            "spp=${if (state and LinkStateBits.SPP_DATA_UP != 0) "up" else "down"} " +
+            "bonded=${state and LinkStateBits.GLASSES_BT_BONDED_OR_PHONE_CONNECTED != 0} " +
+            "worn=${state and LinkStateBits.GLASSES_WORN != 0} closedByServer=$closed"
+        if (line == loggedLink) return
+        loggedLink = line
+        LinkLog.i(line)
     }
 
     private fun promoteService(microphone: Boolean): Throwable? {

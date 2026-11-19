@@ -11,6 +11,8 @@ import com.anezium.rokidbus.client.plugin.NexusSpeechState
 import com.anezium.rokidbus.client.plugin.NexusSpeechStopReason
 import com.anezium.rokidbus.phone.SpeechHandle
 import com.anezium.rokidbus.phone.SpeechListener
+import com.anezium.rokidbus.plugin.agents.service.LinkEnsure
+import com.anezium.rokidbus.plugin.agents.service.LinkLog
 import com.anezium.rokidbus.shared.plugin.NexusInputEvent
 
 internal sealed interface VoiceTarget {
@@ -58,10 +60,11 @@ internal class VoiceQuestionWiring(
         val voiceWordLimit: Int get() = VoiceCondense.DEFAULT_WORD_LIMIT
 
         /**
-         * A speech start was denied for want of the glasses link: one reconnect now, and [onResult] with
-         * whether the link was up a moment later. The default has nothing to reconnect.
+         * Makes sure the glasses link is up before a speech start the wearer just asked for: a live link is
+         * reused, a down one is bound once and waited for a little, and [onResult] says what came of it.
+         * The default has no link to make sure of.
          */
-        fun healLink(onResult: (Boolean) -> Unit) = onResult(false)
+        fun ensureLink(onResult: (LinkEnsure) -> Unit) = onResult(LinkEnsure.UP)
     }
 
     // ------------------------------------------------------------------ voice
@@ -72,18 +75,39 @@ internal class VoiceQuestionWiring(
      * that arrives after the card was closed or restarted is dropped. Nothing the
      * wearer says is logged, and nothing is sent until ENTER on the heard card.
      */
-    fun startVoice(target: VoiceTarget) = startVoice(target, healed = false)
-
-    /**
-     * [healed]: this is the one retry after a link-denied start, so a second denial is the wearer's to see.
-     * The first denial is not shown: the link is reconnected and, if it is up within a moment, the start
-     * runs again on a card of its own.
-     */
-    private fun startVoice(target: VoiceTarget, healed: Boolean) {
+    fun startVoice(target: VoiceTarget) {
         // A restart gives the screen back to the card that asked, then covers it again.
         screen.stopVoice()
         val run = VoiceRun(target)
         screen.openVoice(run)
+        // Every tap makes sure of the link first, not only after a denial: a live link is reused, a dropped
+        // one (Hi Rokid's session included) is bound once, and nothing starts listening before it is there.
+        var answered = false
+        LinkLog.i("voice tap: making sure of the glasses link")
+        host.ensureLink { link ->
+            answered = true
+            LinkLog.i("voice tap: link $link")
+            when {
+                // The wearer left the card, or started another utterance, while the link was coming up.
+                screen.voice !== run -> Unit
+                link == LinkEnsure.UP -> beginSpeech(run)
+                else -> {
+                    run.capture.onLinkUnavailable(linkUnavailableMessage(link))
+                    voiceChanged(run)
+                }
+            }
+        }
+        // Waiting on the link: the card is up, saying it is starting.
+        if (!answered) voiceChanged(run)
+    }
+
+    private fun linkUnavailableMessage(link: LinkEnsure): String = when (link) {
+        LinkEnsure.MONITORING_OFF -> VoiceCapture.MONITORING_OFF
+        LinkEnsure.NO_TOKEN -> VoiceCapture.GLASSES_NOT_SET_UP
+        LinkEnsure.UP, LinkEnsure.NOT_REACHED, LinkEnsure.STOPPED -> VoiceCapture.NOT_REACHED
+    }
+
+    private fun beginSpeech(run: VoiceRun) {
         val session = host.startSpeech(object : SpeechListener {
             // A start the wearer gave up on is stopped by the capture itself, once the hub accepts it (R105).
             override fun onStarted(realtime: Boolean) = onVoiceEvent(run) { it.onStarted() }
@@ -93,9 +117,9 @@ internal class VoiceQuestionWiring(
             }
             override fun onFinal(text: String) = onVoiceEvent(run) { it.onFinal(text) }
             override fun onStopped(reason: NexusSpeechStopReason, error: NexusSpeechError?) {
-                if (reason == NexusSpeechStopReason.DENIED_NO_LINK && !healed && screen.voice === run) {
-                    healAndRetry(run, reason, error)
-                    return
+                // Denied for want of the link even after it was made sure of: the loss is the wearer's to see.
+                if (reason == NexusSpeechStopReason.DENIED_NO_LINK || reason == NexusSpeechStopReason.LINK_LOST) {
+                    LinkLog.i("voice stopped: $reason")
                 }
                 onVoiceEvent(run) { it.onStopped(reason, error) }
             }
@@ -107,17 +131,6 @@ internal class VoiceQuestionWiring(
             run.capture.onStartRefused(session.result)
         }
         voiceChanged(run)
-    }
-
-    private fun healAndRetry(run: VoiceRun, reason: NexusSpeechStopReason, error: NexusSpeechError?) {
-        host.healLink { up ->
-            when {
-                // The wearer left the card, or started another utterance, while the link was coming back.
-                screen.voice !== run -> onVoiceEvent(run) { it.onStopped(reason, error) }
-                up -> startVoice(run.target, healed = true)
-                else -> onVoiceEvent(run) { it.onStopped(reason, error) }
-            }
-        }
     }
 
     private fun onVoiceEvent(run: VoiceRun, event: (VoiceCapture) -> Unit) {
