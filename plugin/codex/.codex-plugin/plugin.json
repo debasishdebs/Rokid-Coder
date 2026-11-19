@@ -5,7 +5,7 @@
   "author": {
     "name": "Rokid-Coder"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "interface": {
     "displayName": "Rokid-Coder",
     "shortDescription": "Follow and steer this Codex session from Rokid glasses",
