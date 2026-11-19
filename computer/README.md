@@ -353,6 +353,14 @@ Limits to know about:
   check then fails, and the cleanup (Ctrl+U) erases that one letter; nothing is sent. The box's top rule is
   taken only from the first column (the UI's own), so a draft whose top has scrolled off the screen is
   never read as an empty box: the reply is refused.
+- Known limit of the width marks: a glyph whose width a terminal does not settle alone is marked per cell, and
+  writing over that one cell makes it certain again without looking at the cells to its right. If the model
+  counted such a glyph as one cell and Claude as two (an emoji in a draft: `❯ 👍a`), then `a` sits one column
+  left of where Claude has it, and a later redraw that rewrites only changed cells by absolute column could
+  leave the model reading a prompt that is empty where the buffer is not. Claude's real redraws move to an
+  absolute column right after every such glyph (`CSI n G`), so this is probably moot, and it is documented
+  rather than fixed. If the field log ever shows it, the safe change is that only `K`, `J` and whole-row
+  erases clear a mark, and a plain overwrite of the marked cell does not.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result
   cannot be seen, the session is marked uncertain and further commands are refused until you check it.
 - A follow-up is one bracketed paste of at most 16 KiB.

@@ -55,6 +55,8 @@ function layout({
   footer = "auto",
   entry = true,
   glyphs = "screenshot",
+  redraw,
+  trailing = "",
 } = {}) {
   // The glyphs as the screenshots show them, or as the bytes of the real capture carry them (`⏵⏵` for the footer's `▶▶`,
   // `⏺` for the message bullet, `✳` in the spinner), which are the ones whose width a terminal does not settle alone.
@@ -145,7 +147,37 @@ function layout({
   parts.push("← 1 agent", "↓ to manage");
   out.push(at(footerRow, 3, `\x1b[33m${glyph2}\x1b[0m ${GRAY}${parts.join(" · ")}${RESET}`));
   panel.forEach((text2, i) => out.push(at(footerRow + 1 + i, 1, text2)));
-  return out.join("");
+  if (trailing) {
+    // A glyph far to the right of the footer, the panel rows and the status line: past where a later row (the
+    // box's prompt row) is written, so only an erase or an overwrite of those cells clears it.
+    const far = Math.min(100, cols - 10);
+    for (const row of [footerRow, ...panel.map((_, i) => footerRow + 1 + i), topRule - 3, topRule - 4]) {
+      if (row >= 0 && row < rows) out.push(at(row, far, trailing));
+    }
+  }
+  if (!redraw) return out.join("");
+  // A redraw of only what changed, row by row, with no whole-row erase before the writes: what is left of the old
+  // rows is cleared only as `redraw` says. `k`: the tail of each row is erased with `K` after its writes, and a row
+  // with no writes is blanked with `K` from its first cell. `x`: the same with `X` for as many cells as the row
+  // has. `overwrite`: no erase at all, a row is written over with spaces and then its content.
+  const writes = new Map();
+  for (const piece of out.slice(1)) {
+    const at2 = /^\x1b\[(\d+);\d+H/.exec(piece);
+    const row = Number(at2[1]);
+    writes.set(row, [...(writes.get(row) ?? []), piece]);
+  }
+  const rowwise = [];
+  for (let row = 1; row <= rows; row += 1) {
+    const mine = writes.get(row) ?? [];
+    const start = `\x1b[${row};1H`;
+    if (redraw === "overwrite") {
+      rowwise.push(`${start}${" ".repeat(cols)}${mine.join("")}`);
+    } else {
+      const erase = redraw === "x" ? `\x1b[${cols}X` : "\x1b[K";
+      rowwise.push(mine.length === 0 ? `${start}${erase}` : `${mine.join("")}${erase}`);
+    }
+  }
+  return rowwise.join("");
 }
 
 /** The 1-based row of the prompt line of `layout(options)`, for a test that draws on it. */

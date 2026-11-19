@@ -294,17 +294,21 @@ export class ScreenModel {
     this.certain(this.row, this.col, this.col + cells);
     const code = ch.codePointAt(0) as number;
     // Writing over half of a wide character leaves the other half meaningless.
-    const wideAt = (col: number): boolean => {
+    // The codepoint of the wide character whose first cell is `col`, or none. What is logged for a half-gone wide
+    // character is this one, never the character that wrote over it (which can be a letter of a draft).
+    const wideCode = (col: number): number | undefined => {
       const cell = (cellsRow[col] ?? "").split(MUTED).join("").split(INVERSE).join("");
-      return cell !== "" && charWidth([...cell][0]) === 2;
+      return cell !== "" && charWidth([...cell][0]) === 2 ? (cell.codePointAt(0) as number) : undefined;
     };
     // The right half of a wide character (an empty cell after one) written over: its left half is meaningless.
-    if (cellsRow[this.col] === "" && this.col > 0 && wideAt(this.col - 1)) {
-      this.dubious[this.row].set(this.col - 1, code);
+    const leftOfRight = cellsRow[this.col] === "" && this.col > 0 ? wideCode(this.col - 1) : undefined;
+    if (leftOfRight !== undefined) {
+      this.dubious[this.row].set(this.col - 1, leftOfRight);
     }
     // Its left half written over by one narrow cell: the right half is.
-    if (cells === 1 && cellsRow[this.col + 1] === "" && wideAt(this.col)) {
-      this.dubious[this.row].set(this.col + 1, code);
+    const rightOfLeft = cells === 1 && cellsRow[this.col + 1] === "" ? wideCode(this.col) : undefined;
+    if (rightOfLeft !== undefined) {
+      this.dubious[this.row].set(this.col + 1, rightOfLeft);
     }
     if (width === undefined) {
       this.dubious[this.row].set(this.col, code);

@@ -60,6 +60,72 @@ test("a_box_is_read_after_any_redraw_from_any_layout_to_any_other_with_the_real_
   assert.equal(count, 3 * 12 * 12);
 });
 
+/** The twelve layouts of the matrix above. */
+function twelveShapes() {
+  const shapes = [];
+  for (const agents of [0, 1, 3, 8]) {
+    for (const phase of ["idle", "working", "waiting"]) {
+      shapes.push({ agents, phase });
+    }
+  }
+  return shapes;
+}
+
+test("a_box_is_read_after_a_redraw_that_erases_only_the_tail_of_a_row_or_overwrites_or_clears_characters", () => {
+  // `entry: "diff"` blanks every row from its first cell, which clears the width marks whatever they are. These
+  // redraws do not: the old rows keep a glyph far to the right (past where the prompt row is written), and only an
+  // erase to the end of the line (`K`), an erase of characters (`X`) or writing over those cells makes them certain.
+  const readiness = new Map();
+  const ready = (screen) => {
+    const box = boxState(screen);
+    if (!readiness.has(box)) readiness.set(box, readyFor(screen));
+    return readiness.get(box);
+  };
+  let count = 0;
+  for (const redraw of ["k", "x", "overwrite"]) {
+    for (const glyphs of ["screenshot", "bytes", "ambiguous"]) {
+      for (const from of twelveShapes()) {
+        for (const to of twelveShapes()) {
+          const common = { cols: 207, rows: 50, monitors: 2, right: "updateGoalSeconds", glyphs, cursor: "blank" };
+          const screen = new ScreenModel(207, 50);
+          screen.push(layout({ ...common, ...from, trailing: "▶" }));
+          screen.push(layout({ ...common, ...to, redraw }));
+          const what = `${redraw} ${glyphs} ${JSON.stringify(from)} -> ${JSON.stringify(to)}`;
+          assert.equal(screen.tainted, false, what);
+          const seen = probe(screen, { queued: true });
+          assert.deepEqual([seen.kind, seen.empty], ["prompt", true], what);
+          assert.equal(ready(screen), true, what);
+          count += 1;
+        }
+      }
+    }
+  }
+  assert.equal(count, 3 * 3 * 12 * 12);
+});
+
+test("the_marks_move_with_their_row_when_a_line_is_inserted_or_deleted", () => {
+  const screen = new ScreenModel(80, 5);
+  screen.push("\x1b[2;5H▶ x");
+  assert.deepEqual([...Array(5).keys()].filter((i) => screen.rowDubious(i)), [1]);
+  screen.push("\x1b[1;1H\x1b[L");
+  assert.deepEqual([...Array(5).keys()].filter((i) => screen.rowDubious(i)), [2], "an inserted line pushes the row down");
+  screen.push("\x1b[1;1H\x1b[2L");
+  assert.deepEqual([...Array(5).keys()].filter((i) => screen.rowDubious(i)), [4], "two of them");
+  screen.push("\x1b[1;1H\x1b[L");
+  assert.deepEqual([...Array(5).keys()].filter((i) => screen.rowDubious(i)), [], "pushed off the screen, it is gone");
+  const deleted = new ScreenModel(80, 5);
+  deleted.push("\x1b[4;5H▶ x");
+  deleted.push("\x1b[1;1H\x1b[M");
+  assert.deepEqual([...Array(5).keys()].filter((i) => deleted.rowDubious(i)), [2], "a deleted line above pulls the row up");
+  deleted.push("\x1b[3;1H\x1b[M");
+  assert.deepEqual([...Array(5).keys()].filter((i) => deleted.rowDubious(i)), [], "deleted itself, it is gone");
+  // The marked cell keeps its column and codepoint as the row moves.
+  const moved = new ScreenModel(80, 5);
+  moved.push("\x1b[2;7H✳");
+  moved.push("\x1b[1;1H\x1b[L");
+  assert.deepEqual(moved.dubiousCell(2), { col: 6, codepoint: 0x2733 });
+});
+
 test("an_ambiguous_glyph_on_any_row_outside_the_box_never_makes_it_unreadable", () => {
   // Written onto the footer, a panel row, the status line, the right-aligned line, the transcript and the rows between.
   for (const glyph of GLYPHS) {
@@ -155,7 +221,20 @@ test("a_cell_written_over_or_erased_is_certain_again_and_a_half_written_wide_cha
   const wide = new ScreenModel(80, 3);
   wide.push("\x1b[1;1H好\x1b[1;1Hx");
   assert.equal(wide.rowDubious(0), true);
-  assert.deepEqual(wide.dubiousCell(0), { col: 1, codepoint: 0x78 });
+  // What is logged is the wide glyph now half gone, never the character that wrote over it (a letter of a draft).
+  assert.deepEqual(wide.dubiousCell(0), { col: 1, codepoint: 0x597d });
+  const rightHalf = new ScreenModel(80, 3);
+  rightHalf.push("\x1b[1;1H好\x1b[1;2Hq");
+  assert.deepEqual(rightHalf.dubiousCell(0), { col: 0, codepoint: 0x597d });
+  // And so the verdict line of a draft with a half-overwritten wide glyph names that glyph, not the letter written over it.
+  const draft = new ScreenModel(207, 50);
+  draft.push(layout({ cols: 207, rows: 50, phase: "idle", agents: 0 }));
+  const promptRow = draft.lines().findIndex((row) => row.startsWith("❯"));
+  draft.push(`\x1b[${promptRow + 1};3H好\x1b[${promptRow + 1};3Hq`);
+  const named = describeVerdict(draft);
+  assert.equal(named.reason, "uncertain_width");
+  assert.equal(named.uw, `${promptRow}:U+597D`);
+  assert.equal(JSON.stringify(named).includes("0071"), false, "the letter written over it is not in the line");
   wide.push("\x1b[1;2Hy");
   assert.equal(wide.rowDubious(0), false);
   // The whole-line erase and the whole-screen erase clear everything.
