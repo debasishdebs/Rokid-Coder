@@ -45,6 +45,13 @@ export function saveTerminal(): SavedTerminal {
 export interface KittyRestore {
   onAlt: string;
   onMain: string;
+  /**
+   * The child left the terminal on the alternate screen, so it is left here. False when it already left
+   * (as plain `claude` does on `/exit`, before it prints its resume hint on the main screen): a second
+   * `?1049l` would restore the cursor saved at the first `?1049h` again, over what the child printed.
+   * Absent means unknown (nothing followed the child), and the screen is left as it always was.
+   */
+  leaveAlt?: boolean;
 }
 
 interface KittyStack {
@@ -98,7 +105,46 @@ export class KittyKeyboardTracker {
     const undo = (stack: KittyStack): string =>
       stack.depth > 0 ? KITTY_POP.repeat(stack.depth) : stack.flagsSet ? KITTY_FLAGS_OFF : "";
     // Left on the main screen, the alternate one's stack is out of reach and harmless.
-    return { onAlt: this.onAlt ? undo(this.alt) : "", onMain: undo(this.main) };
+    return { onAlt: this.onAlt ? undo(this.alt) : "", onMain: undo(this.main), leaveAlt: this.onAlt };
+  }
+}
+
+/** The text kept for the hint: the end of the output, which is where the hint is. */
+const HINT_WINDOW = 4096;
+/** A leave of the alternate screen (`?1049l`, `?47l`, `?1047l`, alone or among other modes). */
+const ALT_LEAVE = /^\x1b\[\?(?:[\d;]*;)?(?:47|1047|1049)(?:;[\d;]*)?l$/;
+
+/**
+ * Whether the child's own "Resume this session with:" hint is in the output it left on the terminal
+ * (plain `claude` prints it after leaving the alternate screen, once a conversation exists). Escape
+ * sequences are stripped, the words may be joined by none (a TUI can place them with cursor moves), and a
+ * sequence cut off at the end of a chunk is carried to the next, so a split `ESC [ 8 G` between two
+ * words leaves no stray `8G` in the text. Only the output after the child's last leave of the alternate
+ * screen counts (the same phrase in a transcript it was showing is not the hint), and, for a child that
+ * never used it, only the last few KiB.
+ */
+export class ResumeHintWatcher {
+  private text = "";
+  private pending = "";
+
+  get seen(): boolean {
+    return /Resume\s*this\s*session\s*with/i.test(this.text);
+  }
+
+  push(chunk: string): void {
+    const raw = this.pending + chunk;
+    // An escape sequence not yet ended waits for the rest of it.
+    const open = /\x1b(?:\[[0-?]*[ -/]*|\][^\x07\x1b]*\x1b?)?$/.exec(raw);
+    const complete = open ? raw.slice(0, open.index) : raw;
+    this.pending = open && open[0].length <= 256 ? open[0] : "";
+    for (const part of complete.split(/(\x1b\[\?[\d;]*[hl])/)) {
+      if (ALT_LEAVE.test(part)) {
+        this.text = "";
+      } else {
+        this.text += part.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b./g, "");
+      }
+    }
+    this.text = this.text.slice(-HINT_WINDOW);
   }
 }
 
@@ -188,7 +234,11 @@ export function restoreTerminal(saved: SavedTerminal, kitty: KittyRestore = { on
   }
   if (process.stdout.isTTY) {
     try {
-      writeSync(1, kitty.onAlt + MOUSE_OFF + FOCUS_OFF + ALT_SCREEN_OFF + kitty.onMain + SHOW_CURSOR + BRACKETED_PASTE_OFF);
+      // `?1049l` only when the child left the alternate screen on: written after it left, it would put
+      // the cursor back where it was when the child entered, and the shell prompt would overwrite
+      // what the child printed on the main screen (its resume hint).
+      const leaveAlt = kitty.leaveAlt === false ? "" : ALT_SCREEN_OFF;
+      writeSync(1, kitty.onAlt + MOUSE_OFF + FOCUS_OFF + leaveAlt + kitty.onMain + SHOW_CURSOR + BRACKETED_PASTE_OFF);
     } catch {
       // The terminal may already be gone.
     }

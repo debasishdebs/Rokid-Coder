@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, openSync, readSync, readdirSync } from "node:fs";
+import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -18,6 +18,30 @@ const MAX_SESSION_FILE_BYTES = 64 * 1024;
 /** `ROKID_CLAUDE_SESSIONS_DIR` (tests) or `<claudeDir>/sessions`. */
 export function claudeSessionsDir(claudeDir = path.join(homedir(), ".claude")): string {
   return process.env.ROKID_CLAUDE_SESSIONS_DIR || path.join(claudeDir, "sessions");
+}
+
+/**
+ * Whether Claude has a transcript for the session (a conversation that `--resume` can open): a file
+ * `<id>.jsonl` in one of the folders of `<claudeDir>/projects`, whatever the folder's name. Plain
+ * `claude` prints no resume hint for a session with no conversation, so neither does rk. Undefined
+ * when the projects folder cannot be read or the id is not one: not known, which is not "no".
+ */
+export function sessionHasTranscript(claudeDir: string, sessionId: string): boolean | undefined {
+  if (!/^[A-Za-z0-9._-]{1,256}$/.test(sessionId) || sessionId.startsWith(".")) {
+    return undefined;
+  }
+  const projects = path.join(claudeDir, "projects");
+  try {
+    return readdirSync(projects).some((folder) => {
+      try {
+        return statSync(path.join(projects, folder, `${sessionId}.jsonl`)).isFile();
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function isPid(value: unknown): value is number {

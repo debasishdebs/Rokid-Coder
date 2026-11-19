@@ -7,12 +7,12 @@ import os from "node:os";
 import path from "node:path";
 import { offerCliInstall, realCliInstallIo, resolveCli, type CliTool } from "./launcher/cli-install";
 import { applyWindowsGate } from "./launcher/windows-gate";
-import { claudeSessionsDir, findOwnedClaudeSession } from "./launcher/claude-sessions";
+import { claudeSessionsDir, findOwnedClaudeSession, sessionHasTranscript } from "./launcher/claude-sessions";
 import { LauncherClient } from "./launcher/launcher-client";
 import { offerPairing } from "./launcher/pair-prompt";
 import { spawnPty, type PtyChild } from "./launcher/pty";
 import { launcherSocketPath, launcherSocketTrusted, probeStatus, type StatusProbe } from "./launcher/status-probe";
-import { BellGate, KittyKeyboardTracker, restoreTerminal, saveTerminal } from "./launcher/terminal";
+import { BellGate, KittyKeyboardTracker, ResumeHintWatcher, restoreTerminal, saveTerminal } from "./launcher/terminal";
 
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
 // R155: printed before the bind, so it says attaching; only the phone shows the bind itself.
@@ -298,6 +298,10 @@ async function runClaude(args: string[]): Promise<void> {
   // own, including after stdin EOF, nothing is swept: plain `claude` leaves a
   // background job the user started on purpose (`npm run dev &`) running, and rk
   // must behave the same.
+  // The session the child last showed in its sessions file, whether or not agentd is up: after the child
+  // exits its file is gone, and a conversation's id is what the wearer needs to find it again.
+  let lastSessionId: string | undefined;
+  const resumeHint = new ResumeHintWatcher();
   let shutdown: { code: number; note?: string } | undefined;
   let sweepGroup = false;
   let finished = false;
@@ -306,6 +310,29 @@ async function runClaude(args: string[]): Promise<void> {
   let killTimer: NodeJS.Timeout | undefined;
   let hardTimer: NodeJS.Timeout | undefined;
   let pollTimer: NodeJS.Timeout | undefined;
+
+  /**
+   * One line, after the terminal is restored, when the child's own "Resume this session with:" hint did
+   * not go by (it can be lost with the screen the child printed it on) and the session has a conversation
+   * to resume: `finish` runs once, so the line comes at most once. Never for a session whose id is not
+   * known, never when stdout is not a terminal, and it changes no exit code.
+   */
+  const writeResumeLine = (): void => {
+    if (resumeHint.seen || !process.stdout.isTTY) {
+      return;
+    }
+    // The poll can be up to two seconds behind (a `/clear` just before `/exit`): look at the file once more
+    // now, and if it shows another session, that is the one a hint would be about.
+    const latest = findOwnedClaudeSession(sessionsDir, child.pid)?.sessionId;
+    const id = latest ?? lastSessionId;
+    if (id === undefined) {
+      return;
+    }
+    if (sessionHasTranscript(path.dirname(sessionsDir), id) === false) {
+      return; // nothing was said in it: plain claude prints no hint for such a session either
+    }
+    fs.writeSync(2, `Resume this session with: rk claude --resume ${id}\n`);
+  };
 
   const finish = (code: number | null, signal: string | null): void => {
     if (finished) {
@@ -335,6 +362,7 @@ async function runClaude(args: string[]): Promise<void> {
         if (shutdown?.note) {
           fs.writeSync(2, shutdown.note);
         }
+        writeResumeLine();
       } finally {
         process.exit(status);
       }
@@ -468,8 +496,14 @@ async function runClaude(args: string[]): Promise<void> {
     if (finished) {
       return;
     }
+    // The id is kept while this poll runs, agentd's link up or not (the binding below needs the link, the
+    // id for the line at exit does not). `everFound` stays what it was: a link that is down gives up after
+    // the window as before, and the link coming up restarts the fast polls.
+    const session = findOwnedClaudeSession(sessionsDir, child.pid);
+    if (session) {
+      lastSessionId = session.sessionId;
+    }
     if (link.up) {
-      const session = findOwnedClaudeSession(sessionsDir, child.pid);
       if (session) {
         everFound = true;
         client.setSession(session);
@@ -497,14 +531,31 @@ async function runClaude(args: string[]): Promise<void> {
 
 
   // ---- wiring: data and exit are subscribed in the same tick as the spawn ----
+  // A `/clear` makes a new session, and the next `/exit` removes the file: look at it (a few hundred
+  // bytes) when the wearer presses Enter and when the child prints, at most every 100 ms, so the id kept
+  // for the line at exit is not two seconds behind the slow poll.
+  let lastIdRead = 0;
+  const refreshSessionId = (): void => {
+    if (Date.now() - lastIdRead >= 100) {
+      lastIdRead = Date.now();
+      lastSessionId = findOwnedClaudeSession(sessionsDir, child.pid)?.sessionId ?? lastSessionId;
+    }
+  };
   child.onData((chunk) => {
     kitty.push(chunk);
+    resumeHint.push(chunk);
+    refreshSessionId();
     process.stdout.write(bell.output(chunk));
   });
   child.onExit((code, signal) => finish(code, signal));
 
   process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (data: string) => client.onStdin(data));
+  process.stdin.on("data", (data: string) => {
+    if (data.includes("\r") || data.includes("\n")) {
+      refreshSessionId();
+    }
+    client.onStdin(data);
+  });
   process.stdin.on("error", () => {});
   const onStdinEnd = (): void => {
     if (shutdown || eofStarted) {

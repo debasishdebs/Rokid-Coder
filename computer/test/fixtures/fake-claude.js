@@ -140,6 +140,15 @@ function runLine(text) {
   const [word, ...rest] = text.trim().split(/\s+/);
   switch (word) {
     case "/exit":
+      // FAKE_EXIT_HINT: what plain claude does on /exit once a conversation exists. It leaves the alternate
+      // screen by itself, prints "Resume this session with:" on the main screen and exits at once.
+      // `1` prints the hint; `leave` leaves the screen and prints nothing (a hint that never reached rk).
+      if (env.FAKE_EXIT_HINT) {
+        raw("\x1b[?1004l\x1b[?1049l\x1b[?25h\x1b[?2004l");
+        if (env.FAKE_EXIT_HINT === "1") {
+          raw(`\r\nResume this session with:\r\nclaude --resume ${state.sessionId}\r\n`);
+        }
+      }
       quit(rest[0] === undefined ? 0 : Number(rest[0]));
       return;
     case "/signal":
