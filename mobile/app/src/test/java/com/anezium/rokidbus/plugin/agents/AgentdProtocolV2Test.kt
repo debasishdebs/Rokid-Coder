@@ -178,6 +178,11 @@ class AgentdProtocolV2Test {
             AgentdAction.Ack("fx-msg-launcher-consumed", "rejected", "dialog_not_seen", consumed = true),
             parse(codec, fixture("ack_consumed")),
         )
+        // A screen agentd could not read: rejected, not consumed, so a resend is not a duplicate.
+        assertEquals(
+            AgentdAction.Ack("fx-msg-launcher-unreadable", "rejected", "screen_unreadable"),
+            parse(codec, fixture("ack_screen_unreadable")),
+        )
         assertEquals(
             AgentdAction.FollowupClosed("claude:fx-claude", "delivered"),
             parse(codec, fixture("followup_closed")),

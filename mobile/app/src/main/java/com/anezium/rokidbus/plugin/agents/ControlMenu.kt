@@ -92,6 +92,10 @@ object ControlMenu {
     const val NOT_SENT = "not_sent"
     const val NOT_SENT_FOLLOWUP = "Claude is busy with something else, wait a moment and try again"
 
+    /** agentd could not read Claude's screen (no prompt box found), whatever Claude was doing; retryable, nothing was consumed. */
+    const val SCREEN_UNREADABLE = "screen_unreadable"
+    const val SCREEN_UNREADABLE_FOLLOWUP = "Could not read Claude's screen, try again or reply at the laptop"
+
     /** R152: typed into the session, then the launcher failed; the id stays spent. */
     const val SENT_MAYBE_UNFINISHED = "Sent, but may not have finished — check laptop"
 
@@ -649,6 +653,7 @@ object ControlMenu {
     fun followupHint(error: String?): String? = when (error) {
         NOT_LAUNCHER -> NOT_LAUNCHER_FOLLOWUP
         NOT_SENT -> NOT_SENT_FOLLOWUP
+        SCREEN_UNREADABLE -> SCREEN_UNREADABLE_FOLLOWUP
         else -> null
     }
 
