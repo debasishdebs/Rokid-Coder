@@ -201,6 +201,23 @@ class GlassesLinkHealerTest {
     }
 
     @Test
+    fun monitoring_turned_off_during_the_first_wait_makes_no_second_bind() = runTest {
+        val core = FakeLinkCore().apply { state = bonded }
+        var monitoring = true
+        val healer = newHealer(core, enabled = { monitoring })
+        var answer: LinkEnsure? = null
+
+        healer.ensureLink { answer = it }
+        runCurrent()
+        monitoring = false
+        healer.onMonitoringChanged()
+        advanceTimeBy(GlassesLinkHealer.FIRST_WAIT_MS + 1)
+
+        assertEquals(LinkEnsure.MONITORING_OFF, answer)
+        assertEquals("only the tap's own bind was made", 1, core.binds)
+    }
+
+    @Test
     fun a_link_that_comes_up_in_neither_wait_is_not_reached_after_both() = runTest {
         val core = FakeLinkCore().apply { state = bonded }
         val healer = newHealer(core)

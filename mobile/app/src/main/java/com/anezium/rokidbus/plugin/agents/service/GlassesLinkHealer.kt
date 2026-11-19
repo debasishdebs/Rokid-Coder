@@ -128,6 +128,11 @@ internal class GlassesLinkHealer(
         }
         settling = scope.launch {
             for (bind in 1..MAX_BINDS) {
+                if (bind > 1 && !enabled()) {
+                    // Monitoring went off during the first wait: monitoring off means no reconnect.
+                    LinkLog.i("wearer link: no second bind (monitoring off)")
+                    return@launch resolve(LinkEnsure.MONITORING_OFF)
+                }
                 bindNo = bind
                 LinkLog.i("wearer link: down, binding (bind $bind, closedByServer=${core.linkClosedByServer})")
                 val bound = core.ensureLink()
