@@ -65,12 +65,18 @@ export type FollowupState = "waiting" | "unavailable" | "cap_reached" | "ready";
  *   above is not there, so the reply waits for Claude's own file to say idle;
  * - `busy`: Claude is working, its file is not idle, an approval is pending or
  *   a write is uncertain;
- * - `not_launcher`: the session does not run under `rk claude`, so agentd cannot type into it.
- * A phone that does not know a value shows it as `busy`.
+ * - `not_launcher`: the session does not run under `rk claude`, so agentd cannot type into it;
+ * - `dialog`: the launcher's own screen shows a dialog, a question or a menu waiting for an answer at
+ *   the laptop (auto-approving modes);
+ * - `unreadable`: the launcher could not read Claude's screen (auto-approving modes).
+ * In an auto-approving mode `draft` is also the screen's word for text in the box, and `busy` is not said
+ * while the box is empty and usable. A phone that does not know a value shows it as `busy`.
  */
 export type FollowupWhy =
   | "busy"
   | "draft"
+  | "dialog"
+  | "unreadable"
   | "background"
   | "bg_off"
   | "mode_not_allowed"

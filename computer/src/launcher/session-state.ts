@@ -86,7 +86,27 @@ export interface StateSources {
    * exist and to say no; absent, such a mode is refused.
    */
   approvalPending?(key: SessionKey): boolean;
+  /**
+   * What the launcher last reported its screen shows of the prompt box (`empty`, `text`, `dialog`, `plan`,
+   * `unreadable`) and how long ago agentd heard it; absent until a report has come.
+   */
+  screen?(key: SessionKey): { box: string; ageMs: number } | undefined;
 }
+
+/**
+ * How old a launcher's report of its screen may be and still count. The launcher repeats an unchanged report
+ * about every second, so one older than this is a launcher that is silent (a busy event loop, a command in
+ * flight, an older launcher): the file-based rules apply then.
+ */
+export const SCREEN_FRESH_MS = 3000;
+
+/**
+ * What the launcher's own screen says about typing a reply, for a session in an auto-approving mode:
+ * `ready` (the box is found and empty, nothing asks, nothing is in flight), the reason the box is not usable
+ * (`text`, `dialog`, `plan`, `unreadable`), or `no` (no verdict: another mode, no fresh report, or something
+ * agentd knows of is in the way, so the file-based rules decide).
+ */
+export type ScreenVerdict = "ready" | "text" | "dialog" | "plan" | "unreadable" | "no";
 
 interface CompactWatch {
   gen: number;
@@ -429,6 +449,61 @@ export class SessionStates {
     return { rule: rule(), status, mode, stopAgeSec: stopAge, subagents };
   }
 
+  /** The main thread's permission mode as a name for the log (`unknown` when no hook has carried one). */
+  modeName(key: SessionKey): string {
+    const mode = this.entries.get(key)?.mode;
+    return mode !== undefined && /^[A-Za-z]{1,40}$/.test(mode) ? mode : "unknown";
+  }
+
+  /**
+   * Whether a TEXT reply may be typed on the launcher's own word about its screen, whatever Claude's file
+   * says (idle, busy or shell: a turn, a background task or a monitor keeps it from idle while the box
+   * is empty and usable, and a reply typed then only queues). Only where Claude never stops to ask (the
+   * sticky mode is `auto` or `bypassPermissions`, known), for the bound session's own file, with nothing
+   * held, asked (an approval or a question of any origin), uncertain or (unless `ownsClaim`, for the
+   * command that holds the claim, whose own checks at the write are then the authority) in flight. Without
+   * `ownsClaim` the launcher's last report must be fresh; the verdict is its box state. Never for
+   * compact or model, which keep the idle rule.
+   */
+  screenVerdict(key: SessionKey, ownsClaim = false): ScreenVerdict {
+    const binding = this.sources.binding(key);
+    const entry = this.entries.get(key);
+    if (
+      this.sources.held(key) ||
+      !binding ||
+      binding.claudePid === undefined ||
+      binding.uncertain ||
+      (entry?.inFlight === true && !ownsClaim) ||
+      this.sources.asking(key) ||
+      entry?.mode === undefined ||
+      !AUTO_APPROVING_MODES.has(entry.mode)
+    ) {
+      return "no";
+    }
+    const file = this.readSession(binding.claudePid);
+    if (!file || (file.sessionId !== undefined && file.sessionId !== key.slice(key.indexOf(":") + 1))) {
+      return "no";
+    }
+    if (ownsClaim) {
+      return "ready";
+    }
+    const report = this.sources.screen?.(key);
+    if (!report || report.ageMs > SCREEN_FRESH_MS) {
+      return "no";
+    }
+    switch (report.box) {
+      case "empty":
+        return "ready";
+      case "text":
+      case "dialog":
+      case "plan":
+      case "unreadable":
+        return report.box;
+      default:
+        return "no";
+    }
+  }
+
   /**
    * Whether the hook evidence for typing a background reply holds: Claude's
    * file says `busy` (never `waiting`, never `idle`, which takes the ordinary
@@ -646,6 +721,11 @@ interface Running {
   settled?: () => void;
   /** A background reply (see `bgAssess`): written is its paste, `enterGranted` its Enter allowed. */
   bg?: boolean;
+  /**
+   * With `bg`: allowed on the launcher's screen report (auto-approving modes), not on the subagent evidence.
+   * Typed though a turn runs, it only queues, so its Enter is the end: no prompt of Claude's is waited for.
+   */
+  screen?: boolean;
   enterGranted?: boolean;
   /** The command was aborted here; no later write check of it is answered yes. */
   dead?: boolean;
@@ -779,10 +859,59 @@ export class LauncherRouter {
     if (state === "held") {
       return "waiting";
     }
-    if (this.port.laptopDraft(key)) {
+    if (this.port.laptopDraft(key) || this.screenAsks(key)) {
       return "unavailable";
     }
-    return state === "ready" || this.bgAssess(key) === "ready" ? "ready" : "unavailable";
+    return state === "ready" || this.screenReady(key) || this.bgAssess(key) === "ready" ? "ready" : "unavailable";
+  }
+
+  /**
+   * The launcher's fresh report says a dialog, a question, the plan-mode footer or text of the wearer's is on
+   * screen (auto-approving modes): nothing is typed, whatever Claude's file says, and the wearer is told why.
+   */
+  private screenAsks(key: SessionKey): boolean {
+    const verdict = this.states.screenVerdict(key);
+    return verdict === "dialog" || verdict === "plan" || verdict === "text";
+  }
+
+  /**
+   * For the log only: whether a text reply may be typed now, by which route or for which reason not, and the
+   * permission mode. A name from a fixed list each; never a decision.
+   */
+  readiness(key: SessionKey): { ready: boolean; why: string; mode: string } {
+    const mode = this.states.modeName(key);
+    if (!this.port.binding(key)) {
+      return { ready: false, why: "not_bound", mode };
+    }
+    const state = this.states.state(key);
+    if (state === "held") {
+      return { ready: true, why: "stop_held", mode };
+    }
+    if (this.port.laptopDraft(key)) {
+      return { ready: false, why: "draft", mode };
+    }
+    const verdict = this.states.screenVerdict(key);
+    if (verdict === "dialog" || verdict === "plan" || verdict === "text") {
+      return { ready: false, why: `screen_${verdict}`, mode };
+    }
+    if (state === "ready") {
+      return { ready: true, why: "file_idle", mode };
+    }
+    if (this.screenReady(key)) {
+      return { ready: true, why: "screen_empty", mode };
+    }
+    if (this.bgAssess(key) === "ready") {
+      return { ready: true, why: "background_evidence", mode };
+    }
+    return { ready: false, why: this.followupWhy(key) ?? "busy", mode };
+  }
+
+  /**
+   * A text reply may be typed on the launcher's own word that the box is empty (auto-approving modes only,
+   * Claude's file may say anything): see `SessionStates.screenVerdict`. A laptop draft still refuses.
+   */
+  private screenReady(key: SessionKey, ownsClaim = false): boolean {
+    return this.states.screenVerdict(key, ownsClaim) === "ready" && !this.port.laptopDraft(key);
   }
 
   /**
@@ -815,13 +944,18 @@ export class LauncherRouter {
    * or "bg_off" (a background reply would be allowed but for the permission
    * mode, or but for the phone's switch), "background" (Claude's file is busy
    * while `subagentsRunning` subagents run, so the main prompt may well be
-   * free) or "busy" (everything else). Undefined when the follow-up is
-   * available or waiting, or the session is not bound.
+   * free) or "busy" (everything else). In an auto-approving mode the
+   * launcher's fresh screen report decides first: "draft" (text in the box),
+   * "dialog" (a dialog or question on screen), "mode_not_allowed" (the plan
+   * footer), "unreadable" (the screen could not be read while Claude's file
+   * is not idle); "busy" is then said only when there is no fresh report.
+   * Undefined when the follow-up is available or waiting, or the session is
+   * not bound.
    */
   followupWhy(
     key: SessionKey,
     subagentsRunning = 0,
-  ): "busy" | "draft" | "background" | "bg_off" | "mode_not_allowed" | undefined {
+  ): "busy" | "draft" | "dialog" | "unreadable" | "background" | "bg_off" | "mode_not_allowed" | undefined {
     if (!this.port.binding(key)) {
       return undefined;
     }
@@ -832,8 +966,27 @@ export class LauncherRouter {
     if (this.port.laptopDraft(key)) {
       return "draft";
     }
+    // In an auto-approving mode the launcher's own screen report says why the box cannot take a reply.
+    const verdict = this.states.screenVerdict(key);
+    if (verdict === "dialog") {
+      return "dialog";
+    }
+    if (verdict === "plan") {
+      return "mode_not_allowed";
+    }
+    if (verdict === "text") {
+      return "draft";
+    }
     if (state === "ready") {
       return undefined;
+    }
+    switch (verdict) {
+      case "ready":
+        return undefined;
+      case "unreadable":
+        return "unreadable";
+      default:
+        break;
     }
     const bg = this.bgAssess(key);
     if (bg === "ready") {
@@ -909,9 +1062,14 @@ export class LauncherRouter {
    */
   private revokeBg(key: SessionKey): void {
     const running = this.running.get(key);
-    if (running?.bg && !running.enterGranted && !running.dead && this.bgAssess(key, true) !== "ready") {
+    if (running?.bg && !running.enterGranted && !running.dead && !this.evidenceHolds(key, running)) {
       running.abort("busy");
     }
+  }
+
+  /** The evidence a background reply was allowed on, again: the screen route's own, or the hook route's. */
+  private evidenceHolds(key: SessionKey, running: Running): boolean {
+    return running.screen ? this.screenReady(key, true) : this.bgAssess(key, true) === "ready";
   }
 
   /**
@@ -927,7 +1085,7 @@ export class LauncherRouter {
     if (this.interrupted(key, running.gen, this.epoch(key)) || (phase === "paste") === running.written) {
       return false;
     }
-    if (this.bgAssess(key, true) !== "ready") {
+    if (!this.evidenceHolds(key, running)) {
       return false;
     }
     if (phase === "enter") {
@@ -984,10 +1142,10 @@ export class LauncherRouter {
     if (ready === "held") {
       return deliverHeld();
     }
-    if (ready !== "ready" && ready !== "ready_bg") {
+    if (ready !== "ready" && ready !== "ready_bg" && ready !== "ready_screen") {
       return fail(ready);
     }
-    return this.run(key, start.gen, epoch, { command: "text", text }, ready === "ready_bg");
+    return this.run(key, start.gen, epoch, { command: "text", text }, ready !== "ready", ready === "ready_screen");
   }
 
   /**
@@ -1020,9 +1178,14 @@ export class LauncherRouter {
       // The launcher would hold it behind the draft anyway (Review Focus 1);
       // waiting here keeps what agentd dispatches in line with what it shows.
       const draft = this.port.laptopDraft(key);
-      const viaBg = background && state !== "ready" && state !== "held" && this.bgAssess(key) === "ready";
-      if ((state === "ready" || viaBg) && !draft && this.states.claim(key)) {
-        return viaBg ? "ready_bg" : "ready";
+      // Only a text reply is held back by the screen's word; compact and model keep today's idle rule.
+      const asks = background && this.screenAsks(key);
+      const notFileReady = background && state !== "ready" && state !== "held";
+      // The launcher's own screen first (auto-approving modes), then the subagent evidence.
+      const viaScreen = notFileReady && this.screenReady(key);
+      const viaBg = notFileReady && !viaScreen && this.bgAssess(key) === "ready";
+      if ((state === "ready" || viaScreen || viaBg) && !draft && !asks && this.states.claim(key)) {
+        return viaScreen ? "ready_screen" : viaBg ? "ready_bg" : "ready";
       }
       if (this.clock() >= deadline) {
         return state === "ready" && draft ? "laptop_draft" : "busy";
@@ -1038,11 +1201,19 @@ export class LauncherRouter {
     epoch: number,
     cmd: LauncherCommand,
     bg: boolean,
+    screen = false,
   ): Promise<RouteOutcome> {
     const cmdId = randomUUID();
     let timer: NodeJS.Timeout | undefined;
     let compactDone: Promise<string> | undefined;
-    const running: Running = { cmdId, written: false, gen, abort: () => undefined, ...(bg ? { bg: true } : {}) };
+    const running: Running = {
+      cmdId,
+      written: false,
+      gen,
+      abort: () => undefined,
+      ...(bg ? { bg: true } : {}),
+      ...(bg && screen ? { screen: true } : {}),
+    };
     // A background reply is spent only when its Enter was allowed: before that
     // the launcher clears the paste away, and the same msgId may be sent again.
     const spent = (): boolean => (bg ? running.enterGranted === true : running.written);
@@ -1067,7 +1238,7 @@ export class LauncherRouter {
     };
     const failed = (error: string): RouteOutcome =>
       spent() && !unsent(error) ? { ok: false, error, consumed: true } : fail(error);
-    const promptSeen = bg && cmd.command === "text"
+    const promptSeen = bg && !screen && cmd.command === "text"
       ? new Promise<string>((resolve) => {
           const want = squash(cmd.text);
           // The prompt of a background task's report is another turn's; ours may follow it.
@@ -1102,6 +1273,7 @@ export class LauncherRouter {
         ...cmd,
         ...(notBefore !== undefined ? { notBefore } : {}),
         ...(bg ? { bgReply: true as const } : {}),
+        ...(bg && screen ? { queued: true as const } : {}),
       });
       const result: CommandResult | string = await Promise.race([sent, interrupt]);
       if (typeof result === "string") {
@@ -1301,7 +1473,7 @@ export class LauncherRouter {
     this.revokeBg(key);
     this.logBgDecision(key);
     // What the phone shows is the follow-up state and, when unavailable, why.
-    const seen = `${this.followupState(key)}/${this.bgAssess(key)}`;
+    const seen = `${this.followupState(key)}/${this.bgAssess(key)}/${this.followupWhy(key) ?? "-"}`;
     if (always || this.shown.get(key) !== seen) {
       this.shown.set(key, seen);
       this.onStateChange(key);

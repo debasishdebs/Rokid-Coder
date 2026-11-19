@@ -17,6 +17,7 @@ import type { AttachChange, AttachRegistry } from "../attach-registry";
 import { sessionKeyOf, type SessionKey } from "../protocol-v2";
 import type { AgentProvider, Logger } from "../types";
 import { findOwnedClaudeSession, isPidAlive } from "./claude-sessions";
+import type { ScreenBox } from "./screen-probe";
 import { LAUNCHER_SOCKET_NAME } from "./socket-name";
 
 export { LAUNCHER_SOCKET_NAME };
@@ -52,6 +53,12 @@ export interface TypeCommand {
    * agentd (`write_check`) before the paste and again before the Enter.
    */
   bgReply?: true;
+  /**
+   * With `bgReply`: agentd found the box empty on the launcher's own screen report (auto or bypass modes) and
+   * Claude's file may say anything. The reply is typed though a turn runs (it queues); a running-turn sign
+   * on the screen does not refuse it. Every other check, and the two looks around the paste, stand.
+   */
+  queued?: true;
   command: TypeCommandKind;
   model?: string;
   text?: string;
@@ -90,6 +97,11 @@ export interface LauncherHubOptions {
    * same-user and 0600, may ask for it: the hook port is open to every local user.
    */
   armPairing?: () => void;
+  /**
+   * What agentd adds to the launcher's `launcher_screen_verdict` line from its own side: the readiness decision
+   * and why, the permission mode. Names and flags only, never anything typed or shown.
+   */
+  verdictContext?: (key: SessionKey) => Record<string, string | number | boolean>;
   /**
    * The pairing IPC for every computer-side client (`agentd pair`, `rk`'s
    * prompt, the installer): `pair_open` subscribes to `pair_status` and opens the window, `pair_watch`
@@ -173,8 +185,13 @@ interface Connection {
   /** Set while this connection is a pairing client: stops its `pair_status` feed. */
   pairingWatch?: () => void;
   draft: boolean;
+  /** The launcher's last report of what its screen shows of the prompt box, and when agentd received it. */
+  box?: ScreenBox;
+  boxAt?: number;
   closed: boolean;
 }
+
+const SCREEN_BOXES: ReadonlySet<string> = new Set(["empty", "text", "dialog", "plan", "unreadable"]);
 
 type Frame = Record<string, unknown>;
 
@@ -315,6 +332,7 @@ export class LauncherHub {
       gen: binding.gen,
       ...(cmd.notBefore !== undefined ? { notBefore: cmd.notBefore } : {}),
       ...(cmd.bgReply ? { bgReply: true as const } : {}),
+      ...(cmd.bgReply && cmd.queued ? { queued: true as const } : {}),
       command: cmd.command,
       ...(cmd.model !== undefined ? { model: cmd.model } : {}),
       ...(cmd.text !== undefined ? { text: cmd.text } : {}),
@@ -379,6 +397,15 @@ export class LauncherHub {
 
   laptopDraft(key: SessionKey): boolean {
     return this.byKey.get(key)?.draft === true;
+  }
+
+  /** What the launcher last said its screen shows of the prompt box, and how long ago agentd heard it; none before the first report. */
+  laptopScreen(key: SessionKey): { box: ScreenBox; ageMs: number } | undefined {
+    const connection = this.byKey.get(key);
+    if (!connection || connection.closed || connection.box === undefined || connection.boxAt === undefined) {
+      return undefined;
+    }
+    return { box: connection.box, ageMs: Math.max(0, Date.now() - connection.boxAt) };
   }
 
   /** Task 4 sets this; the launcher is told on every change. */
@@ -714,6 +741,77 @@ export class LauncherHub {
         });
         return undefined;
       }
+      case "screen_verdict": {
+        // What the launcher's probe made of its screen, when that changes: names, numbers and row classes
+        // only (the same alphabet as `screen_shape`), so a new real layout can be read from the log.
+        const word = /^[a-z_]{1,40}$/;
+        const classes = /^[0-9BRPMGT ]*$/;
+        const row = (value: unknown): boolean => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 1000;
+        if (
+          !hasShape(
+            frame,
+            ["type", "probe", "reason", "box", "tainted", "cols", "rows", "below", "shape", "file", "layouts", "unknown"],
+            ["top", "prompt", "bottom"],
+          ) ||
+          (frame.probe !== "prompt" && frame.probe !== "blocked" && frame.probe !== "unknown") ||
+          typeof frame.reason !== "string" ||
+          !word.test(frame.reason) ||
+          typeof frame.box !== "string" ||
+          !SCREEN_BOXES.has(frame.box) ||
+          typeof frame.tainted !== "boolean" ||
+          typeof frame.unknown !== "boolean" ||
+          !Number.isInteger(frame.cols) ||
+          (frame.cols as number) < 1 ||
+          (frame.cols as number) > 2000 ||
+          !Number.isInteger(frame.rows) ||
+          (frame.rows as number) < 1 ||
+          (frame.rows as number) > 1000 ||
+          typeof frame.below !== "string" ||
+          frame.below.length > 200 ||
+          !classes.test(frame.below) ||
+          typeof frame.shape !== "string" ||
+          frame.shape.length > 8000 ||
+          !classes.test(frame.shape) ||
+          typeof frame.file !== "string" ||
+          !/^[a-z_]{1,20}$/.test(frame.file) ||
+          !row(frame.layouts) ||
+          (frame.top !== undefined && !row(frame.top)) ||
+          (frame.prompt !== undefined && !row(frame.prompt)) ||
+          (frame.bottom !== undefined && !row(frame.bottom))
+        ) {
+          return "bad_frame";
+        }
+        const key = connection.binding?.key;
+        let context: Record<string, string | number | boolean> = {};
+        try {
+          context = (key ? this.options.verdictContext?.(key) : undefined) ?? {};
+        } catch {
+          context = {};
+        }
+        const fields = {
+          session: key,
+          probe: frame.probe,
+          reason: frame.reason,
+          box: frame.box,
+          tainted: frame.tainted,
+          cols: frame.cols,
+          rows: frame.rows,
+          ...(frame.top !== undefined ? { top: frame.top } : {}),
+          ...(frame.prompt !== undefined ? { prompt: frame.prompt } : {}),
+          ...(frame.bottom !== undefined ? { bottom: frame.bottom } : {}),
+          below: frame.below,
+          file: frame.file,
+          layoutSeen: frame.layouts,
+          ...context,
+          shape: frame.shape,
+        };
+        this.options.logger.info("launcher_screen_verdict", fields);
+        if (frame.unknown) {
+          // A prompt-glyph row the probe could not read as the box: the layout to look at.
+          this.options.logger.warn("launcher_screen_unknown_layout", fields);
+        }
+        return undefined;
+      }
       case "screen_check": {
         // The launcher's own look at the screen around a reply: names, lengths and flags only.
         const word = /^[a-z_]{1,40}$/;
@@ -742,17 +840,27 @@ export class LauncherHub {
         });
         return undefined;
       }
-      case "laptop_state":
-        if (!hasShape(frame, ["type", "draft"]) || typeof frame.draft !== "boolean") {
+      case "laptop_state": {
+        // `box` and `at` are additive: an older launcher sends the draft alone.
+        if (
+          !hasShape(frame, ["type", "draft"], ["box", "at"]) ||
+          typeof frame.draft !== "boolean" ||
+          (frame.box !== undefined && (typeof frame.box !== "string" || !SCREEN_BOXES.has(frame.box))) ||
+          (frame.at !== undefined && (typeof frame.at !== "number" || !Number.isFinite(frame.at)))
+        ) {
           return "bad_frame";
         }
-        if (connection.draft !== frame.draft) {
-          connection.draft = frame.draft;
-          if (connection.binding) {
-            this.emit(connection.binding.key);
-          }
+        const box = frame.box as ScreenBox | undefined;
+        const changed = connection.draft !== frame.draft || connection.box !== box;
+        connection.draft = frame.draft;
+        connection.box = box;
+        // Freshness is agentd's own clock: the launcher's `at` is for the log, never for a decision.
+        connection.boxAt = box === undefined ? undefined : Date.now();
+        if (changed && connection.binding) {
+          this.emit(connection.binding.key);
         }
         return undefined;
+      }
       case "launcher_hello":
         return "duplicate_hello";
       default:

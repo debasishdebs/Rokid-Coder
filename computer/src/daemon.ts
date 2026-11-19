@@ -200,11 +200,16 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
   attachRegistry.reconcileLaunchers({
     isSessionLive: liveIds ? (key) => key.startsWith("claude:") && liveIds.has(key.slice("claude:".length)) : undefined,
   });
-  const launchers = new LauncherHub({
+  const launchers: LauncherHub = new LauncherHub({
     configDir: config.rokidCoder.stateDir,
     claudeSessionsDir: launcherSessionsDir,
     logger,
     registry: attachRegistry,
+    // What the launcher's screen verdict line says from agentd's side: the readiness decision and the mode.
+    verdictContext: (key) => {
+      const decision = launcherRouter.readiness(key);
+      return { ready: decision.ready, readyWhy: decision.why, mode: decision.mode };
+    },
     // The plugin's pair command arrives here, from the hook forwarder (R156).
     // It only opens the window: the code is confirmed in a terminal and on the phone.
     armPairing: () => {
@@ -267,10 +272,12 @@ async function startDaemonUndoable(daemonOptions: DaemonOptions, undoOnFailure: 
       subagents: (key) => sessions.get(key.slice(key.indexOf(":") + 1))?.subagents?.running ?? 0,
       // Every pending approval counts, a subagent's included; an unknown manager is not "none".
       approvalPending: (key) => approvals?.hasPendingForSession(key.slice(key.indexOf(":") + 1)) !== false,
+      // What the launcher's own screen last said of the prompt box, and how long ago.
+      screen: (key) => launchers.laptopScreen(key),
     },
   );
   // The environment overrides exist only so tests need not wait the windows out.
-  const launcherRouter = new LauncherRouter({
+  const launcherRouter: LauncherRouter = new LauncherRouter({
     port: launchers,
     states: launcherStates,
     timings: {
