@@ -96,3 +96,21 @@ interface PhoneTtsPort {
 
 /** The SPP pairing key's state when it is not plainly usable. */
 enum class SppKeyState { UNAVAILABLE, RECOVERING, RECOVERED }
+
+/** What [HubCore.ensureCxrLink] found and did. */
+enum class CxrEnsureResult {
+    /** The CXR link was up: nothing was bound. */
+    ALREADY_UP,
+
+    /** The link was down and is being bound; the link state says when it is up. */
+    CONNECTING,
+
+    /** The link was down and the library refused the bind (Hi Rokid missing or not authorized). */
+    NOT_BOUND,
+
+    /** No CXR token is stored: the glasses were never authorized. */
+    NO_TOKEN,
+
+    /** The hub is stopped or closed. */
+    HUB_STOPPED,
+}
