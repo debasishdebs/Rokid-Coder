@@ -43,6 +43,7 @@ export const LEGACY_MENTIONS = [
   "computer/test/setup-plugins.test.js",
   "computer/test/setup-state.test.js",
   "mobile/app/CHANGELOG.md",
+  "ROADMAP.md",
   "scripts/check-versions.mjs",
   "scripts/test/publish.test.mjs",
   "scripts/test/versions.test.mjs",
