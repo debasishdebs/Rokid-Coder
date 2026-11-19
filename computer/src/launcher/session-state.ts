@@ -137,9 +137,9 @@ interface Entry {
   /** The `permission_mode` of the latest main-thread hook; undefined when that hook carried none. */
   mode?: string;
   /** Dialogs hooks announced that no Post or Result hook has closed yet (any agent's), by kind, with when. */
-  dialogs?: Map<string, number>;
+  dialogs?: Map<string, { at: number; count: number; tool?: string }>;
   /** A reply typed on the screen route that Claude has not yet taken as a prompt. */
-  queued?: { text: string; at: number };
+  queued?: { text: string; at: number; sawPrompt: boolean };
 }
 
 /** What the evidence for a background reply says, short of the phone's switch (the router adds it). */
@@ -193,7 +193,20 @@ const MAIN_THREAD_TOOL: ReadonlySet<string> = new Set(["PreToolUse", "PostToolUs
  * thread fired them. A SubagentStop is not one: background agents finishing is
  * normal and puts nothing on the main screen.
  */
-const BLOCKING_HOOKS: ReadonlySet<string> = new Set(["PermissionRequest", "Elicitation", "ElicitationResult"]);
+export const BLOCKING_HOOKS: ReadonlySet<string> = new Set(["PermissionRequest", "Elicitation", "ElicitationResult"]);
+/**
+ * The hooks agentd's dialog tracking depends on beyond the blocking ones: what closes a dialog (a tool's
+ * Post hooks, a denial), what announces one (a notification) and what ends one (a prompt, a Stop). The
+ * plugin's hooks.json must register every one of these and every blocking hook, or the tracking never runs.
+ */
+export const DIALOG_TRACKING_HOOKS: readonly string[] = [
+  "Notification",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PermissionDenied",
+  "UserPromptSubmit",
+  "Stop",
+];
 /**
  * Notifications that are not a dialog (idle, a login, a finished or resumed
  * background agent, a plugin's own): they leave the Stop alone. Every other type,
@@ -237,10 +250,16 @@ export const DIALOG_ANNOUNCED_MS = 30_000;
 
 /**
  * How long a reply queued behind a running turn keeps the Stop from being held for the glasses: Claude takes
- * the queued prompt at the end of the turn, and a hold there would keep it from doing so. A matching
- * UserPromptSubmit ends it sooner.
+ * the queued prompt at the end of the turn, and a hold there would keep it from doing so. A UserPromptSubmit
+ * that holds the reply's text ends it sooner, and so does the next main-thread Stop after any prompt (Claude
+ * took the reply in some other way: joined with a prompt of the laptop's, or put back by Esc).
  */
-export const QUEUED_REPLY_MS = 15 * 60_000;
+export const QUEUED_REPLY_MS = 3 * 60_000;
+
+/** The tool a hook is about, or none. */
+function toolName(payload: Record<string, unknown>): string | undefined {
+  return typeof payload.tool_name === "string" && payload.tool_name.length > 0 ? payload.tool_name : undefined;
+}
 
 /** What a permission request or its tool's Post hook say of one tool call: the same on both, never kept as text. */
 function toolSignature(payload: Record<string, unknown>): string {
@@ -355,10 +374,16 @@ export class SessionStates {
           this.sources.clearUncertain(key);
         }
         {
-          // Claude took the queued reply as a prompt of its own: the Stop may be held again.
+          // A prompt that holds the queued reply is Claude taking it (alone, or joined with one typed at the
+          // laptop): the Stop may be held again. Any other prompt is a turn of its own, and the Stop that ends
+          // it (see trackMainThread) is the next word on whether the reply is still waiting.
           const entry = this.entries.get(key);
-          if (entry?.queued && typeof payload.prompt === "string" && squash(payload.prompt) === entry.queued.text) {
-            entry.queued = undefined;
+          if (entry?.queued) {
+            if (typeof payload.prompt === "string" && entry.queued.text.length > 0 && squash(payload.prompt).includes(entry.queued.text)) {
+              entry.queued = undefined;
+            } else {
+              entry.queued.sawPrompt = true;
+            }
           }
         }
         break;
@@ -418,6 +443,11 @@ export class SessionStates {
       } else {
         entry.stopAt = this.clock();
         entry.stopCause = undefined;
+        // The turn of a prompt that was not our reply ended: whatever became of the queued reply (joined with
+        // that prompt, put back by Esc, taken without a hook), it is not waiting behind a turn any more.
+        if (entry.queued?.sawPrompt) {
+          entry.queued = undefined;
+        }
       }
     } else if (event === "Notification") {
       const type = payload.notification_type;
@@ -444,20 +474,46 @@ export class SessionStates {
     const dialogs = (entry.dialogs ??= new Map());
     const now = this.clock();
     const notification = typeof payload.notification_type === "string" ? payload.notification_type : "";
+    // One marker per kind, counting how many of that kind are open: two requests for the same tool call are two
+    // dialogs, and the first Post hook closes one of them.
+    const open = (kind: string, tool?: string): void => {
+      const known = dialogs.get(kind);
+      dialogs.set(kind, { at: now, count: (known?.count ?? 0) + 1, ...(tool !== undefined ? { tool } : {}) });
+    };
+    const close = (kind: string): void => {
+      const known = dialogs.get(kind);
+      if (known && known.count > 1) {
+        known.count -= 1;
+      } else {
+        dialogs.delete(kind);
+      }
+    };
     if (event === "PermissionRequest") {
-      dialogs.set(`perm:${toolSignature(payload)}`, now);
+      open(`perm:${toolSignature(payload)}`, toolName(payload));
     } else if (event === "Elicitation") {
-      dialogs.set("elicit", now);
+      open("elicit");
     } else if (event === "ElicitationResult") {
-      dialogs.delete("elicit");
+      close("elicit");
     } else if (event === "Notification") {
       if (notification === "elicitation_complete" || notification === "elicitation_response") {
         dialogs.delete("elicit");
+        dialogs.delete("note:elicitation_dialog");
       } else if (!QUIET_NOTIFICATIONS.has(notification)) {
-        dialogs.set(`note:${/^[a-z_]{1,40}$/.test(notification) ? notification : "unknown"}`, now);
+        dialogs.set(`note:${/^[a-z_]{1,40}$/.test(notification) ? notification : "unknown"}`, { at: now, count: 1 });
       }
     } else if (event === "PostToolUse" || event === "PostToolUseFailure" || event === "PermissionDenied") {
-      dialogs.delete(`perm:${toolSignature(payload)}`);
+      const exact = `perm:${toolSignature(payload)}`;
+      if (dialogs.has(exact)) {
+        close(exact);
+      } else {
+        // The Post hook's input need not equal the request's (an AskUserQuestion's carries the answers, a
+        // tool's may be a superset): with exactly one dialog open for that tool, it is that one's.
+        const tool = toolName(payload);
+        const same = tool === undefined ? [] : [...dialogs].filter(([kind, marker]) => kind.startsWith("perm:") && marker.tool === tool);
+        if (same.length === 1) {
+          close(same[0][0]);
+        }
+      }
       if (![...dialogs.keys()].some((kind) => kind.startsWith("perm:"))) {
         dialogs.delete("note:permission_prompt");
       }
@@ -475,7 +531,7 @@ export class SessionStates {
       return false;
     }
     const now = this.clock();
-    for (const [kind, at] of dialogs) {
+    for (const [kind, { at }] of dialogs) {
       if (now - at > DIALOG_ANNOUNCED_MS || now < at) {
         dialogs.delete(kind);
       }
@@ -485,7 +541,15 @@ export class SessionStates {
 
   /** A reply typed on the screen route went in (its Enter was pressed) and Claude has not taken it as a prompt yet. */
   markQueued(key: SessionKey, text: string): void {
-    this.entry(key).queued = { text: squash(text), at: this.clock() };
+    this.entry(key).queued = { text: squash(text), at: this.clock(), sawPrompt: false };
+  }
+
+  /** The reply did not queue (it failed, or was cancelled): nothing waits behind a turn. */
+  clearQueued(key: SessionKey): void {
+    const entry = this.entries.get(key);
+    if (entry) {
+      entry.queued = undefined;
+    }
   }
 
   /** A reply is queued behind a turn: the Stop is not held for the glasses meanwhile, or Claude would never take it. */
@@ -851,6 +915,10 @@ interface Running {
    * Typed though a turn runs, it only queues, so its Enter is the end: no prompt of Claude's is waited for.
    */
   screen?: boolean;
+  /** The text of a screen reply, for its queued marker at the Enter's grant. */
+  text?: string;
+  /** The screen reply ended OK: it stays queued. */
+  queuedOk?: boolean;
   enterGranted?: boolean;
   /** The command was aborted here; no later write check of it is answered yes. */
   dead?: boolean;
@@ -1216,6 +1284,10 @@ export class LauncherRouter {
     if (phase === "enter") {
       running.enterGranted = true;
       this.states.clearStop(key);
+      if (running.screen && running.text !== undefined) {
+        // From the grant on, not from the launcher's ok: a Stop in between must not open a hold the reply waits behind.
+        this.states.markQueued(key, running.text);
+      }
     }
     return true;
   }
@@ -1338,6 +1410,7 @@ export class LauncherRouter {
       abort: () => undefined,
       ...(bg ? { bg: true } : {}),
       ...(bg && screen ? { screen: true } : {}),
+      ...(bg && screen && cmd.command === "text" ? { text: cmd.text } : {}),
     };
     // A background reply is spent only when its Enter was allowed: before that
     // the launcher clears the paste away, and the same msgId may be sent again.
@@ -1448,8 +1521,8 @@ export class LauncherRouter {
           }
         }
         if (screen) {
-          // Typed behind whatever Claude is doing: until it takes the prompt, no Stop is held for the glasses.
-          this.states.markQueued(key, cmd.text);
+          // Typed behind whatever Claude is doing (marked at the Enter's grant): it stays queued.
+          running.queuedOk = true;
         }
         return OK;
       }
@@ -1470,6 +1543,12 @@ export class LauncherRouter {
       }
       if (cmd.command === "compact") {
         this.states.disarmCompact(key);
+      }
+      if (screen && running.enterGranted && !running.queuedOk) {
+        // Its Enter was allowed (that set the marker) and it then failed or was cancelled: agentd does not count
+        // a reply as waiting behind a turn when it cannot say it went in. A reply that never got that far
+        // leaves an earlier reply's marker alone.
+        this.states.clearQueued(key);
       }
       this.states.release(key);
       this.look(key, true);

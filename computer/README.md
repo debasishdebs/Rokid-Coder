@@ -307,7 +307,11 @@ Limits to know about:
   the route away at once: a reply already pasted is cleared before its Enter, and no new one is typed until the
   tool's Post hook, the elicitation's result, the wearer's next prompt or the next Stop closes it, or 30 s pass
   (so a lost hook cannot refuse replies for good). A reply queued behind a turn keeps agentd from holding the
-  turn's Stop for the glasses (when Stop holding is on) until Claude takes the prompt, or 15 minutes pass. `compact`, `model` and every other permission mode keep the idle rule exactly. The phone is told
+  turn's Stop for the glasses (when Stop holding is on, which it is not by default), from the moment its Enter is
+  allowed until a prompt that holds the reply's text arrives, the next Stop after any other prompt, a failure of
+  the reply, or 3 minutes. The plugin registers the MCP `Elicitation` and `ElicitationResult` hooks (the names
+  Claude Code 2.1.285 defines) so those dialogs are announced and closed like a permission request; a plugin
+  installed before this release needs the plugin sync to pick them up. `compact`, `model` and every other permission mode keep the idle rule exactly. The phone is told
   why a reply cannot go: text typed at the laptop (`draft`), a dialog or question to answer there
   (`dialog`), the screen could not be read (`unreadable`), plan mode (`mode_not_allowed`), and only
   otherwise that Claude is working.

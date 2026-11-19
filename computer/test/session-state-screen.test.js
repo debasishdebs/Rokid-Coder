@@ -253,9 +253,11 @@ test("a_queued_reply_keeps_the_stop_from_being_held_until_claude_takes_it_as_a_p
   t.port.settle({ ok: true });
   assert.deepEqual(await result, { ok: true });
   assert.equal(t.states.queuedPending(KEY), true, "typed, Claude has not taken it yet");
-  // The turn ends: its Stop is not held, so Claude goes on to the queued prompt at once.
-  assert.deepEqual(await stopWait.hold("s1", closed), {});
-  assert.equal(stopWait.state("s1").waiting, false);
+  // The turn ends: its Stop is not held, so Claude goes on to the queued prompt at once. Checked before anything
+  // is awaited: a hold that is opened (and would only end at its 60 s limit) shows as waiting at once.
+  const stop = stopWait.hold("s1", closed);
+  assert.equal(stopWait.state("s1").waiting, false, "no hold was opened");
+  assert.deepEqual(await Promise.race([stop, settle(200).then(() => "still held")]), {});
   // A prompt that is not ours does not end it; ours does.
   t.hook("UserPromptSubmit", { prompt: "something typed at the laptop" });
   assert.equal(t.states.queuedPending(KEY), true);
@@ -269,8 +271,115 @@ test("a_queued_reply_keeps_the_stop_from_being_held_until_claude_takes_it_as_a_p
   const u = setup({ mode: "auto", status: "busy", report: "empty" });
   u.states.markQueued(KEY, "yes do it");
   assert.equal(u.states.queuedPending(KEY), true);
-  u.clock.offset += 15 * 60_000 + 1000;
+  u.clock.offset += 2 * 60_000;
+  assert.equal(u.states.queuedPending(KEY), true, "still inside three minutes");
+  u.clock.offset += 60_000 + 1000;
   assert.equal(u.states.queuedPending(KEY), false);
+});
+
+test("a_queued_marker_ends_when_a_prompt_holds_the_reply_or_a_stop_follows_any_prompt", () => {
+  // A prompt that CONTAINS the reply (joined with one typed at the laptop) is Claude taking it.
+  const joined = setup({ mode: "auto", status: "busy", report: "empty" });
+  joined.states.markQueued(KEY, "yes do it");
+  joined.hook("UserPromptSubmit", { prompt: "first fix the tests\n\nyes   do it" });
+  assert.equal(joined.states.queuedPending(KEY), false, "joined with another prompt");
+  // A prompt that is not ours changes nothing yet; the Stop that ends that turn ends the marker (Esc put the reply back, or
+  // Claude took it without a hook).
+  const other = setup({ mode: "auto", status: "busy", report: "empty" });
+  other.states.markQueued(KEY, "yes do it");
+  other.hook("Stop", {});
+  assert.equal(other.states.queuedPending(KEY), true, "the turn we queued behind ends: the reply is next");
+  other.hook("UserPromptSubmit", { prompt: "something else entirely" });
+  assert.equal(other.states.queuedPending(KEY), true);
+  other.hook("Stop", { stop_hook_active: true });
+  assert.equal(other.states.queuedPending(KEY), true, "a continued Stop is not the end of that turn");
+  other.hook("Stop", {});
+  assert.equal(other.states.queuedPending(KEY), false, "the next main-thread Stop after a prompt of another kind");
+  // A subagent's Stop is no end of anything.
+  const sub = setup({ mode: "auto", status: "busy", report: "empty" });
+  sub.states.markQueued(KEY, "yes do it");
+  sub.hook("UserPromptSubmit", { prompt: "other" });
+  sub.hook("Stop", { agent_id: "sub1" });
+  assert.equal(sub.states.queuedPending(KEY), true);
+});
+
+test("a_reply_is_marked_queued_at_the_enters_grant_and_unmarked_when_it_then_fails", async () => {
+  const t = setup({ mode: "auto", status: "busy", report: "empty" });
+  const result = t.router.followup(KEY, "yes do it", () => ({ ok: false, error: "not_held" }));
+  await until(() => t.port.pending, 2000, "the command");
+  assert.equal(t.port.check("paste"), true);
+  assert.equal(t.states.queuedPending(KEY), false, "not before the Enter is allowed");
+  t.port.wrote();
+  assert.equal(t.port.check("enter"), true);
+  assert.equal(t.states.queuedPending(KEY), true, "from the grant, before the launcher's ok: a Stop now is not held");
+  t.port.settle({ ok: false, error: "typed_after_cancel" });
+  assert.equal((await result).ok, false);
+  assert.equal(t.states.queuedPending(KEY), false, "a reply that then failed or was cancelled is not counted as waiting");
+  // A reply that never got to the Enter leaves an earlier reply's marker alone.
+  const u = setup({ mode: "auto", status: "busy", report: "empty" });
+  u.states.markQueued(KEY, "earlier reply");
+  const later = u.router.followup(KEY, "yes do it", () => ({ ok: false, error: "not_held" }));
+  await until(() => u.port.pending, 2000, "the command");
+  u.port.settle({ ok: false, error: "not_sent" });
+  assert.equal((await later).ok, false);
+  assert.equal(u.states.queuedPending(KEY), true);
+});
+
+test("a_dialog_notification_is_closed_by_its_completion_and_an_askuserquestion_by_its_answered_post_hook", () => {
+  const t = setup({ mode: "auto", status: "busy", report: "empty" });
+  t.hook("Notification", { notification_type: "elicitation_dialog" });
+  assert.equal(t.router.followupWhy(KEY), "dialog");
+  t.hook("Notification", { notification_type: "elicitation_complete" });
+  assert.equal(t.router.followupState(KEY), "ready", "the completion closes the notification's marker too");
+  // The Post hook of an AskUserQuestion carries the answers in tool_input: not the request's input, and still its.
+  const asked = { tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Pick", options: ["A", "B"] }] } };
+  t.hook("PermissionRequest", asked);
+  assert.equal(t.router.followupState(KEY), "unavailable");
+  t.hook("PostToolUse", { tool_name: "AskUserQuestion", tool_input: { ...asked.tool_input, answers: { Pick: "A" } } });
+  assert.equal(t.router.followupState(KEY), "ready", "closed though the input differs");
+  // With two dialogs of one tool open, a Post hook that matches neither exactly cannot say which it is: nothing closes.
+  t.hook("PermissionRequest", { tool_name: "Bash", tool_input: { command: "a" } });
+  t.hook("PermissionRequest", { tool_name: "Bash", tool_input: { command: "b" } });
+  t.hook("PostToolUse", { tool_name: "Bash", tool_input: { command: "c" } });
+  assert.equal(t.router.followupState(KEY), "unavailable");
+  t.hook("PostToolUse", { tool_name: "Bash", tool_input: { command: "a" } });
+  t.hook("PostToolUse", { tool_name: "Bash", tool_input: { command: "b" } });
+  assert.equal(t.router.followupState(KEY), "ready");
+  // Another tool's Post hook never closes it by the name fallback.
+  t.hook("PermissionRequest", asked);
+  t.hook("PostToolUse", { tool_name: "Read", tool_input: { file_path: "/x" } });
+  assert.equal(t.router.followupState(KEY), "unavailable");
+});
+
+test("two_requests_for_the_same_tool_call_are_two_dialogs_and_each_post_hook_closes_one", () => {
+  const t = setup({ mode: "auto", status: "busy", report: "empty" });
+  t.hook("PermissionRequest", BASH);
+  t.hook("PermissionRequest", BASH);
+  t.hook("PostToolUse", BASH);
+  assert.equal(t.router.followupState(KEY), "unavailable", "one is still open");
+  t.hook("PostToolUse", BASH);
+  assert.equal(t.router.followupState(KEY), "ready");
+  // The two elicitations likewise.
+  t.hook("Elicitation", {});
+  t.hook("Elicitation", {});
+  t.hook("ElicitationResult", {});
+  assert.equal(t.router.followupState(KEY), "unavailable");
+  t.hook("ElicitationResult", {});
+  assert.equal(t.router.followupState(KEY), "ready");
+});
+
+test("every_hook_agentd_tracks_for_a_dialog_is_registered_by_the_claude_plugin_through_the_forwarder", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { BLOCKING_HOOKS, DIALOG_TRACKING_HOOKS } = require("../dist/launcher/session-state.js");
+  const hooks = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "plugin", "claude-code", "hooks", "hooks.json"), "utf8")).hooks;
+  for (const name of [...BLOCKING_HOOKS, ...DIALOG_TRACKING_HOOKS]) {
+    assert.equal(Array.isArray(hooks[name]), true, `${name} is registered in the plugin's hooks.json`);
+    const commands = hooks[name].flatMap((group) => group.hooks.map((hook) => hook.command));
+    assert.equal(commands.some((command) => /hook-forward\.js/.test(command)), true, `${name} goes through the forwarder`);
+  }
+  // The MCP elicitation hooks are the ones Claude Code 2.1.285 names (its own hook-input descriptions say so).
+  assert.deepEqual([...BLOCKING_HOOKS].sort(), ["Elicitation", "ElicitationResult", "PermissionRequest"]);
 });
 
 test("a_reply_that_failed_marks_nothing_queued", async () => {

@@ -288,6 +288,10 @@ export class SessionStore {
         break;
       case "UserPromptExpansion":
         break;
+      // An MCP server asked the user for input, and the user's answer: dialogs agentd tracks (session-state) and shows nothing of.
+      case "Elicitation":
+      case "ElicitationResult":
+        break;
       case "Notification":
         this.applyNotification(record, asString(payload.message), now);
         break;
