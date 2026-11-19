@@ -7,12 +7,12 @@ import os from "node:os";
 import path from "node:path";
 import { offerCliInstall, realCliInstallIo, resolveCli, type CliTool } from "./launcher/cli-install";
 import { applyWindowsGate } from "./launcher/windows-gate";
-import { claudeSessionsDir, findOwnedClaudeSession } from "./launcher/claude-sessions";
+import { claudeSessionsDir, findOwnedClaudeSession, sessionHasTranscript } from "./launcher/claude-sessions";
 import { LauncherClient } from "./launcher/launcher-client";
 import { offerPairing } from "./launcher/pair-prompt";
 import { spawnPty, type PtyChild } from "./launcher/pty";
 import { launcherSocketPath, launcherSocketTrusted, probeStatus, type StatusProbe } from "./launcher/status-probe";
-import { BellGate, KittyKeyboardTracker, restoreTerminal, saveTerminal } from "./launcher/terminal";
+import { BellGate, KittyKeyboardTracker, ResumeHintWatcher, restoreTerminal, saveTerminal } from "./launcher/terminal";
 
 const UNREACHABLE = "Rokid-Coder: agentd isn't running — this session is not attached.";
 // R155: printed before the bind, so it says attaching; only the phone shows the bind itself.
@@ -298,6 +298,10 @@ async function runClaude(args: string[]): Promise<void> {
   // own, including after stdin EOF, nothing is swept: plain `claude` leaves a
   // background job the user started on purpose (`npm run dev &`) running, and rk
   // must behave the same.
+  // The session the child last showed in its sessions file, whether or not agentd is up: after the child
+  // exits its file is gone, and a conversation's id is what the wearer needs to find it again.
+  let lastSessionId: string | undefined;
+  const resumeHint = new ResumeHintWatcher();
   let shutdown: { code: number; note?: string } | undefined;
   let sweepGroup = false;
   let finished = false;
@@ -306,6 +310,22 @@ async function runClaude(args: string[]): Promise<void> {
   let killTimer: NodeJS.Timeout | undefined;
   let hardTimer: NodeJS.Timeout | undefined;
   let pollTimer: NodeJS.Timeout | undefined;
+
+  /**
+   * One line, after the terminal is restored, when the child's own "Resume this session with:" hint did
+   * not go by (it can be lost with the screen the child printed it on) and the session has a conversation
+   * to resume: `finish` runs once, so the line comes at most once. Never for a session whose id is not
+   * known, never when stdout is not a terminal, and it changes no exit code.
+   */
+  const writeResumeLine = (): void => {
+    if (resumeHint.seen || lastSessionId === undefined || !process.stdout.isTTY) {
+      return;
+    }
+    if (sessionHasTranscript(path.dirname(sessionsDir), lastSessionId) === false) {
+      return; // nothing was said in it: plain claude prints no hint for such a session either
+    }
+    fs.writeSync(2, `Resume this session with: rk claude --resume ${lastSessionId}\n`);
+  };
 
   const finish = (code: number | null, signal: string | null): void => {
     if (finished) {
@@ -335,6 +355,7 @@ async function runClaude(args: string[]): Promise<void> {
         if (shutdown?.note) {
           fs.writeSync(2, shutdown.note);
         }
+        writeResumeLine();
       } finally {
         process.exit(status);
       }
@@ -468,6 +489,14 @@ async function runClaude(args: string[]): Promise<void> {
     if (finished) {
       return;
     }
+    // The id is kept even while agentd is away, which the binding below needs a link for.
+    // Polling goes on at the slow rate once a session was seen, so a `/clear` while agentd is away is
+    // followed too and the id printed at exit is the current one.
+    const seen = findOwnedClaudeSession(sessionsDir, child.pid);
+    if (seen) {
+      lastSessionId = seen.sessionId;
+      everFound = true;
+    }
     if (link.up) {
       const session = findOwnedClaudeSession(sessionsDir, child.pid);
       if (session) {
@@ -499,6 +528,7 @@ async function runClaude(args: string[]): Promise<void> {
   // ---- wiring: data and exit are subscribed in the same tick as the spawn ----
   child.onData((chunk) => {
     kitty.push(chunk);
+    resumeHint.push(chunk);
     process.stdout.write(bell.output(chunk));
   });
   child.onExit((code, signal) => finish(code, signal));

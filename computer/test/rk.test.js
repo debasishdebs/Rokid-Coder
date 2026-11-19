@@ -594,20 +594,20 @@ test("kitty_tracker_pops_each_screen_on_its_own_and_undoes_a_bare_set", async ()
   both.push("\x1b[>1u");
   both.push("\x1b[?10");
   both.push("49h\x1b[>5u\x1b[>1u\x1b[<u");
-  assert.deepEqual(both.restore(), { onAlt: "\x1b[<u", onMain: "\x1b[<u" }, "one pop on each screen, each on its own");
+  assert.deepEqual(both.restore(), { onAlt: "\x1b[<u", onMain: "\x1b[<u", leaveAlt: true }, "one pop on each screen, each on its own");
   const bare = new KittyKeyboardTracker();
   bare.push("\x1b[=5;");
   bare.push("1u");
-  assert.deepEqual(bare.restore(), { onAlt: "", onMain: "\x1b[=0;1u" }, "flags set with nothing pushed are set back to 0");
+  assert.deepEqual(bare.restore(), { onAlt: "", onMain: "\x1b[=0;1u", leaveAlt: false }, "flags set with nothing pushed are set back to 0");
   const inside = new KittyKeyboardTracker();
   inside.push("\x1b[>1u\x1b[=3u");
-  assert.deepEqual(inside.restore(), { onAlt: "", onMain: "\x1b[<u" }, "a set on a pushed entry goes with its pop");
+  assert.deepEqual(inside.restore(), { onAlt: "", onMain: "\x1b[<u", leaveAlt: false }, "a set on a pushed entry goes with its pop");
   const cleared = new KittyKeyboardTracker();
   cleared.push("\x1b[=5u\x1b[>1u\x1b[<u");
-  assert.deepEqual(cleared.restore(), { onAlt: "", onMain: "" }, "a pop that empties the stack resets the flags");
+  assert.deepEqual(cleared.restore(), { onAlt: "", onMain: "", leaveAlt: false }, "a pop that empties the stack resets the flags");
   const left = new KittyKeyboardTracker();
   left.push("\x1b[?1049h\x1b[>1u\x1b[?1049l");
-  assert.deepEqual(left.restore(), { onAlt: "", onMain: "" }, "the alternate screen's stack is gone with it");
+  assert.deepEqual(left.restore(), { onAlt: "", onMain: "", leaveAlt: false }, "the alternate screen's stack is gone with it");
 
   // restoreTerminal pops the alternate screen's stack before leaving it, and the main one's after.
   await withTempDir(async (dir) => {
