@@ -353,6 +353,14 @@ Limits to know about:
   check then fails, and the cleanup (Ctrl+U) erases that one letter; nothing is sent. The box's top rule is
   taken only from the first column (the UI's own), so a draft whose top has scrolled off the screen is
   never read as an empty box: the reply is refused.
+- Known limit of the width marks: a glyph whose width a terminal does not settle alone is marked per cell, and
+  writing over that one cell makes it certain again without looking at the cells to its right. If the model
+  counted such a glyph as one cell and Claude as two (an emoji in a draft: `❯ 👍a`), then `a` sits one column
+  left of where Claude has it, and a later redraw that rewrites only changed cells by absolute column could
+  leave the model reading a prompt that is empty where the buffer is not. Claude's real redraws move to an
+  absolute column right after every such glyph (`CSI n G`), so this is probably moot, and it is documented
+  rather than fixed. If the field log ever shows it, the safe change is that only `K`, `J` and whole-row
+  erases clear a mark, and a plain overwrite of the marked cell does not.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result
   cannot be seen, the session is marked uncertain and further commands are refused until you check it.
 - A follow-up is one bracketed paste of at most 16 KiB.
@@ -385,6 +393,12 @@ wrong, the log tells which layout it was, without a character of what was on the
   screen size, the rows of the top rule, the prompt row and the bottom rule, the rows under the bottom rule
   by class (`below`), Claude's sessions-file status (`file`), agentd's decision (`ready`, `readyWhy`),
   the permission mode and `layoutSeen`, how many distinct layouts this session has shown.
+  With `reason` `uncertain_width` it adds `uw=<row>:U+<hex>`: the row and the codepoint (a character whose width a
+  terminal does not settle alone, such as `▶`, an emoji or a joiner) that made the box rows unreadable; with a
+  refusal for a dialog, `dlg=<row>:<chrome|menu|input>`: the row, and whether it was a dialog's own hint text, a
+  selected menu row (`❯ 1. Yes`) or something in the input rows. Never the text itself. A width mark is kept per
+  cell and goes when the cell is written over or erased, and counts only on the box's own rows; a dialog's
+  words in a message, an agent's title or a numbered list are not read as a dialog around the box.
 - `launcher_screen_shape`: when a reply was refused because no box was found, each row's index, class and length.
 - `launcher_screen_unknown_layout`: a warning, the first time (a few per session at most) a layout shows a
   prompt-glyph row the probe could not read as the box: the line to send.

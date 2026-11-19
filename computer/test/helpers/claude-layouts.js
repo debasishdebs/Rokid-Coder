@@ -54,7 +54,18 @@ function layout({
   diffHeaderAbove = false,
   footer = "auto",
   entry = true,
+  glyphs = "screenshot",
+  redraw,
+  trailing = "",
 } = {}) {
+  // The glyphs as the screenshots show them, or as the bytes of the real capture carry them (`⏵⏵` for the footer's `▶▶`,
+  // `⏺` for the message bullet, `✳` in the spinner), which are the ones whose width a terminal does not settle alone.
+  const glyph =
+    glyphs === "bytes"
+      ? { footer: "⏵⏵", plan: "⏸", bullet: "⏺", spinner: "✳", status: "✻" }
+      : glyphs === "ambiguous"
+        ? { footer: "▶▶", plan: "⏸", bullet: "⏺", spinner: "✳", status: "✱" }
+        : { footer: "▶▶", plan: "⏸", bullet: "●", spinner: "✱", status: "✻" };
   // The agents panel: a blank row, `● main`, then a `○` row per agent with its duration and tokens right-aligned; the
   // selection `❯` is on one row, on `● main`, or nowhere. The footer's own counts are not the panel's.
   const panelRow = (glyph, text, right2) => {
@@ -77,7 +88,17 @@ function layout({
   const promptRow = bottomRule - 1;
   const topRule = promptRow - 1;
   const rightRow = topRule - 1;
-  const out = [entry ? "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l" : "\x1b[2J\x1b[H"];
+  // `entry: "diff"`: no erase at all, the rows are written over what is there, as Claude's own redraws do when
+  // only part of the screen changed (a panel that grows or shrinks moves the box over rows that held other things).
+  // The rows are blanked from their first cell with the erase-to-end-of-line (`K`), not a whole-screen or
+  // whole-line erase, and written again.
+  const out = [
+    entry === "diff"
+      ? Array.from({ length: rows }, (_, row) => `\x1b[${row + 1};1H\x1b[K`).join("")
+      : entry
+        ? "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l"
+        : "\x1b[2J\x1b[H",
+  ];
   if (transcript === "diff") {
     // A rendered diff block as the UI draws it: full-width coloured BACKGROUNDS (red for removed, green for added),
     // line numbers, a dim `└` row, YAML with comments, `---` and `──` inside the text, bullet rows and a `Ran`
@@ -98,14 +119,15 @@ function layout({
     ];
     diffRows.forEach((text, i) => out.push(at(1 + i, 1, text)));
   } else {
-    out.push(at(1, 1, "● The last assistant text, which says what was done."));
+    out.push(at(1, 1, `${glyph.bullet} The last assistant text, which says what was done.`));
+    out.push(at(3, 1, `${glyph.bullet} Another message, drawn earlier.`));
   }
   if (phase === "waiting") {
-    out.push(at(topRule - 3, 1, `${GRAY}✱ Waiting for ${Math.max(agents, 1)} background agents to finish${RESET}`));
+    out.push(at(topRule - 3, 1, `${GRAY}${glyph.status} Waiting for ${Math.max(agents, 1)} background agents to finish${RESET}`));
   } else if (phase === "idle") {
-    out.push(at(topRule - 3, 1, `${GRAY}✻ ${verb} for ${duration} · done 8:32 PM${monitor ? " · 1 monitor still running" : ""}${RESET}`));
+    out.push(at(topRule - 3, 1, `${GRAY}${glyph.status} ${verb} for ${duration} · done 8:32 PM${monitor ? " · 1 monitor still running" : ""}${RESET}`));
   } else if (phase === "working") {
-    out.push(at(topRule - 4, 1, `\x1b[38;5;174m✱ ${verb}…${RESET} ${GRAY}(21s · ↓ 2.0k tokens)${RESET}`));
+    out.push(at(topRule - 4, 1, `\x1b[38;5;174m${glyph.spinner} ${verb}…${RESET} ${GRAY}(21s · ↓ 2.0k tokens)${RESET}`));
     out.push(at(topRule - 3, 1, `${MUTED}  Tip: Use /memory to view and manage Claude memory${RESET}`));
   }
   const text = RIGHT_LINES[right] ?? "";
@@ -117,15 +139,45 @@ function layout({
     cursor === "blank" ? `❯ \x1b[7m \x1b[27m` : cursor === "suggestion" ? `❯ \x1b[7mc\x1b[27m${MUTED}ontinue${RESET}` : "❯ ";
   out.push(at(promptRow, 1, line));
   out.push(at(bottomRule, 1, rule(cols)));
-  const glyph = footer === "plan" ? "⏸" : "▶▶";
+  const glyph2 = footer === "plan" ? glyph.plan : glyph.footer;
   const mode = footer === "plan" ? "plan mode on" : "auto mode on";
   const parts = [`${mode} (shift+tab to cycle)`];
   if (monitor) parts.push(monitors === 1 ? "1 monitor" : `${monitors} monitors`);
   if (phase === "working") parts.push("esc to interrupt");
   parts.push("← 1 agent", "↓ to manage");
-  out.push(at(footerRow, 3, `\x1b[33m${glyph}\x1b[0m ${GRAY}${parts.join(" · ")}${RESET}`));
+  out.push(at(footerRow, 3, `\x1b[33m${glyph2}\x1b[0m ${GRAY}${parts.join(" · ")}${RESET}`));
   panel.forEach((text2, i) => out.push(at(footerRow + 1 + i, 1, text2)));
-  return out.join("");
+  if (trailing) {
+    // A glyph far to the right of the footer, the panel rows and the status line: past where a later row (the
+    // box's prompt row) is written, so only an erase or an overwrite of those cells clears it.
+    const far = Math.min(100, cols - 10);
+    for (const row of [footerRow, ...panel.map((_, i) => footerRow + 1 + i), topRule - 3, topRule - 4]) {
+      if (row >= 0 && row < rows) out.push(at(row, far, trailing));
+    }
+  }
+  if (!redraw) return out.join("");
+  // A redraw of only what changed, row by row, with no whole-row erase before the writes: what is left of the old
+  // rows is cleared only as `redraw` says. `k`: the tail of each row is erased with `K` after its writes, and a row
+  // with no writes is blanked with `K` from its first cell. `x`: the same with `X` for as many cells as the row
+  // has. `overwrite`: no erase at all, a row is written over with spaces and then its content.
+  const writes = new Map();
+  for (const piece of out.slice(1)) {
+    const at2 = /^\x1b\[(\d+);\d+H/.exec(piece);
+    const row = Number(at2[1]);
+    writes.set(row, [...(writes.get(row) ?? []), piece]);
+  }
+  const rowwise = [];
+  for (let row = 1; row <= rows; row += 1) {
+    const mine = writes.get(row) ?? [];
+    const start = `\x1b[${row};1H`;
+    if (redraw === "overwrite") {
+      rowwise.push(`${start}${" ".repeat(cols)}${mine.join("")}`);
+    } else {
+      const erase = redraw === "x" ? `\x1b[${cols}X` : "\x1b[K";
+      rowwise.push(mine.length === 0 ? `${start}${erase}` : `${mine.join("")}${erase}`);
+    }
+  }
+  return rowwise.join("");
 }
 
 /** The 1-based row of the prompt line of `layout(options)`, for a test that draws on it. */

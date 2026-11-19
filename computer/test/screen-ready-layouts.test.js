@@ -176,8 +176,11 @@ test("agent_titles_and_token_counts_that_look_like_rules_or_prompts_change_nothi
   dialog.push(claudeScreen({ cols: 207, rows: 50, agents: 3, selected: 0, dialog: true }));
   assert.equal(boxState(dialog), "dialog");
   const inPanel = new ScreenModel(207, 50);
-  inPanel.push(layout({ cols: 207, rows: 50, phase: "waiting", agents: 3, titles: ["Do you want to proceed?"] }));
+  inPanel.push(layout({ cols: 207, rows: 50, phase: "waiting", agents: 3, titles: ["Esc to cancel · Tab to amend"] }));
   assert.equal(boxState(inPanel), "dialog");
+  const prose = new ScreenModel(207, 50);
+  prose.push(layout({ cols: 207, rows: 50, phase: "waiting", agents: 3, titles: ["Do you want to proceed?"] }));
+  assert.equal(boxState(prose), "empty", "words a dialog also holds, in an agent's title, are no dialog");
   const above = new ScreenModel(207, 50);
   above.push(layout({ cols: 207, rows: 50, phase: "waiting", agents: 3 }) + "\x1b[40;1H  Esc to cancel · Tab to amend");
   assert.equal(boxState(above), "dialog");

@@ -419,6 +419,24 @@ test("the_sessions_file_and_the_verdict_are_looked_at_about_once_a_second_not_at
   }
 });
 
+test("the_verdict_names_the_row_and_codepoint_of_an_uncertain_width_and_the_row_and_kind_of_a_dialog", () => {
+  const wide = setup();
+  wide.draw(repaint({ above: ["● the secret launch code"], input: "go 👍 hunter2" }));
+  wide.wait(500);
+  const [first] = wide.frames.filter((f) => f.type === "screen_verdict");
+  assert.equal(first.reason, "uncertain_width");
+  assert.match(first.uw, /^\d+:U\+1F44D$/);
+  assert.equal(JSON.stringify(first).includes("hunter2"), false);
+  assert.equal(JSON.stringify(first).includes("secret"), false);
+  const dialog = setup();
+  dialog.draw(`● Which one?\r\n${RULE}\r\n❯ 1. Yes\r\n  2. No\r\n${RULE}\r\n  Esc to cancel · Tab to amend`);
+  dialog.wait(500);
+  const [shown] = dialog.frames.filter((f) => f.type === "screen_verdict");
+  assert.deepEqual([shown.probe, shown.box], ["blocked", "dialog"]);
+  assert.match(shown.dlg, /^\d+:(chrome|menu|input)$/);
+  assert.equal(JSON.stringify(shown).includes("Which"), false);
+});
+
 test("a_layout_with_a_prompt_glyph_row_the_probe_cannot_read_is_told_at_once_and_only_the_first_time", () => {
   const t = setup();
   const odd = (word) => `\x1b[2J\x1b[H● ${word}\r\n❯ hunter2\r\n  ○ general-purpose  Task\r\n❯ ○ general-purpose  Task`;
@@ -525,12 +543,22 @@ test("agentd_logs_the_verdict_with_its_own_decision_a_warning_for_an_unknown_lay
         ["layouts huge", { layouts: 5000 }],
         ["tainted a string", { tainted: "no" }],
         ["unknown a string", { unknown: "yes" }],
+        ["uw with words", { uw: "47:the launch code" }],
+        ["uw without a codepoint", { uw: "47" }],
+        ["uw with a lowercase codepoint", { uw: "47:U+25b6" }],
+        ["dlg with words", { dlg: "47:secret" }],
+        ["dlg of a kind not known", { dlg: "47:prose" }],
         ["an extra field", { title: "my secret project" }],
       ]) {
         n += 1;
         assert.equal(await attempt({ ...good, ...bad }, `L-v${n}`), true, `${what}: the connection is dropped`);
       }
-      assert.equal(logs.filter((l) => l.event === "launcher_screen_verdict").length, 3, "only the good ones were logged");
+      assert.equal(await attempt({ ...good, reason: "uncertain_width", uw: "47:U+25B6" }, "L-uw"), false);
+      assert.equal(await attempt({ ...good, probe: "blocked", reason: "dialog", box: "dialog", dlg: "44:chrome" }, "L-dlg"), false);
+      const named = logs.filter((l) => l.event === "launcher_screen_verdict");
+      assert.equal(named.find((l) => l.meta.uw !== undefined).meta.uw, "47:U+25B6");
+      assert.equal(named.find((l) => l.meta.dlg !== undefined).meta.dlg, "44:chrome");
+      assert.equal(named.length, 5, "only the good ones were logged");
       assert.equal(JSON.stringify(logs).includes("secret"), false);
     } finally {
       await hub.stop();

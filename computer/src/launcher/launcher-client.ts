@@ -219,7 +219,7 @@ export class LauncherClient {
       this.unknownLayouts.add(classes);
     }
     const status = readOwnedStatus(this.readFile?.());
-    const signature = [verdict.probe, verdict.reason, verdict.box, verdict.tainted, verdict.top, verdict.prompt, verdict.bottom, verdict.cols, verdict.rows, status].join("|");
+    const signature = [verdict.probe, verdict.reason, verdict.box, verdict.tainted, verdict.top, verdict.prompt, verdict.bottom, verdict.cols, verdict.rows, verdict.uw, verdict.dlg, status].join("|");
     const now = this.clock.now();
     const due = this.verdictSentAt === undefined || now - this.verdictSentAt >= VERDICT_REPORT_MS;
     if (!newUnknown && (signature === this.verdictSignature || !due)) {

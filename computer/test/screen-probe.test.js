@@ -330,7 +330,12 @@ test("wide_characters_take_two_cells_and_combining_marks_none", () => {
 test("a_character_of_uncertain_width_on_the_input_line_makes_it_unknown", () => {
   for (const text of ["go 👍", "family 👨‍👩‍👧", "heart ❤️", "flag 🇮🇳"]) {
     const model = screen(repaint({ input: text }));
-    assert.deepEqual(probe(model), { kind: "unknown", reason: "uncertain_width" }, text);
+    const seen = probe(model);
+    assert.deepEqual([seen.kind, seen.reason], ["unknown", "uncertain_width"], text);
+    // It names the row and the codepoint, in hex, and nothing of the text around them.
+    assert.match(seen.uw, /^\d+:U\+[0-9A-F]{4,6}$/, text);
+    const row = Number(seen.uw.split(":")[0]);
+    assert.equal(model.lines()[row].includes("> "), true, "the row named is the input row");
   }
   // The same character far from the box is not a problem.
   assert.equal(probe(screen(repaint({ above: ["Looks good 👍"], input: "ok" }))).kind, "prompt");
