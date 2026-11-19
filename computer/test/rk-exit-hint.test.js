@@ -19,10 +19,13 @@ const ID = "sess-exit-hint";
 const count = (text, needle) => text.split(needle).length - 1;
 
 /** rk claude on a pty with the fake behind it, driven to `/exit`; resolves with the run and the status. */
-async function exitRun(dir, extra, { exit = "/exit", before } = {}) {
+async function exitRun(dir, extra, { exit = "/exit", before, stderrTo } = {}) {
   const { env } = await rkEnv(dir, { FAKE_PIDFILE: path.join(dir, "pids.json"), FAKE_SESSION_ID: ID, FAKE_TUI_MODES: "1", ...extra });
   await before?.(dir);
-  const run = inPty(process.execPath, [RK, "claude"], env);
+  // `stderrTo`: stdout and stdin stay the pty, stderr goes to that file (the hint line is written to stderr).
+  const run = stderrTo
+    ? inPty("/bin/sh", ["-c", 'exec "$0" "$@" 2>"$RK_STDERR_FILE"', process.execPath, RK, "claude"], { ...env, RK_STDERR_FILE: stderrTo })
+    : inPty(process.execPath, [RK, "claude"], env);
   await run.until("fake-claude ready");
   const pids = await until(() => readJson(path.join(dir, "pids.json")), 5000, "the fake's pid file");
   // rk finds the session by polling its file; give it the fast polls to do so before the child goes.
@@ -81,6 +84,16 @@ test("the_line_needs_a_known_id_a_terminal_and_a_conversation_to_resume", async 
   await withTempDir(async (dir) => {
     const run = await exitRun(dir, { FAKE_EXIT_HINT: "leave", ROKID_CLAUDE_SESSIONS_DIR: "" });
     assert.equal(run.out.includes("rk claude --resume"), false);
+  });
+});
+
+test("the_line_goes_to_stderr_so_it_is_not_printed_when_stderr_is_not_a_terminal", async () => {
+  await withTempDir(async (dir) => {
+    const errFile = path.join(dir, "stderr.txt");
+    // stdout is a terminal, stderr is a file: the line would go to the file, where nobody is reading it.
+    const run = await exitRun(dir, { FAKE_EXIT_HINT: "leave" }, { stderrTo: errFile });
+    assert.equal(run.out.includes("rk claude --resume"), false, "not on the terminal");
+    assert.equal(fs.readFileSync(errFile, "utf8").includes("rk claude --resume"), false, "not in the file");
   });
 });
 

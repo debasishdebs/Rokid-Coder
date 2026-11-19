@@ -315,10 +315,11 @@ async function runClaude(args: string[]): Promise<void> {
    * One line, after the terminal is restored, when the child's own "Resume this session with:" hint did
    * not go by (it can be lost with the screen the child printed it on) and the session has a conversation
    * to resume: `finish` runs once, so the line comes at most once. Never for a session whose id is not
-   * known, never when stdout is not a terminal, and it changes no exit code.
+   * known, never when stdout is not a terminal or stderr (where the line is written) is not one, and it
+   * changes no exit code.
    */
   const writeResumeLine = (): void => {
-    if (resumeHint.seen || !process.stdout.isTTY) {
+    if (resumeHint.seen || !process.stdout.isTTY || !process.stderr.isTTY) {
       return;
     }
     // The poll can be up to two seconds behind (a `/clear` just before `/exit`): look at the file once more

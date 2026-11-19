@@ -767,9 +767,12 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   // `○` row for each agent, one of which may carry a `❯` selection). It is as tall as there are agents,
   // so it is not counted; it is never read for what the input line holds, and a `❯` there is no prompt.
   const footer = rows.slice(bottom + 1);
+  // The box's top rule starts in the first column, as the UI's own rules do; a draft's rows are indented under
+  // the glyph, so an indented row that reads as a rule is the wearer's text, never the top (with the real top
+  // scrolled off, it would make the rows below it an "empty" box and the hidden draft above it would be sent).
   let top = -1;
   for (let i = bottom - 1; i >= Math.max(0, bottom - 1 - MAX_INPUT_ROWS); i -= 1) {
-    if (isRule(rows[i])) {
+    if (isTopRule(rows[i])) {
       top = i;
       break;
     }
@@ -779,7 +782,8 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   // with a prompt row under it and only box-like rows down to the bottom rule encloses solid text, that is the
   // box holding a draft: the caller must be told there is text, never that the box is empty or unreadable.
   const topFound = top >= 0 && bottom - top >= 2 && PROMPT_ROW.test(rows[top + 1] ?? "");
-  const draftTop = findDraftTop(rows, bottom, screen.solidLines(), topFound);
+  const solidRows = screen.solidLines();
+  const draftTop = findDraftTop(rows, bottom, solidRows, topFound);
   if (draftTop >= 0 && (!topFound || draftTop < top)) {
     top = draftTop;
   }
@@ -794,8 +798,14 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   }
   // Where a running-turn sign or a dialog's own text would be: the rows above the box and its footer.
   const around = [...rows.slice(Math.max(0, top - STATUS_ROWS), top), ...footer];
-  // A second prompt row with something after its glyph is a selection list; a bare `>` is a row of the draft.
-  if (inputRows.some((row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row) && row.replace(PROMPT_LEAD, "").trim() !== ""))) {
+  // A second prompt row with something after its glyph is a selection list; a bare `>` is a row of the draft,
+  // but only a solid one: a muted bare glyph is no text of the wearer's, and no empty box either.
+  const mutedRow = (index: number): boolean => (solidRows[top + 1 + index] ?? "").trim() === "";
+  if (
+    inputRows.some(
+      (row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row) && (row.replace(PROMPT_LEAD, "").trim() !== "" || mutedRow(index))),
+    )
+  ) {
     return { kind: "blocked", reason: "menu" };
   }
   if (!PROMPT_ROW.test(inputRows[0])) {
@@ -813,6 +823,11 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   // placeholder. Typed text that looks like it is text, and so is a multi-line draft that begins
   // and ends the same way.
   return { kind: "prompt", text, rows: exactRows(inputRows), empty: solid === "" };
+}
+
+/** A rule that starts in the first column: what the UI draws (an indented row that reads as a rule is a draft's). */
+function isTopRule(row: string): boolean {
+  return isRule(row) && /^\S/.test(row);
 }
 
 /** The prompt glyph (and a side border) at the start of a row. */
@@ -850,7 +865,7 @@ function findDraftTop(rows: string[], bottom: number, solid: string[], nearestFo
     if (i + 2 < bottom && (solid[i + 2] ?? "").trim() !== "" && !isRule(solid[i + 2])) {
       below = true;
     }
-    if (i + 1 < bottom && isRule(rows[i]) && PROMPT_ROW.test(rows[i + 1] ?? "")) {
+    if (i + 1 < bottom && isTopRule(rows[i]) && PROMPT_ROW.test(rows[i + 1] ?? "")) {
       const first = (solid[i + 1] ?? "").replace(PROMPT_LEAD, "").trim();
       if (below || (first !== "" && !isRule(first))) {
         found = i;

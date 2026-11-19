@@ -1036,6 +1036,23 @@ test("muted_rows_between_two_rules_stay_screen_unreadable_and_a_rule_like_draft_
   }
 });
 
+test("a_draft_whose_top_scrolled_off_gets_nothing_typed_either_way_the_rule_like_row_is_drawn", async () => {
+  const draft = Array.from({ length: 12 }, (_, i) => `  draft line ${i}`);
+  const footer = [FOOTER, "", "● main", "  ○ general-purpose  Task one"];
+  for (const [what, tail] of [["glyph and space", ["  > "]], ["second glyph", ["  ❯"]], ["glyph and a blank row", ["  > ", ""]], ["bare >", ["  >"]]]) {
+    for (const file of ["idle", "busy"]) {
+      const t = setup({ file });
+      t.session.statusUpdatedAt = t.clock.now() - 10_000;
+      t.draw(`\x1b[2J\x1b[H${[...draft, "  ──────────────", ...tail, RULE, ...footer].join("\r\n")}`);
+      const run = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain", ...(file === "busy" ? { bgReply: true } : {}) }));
+      await t.advance(5400);
+      assert.equal(run.result?.ok, false, `${what} ${file}`);
+      assert.deepEqual(t.pty.writes, [], `${what} ${file}: nothing typed`);
+      assert.deepEqual(t.asked, [], `${what} ${file}: agentd is not even asked`);
+    }
+  }
+});
+
 test("a_tainted_screen_refusal_logs_no_shape_and_a_huge_terminal_logs_one_the_hub_accepts", async () => {
   const tainted = setup({ file: "idle" });
   tainted.session.statusUpdatedAt = tainted.clock.now() - 10_000;

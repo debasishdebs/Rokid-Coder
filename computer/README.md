@@ -324,6 +324,12 @@ Limits to know about:
   `resume`, `clear` or an unknown source and by the session's end, not by a `compact` (agents run on
   through a compaction); every SubagentStart, SubagentStop and clearing is logged as `subagent_event`
   with the counts before and after, the cause and the first 8 characters of the agent id.
+- Known limit of the screen check: a single typed letter with the cursor on it, followed by a faint
+  suggestion (`h` in inverse video, then `elp` faint), looks on the screen exactly like the cursor on the
+  first letter of an empty box's suggestion, so the box reads as empty. The reply is pasted, the exact-text
+  check then fails, and the cleanup (Ctrl+U) erases that one letter; nothing is sent. The box's top rule is
+  taken only from the first column (the UI's own), so a draft whose top has scrolled off the screen is
+  never read as an empty box: the reply is refused.
 - Compact has up to 180 s to finish. A model change is confirmed with Claude's own dialog; if the result
   cannot be seen, the session is marked uncertain and further commands are refused until you check it.
 - A follow-up is one bracketed paste of at most 16 KiB.
