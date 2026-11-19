@@ -1,8 +1,11 @@
 package com.anezium.rokidbus.plugin.agents.onboarding
 
 import android.app.Application
+import android.content.ClipboardManager
 import android.content.Context
+import com.anezium.rokidbus.plugin.agents.service.LinkLog
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -40,6 +43,41 @@ class OnboardingStepsTest {
         val missed = activity.visibleTexts()
         assertTrue(missed.contains(OnboardingCopy.TEST_ALERT_MISSED))
         assertTrue("it can be sent again from the missed screen too", missed.map(String::lowercase).contains("send again"))
+    }
+
+    @Test
+    fun the_glass_app_screen_has_a_collapsed_link_log_that_copies_as_text_without_anything_sensitive() {
+        val secret = "tok1234567890abcdefXYZ"
+        LinkLog.clearRecent()
+        LinkLog.i("voice tap: link UP after 1200ms (attempt 1)")
+        LinkLog.i("hub says token=$secret at 192.168.1.20")
+        try {
+            val activity = openAt(OnboardingStep.GLASSES)
+
+            // The pill buttons draw their labels in capitals.
+            val collapsed = activity.visibleTexts().map(String::lowercase)
+            assertTrue("$collapsed", OnboardingCopy.LINK_LOG.lowercase() in collapsed)
+            assertFalse("collapsed: no lines shown", collapsed.any { it.contains("voice tap: link up") })
+            assertFalse(OnboardingCopy.COPY.lowercase() in collapsed)
+
+            activity.clickText(OnboardingCopy.LINK_LOG)
+            val open = activity.visibleTexts()
+            assertTrue(open.any { it.contains("voice tap: link UP after 1200ms (attempt 1)") })
+            assertTrue(OnboardingCopy.LINK_LOG_HIDE.lowercase() in open.map(String::lowercase))
+            assertFalse("what is shown is redacted too", open.any { it.contains(secret) || it.contains("192.168.1.20") })
+
+            activity.clickText(OnboardingCopy.COPY)
+            val clip = app.getSystemService(ClipboardManager::class.java).primaryClip!!.getItemAt(0).text.toString()
+            assertEquals(LinkLog.recentText(), clip)
+            assertTrue(clip.contains("voice tap: link UP after 1200ms (attempt 1)"))
+            assertFalse(clip.contains(secret))
+            assertFalse(clip.contains("192.168.1.20"))
+
+            activity.clickText(OnboardingCopy.LINK_LOG_HIDE)
+            assertFalse(activity.visibleTexts().any { it.contains("voice tap: link UP") })
+        } finally {
+            LinkLog.clearRecent()
+        }
     }
 
     @Test
