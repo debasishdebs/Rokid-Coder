@@ -112,7 +112,7 @@ class HubCoreReconnectCxrTest {
     }
 
     @Test
-    fun a_session_hi_rokid_closed_is_taken_back_for_the_wearer_and_the_closure_clears() {
+    fun a_session_hi_rokid_closed_is_taken_back_for_the_wearer_and_the_closure_clears_when_the_link_is_up() {
         harness.startLinked()
         cxr.linkDown()
         cxr.linkCallback!!.onCXRLDisconnectedByServer()
@@ -124,8 +124,40 @@ class HubCoreReconnectCxrTest {
         assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
 
         assertEquals(listOf("test-token", "test-token"), cxr.connectTokens.toList())
-        assertFalse("the closure is cleared, as the Glass app screen does", core.cxrClosedByServer)
         assertEquals(0, cxr.disconnects)
+        assertTrue("the closure stands until the link is seen up", core.cxrClosedByServer)
+
+        cxr.linkUp()
+        assertFalse(core.cxrClosedByServer)
+    }
+
+    @Test
+    fun a_bind_that_never_comes_up_leaves_the_background_refusing() {
+        harness.startLinked()
+        cxr.linkDown()
+        cxr.linkCallback!!.onCXRLDisconnectedByServer()
+
+        assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
+        assertFalse(core.isCxrUp())
+
+        assertTrue(core.cxrClosedByServer)
+        assertFalse("the background still refuses", core.reconnectCxr())
+        assertEquals("and binds nothing", 2, cxr.connectTokens.size)
+    }
+
+    @Test
+    fun once_the_link_was_seen_up_a_later_drop_that_is_not_a_closure_is_the_backgrounds_to_heal() {
+        harness.startLinked()
+        cxr.linkDown()
+        cxr.linkCallback!!.onCXRLDisconnectedByServer()
+        assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
+        cxr.linkUp()
+        assertFalse(core.cxrClosedByServer)
+
+        cxr.linkDown()
+
+        assertTrue(core.reconnectCxr())
+        assertEquals(3, cxr.connectTokens.size)
     }
 
     @Test
@@ -139,7 +171,9 @@ class HubCoreReconnectCxrTest {
 
         assertEquals(CxrEnsureResult.CONNECTING, core.ensureCxrLink())
 
-        assertEquals(0, cxr.disconnects)
+        assertEquals("the bind is kept", 0, cxr.disconnects)
+        assertTrue("and the closure stands until the link is up", core.cxrClosedByServer)
+        cxr.linkUp()
         assertFalse(core.cxrClosedByServer)
     }
 

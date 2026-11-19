@@ -2747,8 +2747,12 @@ class HubCore internal constructor(
      * still be clear when the attempt starts; `connect` then finishes the closed bind first, which
      * sets it, and the new bind is let go ([CxrStart.DROPPED]). A bind the library refused is
      * [CxrStart.NOT_BOUND]; the link state says so.
+     *
+     * [clearClosure]: a wearer start puts a standing closure away as soon as it is bound, as the Glass
+     * app screen always did. [ensureCxrLink] keeps it until the link is seen up (`onCXRLConnected(true)`
+     * clears it), so a bind that never comes up leaves a shell's background retries refusing, as before.
      */
-    private fun startCxr(token: String, wearerAsked: Boolean = true): CxrStart {
+    private fun startCxr(token: String, wearerAsked: Boolean = true, clearClosure: Boolean = true): CxrStart {
         val link = cxrLink ?: (seams.cxr ?: CxrLinkTransport(CXRLink(applicationContext))).apply {
             configCXRSession(
                 CxrDefs.CXRSession(
@@ -2768,9 +2772,13 @@ class HubCore internal constructor(
                 notifyLinkState()
                 return CxrStart.DROPPED
             }
-            cxrClosedByServer = false
-            log("CXR-L closed-session flag cleared by a wearer start")
-            updateStatusNotification(linkState())
+            if (clearClosure) {
+                cxrClosedByServer = false
+                log("CXR-L closed-session flag cleared by a wearer start")
+                updateStatusNotification(linkState())
+            } else {
+                log("CXR-L closed-session flag stands until the link is seen up")
+            }
         }
         log("CXR-L connect requested bound=$bound")
         if (!bound) {
@@ -3211,10 +3219,11 @@ class HubCore internal constructor(
     /**
      * Main thread. Makes sure the CXR link is there for something the wearer just asked for (a voice
      * reply on the glasses). A live link is reused and nothing is bound. A link that is down is bound
-     * again with the stored token, exactly as the Glass app screen does, and a session Hi Rokid closed
-     * is no reason to stay down: the closure is cleared once the bind is made. The link then comes up
-     * on the usual callbacks; this does not wait for it, and never loops. Never for a background retry,
-     * which must not fight Hi Rokid ([reconnectCxr] refuses while a closure stands).
+     * again with the stored token, as the Glass app screen does, and a session Hi Rokid closed is no
+     * reason to stay down. The closure is cleared only when the link is then seen up: a bind that never
+     * comes up leaves it standing, so [reconnectCxr] keeps refusing and the background does not take the
+     * glasses from Hi Rokid on the strength of a failed tap. This does not wait for the link, and never
+     * loops. Never for a background retry.
      */
     @HubShellApi @MainThread
     fun ensureCxrLink(): CxrEnsureResult {
@@ -3223,7 +3232,7 @@ class HubCore internal constructor(
         val token = prefs().getString(PREF_TOKEN, "").orEmpty()
         if (token.isBlank()) return CxrEnsureResult.NO_TOKEN
         log("CXR-L ensure: link down, binding for the wearer closedByServer=$cxrClosedByServer")
-        return when (startCxr(token, wearerAsked = true)) {
+        return when (startCxr(token, wearerAsked = true, clearClosure = false)) {
             CxrStart.BOUND -> CxrEnsureResult.CONNECTING
             else -> CxrEnsureResult.NOT_BOUND
         }
