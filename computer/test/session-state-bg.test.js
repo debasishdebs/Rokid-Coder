@@ -943,3 +943,24 @@ test("only_a_write_that_pressed_enter_consumes_the_msgId", async () => {
   model.port.settle({ ok: false, error: "taken_over" });
   assert.deepEqual(await m, { ok: false, error: "taken_over", consumed: true });
 });
+
+test("screen_unreadable_is_retryable_and_leaves_the_state_as_it_was", async () => {
+  // The launcher found no box, before the paste or after a cleared one: nothing was submitted.
+  for (const wrote of [false, true]) {
+    const t = idleSession();
+    const result = t.router.followup(KEY, "hi", () => ({ ok: true }));
+    await until(() => t.port.sent.length === 1, 500, "the dispatch");
+    if (wrote) t.port.wrote();
+    t.port.settle({ ok: false, error: "screen_unreadable" });
+    const outcome = await result;
+    assert.deepEqual(outcome, { ok: false, error: "screen_unreadable" }, `wrote ${wrote}`);
+    assert.equal(ready(t), true, "and a retry sees the state from before");
+  }
+  // A background reply: the same.
+  const bg = setup();
+  const { result } = await dispatch(bg);
+  bg.port.check("paste");
+  bg.port.wrote();
+  bg.port.settle({ ok: false, error: "screen_unreadable" });
+  assert.deepEqual(await result, { ok: false, error: "screen_unreadable" });
+});

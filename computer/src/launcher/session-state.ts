@@ -1056,7 +1056,8 @@ export class LauncherRouter {
     // text reply cancelled after its paste began is presumed sent and its msgId consumed. The trade-off
     // is deliberate: a cancel can cost the wearer a re-spoken reply, and never a duplicate.
     const unsent = (error: string): boolean =>
-      cmd.command === "text" && (error === "not_sent" || error === "laptop_draft" || error === "taken_over");
+      cmd.command === "text" &&
+      (error === "not_sent" || error === "laptop_draft" || error === "taken_over" || error === "screen_unreadable");
     const before = this.states.snapshotLatch(key);
     // Puts the latch back for a paste that was never entered, if nobody has moved it since that write.
     const putBack = (): void => {

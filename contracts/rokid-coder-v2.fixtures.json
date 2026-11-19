@@ -218,6 +218,13 @@
       "result": "rejected",
       "error": "dialog_not_seen",
       "consumed": true
+    },
+    "ack_screen_unreadable": {
+      "type": "ack",
+      "v": 2,
+      "msgId": "fx-msg-launcher-unreadable",
+      "result": "rejected",
+      "error": "screen_unreadable"
     }
   },
   "phone_to_agent": {

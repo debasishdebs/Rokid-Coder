@@ -117,6 +117,8 @@ export class LauncherClient {
       },
       // What the screen check decided, for agentd's log: names and lengths, never prompt text.
       onCheck: (check) => this.send({ type: "screen_check", ...check }),
+      // The row kinds of a screen it could not read, for the log; never its text.
+      onShape: (shape) => this.send({ type: "screen_shape", ...shape }),
     });
   }
 
