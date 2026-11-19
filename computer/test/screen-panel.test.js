@@ -177,6 +177,51 @@ test("a_draft_taller_than_the_box_or_with_a_rule_like_row_is_a_draft_not_an_unre
   assert.equal(probe(dialog).kind, "blocked");
 });
 
+const GRAY = (text) => `\x1b[38;5;244m${text}${RESET}`;
+
+/** The empty box (muted suggestion), then `rows` drawn under it, the last of which may be a gray rule: as the screens in the review. */
+function emptyBoxWith(rows) {
+  const screen = new ScreenModel(80, 40);
+  const rule = GRAY("─".repeat(80));
+  screen.push(`\x1b[2J\x1b[H● Done.\r\n${rule}\r\n❯ ${MUTE}Try "fix the tests"${RESET}\r\n${rule}\r\n${rows.join("\r\n")}`);
+  return screen;
+}
+
+test("rows_that_are_only_muted_between_two_rules_never_make_a_box_of_a_screen_the_probe_refused", () => {
+  const rule = GRAY("─".repeat(80));
+  // The empty box, a muted footer row, then another gray rule lower down: no prompt under the nearest rule.
+  const one = probe(emptyBoxWith([`${MUTE}  auto mode on${RESET}`, rule]));
+  assert.deepEqual([one.kind, one.reason], ["unknown", "no_prompt"]);
+  // The same with twelve muted agent rows before the lower rule: further than the box may be tall.
+  const agents = Array.from({ length: 12 }, (_, i) => `${MUTE}  ○ agent ${i}${RESET}`);
+  const two = probe(emptyBoxWith([`${MUTE}  auto mode on${RESET}`, ...agents, rule]));
+  assert.deepEqual([two.kind, two.reason], ["unknown", "no_box"]);
+  // Without the lower rule it is the empty box.
+  assert.equal(showsEmptyPrompt(probe(emptyBoxWith([`${MUTE}  auto mode on${RESET}`, ...agents]))), true);
+  // And a real long draft, then the rule: a draft.
+  const long = probe(boxScreen(["❯ first line", ...Array.from({ length: 12 }, (_, i) => `  line ${i + 2}`)]));
+  assert.deepEqual([long.kind, long.empty], ["prompt", false]);
+});
+
+test("a_draft_row_that_reads_as_a_rule_does_not_make_the_rows_around_it_an_empty_box", () => {
+  for (const [what, tail] of [
+    ["a bare glyph", ["  >"]],
+    ["a glyph and a space", ["  > "]],
+    ["a glyph and a blank row", ["  > ", ""]],
+    ["a second glyph", ["  ❯"]],
+  ]) {
+    const seen = probe(boxScreen(["❯ hello", "  ────────────", ...tail]));
+    assert.deepEqual([seen.kind, seen.empty], ["prompt", false], what);
+    assert.equal(seen.text.startsWith("hello"), true, what);
+    assert.equal(seen.rows[0], "hello", what);
+  }
+  // A rule-like row in the middle of a draft with no glyph row under it.
+  const middle = probe(boxScreen(["❯ hello", "  ────────────", "  there"]));
+  assert.deepEqual([middle.kind, middle.empty], ["prompt", false]);
+  // A second prompt row with text after its glyph is still a menu, not a draft.
+  assert.equal(probe(boxScreen(["❯ hello", "  ❯ yes"])).kind, "blocked");
+});
+
 test("the_shape_of_a_huge_terminal_stays_within_what_the_hub_accepts", () => {
   const screen = new ScreenModel(2100, 1100);
   screen.push("\x1b[2J\x1b[H" + Array.from({ length: 1100 }, (_, i) => `row ${i} of a screen nobody has`).join("\r\n"));

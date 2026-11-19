@@ -774,14 +774,14 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
       break;
     }
   }
-  if (top < 0 || bottom - top < 2 || !PROMPT_ROW.test(rows[top + 1] ?? "")) {
-    // A draft longer than the box's rows, or a draft row that itself reads as a rule, hides the real top
-    // rule. When a rule with a prompt row right under it encloses solid text down to the bottom rule,
-    // that is the box holding a draft: the caller must be told there is text, not that the screen is unreadable.
-    const draftTop = findDraftTop(rows, bottom, screen.solidLines());
-    if (draftTop >= 0) {
-      top = draftTop;
-    }
+  // A draft longer than the box's rows, or a draft row that itself reads as a rule (the nearest rule is then
+  // the draft's own row, even with a prompt-like row under it), hides the real top rule. When a higher rule
+  // with a prompt row under it and only box-like rows down to the bottom rule encloses solid text, that is the
+  // box holding a draft: the caller must be told there is text, never that the box is empty or unreadable.
+  const topFound = top >= 0 && bottom - top >= 2 && PROMPT_ROW.test(rows[top + 1] ?? "");
+  const draftTop = findDraftTop(rows, bottom, screen.solidLines(), topFound);
+  if (draftTop >= 0 && (!topFound || draftTop < top)) {
+    top = draftTop;
   }
   if (top < 0 || bottom - top < 2) {
     return { kind: "unknown", reason: "no_box", bottom, ...(top >= 0 ? { top } : {}) };
@@ -794,7 +794,8 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   }
   // Where a running-turn sign or a dialog's own text would be: the rows above the box and its footer.
   const around = [...rows.slice(Math.max(0, top - STATUS_ROWS), top), ...footer];
-  if (inputRows.some((row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row)))) {
+  // A second prompt row with something after its glyph is a selection list; a bare `>` is a row of the draft.
+  if (inputRows.some((row, index) => MENU_ROW.test(row) || (index > 0 && PROMPT_ROW.test(row) && row.replace(PROMPT_LEAD, "").trim() !== ""))) {
     return { kind: "blocked", reason: "menu" };
   }
   if (!PROMPT_ROW.test(inputRows[0])) {
@@ -814,22 +815,49 @@ export function probe(screen: ScreenModel, options: ProbeOptions = {}): ProbeRes
   return { kind: "prompt", text, rows: exactRows(inputRows), empty: solid === "" };
 }
 
+/** The prompt glyph (and a side border) at the start of a row. */
+const PROMPT_LEAD = /^\s*(?:[│┃]\s*)?[>❯]/;
+
 /**
- * The nearest rule above `bottom` that has a prompt row directly under it and solid (not muted, not a rule)
- * text somewhere between that prompt row and `bottom`, or -1. The search is not bounded by `MAX_INPUT_ROWS`.
+ * A row that can be part of the input box: blank, indented (a continuation row is indented under the glyph),
+ * a rule (or a draft row that reads as one) or a prompt row. A row of text from the first column (`● Done`,
+ * `✻ Working`, a footer-less transcript line) is not: the input box does not reach up through it.
  */
-function findDraftTop(rows: string[], bottom: number, solid: string[]): number {
-  for (let i = bottom - 2; i >= 0; i -= 1) {
-    if (isRule(rows[i]) && PROMPT_ROW.test(rows[i + 1] ?? "")) {
-      for (let j = i + 1; j < bottom; j += 1) {
-        if ((solid[j] ?? "").trim() !== "" && !isRule(solid[j])) {
-          return i;
-        }
+function boxLike(row: string): boolean {
+  return row.trim() === "" || /^[\s│┃]/.test(row) || isRule(row) || PROMPT_ROW.test(row);
+}
+
+/**
+ * The highest rule above `bottom` that has a prompt row directly under it, with only box-like rows
+ * from there down to `bottom`, and solid (not muted, not a rule) text between: text after the glyph of
+ * that prompt row, or anything on a row below it. -1 when there is none. It finds the top of a draft that is
+ * taller than `MAX_INPUT_ROWS` or holds a row that reads as a rule (which the nearest-rule search takes for the
+ * top). Rows that are only muted (a gray rule, a footer) are no text: they never make a box out of nothing.
+ * `nearestFound` says the nearest-rule search already found a box: then the search may reach above that rule
+ * only across rows of a draft, so no rule that starts in the first column (the UI's own; a draft's rows are
+ * indented under the glyph) is crossed.
+ */
+function findDraftTop(rows: string[], bottom: number, solid: string[], nearestFound: boolean): number {
+  let found = -1;
+  let below = false; // solid, non-rule text on the rows under the candidate's prompt row
+  for (let i = bottom - 1; i >= 0; i -= 1) {
+    if (!boxLike(rows[i])) {
+      break;
+    }
+    if (nearestFound && i + 2 < bottom && isRule(rows[i + 2]) && /^\S/.test(rows[i + 2])) {
+      break;
+    }
+    if (i + 2 < bottom && (solid[i + 2] ?? "").trim() !== "" && !isRule(solid[i + 2])) {
+      below = true;
+    }
+    if (i + 1 < bottom && isRule(rows[i]) && PROMPT_ROW.test(rows[i + 1] ?? "")) {
+      const first = (solid[i + 1] ?? "").replace(PROMPT_LEAD, "").trim();
+      if (below || (first !== "" && !isRule(first))) {
+        found = i;
       }
-      return -1;
     }
   }
-  return -1;
+  return found;
 }
 
 /** How many leading whitespace characters of a continuation row are the UI's indent: at most `indent`, never text. */

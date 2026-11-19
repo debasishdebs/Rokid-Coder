@@ -1005,6 +1005,37 @@ test("a_draft_of_many_rows_or_with_a_rule_like_row_is_laptop_draft_and_not_unrea
   }
 });
 
+test("muted_rows_between_two_rules_stay_screen_unreadable_and_a_rule_like_draft_row_is_a_draft", async () => {
+  const gray = (text) => `\x1b[38;5;244m${text}\x1b[0m`;
+  const faint = (text) => `\x1b[2m${text}\x1b[0m`;
+  const grayRule = gray("─".repeat(60));
+  const box = [grayRule, `❯ ${faint('Try "fix the tests"')}`, grayRule];
+  const agents = Array.from({ length: 12 }, (_, i) => faint(`  ○ agent ${i}`));
+  for (const [what, rows] of [
+    ["a footer and a lower rule", [...box, faint("  auto mode on"), grayRule]],
+    ["twelve agent rows and a lower rule", [...box, faint("  auto mode on"), ...agents, grayRule]],
+  ]) {
+    const t = setup({ file: "idle" });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(`\x1b[2J\x1b[H● Done.\r\n${rows.join("\r\n")}`);
+    const run = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+    await t.advance(5400);
+    assert.deepEqual(run.result, { ok: false, error: "screen_unreadable" }, what);
+    assert.deepEqual(t.pty.writes, [], `${what}: nothing typed`);
+    assert.equal(t.shapes.length, 1, `${what}: one shape line`);
+  }
+  // The user's own text with a row that reads as a rule: a draft, whatever follows it, and nothing is typed.
+  for (const [what, tail] of [["bare glyph", ["  >"]], ["glyph and space", ["  > "]], ["glyph, space and blank row", ["  > ", ""]]]) {
+    const t = setup({ file: "idle" });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(`\x1b[2J\x1b[H● Done.\r\n${[RULE, "❯ hello", "  ────────────", ...tail, RULE, FOOTER].join("\r\n")}`);
+    const run = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain" }));
+    await t.advance(300);
+    assert.deepEqual(run.result, { ok: false, error: "laptop_draft" }, what);
+    assert.deepEqual(t.pty.writes, [], what);
+  }
+});
+
 test("a_tainted_screen_refusal_logs_no_shape_and_a_huge_terminal_logs_one_the_hub_accepts", async () => {
   const tainted = setup({ file: "idle" });
   tainted.session.statusUpdatedAt = tainted.clock.now() - 10_000;
