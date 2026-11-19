@@ -823,3 +823,77 @@ test("keys_typed_into_a_visible_dialog_during_the_cleanup_reach_the_pty", async 
     assert.equal(t.binding.uncertain, true, "the paste in a dialog is still not assumed cleared");
   }
 });
+
+// ---- plan mode on the screen: Shift+Tab at the laptop is no hook ----------------------------
+
+const PLAN_FOOTER = "  ⏸ plan mode on (shift+tab to cycle)";
+const AUTO_FOOTER = "  ⏵⏵ auto mode on (shift+tab to cycle)";
+
+test("a_plan_mode_footer_stops_every_reply_before_the_paste", async () => {
+  for (const [file, bgReply] of [["idle", false], ["busy", true], ["shell", true]]) {
+    for (const footer of [PLAN_FOOTER, "  PLAN MODE ON", "  ⏸⏸ Plan Mode On · ← 1 agent"]) {
+      const t = setup({ file });
+      t.session.statusUpdatedAt = t.clock.now() - 10_000;
+      t.draw(repaint({ footer: [footer] }));
+      const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain", ...(bgReply ? { bgReply: true } : {}) }));
+      await t.advance(300);
+      assert.deepEqual(t.pty.writes, [], `${file} ${footer}`);
+      assert.deepEqual(t.asked, [], "agentd is not even asked");
+      assert.deepEqual(box.result, { ok: false, error: "not_sent" }, `${file} ${footer}`);
+      assert.deepEqual(t.checks.at(-1).reason, "plan_mode");
+    }
+  }
+});
+
+test("plan_mode_coming_on_between_the_paste_and_the_enter_clears_the_line_and_never_enters", async () => {
+  for (const [file, bgReply] of [["idle", false], ["busy", true]]) {
+    const t = setup({ file });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(repaint({ footer: [AUTO_FOOTER] }));
+    const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain", ...(bgReply ? { bgReply: true } : {}) }));
+    await t.advance(150);
+    if (bgReply) {
+      t.typist.verdict("c1", "paste", true);
+      await t.advance(0);
+    }
+    assert.equal(t.pty.writes[0], PASTE("plain"));
+    // The wearer pressed Shift+Tab at the laptop: the box shows our text and the footer now says plan mode.
+    t.draw(repaint({ input: "plain", footer: [PLAN_FOOTER] }));
+    await t.advance(300);
+    assert.deepEqual(t.pty.writes, [PASTE("plain"), CTRL_U], file);
+    assert.deepEqual(box.result, { ok: false, error: "not_sent" }, file);
+    assert.equal(t.asked.some((a) => a.phase === "enter"), false, "agentd is never asked about an Enter");
+  }
+});
+
+test("an_enter_verdict_that_arrives_after_plan_mode_came_on_is_refused", async () => {
+  const t = setup({ file: "busy" });
+  t.draw(repaint({ footer: [AUTO_FOOTER] }));
+  const box = track(t.typist.run({ cmdId: "c1", gen: 1, command: "text", text: "plain", bgReply: true }));
+  await t.advance(150);
+  t.typist.verdict("c1", "paste", true);
+  await t.advance(0);
+  t.draw(repaint({ input: "plain", footer: [AUTO_FOOTER] }));
+  await t.advance(100);
+  assert.deepEqual(t.asked.map((a) => a.phase), ["paste", "enter"]);
+  t.draw(repaint({ input: "plain", footer: [PLAN_FOOTER] }));
+  t.typist.verdict("c1", "enter", true);
+  await t.advance(0);
+  assert.equal(t.pty.writes.includes("\r"), false);
+  assert.deepEqual(box.result, { ok: false, error: "not_sent" });
+});
+
+test("an_auto_footer_or_no_footer_or_an_unknown_one_blocks_nothing", async () => {
+  for (const footer of [[AUTO_FOOTER], [], ["  ? for shortcuts"], ["  ⏵⏵ accept edits on (shift+tab to cycle)"], ["  explain plan mode off tonight"]]) {
+    const t = setup({ file: "idle" });
+    t.session.statusUpdatedAt = t.clock.now() - 10_000;
+    t.draw(repaint({ footer }));
+    const box = track(t.typist.run({ cmdId: "c2", gen: 1, command: "text", text: "plain" }));
+    await t.advance(150);
+    assert.deepEqual(t.pty.writes, [PASTE("plain")], JSON.stringify(footer));
+    t.draw(repaint({ input: "plain", footer }));
+    await t.advance(150);
+    assert.deepEqual(t.pty.writes.at(-1), "\r", JSON.stringify(footer));
+    assert.deepEqual(box.result, { ok: true });
+  }
+});

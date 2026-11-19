@@ -815,6 +815,16 @@ function inputContent(rows: string[]): string {
 }
 
 /**
+ * Whether a visible row is the footer of plan mode (`plan mode on`, with whatever glyph and hint
+ * around it, any case): the mode Claude shows after Shift+Tab, which no hook announces until the
+ * next one, and whose approval dialog takes any key. Only a recognised plan-mode footer says yes;
+ * a footer the model does not know says nothing, and no other mode is derived from the screen.
+ */
+export function showsPlanMode(screen: ScreenModel): boolean {
+  return screen.lines().some((row) => /(^|[^a-z])plan\s+mode\s+on\b/i.test(row));
+}
+
+/**
  * Whether the screen shows a dialog or a menu anywhere, framed prompt box or not (a permission
  * dialog replaces the box). For deciding that what the wearer types is an answer; never a
  * reason to type anything.
